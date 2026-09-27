@@ -1,8 +1,14 @@
 # OpenGeni UI kit (DEV only)
 
-The component studio at `/dev/ui-kit` (`http://homeserver:3140/dev/ui-kit`). Bendik picks one
-version per component here; the picks shape the page previews and later `apps/web/DESIGN.md`.
-The design brief is `.ui-audit/design-brief.md`.
+The component studio at `/dev/ui-kit` (`http://homeserver:3140/dev/ui-kit`). Every fork is
+decided (27 Sep 2026): the registry's `recommended` version is the decision and carries the
+"Decided" tag, and the other versions stay visible as history. The binding spec is
+`apps/web/DESIGN.md`; the design brief is `.ui-audit/design-brief.md`.
+
+No side sheets: detail views are pages (`components/ui/detail-page.tsx`) and create/edit flows are
+`FormPage`s, both rendered in place inside the page previews with a back link. Centered modals
+only for destructive confirms and one-field prompts. A section with a `decision` in the registry
+ignores older stored picks of a retired version.
 
 The route is registered in `src/App.tsx` only when `import.meta.env.DEV`, and the kit is lazy
 loaded, so none of this reaches a production build.

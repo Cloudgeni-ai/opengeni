@@ -351,10 +351,10 @@ function SettingsRail({
 }
 
 /* ----------------------------------------------------------------------------
-   Phone chrome: a top bar, and the rail in a sheet inside the frame.
+   Phone chrome: a top bar, and the rail in a left drawer inside the frame (app navigation, not an object sheet).
    -------------------------------------------------------------------------- */
 
-function PhoneNavSheet({
+function PhoneNavDrawer({
   open,
   onClose,
   children,
@@ -656,9 +656,9 @@ export function AppFrame({
           </div>
         </div>
         {phone ? (
-          <PhoneNavSheet open={menuOpen} onClose={closeMenu}>
+          <PhoneNavDrawer open={menuOpen} onClose={closeMenu}>
             {rail}
-          </PhoneNavSheet>
+          </PhoneNavDrawer>
         ) : null}
       </div>
     </FrameContext.Provider>

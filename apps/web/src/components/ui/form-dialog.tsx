@@ -38,6 +38,9 @@ import { cn } from "@/lib/utils";
    -------------------------------------------------------------------------- */
 
 export type FormVariant = "dialog" | "sheet" | "page" | "inline";
+
+/** A form page's frame: the DetailPage column (960px, 32px sides, 16px on phones). */
+const PAGE_FRAME = "mx-auto w-full max-w-[960px] px-8 max-sm:px-4 @max-[26rem]/form:px-4";
 export type FormDialogSize = "sm" | "md" | "lg";
 
 type SubmitResult = void | boolean;
@@ -331,7 +334,10 @@ export function FormFrame({
         className="flex min-h-0 min-w-0 flex-1 flex-col"
       >
         {variant === "page" ? (
-          <header className="mx-auto w-full max-w-[640px] px-6 pt-6 @max-[26rem]/form:px-4">
+          // The 640px column starts where a DetailPage's content starts (the
+          // same 960px frame and padding), so moving between an object's page
+          // and its edit page doesn't shift the back link or the title.
+          <header className={cn(PAGE_FRAME, "pt-6 [&>*]:max-w-[640px]")}>
             {back ? (
               back.href ? (
                 <a
@@ -355,7 +361,13 @@ export function FormFrame({
             ) : null}
             <div className="flex min-w-0 items-start justify-between gap-4 border-b border-border pb-4">
               <div className="min-w-0">
-                <Title className="text-xl font-semibold tracking-[-0.5px] text-fg">{title}</Title>
+                {/* Focusable from script only: a form page opened in place moves focus here. */}
+                <Title
+                  tabIndex={-1}
+                  className="text-xl font-semibold tracking-[-0.5px] text-fg outline-none"
+                >
+                  {title}
+                </Title>
                 {description ? (
                   <Description className="mt-1 text-sm text-fg-muted">{description}</Description>
                 ) : null}
@@ -407,8 +419,7 @@ export function FormFrame({
             "min-h-0 min-w-0",
             variant === "dialog" && "flex-1 overflow-y-auto px-6 pt-1 pb-6 @max-[26rem]/form:px-5",
             variant === "sheet" && "flex-1 overflow-y-auto px-6 py-6 @max-[26rem]/form:px-5",
-            variant === "page" &&
-              "mx-auto w-full max-w-[640px] flex-1 px-6 py-6 @max-[26rem]/form:px-4",
+            variant === "page" && cn(PAGE_FRAME, "flex-1 py-6 [&>*]:max-w-[640px]"),
             variant === "inline" && "px-5 pb-5",
             bodyClassName,
           )}
@@ -429,13 +440,15 @@ export function FormFrame({
           )}
         >
           {variant === "page" ? (
-            <div className="mx-auto flex w-full max-w-[640px] flex-wrap items-center justify-end gap-x-4 gap-y-3 px-6 py-4 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch @max-[26rem]/form:px-4">
-              {start ? (
-                <div className="min-w-0 flex-1 basis-48 @max-[26rem]/form:flex-none @max-[26rem]/form:basis-auto">
-                  {start}
-                </div>
-              ) : null}
-              {actions}
+            <div className={cn(PAGE_FRAME, "py-4")}>
+              <div className="flex w-full max-w-[640px] flex-wrap items-center justify-end gap-x-4 gap-y-3 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch">
+                {start ? (
+                  <div className="min-w-0 flex-1 basis-48 @max-[26rem]/form:flex-none @max-[26rem]/form:basis-auto">
+                    {start}
+                  </div>
+                ) : null}
+                {actions}
+              </div>
             </div>
           ) : variant === "inline" ? (
             // The buttons end where the field column ends, not at the panel edge.

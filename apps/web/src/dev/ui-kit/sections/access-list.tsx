@@ -9,14 +9,9 @@ import {
 } from "@/components/ui/access-list";
 import { Button } from "@/components/ui/button";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
-import {
-  DetailBody,
-  DetailFooter,
-  DetailHeader,
-  DetailSection,
-  DetailSheet,
-  DetailSheetContent,
-} from "@/components/ui/detail-sheet";
+import { DetailPage, DetailSection } from "@/components/ui/detail-sheet";
+import { DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   RoleSelect,
@@ -219,15 +214,16 @@ function InlineDemo() {
   );
 }
 
-/** B: rows are quiet; the role changes inside the person sheet. */
+/** B: rows are quiet; the row opens the person's page, where the role changes. */
 function TextDemo() {
   const demo = useAccessDemo(PLATFORM_ACCESS);
   const [openId, setOpenId] = useState<string | null>(null);
   const open = demo.members.find((member) => member.id === openId) ?? null;
   const person = open ? personById(open.id) : null;
   const roleHeadingId = useId();
-  return (
-    <>
+  const back = () => setOpenId(null);
+  if (!open || !person) {
+    return (
       <AccessList
         variant="text"
         label={`People with access to ${WORKSPACE.name}`}
@@ -235,68 +231,56 @@ function TextDemo() {
         members={demo.members}
         onOpen={(member) => setOpenId(member.id)}
       />
-      <DetailSheet open={open !== null} onOpenChange={(next) => (next ? null : setOpenId(null))}>
-        {open && person ? (
-          <DetailSheetContent>
-            <DetailHeader
-              leading={
-                <Avatar size="lg">
-                  <AvatarFallback className="bg-surface-2 text-sm font-semibold text-fg-muted">
-                    {open.initials}
-                  </AvatarFallback>
-                </Avatar>
-              }
-              title={open.name}
-              subtitle={`${open.kind === "service" ? "Service account" : open.email}${person.joinedLabel ? ` · ${person.joinedLabel}` : ""}`}
-            />
-            <DetailBody>
-              <DetailSection
-                title={<span id={roleHeadingId}>Role in {WORKSPACE.name}</span>}
-                description="Saves as soon as you pick one."
-              >
-                <RoleSelect
-                  variant="list"
-                  aria-labelledby={roleHeadingId}
-                  roles={WORKSPACE_ROLES}
-                  value={open.role}
-                  subjectName={open.name}
-                  disabledReason={
-                    open.isYou ? "You can't change your own role. Ask another admin." : undefined
-                  }
-                  onValueChange={(role) => demo.onRoleChange(open, role)}
-                />
-              </DetailSection>
-            </DetailBody>
-            <DetailFooter
-              start={
-                open.isYou || open.isOwner ? null : (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
-                    onClick={() => {
-                      demo.onRemove(open);
-                      setOpenId(null);
-                    }}
-                  >
-                    Remove from workspace
-                  </Button>
-                )
-              }
+    );
+  }
+  return (
+    <DetailPage back={{ label: "Access", onClick: back }} className="px-0 pt-0 pb-0 max-sm:px-0">
+      <DetailPageHeader
+        leading={
+          <Avatar size="lg">
+            <AvatarFallback className="bg-surface-2 text-sm font-semibold text-fg-muted">
+              {open.initials}
+            </AvatarFallback>
+          </Avatar>
+        }
+        title={open.name}
+        chips={<MetaChip variant="soft">{roleLabel(WORKSPACE_ROLES, open.role)}</MetaChip>}
+        meta={[open.kind === "service" ? "Service account" : open.email, person.joinedLabel]}
+        actions={
+          open.isYou || open.isOwner ? null : (
+            <Button
+              type="button"
+              variant="outline"
+              className="text-danger hover:text-danger pointer-coarse:h-11"
+              onClick={() => {
+                demo.onRemove(open);
+                back();
+              }}
             >
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setOpenId(null)}
-                className="pointer-coarse:h-11"
-              >
-                Done
-              </Button>
-            </DetailFooter>
-          </DetailSheetContent>
-        ) : null}
-      </DetailSheet>
-    </>
+              Remove from workspace
+            </Button>
+          )
+        }
+      />
+      <DetailPageBody>
+        <DetailSection
+          title={<span id={roleHeadingId}>Role in {WORKSPACE.name}</span>}
+          description="Saves as soon as you pick one."
+        >
+          <RoleSelect
+            variant="list"
+            aria-labelledby={roleHeadingId}
+            roles={WORKSPACE_ROLES}
+            value={open.role}
+            subjectName={open.name}
+            disabledReason={
+              open.isYou ? "You can't change your own role. Ask another admin." : undefined
+            }
+            onValueChange={(role) => demo.onRoleChange(open, role)}
+          />
+        </DetailSection>
+      </DetailPageBody>
+    </DetailPage>
   );
 }
 

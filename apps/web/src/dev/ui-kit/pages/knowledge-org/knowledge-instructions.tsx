@@ -10,19 +10,12 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import {
-  DetailBody,
-  DetailFooter,
-  DetailHeader,
-  DetailSection,
-  DetailSheet,
-  DetailSheetContent,
-} from "@/components/ui/detail-sheet";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import { Field, TextArea } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
+import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
 import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
 import { Section, SectionStack } from "@/components/ui/section";
@@ -117,8 +110,10 @@ function BlockHeader({
 export interface InstructionsTabProps {
   picks: PagePicks;
   revisions: Revision[];
-  onSave: (content: string) => Promise<void>;
-  onRestore: (revision: Revision) => Promise<void>;
+  /** Opens the Edit instructions page. */
+  onEdit: () => void;
+  /** Opens the Instructions history page. */
+  onOpenHistory: () => void;
   /** Q31: history with Restore. */
   showHistory: boolean;
   /** Q32: "Organization identity" or "Company knowledge". */
@@ -130,8 +125,8 @@ export interface InstructionsTabProps {
 export function InstructionsTab({
   picks,
   revisions,
-  onSave,
-  onRestore,
+  onEdit,
+  onOpenHistory,
   showHistory,
   identityName,
   onGoToLibrary,
@@ -139,37 +134,10 @@ export function InstructionsTab({
 }: InstructionsTabProps) {
   const current = state === "empty" ? "" : (revisions[0]?.content ?? "");
   const latest = revisions[0];
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(current);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
   const [askOpen, setAskOpen] = useState(false);
   const [ask, setAsk] = useState("");
   const [askError, setAskError] = useState<string | null>(null);
   const loading = state === "loading";
-  const tooLong = draft.length > 4000;
-
-  const startEdit = () => {
-    setDraft(current);
-    setError(null);
-    setEditing(true);
-  };
-
-  const save = async () => {
-    if (tooLong) {
-      setError("Keep instructions under 4,000 characters. Move long procedures into a skill.");
-      return;
-    }
-    setSaving(true);
-    try {
-      await onSave(draft.trim());
-      setEditing(false);
-      toast("Saved the workspace instructions. New messages use them.");
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const instructionsMeta = latest ? (
     <>
@@ -227,45 +195,43 @@ export function InstructionsTab({
               title="Workspace instructions"
               meta={state === "empty" ? "Not set yet" : instructionsMeta}
               actions={
-                editing ? null : (
-                  <>
+                <>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setAskOpen(true)}
+                    disabled={loading}
+                    className="pointer-coarse:h-11"
+                  >
+                    <SparklesIcon aria-hidden="true" />
+                    Ask OpenGeni…
+                  </Button>
+                  {showHistory && revisions.length > 0 && state !== "empty" ? (
                     <Button
                       type="button"
                       variant="ghost"
                       size="sm"
-                      onClick={() => setAskOpen(true)}
+                      onClick={onOpenHistory}
                       disabled={loading}
                       className="pointer-coarse:h-11"
                     >
-                      <SparklesIcon aria-hidden="true" />
-                      Ask OpenGeni…
+                      <HistoryIcon aria-hidden="true" />
+                      History
                     </Button>
-                    {showHistory && revisions.length > 0 && state !== "empty" ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setHistoryOpen(true)}
-                        disabled={loading}
-                        className="pointer-coarse:h-11"
-                      >
-                        <HistoryIcon aria-hidden="true" />
-                        History
-                      </Button>
-                    ) : null}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={startEdit}
-                      disabled={loading}
-                      className="pointer-coarse:h-11"
-                    >
-                      <PencilIcon aria-hidden="true" />
-                      {state === "empty" ? "Write instructions" : "Edit"}
-                    </Button>
-                  </>
-                )
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={onEdit}
+                    disabled={loading}
+                    className="pointer-coarse:h-11"
+                  >
+                    <PencilIcon aria-hidden="true" />
+                    {state === "empty" ? "Write instructions" : "Edit"}
+                  </Button>
+                </>
               }
             />
             {loading ? (
@@ -273,46 +239,6 @@ export function InstructionsTab({
                 <div className="h-4 w-32 animate-pulse rounded-full bg-surface-2" />
                 <div className="h-3.5 w-3/5 animate-pulse rounded-full bg-surface-2" />
                 <div className="h-3.5 w-2/5 animate-pulse rounded-full bg-surface-2" />
-              </div>
-            ) : editing ? (
-              <div className="flex min-w-0 flex-col gap-3 pl-11 @max-[559px]/main:pl-0">
-                <Field
-                  label="Instructions"
-                  hint="Markdown. Headings and bullets read as they look. Agents follow these in every chat."
-                  error={
-                    error ?? (tooLong ? "Keep instructions under 4,000 characters." : undefined)
-                  }
-                  aside={`${draft.length.toLocaleString("en-US")} / 4,000`}
-                >
-                  <TextArea
-                    mono
-                    rows={7}
-                    value={draft}
-                    onChange={(event) => {
-                      setDraft(event.target.value);
-                      setError(null);
-                    }}
-                  />
-                </Field>
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={() => setEditing(false)}
-                    disabled={saving}
-                    className="pointer-coarse:h-11"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    type="button"
-                    onClick={() => void save()}
-                    disabled={saving || draft.trim() === current.trim()}
-                    className="pointer-coarse:h-11"
-                  >
-                    {saving ? "Saving…" : "Save instructions"}
-                  </Button>
-                </div>
               </div>
             ) : current ? (
               <Markdown text={current} className="pl-11 @max-[559px]/main:pl-0" />
@@ -329,36 +255,6 @@ export function InstructionsTab({
         Facts go in the <HelpLink onClick={onGoToLibrary}>Library</HelpLink>. Step-by-step
         procedures go in Skills, in <HelpLink href="#capabilities">Capabilities</HelpLink>.
       </InlineHelp>
-
-      <DetailSheet open={historyOpen} onOpenChange={setHistoryOpen}>
-        <DetailSheetContent>
-          <DetailHeader
-            leading={<LogoTile icon={<HistoryIcon />} />}
-            title="Instructions history"
-            subtitle={`${KNOWLEDGE_WORKSPACE.name} · ${revisions.length} versions`}
-          />
-          <DetailBody>
-            <DetailSection description="Restoring saves that version again as the newest one, so you can always go back.">
-              <RevisionHistory
-                revisions={revisions}
-                now={KIT_NOW}
-                label="Workspace instructions history"
-                onRestore={onRestore}
-              />
-            </DetailSection>
-          </DetailBody>
-          <DetailFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setHistoryOpen(false)}
-              className="pointer-coarse:h-11"
-            >
-              Done
-            </Button>
-          </DetailFooter>
-        </DetailSheetContent>
-      </DetailSheet>
 
       <FormDialog
         open={askOpen}
@@ -398,5 +294,101 @@ export function InstructionsTab({
         </Field>
       </FormDialog>
     </div>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   Edit and History: their own pages, back to the Instructions tab.
+   -------------------------------------------------------------------------- */
+
+const INSTRUCTIONS_LIMIT = 4000;
+
+export function InstructionsEditPage({
+  current,
+  onClose,
+  onSave,
+}: {
+  current: string;
+  onClose: () => void;
+  onSave: (content: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(current);
+  const [error, setError] = useState<string | null>(null);
+  const tooLong = draft.length > INSTRUCTIONS_LIMIT;
+  return (
+    <FormPage
+      title={current ? "Edit workspace instructions" : "Write workspace instructions"}
+      description={`Added to every chat and schedule in ${KNOWLEDGE_WORKSPACE.name}. The old version stays in History.`}
+      back={{ label: "Instructions", onClick: onClose }}
+      submitLabel="Save instructions"
+      pendingLabel="Saving…"
+      submitDisabled={draft.trim() === current.trim()}
+      onCancel={onClose}
+      onSubmitted={() => {
+        toast("Saved the workspace instructions. New messages use them.");
+        onClose();
+      }}
+      onSubmit={async () => {
+        if (tooLong) {
+          setError("Keep instructions under 4,000 characters. Move long procedures into a skill.");
+          return false;
+        }
+        await onSave(draft.trim());
+        return true;
+      }}
+      className="flex-1"
+    >
+      <Field
+        label="Instructions"
+        hint="Markdown. Headings and bullets read as they look. Agents follow these in every chat."
+        error={error ?? (tooLong ? "Keep instructions under 4,000 characters." : undefined)}
+        aside={`${draft.length.toLocaleString("en-US")} / 4,000`}
+      >
+        <TextArea
+          mono
+          rows={14}
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setError(null);
+          }}
+        />
+      </Field>
+    </FormPage>
+  );
+}
+
+export function InstructionsHistoryPage({
+  revisions,
+  onClose,
+  onRestore,
+}: {
+  revisions: Revision[];
+  onClose: () => void;
+  onRestore: (revision: Revision) => Promise<void>;
+}) {
+  const latest = revisions[0];
+  return (
+    <DetailPage back={{ label: "Instructions", onClick: onClose }}>
+      <DetailPageHeader
+        leading={<LogoTile icon={<HistoryIcon />} />}
+        title="Instructions history"
+        meta={[
+          `in ${KNOWLEDGE_WORKSPACE.name}`,
+          `${revisions.length} ${revisions.length === 1 ? "version" : "versions"}`,
+          latest ? `last by ${latest.author}` : null,
+        ]}
+      />
+      <DetailPageBody>
+        <DetailSection description="Restoring saves that version again as the newest one, so you can always go back.">
+          <RevisionHistory
+            revisions={revisions}
+            now={KIT_NOW}
+            label="Workspace instructions history"
+            onRestore={onRestore}
+          />
+        </DetailSection>
+      </DetailPageBody>
+    </DetailPage>
   );
 }

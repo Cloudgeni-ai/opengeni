@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Field, FieldStack, TextInput, useField } from "@/components/ui/field";
-import { FormDialog, FormInline } from "@/components/ui/form-dialog";
+import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { HelpLink } from "@/components/ui/inline-help";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -55,6 +55,8 @@ import { useSettingsPicks } from "./picks";
 import { SettingsFrame } from "./settings-frame";
 import {
   AdminOnly,
+  FORM_PAGE_IN_SETTINGS,
+  OpenedPage,
   RowValue,
   addMinutes,
   pauseUntilPhrase,
@@ -226,24 +228,6 @@ function RenameDialog({
   );
 }
 
-function RenameInline({ onClose }: { onClose: () => void }) {
-  const form = useRenameForm(onClose);
-  return (
-    <FormInline
-      title="Rename workspace"
-      description="Everyone with access sees the new name."
-      submitLabel="Save name"
-      pendingLabel="Saving…"
-      onSubmit={form.submit}
-      onSubmitted={onClose}
-      onCancel={onClose}
-      className="mb-3"
-    >
-      {form.fields}
-    </FormInline>
-  );
-}
-
 /** The ID under its label, like Name and Type: shown in full when it fits. */
 function WorkspaceIdValue() {
   return (
@@ -260,7 +244,6 @@ function WorkspaceSection() {
   const kitNavigate = useKitNavigate(view);
   const buttonWidth = useButtonWidth();
   const [renaming, setRenaming] = useState(false);
-  const inline = picks.form === "inline";
   return (
     <Section title="Workspace">
       <SettingRow
@@ -270,21 +253,15 @@ function WorkspaceSection() {
         controlWidth={buttonWidth}
         control={
           <AdminOnly>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setRenaming(true)}
-              aria-expanded={inline ? renaming : undefined}
-            >
+            <Button type="button" variant="outline" size="sm" onClick={() => setRenaming(true)}>
               <PencilIcon aria-hidden="true" />
               Rename
             </Button>
           </AdminOnly>
         }
       />
-      {inline && renaming ? <RenameInline onClose={() => setRenaming(false)} /> : null}
-      {inline ? null : <RenameDialog open={renaming} onOpenChange={setRenaming} />}
+      {/* One field: a small centered dialog, not a page. */}
+      <RenameDialog open={renaming} onOpenChange={setRenaming} />
       <SettingRow
         variant={picks.settingRow}
         label="Type"
@@ -619,68 +596,60 @@ const VIDEO_PAYER_OPTIONS = [
   },
 ];
 
-function ConnectGatewayDialog({
-  open,
-  onOpenChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const { setGatewayConnected } = useSettingsPreview();
+/** Connect AI Gateway as a page of its own, in place of General. */
+function ConnectGatewayPage({ onClose }: { onClose: () => void }) {
+  const { setGatewayConnected, workspaceName } = useSettingsPreview();
   const [key, setKey] = useState("");
   const [error, setError] = useState<string>();
   return (
-    <FormDialog
-      open={open}
-      onOpenChange={(next) => {
-        if (next) {
-          setKey("");
-          setError(undefined);
-        }
-        onOpenChange(next);
-      }}
-      size="sm"
-      title="Connect AI Gateway"
-      description="Pay for video generation and other models with your Vercel AI Gateway key."
-      submitLabel="Connect"
-      pendingLabel="Connecting…"
-      onSubmit={async () => {
-        const trimmed = key.trim();
-        if (!trimmed) {
-          setError("Paste the API key from your Vercel dashboard.");
-          return false;
-        }
-        if (!trimmed.startsWith("vck_") || trimmed.length < 16) {
-          setError("That doesn't look like an AI Gateway key. They start with vck_.");
-          return false;
-        }
-        await wait(900);
-        setGatewayConnected(true);
-        toast("Connected AI Gateway", { description: "Video generation can be turned on now." });
-        return true;
-      }}
-    >
-      <FieldStack>
-        <Field
-          label="API key"
-          error={error}
-          hint="Vercel dashboard > AI Gateway > API keys. It's stored encrypted and never shown again."
-        >
-          <SecretInput
-            value={key}
-            onChange={(event) => {
-              setKey(event.target.value);
-              setError(undefined);
-            }}
-            placeholder="vck_…"
-          />
-        </Field>
-      </FieldStack>
-    </FormDialog>
+    <OpenedPage>
+      <FormPage
+        back={{ label: "General", onClick: onClose }}
+        className={FORM_PAGE_IN_SETTINGS}
+        title="Connect AI Gateway"
+        description={`Pay for video generation and other models in ${workspaceName} with your Vercel AI Gateway key.`}
+        submitLabel="Connect"
+        pendingLabel="Connecting…"
+        onCancel={onClose}
+        onSubmit={async () => {
+          const trimmed = key.trim();
+          if (!trimmed) {
+            setError("Paste the API key from your Vercel dashboard.");
+            return false;
+          }
+          if (!trimmed.startsWith("vck_") || trimmed.length < 16) {
+            setError("That doesn't look like an AI Gateway key. They start with vck_.");
+            return false;
+          }
+          await wait(900);
+          setGatewayConnected(true);
+          toast("Connected AI Gateway", { description: "Video generation can be turned on now." });
+          return true;
+        }}
+        onSubmitted={onClose}
+      >
+        <FieldStack>
+          <Field
+            label="API key"
+            error={error}
+            hint="Vercel dashboard > AI Gateway > API keys. It's stored encrypted and never shown again."
+          >
+            <SecretInput
+              value={key}
+              onChange={(event) => {
+                setKey(event.target.value);
+                setError(undefined);
+              }}
+              placeholder="vck_…"
+            />
+          </Field>
+        </FieldStack>
+      </FormPage>
+    </OpenedPage>
   );
 }
 
-function SessionDefaultsSection() {
+function SessionDefaultsSection({ onConnectGateway }: { onConnectGateway: () => void }) {
   const { questions, gatewayConnected, canManage } = useSettingsPreview();
   const picks = useSettingsPicks();
   const voice = useSavedSwitch(sessionDefaults.voiceInput, {
@@ -702,7 +671,6 @@ function SessionDefaultsSection() {
   const [provider, setProvider] = useState<string>(sessionDefaults.transcriptionProvider);
   const [payer, setPayer] = useState("gateway");
   const [codeSearch, setCodeSearch] = useState<string>(sessionDefaults.fastCodeSearch);
-  const [connectOpen, setConnectOpen] = useState(false);
   const selectVariant = picks.select === "combobox" ? "menu" : picks.select;
   const oneControl = questions.q8 === "yes";
 
@@ -723,7 +691,7 @@ function SessionDefaultsSection() {
 
   const gatewayHint = gatewayConnected ? null : (
     <AdminOnly>
-      <SettingRowLink onClick={() => setConnectOpen(true)}>Connect AI Gateway</SettingRowLink>
+      <SettingRowLink onClick={onConnectGateway}>Connect AI Gateway</SettingRowLink>
     </AdminOnly>
   );
 
@@ -876,8 +844,6 @@ function SessionDefaultsSection() {
           control={<SavedSwitch state={providers} />}
         />
       )}
-
-      <ConnectGatewayDialog open={connectOpen} onOpenChange={setConnectOpen} />
     </Section>
   );
 }
@@ -1037,6 +1003,7 @@ export function GeneralPage() {
   const base = useFrameBase();
   const { data, questions, deleted, canManage } = useSettingsPreview();
   const picks = useSettingsPicks();
+  const [connecting, setConnecting] = useState(false);
   let body: ReactNode;
   if (deleted) body = <DeletedState />;
   else if (data.general === "loading") body = <GeneralSkeleton />;
@@ -1045,11 +1012,21 @@ export function GeneralPage() {
       <SectionStack variant={picks.section}>
         <WorkspaceSection />
         <AgentActivitySection />
-        <SessionDefaultsSection />
+        <SessionDefaultsSection onConnectGateway={() => setConnecting(true)} />
         {questions.q6 === "yes" && canManage ? <DeleteWorkspaceSection /> : null}
       </SectionStack>
     );
-  return <SettingsFrame {...base}>{body}</SettingsFrame>;
+  return (
+    <SettingsFrame
+      {...base}
+      takeover={
+        connecting ? <ConnectGatewayPage onClose={() => setConnecting(false)} /> : undefined
+      }
+      takeoverKey={connecting ? "connect-gateway" : undefined}
+    >
+      {body}
+    </SettingsFrame>
+  );
 }
 
 /** Question 6 answered No: a page of its own for one button. */

@@ -1,8 +1,8 @@
 /**
  * The schedule form: What (a composer-style field with chips) -> When (the
  * cadence sentence and next runs) -> an optional Name -> a closed Advanced
- * section. One component for create and edit, shown as a sheet, a page or an
- * inline panel (form-dialog pick).
+ * section. One component for create and edit, always a full page
+ * (/schedules/new, /schedules/:id/edit) with a back link and a sticky footer.
  */
 import { useId, useMemo, useState, type ReactNode } from "react";
 import {
@@ -36,7 +36,7 @@ import {
   useField,
   useFieldControlProps,
 } from "@/components/ui/field";
-import { FormFrame } from "@/components/ui/form-dialog";
+import { FormPage } from "@/components/ui/form-dialog";
 import { InlineHelp } from "@/components/ui/inline-help";
 import { Notice } from "@/components/ui/notice";
 import { SegmentedControl, type SegmentedControlProps } from "@/components/ui/segmented-control";
@@ -70,7 +70,7 @@ import {
   type WhereItRuns,
 } from "./model";
 import { ToolLogo } from "./tool-mark";
-import type { FormPresentationPick, SchedulePicks } from "./use-picks";
+import type { SchedulePicks } from "./use-picks";
 
 /* ----------------------------------------------------------------------------
    Composer chips. The chips are real SelectMenus styled as pills; the "+"
@@ -537,11 +537,12 @@ function wait(ms: number) {
 }
 
 export interface ScheduleFormProps {
-  presentation: FormPresentationPick;
   mode: "create" | "edit";
   initial: ScheduleDraft;
   /** Shown under the title when editing. */
   editingName?: string;
+  /** The back link: "Schedules", or the schedule's name when editing from its page. */
+  backLabel: string;
   questions: SchedulesQuestions;
   picks: SchedulePicks;
   canRunSchedules: boolean;
@@ -550,16 +551,16 @@ export interface ScheduleFormProps {
   /** Called with the saved draft; close the form in `onDone`. */
   onSave: (draft: ScheduleDraft) => void;
   onDone: () => void;
-  /** Saving started or finished (overlays block Escape while saving). */
+  /** Saving started or finished. */
   onPendingChange?: (pending: boolean) => void;
   className?: string;
 }
 
 export function ScheduleForm({
-  presentation,
   mode,
   initial,
   editingName,
+  backLabel,
   questions,
   picks,
   canRunSchedules,
@@ -680,7 +681,6 @@ export function ScheduleForm({
         variant={picks.disclosure}
         title="Advanced"
         summary={advancedSummary(draft, questions.q27OngoingOnly)}
-        sheetDescription={draft.name || derivedName || "New schedule"}
       >
         <AdvancedFields
           draft={draft}
@@ -694,8 +694,7 @@ export function ScheduleForm({
   );
 
   return (
-    <FormFrame
-      variant={presentation}
+    <FormPage
       title={create ? "New schedule" : "Edit schedule"}
       description={create ? undefined : editingName}
       submitLabel={create ? "Create schedule" : "Save changes"}
@@ -704,13 +703,13 @@ export function ScheduleForm({
       onSubmitted={onDone}
       onCancel={onCancel}
       onPendingChange={onPendingChange}
-      back={presentation === "page" ? { label: "Schedules", onClick: onCancel } : undefined}
+      back={{ label: backLabel, onClick: onCancel }}
       submitDisabled={!canRunSchedules}
       disabledReason="Connect a machine first. Schedules can't run in Design preview yet."
       footerStart="Runs with your connected accounts."
       className={className}
     >
       {fields}
-    </FormFrame>
+    </FormPage>
   );
 }

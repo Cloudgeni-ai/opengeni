@@ -1,23 +1,24 @@
 import { useId, useState, type ReactNode } from "react";
-import { UserPlusIcon } from "lucide-react";
+import { BuildingIcon, CalendarIcon, ShieldIcon, UserPlusIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { AccessList, type AccessMember } from "@/components/ui/access-list";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
-  DetailBody,
-  DetailFooter,
-  DetailHeader,
-  DetailSection,
-  DetailSheet,
-  DetailSheetContent,
-} from "@/components/ui/detail-sheet";
+  DetailAside,
+  DetailAsideItem,
+  DetailPage,
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
 import { CheckboxField, Field, FieldStack } from "@/components/ui/field";
-import { FormDialog, FormInline, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
+import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
 import { HelpLink } from "@/components/ui/inline-help";
 import { ListRow, RowList } from "@/components/ui/list-row";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { RoleSelect, roleLabel, type RoleValue } from "@/components/ui/role-select";
 import { Section, SectionStack } from "@/components/ui/section";
@@ -34,7 +35,7 @@ import { useKitNavigate, useKitView } from "../../view";
 import { ADD_CANDIDATE_IDS, WORKSPACE_ROLE_OPTIONS, accessMemberFor, wait } from "./data";
 import { useSettingsPicks } from "./picks";
 import { SettingsFrame } from "./settings-frame";
-import { FORM_PAGE_IN_SETTINGS, useFrameBase } from "./shared";
+import { FORM_PAGE_IN_SETTINGS, OpenedPage, useFrameBase } from "./shared";
 import { useSettingsPreview } from "./state";
 
 /* ----------------------------------------------------------------------------
@@ -246,39 +247,18 @@ function useAddPeopleForm(onDone: () => void) {
   return { frame, reset };
 }
 
-function AddPeopleDialog({
-  open,
-  onOpenChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const form = useAddPeopleForm(() => onOpenChange(false));
-  return (
-    <FormDialog
-      open={open}
-      onOpenChange={(next) => {
-        if (next) form.reset();
-        onOpenChange(next);
-      }}
-      size="md"
-      {...form.frame}
-    />
-  );
-}
-
-function AddPeopleInPage({ layout, onClose }: { layout: "page" | "inline"; onClose: () => void }) {
+/** Add people as a page of its own (/access/add), in place of the list. */
+function AddPeoplePage({ onClose }: { onClose: () => void }) {
   const form = useAddPeopleForm(onClose);
-  if (layout === "page") {
-    return (
+  return (
+    <OpenedPage>
       <FormPage
         {...form.frame}
         back={{ label: "Access", onClick: onClose }}
         className={FORM_PAGE_IN_SETTINGS}
       />
-    );
-  }
-  return <FormInline {...form.frame} className="mb-6" />;
+    </OpenedPage>
+  );
 }
 
 /* ----------------------------------------------------------------------------
@@ -318,9 +298,7 @@ function ReviewRequestDialog({
       size="sm"
       title={person ? `Give ${person.name} access?` : "Access request"}
       description={
-        person
-          ? `${person.email} · Asked in #design-reviews ${request?.requestedLabel}`
-          : undefined
+        person ? `${person.email} · Asked in #design-reviews ${request?.requestedLabel}` : undefined
       }
       submitLabel="Give access"
       pendingLabel="Adding…"
@@ -420,88 +398,104 @@ function RequestsSection({ requests }: { requests: AccessRequest[] }) {
 }
 
 /* ----------------------------------------------------------------------------
-   Person sheet, for the quieter "role as text" rows (access list B).
+   Person page, for the quieter "role as text" rows (access list B).
    -------------------------------------------------------------------------- */
 
-function PersonSheet({
+function PersonPage({
   member,
-  onClose,
+  onBack,
   actions,
 }: {
-  member: AccessMember<WorkspaceRole> | null;
-  onClose: () => void;
+  member: AccessMember<WorkspaceRole>;
+  onBack: () => void;
   actions: ReturnType<typeof useAccessActions>;
 }) {
   const { workspaceName, canManage } = useSettingsPreview();
   const headingId = useId();
-  const person = member ? personById(member.id) : null;
+  const person = personById(member.id);
+  const canRemove = canManage && !member.isYou && !member.isOwner;
   return (
-    <DetailSheet open={member !== null} onOpenChange={(open) => (open ? null : onClose())}>
-      {member && person ? (
-        <DetailSheetContent>
-          <DetailHeader
-            leading={
-              <Avatar size="lg" aria-hidden="true">
-                <AvatarFallback className="bg-surface-2 text-sm font-semibold text-fg-muted">
-                  {member.initials}
-                </AvatarFallback>
-              </Avatar>
-            }
-            title={member.name}
-            subtitle={[
-              member.kind === "service" ? "Service account" : member.email,
-              person.joinedLabel,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          />
-          <DetailBody>
-            <DetailSection
-              title={<span id={headingId}>Role in {workspaceName}</span>}
-              description={canManage ? "Saves as soon as you pick one." : undefined}
-            >
-              <RoleSelect
-                variant={canManage ? "list" : "text"}
-                aria-labelledby={headingId}
-                roles={WORKSPACE_ROLE_OPTIONS}
-                value={member.role}
-                subjectName={member.name}
-                disabledReason={
-                  member.isYou ? "You can't change your own role. Ask another admin." : undefined
-                }
-                onValueChange={(role) => actions.onRoleChange(member, role)}
-              />
-            </DetailSection>
-          </DetailBody>
-          <DetailFooter
-            start={
-              canManage && !member.isYou && !member.isOwner ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
-                  onClick={() => {
-                    actions.onRemove(member);
-                    onClose();
-                  }}
-                >
-                  Remove from workspace
-                </Button>
-              ) : null
-            }
+    <OpenedPage>
+      <DetailPage
+        back={{ label: "Access", onClick: onBack }}
+        className="max-w-none px-0 pt-0 pb-0 max-sm:px-0"
+      >
+        <DetailPageHeader
+          leading={
+            <Avatar size="lg" aria-hidden="true">
+              <AvatarFallback className="bg-surface-2 text-sm font-semibold text-fg-muted">
+                {member.initials}
+              </AvatarFallback>
+            </Avatar>
+          }
+          title={member.name}
+          chips={
+            <>
+              {member.isYou ? <MetaChip variant="outline">You</MetaChip> : null}
+              {member.isOwner ? <MetaChip variant="outline">Owner</MetaChip> : null}
+            </>
+          }
+          meta={[
+            member.kind === "service" ? "Service account" : member.email,
+            roleLabel(WORKSPACE_ROLE_OPTIONS, member.role),
+            person.joinedLabel ? (
+              <span key="joined" className="whitespace-nowrap">
+                {person.joinedLabel.replace(/^Joined/, "joined")}
+              </span>
+            ) : null,
+          ]}
+          actions={
+            canRemove ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="text-danger hover:text-danger pointer-coarse:h-11"
+                onClick={() => {
+                  actions.onRemove(member);
+                  onBack();
+                }}
+              >
+                Remove from workspace
+              </Button>
+            ) : null
+          }
+        />
+        <DetailPageBody
+          aside={
+            <DetailAside label={`${member.name} details`}>
+              <DetailAsideItem label="Organization" icon={<BuildingIcon />}>
+                {organization.name}
+              </DetailAsideItem>
+              <DetailAsideItem label="Organization role" icon={<ShieldIcon />}>
+                {person.organizationRole.charAt(0).toUpperCase() + person.organizationRole.slice(1)}
+              </DetailAsideItem>
+              {person.joinedLabel ? (
+                <DetailAsideItem label="Joined" icon={<CalendarIcon />}>
+                  {person.joinedLabel.replace(/^Joined /, "")}
+                </DetailAsideItem>
+              ) : null}
+            </DetailAside>
+          }
+        >
+          <DetailSection
+            title={<span id={headingId}>Role in {workspaceName}</span>}
+            description={canManage ? "Saves as soon as you pick one." : undefined}
           >
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onClose}
-              className="pointer-coarse:h-11"
-            >
-              Done
-            </Button>
-          </DetailFooter>
-        </DetailSheetContent>
-      ) : null}
-    </DetailSheet>
+            <RoleSelect
+              variant={canManage ? "list" : "text"}
+              aria-labelledby={headingId}
+              roles={WORKSPACE_ROLE_OPTIONS}
+              value={member.role}
+              subjectName={member.name}
+              disabledReason={
+                member.isYou ? "You can't change your own role. Ask another admin." : undefined
+              }
+              onValueChange={(role) => actions.onRoleChange(member, role)}
+            />
+          </DetailSection>
+        </DetailPageBody>
+      </DetailPage>
+    </OpenedPage>
   );
 }
 
@@ -509,13 +503,18 @@ function PersonSheet({
    The page.
    -------------------------------------------------------------------------- */
 
-function PeopleSection({ onAdd }: { onAdd: () => void }) {
+function PeopleSection({
+  onAdd,
+  onOpen,
+  actions,
+}: {
+  onAdd: () => void;
+  onOpen: (member: AccessMember<WorkspaceRole>) => void;
+  actions: ReturnType<typeof useAccessActions>;
+}) {
   const { members, data, canManage, workspaceName, setData } = useSettingsPreview();
   const picks = useSettingsPicks();
-  const actions = useAccessActions();
-  const [openId, setOpenId] = useState<string | null>(null);
   const shown = data.access === "only-you" ? members.filter((member) => member.isYou) : members;
-  const open = shown.find((member) => member.id === openId) ?? null;
   const readOnlyReason = canManage
     ? undefined
     : "Only workspace admins can change access. You're a member here.";
@@ -546,7 +545,7 @@ function PeopleSection({ onAdd }: { onAdd: () => void }) {
         onRemove={actions.onRemove}
         onResendInvite={actions.onResendInvite}
         onRevokeInvite={actions.onRevokeInvite}
-        onOpen={variant === "text" ? (member) => setOpenId(member.id) : undefined}
+        onOpen={variant === "text" ? onOpen : undefined}
         emptyMessage={
           canManage ? (
             <>
@@ -559,45 +558,53 @@ function PeopleSection({ onAdd }: { onAdd: () => void }) {
           )
         }
       />
-      {variant === "text" ? (
-        <PersonSheet member={open} onClose={() => setOpenId(null)} actions={actions} />
-      ) : null}
     </Section>
   );
 }
 
 export function AccessPage() {
   const base = useFrameBase();
-  const { requests, canManage, data } = useSettingsPreview();
+  const { requests, canManage, data, members } = useSettingsPreview();
   const picks = useSettingsPicks();
+  const actions = useAccessActions();
   const [adding, setAdding] = useState(false);
-  const layout = picks.form;
+  const [openId, setOpenId] = useState<string | null>(null);
+  const open = members.find((member) => member.id === openId) ?? null;
   const showRequests = canManage && requests.length > 0 && data.access === "filled";
 
-  const addButton = canManage && !(adding && layout === "inline") ? (
+  const addButton = canManage ? (
     <Button type="button" onClick={() => setAdding(true)}>
       <UserPlusIcon aria-hidden="true" />
       Add people
     </Button>
   ) : null;
 
+  // Adding people and opening a person are pages of their own, in place of the list.
   let takeover: ReactNode;
-  if (adding && layout === "page") {
-    takeover = <AddPeopleInPage layout="page" onClose={() => setAdding(false)} />;
+  if (adding) {
+    takeover = <AddPeoplePage onClose={() => setAdding(false)} />;
+  } else if (open) {
+    takeover = (
+      <PersonPage key={open.id} member={open} onBack={() => setOpenId(null)} actions={actions} />
+    );
   }
 
   return (
-    <SettingsFrame {...base} actions={addButton} takeover={takeover}>
-      <div className="flex min-w-0 flex-col gap-6">
-        {adding && layout === "inline" ? (
-          <AddPeopleInPage layout="inline" onClose={() => setAdding(false)} />
-        ) : null}
-        <SectionStack variant={picks.section}>
-          {showRequests ? <RequestsSection requests={requests} /> : null}
-          <PeopleSection onAdd={() => setAdding(true)} />
-        </SectionStack>
-      </div>
-      {layout === "dialog" ? <AddPeopleDialog open={adding} onOpenChange={setAdding} /> : null}
+    <SettingsFrame
+      {...base}
+      actions={addButton}
+      takeover={takeover}
+      takeoverWide={Boolean(open) && !adding}
+      takeoverKey={adding ? "add" : (open?.id ?? undefined)}
+    >
+      <SectionStack variant={picks.section}>
+        {showRequests ? <RequestsSection requests={requests} /> : null}
+        <PeopleSection
+          onAdd={() => setAdding(true)}
+          onOpen={(member) => setOpenId(member.id)}
+          actions={actions}
+        />
+      </SectionStack>
     </SettingsFrame>
   );
 }

@@ -12,15 +12,11 @@ import type { SwitchVariant } from "@/components/ui/switch";
 
 import { usePick } from "../../picks";
 
-export type DetailPresentationPick = "sheet" | "page" | "inline";
-export type FormPresentationPick = "sheet" | "page" | "inline";
-
 export interface SchedulePicks {
   headerVariant: PageHeaderVariant;
   headerIcon: PageHeaderIconMode;
   navItemSize: NavItemSize;
   rowList: RowListVariant;
-  detail: DetailPresentationPick;
   /** Page (A, C) shows the templates on Schedules; inline (B) is one line. */
   emptyState: EmptyStateVariant;
   switchVariant: SwitchVariant;
@@ -30,25 +26,27 @@ export interface SchedulePicks {
   select: SelectMenuVariant;
   /** Chips in the composer row can't be native selects, so A falls back to the menu. */
   chipSelect: Exclude<SelectMenuVariant, "native">;
-  disclosure: DisclosureVariant;
-  form: FormPresentationPick;
+  /** Never "sheet": nothing opens as a side panel. */
+  disclosure: Exclude<DisclosureVariant, "sheet">;
   confirm: DestructiveConfirmVariant | "undo";
   cadence: CadencePickerVariant;
   settingRow: SettingRowVariant;
 }
 
-/** Bendik's picks (or the recommended defaults), as the props each primitive takes. */
+/**
+ * Bendik's picks (or the decided defaults), as the props each primitive takes.
+ * Detail views and create/edit forms are always pages (decided 27 Sep 2026),
+ * so the detail-sheet and form-dialog picks no longer steer this preview.
+ */
 export function useSchedulePicks(): SchedulePicks {
   const header = usePick("page-header");
   const navigation = usePick("navigation");
   const listRow = usePick("list-row");
-  const detail = usePick("detail-sheet");
   const empty = usePick("empty-state");
   const switchPick = usePick("switch");
   const segmented = usePick("segmented-control");
   const select = usePick("select");
   const disclosure = usePick("disclosure");
-  const form = usePick("form-dialog");
   const confirm = usePick("destructive-confirm");
   const cadence = usePick("cadence-picker");
   const settingRow = usePick("setting-row");
@@ -58,8 +56,6 @@ export function useSchedulePicks(): SchedulePicks {
 
   const rowList: RowListVariant =
     listRow === "a" ? "catalog" : listRow === "c" ? "table" : "resource";
-  const detailPick: DetailPresentationPick =
-    detail === "b" ? "page" : detail === "c" ? "inline" : "sheet";
 
   return {
     headerVariant: header === "c" ? "large" : "default",
@@ -67,16 +63,14 @@ export function useSchedulePicks(): SchedulePicks {
     headerIcon: header === "c" ? "hide" : "show",
     navItemSize: navigation === "b" ? "comfortable" : "default",
     rowList,
-    // Table rows can't expand in place (ListRow limitation), so C falls back to the sheet there.
-    detail: detailPick === "inline" && rowList === "table" ? "sheet" : detailPick,
     emptyState: empty === "b" ? "inline" : "page",
     switchVariant: switchPick === "b" ? "neutral" : "brand",
     switchStateText: switchPick === "c",
     segmented: segmented === "b" ? "outlined" : segmented === "c" ? "underline" : "filled",
     select: selectVariant,
     chipSelect: selectVariant === "combobox" ? "combobox" : "menu",
-    disclosure: disclosure === "b" ? "inline" : disclosure === "c" ? "sheet" : "row",
-    form: form === "b" ? "page" : form === "c" ? "inline" : "sheet",
+    // C opens its options in a side sheet, which no longer exists: it shows as the row.
+    disclosure: disclosure === "b" ? "inline" : "row",
     confirm: confirm === "b" ? "type-to-confirm" : confirm === "c" ? "undo" : "consequences",
     cadence: cadence === "b" ? "presets" : cadence === "c" ? "text" : "sentence",
     settingRow:

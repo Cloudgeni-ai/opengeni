@@ -4,7 +4,7 @@ import { ChevronDownIcon, RotateCcwIcon } from "lucide-react";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { cn } from "@/lib/utils";
 
-import { usePickState } from "../../picks";
+import { storedPick, usePickState } from "../../picks";
 import {
   alternativeLetter,
   alternativeMeta,
@@ -38,16 +38,6 @@ interface Question<Key extends AnswerKey> {
 type AnyQuestion = { [Key in AnswerKey]: Question<Key> }[AnswerKey];
 
 const QUESTIONS: AnyQuestion[] = [
-  {
-    key: "opens",
-    number: "Q19",
-    title: "Where a set opens",
-    options: [
-      { value: "page", label: "Its own page" },
-      { value: "sheet", label: "Right sheet" },
-      { value: "inline", label: "In place" },
-    ],
-  },
   {
     key: "inUse",
     number: "Q21",
@@ -279,7 +269,7 @@ export function PicksUsed() {
     <ul className="flex min-w-0 flex-wrap gap-1.5">
       {PAGE_PICKS.map((key) => {
         const section = getSection(key);
-        const picked = state.picks[key];
+        const picked = storedPick(state, key);
         const id = picked ?? section.recommended ?? "a";
         const name = alternativeMeta(key, id)?.name;
         return (

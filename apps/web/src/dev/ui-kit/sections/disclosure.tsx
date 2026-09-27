@@ -174,8 +174,8 @@ function ForkDemo({ variant }: { variant: DisclosureVariant }) {
       </Disclosure>
       {variant === "sheet" ? (
         <p className="text-xs leading-4.5 text-fg-subtle">
-          The same row sits in the schedule&apos;s detail sheet, so these options can change after
-          it&apos;s created.
+          Retired with the side sheets. The same row sits on the schedule&apos;s page, so these
+          options can change after it&apos;s created.
         </p>
       ) : null}
     </div>
@@ -192,7 +192,7 @@ const posthogDetails: Array<{ label: string; value: string; mono?: boolean }> = 
   { label: "Scopes", value: "Read insights, read feature flags, read sessions" },
 ];
 
-/** PostHog's Technical details, at the end of its connection sheet. */
+/** PostHog's Technical details, at the end of its connection page. */
 function TechnicalDetails({ defaultOpen }: { defaultOpen?: boolean }) {
   return (
     <Disclosure
@@ -324,7 +324,7 @@ export default function DisclosureSection() {
           label="Technical details, open"
           canvas="surface"
           align="stretch"
-          note="The other everyday use: IDs and endpoints stay out of PostHog's sheet until asked for."
+          note="The other everyday use: IDs and endpoints stay out of PostHog's page until asked for."
         >
           <TechnicalDetails defaultOpen />
         </StateCell>
@@ -374,7 +374,7 @@ export default function DisclosureSection() {
         ]}
         avoid={[
           "Nesting one disclosure inside another",
-          "Hiding the primary action, or a sheet's main content",
+          "Hiding the primary action, or a page's main content",
           "Opening another view - that is a row with a right chevron",
           "Settings people change often - leave them visible",
         ]}

@@ -508,6 +508,13 @@ export interface SettingsFrameProps {
   meta?: ReactNode;
   /** Replaces the header and body: a full-page form or a detail page. */
   takeover?: ReactNode;
+  /**
+   * The takeover is a detail page: it gets the whole content width (the
+   * settings sub-nav column steps aside), so its aside card has room.
+   */
+  takeoverWide?: boolean;
+  /** Changes whenever the takeover changes (another page opens), to reset the scroll position. */
+  takeoverKey?: string;
   /** Renders pages this frame doesn't own. Return null to use the placeholder. */
   children?: ReactNode;
   /** Changes whenever the visible page changes, to reset the scroll position. */
@@ -537,6 +544,8 @@ export function SettingsFrame({
   actions,
   meta,
   takeover,
+  takeoverWide = false,
+  takeoverKey,
   children,
   scrollKey,
 }: SettingsFrameProps) {
@@ -560,7 +569,7 @@ export function SettingsFrame({
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
-  }, [current, scrollKey]);
+  }, [current, scrollKey, takeoverKey]);
 
   const all = destinations(workspaceName);
   const destination = current === "index" ? null : all[current];
@@ -656,21 +665,23 @@ export function SettingsFrame({
     );
   }
 
-  const column = showColumn ? (
-    <SettingsNav
-      aria-label="Workspace settings"
-      className="sticky top-8 self-start"
-      header={
-        <div className="px-2.5">
-          <p className="text-sm leading-5 font-semibold text-fg">Settings</p>
-          <p className="truncate text-xs leading-4.5 text-fg-subtle">{workspaceName}</p>
-        </div>
-      }
-      footer={<OrganizationLink />}
-    >
-      <SettingsItems page={current} onNavigate={navigate} layout={layout} />
-    </SettingsNav>
-  ) : null;
+  const wideTakeover = Boolean(takeover) && takeoverWide;
+  const column =
+    showColumn && !wideTakeover ? (
+      <SettingsNav
+        aria-label="Workspace settings"
+        className="sticky top-8 self-start"
+        header={
+          <div className="px-2.5">
+            <p className="text-sm leading-5 font-semibold text-fg">Settings</p>
+            <p className="truncate text-xs leading-4.5 text-fg-subtle">{workspaceName}</p>
+          </div>
+        }
+        footer={<OrganizationLink />}
+      >
+        <SettingsItems page={current} onNavigate={navigate} layout={layout} />
+      </SettingsNav>
+    ) : null;
 
   const settingsRail = (
     <SettingsNav
@@ -695,7 +706,7 @@ export function SettingsFrame({
     </SettingsNav>
   );
 
-  const mainRail = (collapsed: boolean, inSheet = false) => (
+  const mainRail = (collapsed: boolean, inDrawer = false) => (
     <MainRail
       collapsed={collapsed}
       settingsOnly={settingsOnly}
@@ -703,9 +714,9 @@ export function SettingsFrame({
       viewer={viewer}
       onOpenSettings={() => navigate(backLinks ? "index" : "general")}
       onToggleRail={
-        inSheet ? undefined : () => setRailPreference(railCollapsed ? "expanded" : "collapsed")
+        inDrawer ? undefined : () => setRailPreference(railCollapsed ? "expanded" : "collapsed")
       }
-      className={inSheet ? "w-full border-r-0" : undefined}
+      className={inDrawer ? "w-full border-r-0" : undefined}
     />
   );
 
@@ -714,13 +725,17 @@ export function SettingsFrame({
       className={cn(
         "flex min-w-0 gap-10",
         phone ? "px-4 pt-5 pb-12" : "mx-auto w-full px-8 pt-8 pb-16",
-        showColumn ? "max-w-[1040px]" : nav === "tabs" ? "max-w-[1024px]" : "max-w-[800px]",
+        showColumn || wideTakeover
+          ? "max-w-[1040px]"
+          : nav === "tabs"
+            ? "max-w-[1024px]"
+            : "max-w-[800px]",
       )}
     >
       {column}
       <main
         aria-label={destination ? destination.label : "Settings"}
-        className={cn("min-w-0 flex-1", showColumn && "max-w-[720px]")}
+        className={cn("min-w-0 flex-1", showColumn && !wideTakeover && "max-w-[720px]")}
       >
         {pageContent}
       </main>

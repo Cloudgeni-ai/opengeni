@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from "react";
 
-import type { FormVariant } from "@/components/ui/form-dialog";
 import type { LineTabsVariant } from "@/components/ui/line-tabs";
 import type { RowListVariant } from "@/components/ui/list-row";
 import type { MetaChipVariant } from "@/components/ui/meta-chip";
@@ -28,7 +27,6 @@ export interface PagePicks {
   section: SectionVariant;
   list: RowListVariant;
   empty: EmptyLook;
-  form: Exclude<FormVariant, "sheet">;
   destructive: DeleteStyle;
   segmented: SegmentedControlVariant;
   chip: MetaChipVariant;
@@ -41,7 +39,6 @@ export function usePagePicks(): PagePicks {
   const section = usePick("section");
   const list = usePick("list-row");
   const empty = usePick("empty-state");
-  const form = usePick("form-dialog");
   const destructive = usePick("destructive-confirm");
   const segmented = usePick("segmented-control");
   const badge = usePick("status-badge");
@@ -54,7 +51,6 @@ export function usePagePicks(): PagePicks {
     section: section === "b" ? "group" : section === "c" ? "tiles" : "open",
     list: list === "a" ? "catalog" : list === "c" ? "table" : "resource",
     empty: empty === "b" ? "inline" : empty === "c" ? "templates" : "page",
-    form: form === "b" ? "page" : form === "c" ? "inline" : "dialog",
     destructive:
       destructive === "b" ? "type-to-confirm" : destructive === "c" ? "undo" : "consequences",
     segmented: segmented === "b" ? "outlined" : segmented === "c" ? "underline" : "filled",
@@ -79,8 +75,6 @@ export interface VariableSetAnswers {
   plain: "hidden" | "shown";
   /** Q18: version numbers and the masked •••••• preview. */
   versions: "removed" | "kept";
-  /** Q19: where a set opens. */
-  opens: "page" | "sheet" | "inline";
   /** Q21: deleting a set that is in use. */
   inUse: "explain" | "disable";
 }
@@ -148,14 +142,11 @@ const EMPTY: StoredAnswers = {};
 /** The recommended answer to every question, adjusted by related component picks. */
 export function useRecommendedAnswers(): VariableSetAnswers {
   const secretValues = usePick("secret-values");
-  const detail = usePick("detail-sheet");
   return {
     verbs: "delete",
     reveal: secretValues === "b" ? "yes" : "no",
     plain: secretValues === "c" ? "shown" : "hidden",
     versions: "removed",
-    // The brief puts variable sets on their own page; only "expand in place" changes that.
-    opens: detail === "c" ? "inline" : "page",
     inUse: "explain",
   };
 }
@@ -163,12 +154,16 @@ export function useRecommendedAnswers(): VariableSetAnswers {
 export function useAnswers(): VariableSetAnswers {
   const stored = useSyncExternalStore(subscribe, read, () => EMPTY);
   const recommended = useRecommendedAnswers();
-  return { ...recommended, ...stored };
+  // Q19 (where a set opens) is decided: its own page. Drop a stored answer to it.
+  const { opens: _retired, ...current } = stored as StoredAnswers & { opens?: unknown };
+  return { ...recommended, ...current };
 }
 
 /** Answers explicitly changed in the toggles, or an empty object. */
 export function useStoredAnswers(): StoredAnswers {
-  return useSyncExternalStore(subscribe, read, () => EMPTY);
+  const stored = useSyncExternalStore(subscribe, read, () => EMPTY);
+  const { opens: _retired, ...current } = stored as StoredAnswers & { opens?: unknown };
+  return current;
 }
 
 export function setAnswer<Key extends AnswerKey>(key: Key, value: VariableSetAnswers[Key]) {

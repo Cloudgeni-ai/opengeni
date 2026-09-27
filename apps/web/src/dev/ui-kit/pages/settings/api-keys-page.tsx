@@ -1,28 +1,33 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ArrowUpRightIcon, CheckIcon, KeyRoundIcon, PlusIcon, RotateCcwIcon } from "lucide-react";
+import {
+  ArrowUpRightIcon,
+  CalendarIcon,
+  CheckIcon,
+  ClockIcon,
+  HashIcon,
+  KeyRoundIcon,
+  PlusIcon,
+  RotateCcwIcon,
+  UserIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
 import {
-  DetailBody,
-  DetailFact,
-  DetailFacts,
-  DetailFooter,
-  DetailFooterConfirm,
-  DetailHeader,
-  DetailInline,
+  DetailAside,
+  DetailAsideItem,
   DetailPage,
-  DetailSection,
-  DetailSheet,
-  DetailSheetContent,
-} from "@/components/ui/detail-sheet";
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import { DestructiveConfirm, showUndoToast } from "@/components/ui/destructive-confirm";
 import { Disclosure } from "@/components/ui/disclosure";
 import { EmptyState, EmptyStateTemplate, EmptyStateTemplates } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { CheckboxField, Field, FieldStack, TextInput, useField } from "@/components/ui/field";
-import { FormDialog, FormInline, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
+import { FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
 import { HelpLink } from "@/components/ui/inline-help";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
@@ -54,7 +59,7 @@ import {
 } from "./data";
 import { useSettingsPicks } from "./picks";
 import { SettingsFrame } from "./settings-frame";
-import { AdminOnly, FORM_PAGE_IN_SETTINGS, absoluteTime, useFrameBase } from "./shared";
+import { AdminOnly, FORM_PAGE_IN_SETTINGS, OpenedPage, absoluteTime, useFrameBase } from "./shared";
 import { useSettingsPreview } from "./state";
 
 /* ----------------------------------------------------------------------------
@@ -203,9 +208,12 @@ function CheckboxGroups({
 
 function useCreateKeyForm({
   onClose,
+  onFinished,
   prefill,
 }: {
   onClose: () => void;
+  /** After the one-time token step: open the new key's page. */
+  onFinished: (key: PreviewApiKey) => void;
   prefill?: { name: string; access: ApiKeyAccess; permissions: string[] } | null;
 }) {
   const { keys, setKeys, questions, workspaceName, viewerPerson } = useSettingsPreview();
@@ -392,7 +400,7 @@ function useCreateKeyForm({
         showClose: false,
         onSubmitted: () => {
           reset(null);
-          onClose();
+          onFinished(created.key);
         },
         children: <SecretOnce value={created.token} />,
       }
@@ -416,77 +424,41 @@ function useCreateKeyForm({
   return { frame, reset, secret: Boolean(secret), created };
 }
 
-function CreateKeyDialog({
-  open,
-  onOpenChange,
+/** Create API key as a page of its own (/api-keys/new). The token shows once, on this page. */
+function CreateKeyPage({
+  onClose,
+  onFinished,
   prefill,
   onCreated,
 }: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
+  onFinished: (key: PreviewApiKey) => void;
   prefill: { name: string; access: ApiKeyAccess; permissions: string[] } | null;
   onCreated: (created: CreatedKey) => void;
 }) {
-  const form = useCreateKeyForm({ onClose: () => onOpenChange(false), prefill });
-  const secretRef = useRef<HTMLDivElement>(null);
-  const { reset, created, secret } = form;
-  useEffect(() => {
-    if (open) reset(prefill);
-    // Reset only when the dialog opens.
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  const form = useCreateKeyForm({ onClose, onFinished, prefill });
+  const { created, secret } = form;
+  const pageRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (created) onCreated(created);
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [created]);
   useEffect(() => {
-    // On the one-time step focus moves to Copy, so a second Enter can't close it unseen.
-    if (secret) secretRef.current?.querySelector<HTMLElement>("button")?.focus();
+    // On the one-time step focus moves to Copy, so a second Enter can't leave it unseen.
+    if (secret)
+      pageRef.current?.querySelector<HTMLElement>("[data-slot=form-body] button")?.focus();
   }, [secret]);
   return (
-    <FormDialog
-      open={open}
-      // The token shows once: only "I've saved it" closes that step, not Escape.
-      onOpenChange={(next) => {
-        if (!next && secret) return;
-        onOpenChange(next);
-      }}
-      size="md"
-      dismissible={!secret}
-      {...form.frame}
-    >
-      <div ref={secretRef}>{form.frame.children}</div>
-    </FormDialog>
+    <OpenedPage>
+      <div ref={pageRef} className="min-w-0">
+        <FormPage
+          {...form.frame}
+          back={secret ? undefined : { label: "API keys", onClick: onClose }}
+          className={FORM_PAGE_IN_SETTINGS}
+        />
+      </div>
+    </OpenedPage>
   );
-}
-
-function CreateKeyInPage({
-  layout,
-  onClose,
-  prefill,
-  onCreated,
-}: {
-  layout: "page" | "inline";
-  onClose: () => void;
-  prefill: { name: string; access: ApiKeyAccess; permissions: string[] } | null;
-  onCreated: (created: CreatedKey) => void;
-}) {
-  const form = useCreateKeyForm({ onClose, prefill });
-  const { created } = form;
-  useEffect(() => {
-    if (created) onCreated(created);
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [created]);
-  if (layout === "page") {
-    return (
-      <FormPage
-        {...form.frame}
-        back={form.secret ? undefined : { label: "API keys", onClick: onClose }}
-        className={FORM_PAGE_IN_SETTINGS}
-      />
-    );
-  }
-  return <FormInline {...form.frame} className="mb-2" />;
 }
 
 /* ----------------------------------------------------------------------------
@@ -545,152 +517,155 @@ function useRevoke(onDone: () => void) {
   };
 }
 
-function KeyDetail({
+/** One key as its own page: "← API keys", the key's header, its access and a quiet facts card. */
+function KeyDetailPage({
   apiKey,
-  onClose,
+  onBack,
   onReplace,
 }: {
   apiKey: PreviewApiKey;
-  onClose: () => void;
+  onBack: () => void;
   onReplace: (key: PreviewApiKey) => void;
 }) {
   const { canManage } = useSettingsPreview();
   const picks = useSettingsPicks();
-  const [confirming, setConfirming] = useState(false);
-  const [typeOpen, setTypeOpen] = useState(false);
-  const [pending, setPending] = useState(false);
-  const { revokeNow, revokeWithUndo } = useRevoke(onClose);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  // Revoking keeps you on the page: the header shows Revoked and offers a replacement.
+  const { revokeNow, revokeWithUndo } = useRevoke(() => undefined);
   const live = isLiveKey(apiKey);
 
   const startRevoke = () => {
     if (picks.destructive === "undo") revokeWithUndo(apiKey);
-    else if (picks.destructive === "type") setTypeOpen(true);
-    else setConfirming(true);
+    else setConfirmOpen(true);
   };
 
-  const footer =
-    confirming && live ? (
-      <DetailFooterConfirm
-        title={`Revoke ${apiKey.name}?`}
-        description="Scripts using it stop working right away. This can't be undone."
-        confirmLabel={pending ? "Revoking…" : "Revoke key"}
-        pending={pending}
-        onCancel={() => setConfirming(false)}
-        onConfirm={() => {
-          setPending(true);
-          void revokeNow(apiKey).finally(() => setPending(false));
-        }}
-      />
-    ) : (
-      <DetailFooter
-        start={
-          live && canManage ? (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={startRevoke}
-              className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
-            >
-              Revoke key
-            </Button>
-          ) : null
-        }
-      >
-        {!live && canManage ? (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => onReplace(apiKey)}
-            className="pointer-coarse:h-11"
-          >
-            <RotateCcwIcon aria-hidden="true" />
-            Create a replacement
-          </Button>
-        ) : null}
-        <Button
-          type="button"
-          variant={live ? "outline" : "ghost"}
-          onClick={onClose}
-          className="pointer-coarse:h-11"
-        >
-          Done
-        </Button>
-      </DetailFooter>
-    );
+  const actions = !canManage ? null : live ? (
+    <Button
+      type="button"
+      variant="outline"
+      onClick={startRevoke}
+      className="text-danger hover:text-danger pointer-coarse:h-11"
+    >
+      Revoke key
+    </Button>
+  ) : (
+    <Button
+      type="button"
+      variant="outline"
+      onClick={() => onReplace(apiKey)}
+      className="pointer-coarse:h-11"
+    >
+      <RotateCcwIcon aria-hidden="true" />
+      Create a replacement
+    </Button>
+  );
+
+  const endLabel =
+    apiKey.status === "revoked" ? "Revoked" : apiKey.status === "expired" ? "Expired" : "Expires";
+  const endValue =
+    apiKey.status === "revoked" && apiKey.revokedAt
+      ? absoluteTime(apiKey.revokedAt)
+      : expiresText(apiKey);
 
   return (
-    <>
-      <DetailHeader
-        leading={<LogoTile icon={<KeyRoundIcon />} />}
-        title={apiKey.name}
-        subtitle={
-          <CopyField
-            value={apiKey.prefix}
-            display={apiKey.prefixLabel}
-            label="key prefix"
-            size="sm"
-          />
-        }
-        status={<KeyStatus apiKey={apiKey} look="header" />}
-      />
-      <DetailBody>
-        {apiKey.status === "expired" && apiKey.expiresAt ? (
-          <div className="py-6">
-            <Notice tone="muted">
-              Expired on {dateLabel(apiKey.expiresAt)}. Requests using it are refused. Create a
-              replacement to keep {apiKey.name} running.
-            </Notice>
-          </div>
-        ) : null}
-        <DetailSection title="Access" description={apiKey.accessLabel}>
-          <PermissionList permissions={apiKey.permissions} />
-        </DetailSection>
-        <DetailSection title="Details">
-          <DetailFacts>
-            <DetailFact label="Last used">
-              {apiKey.lastUsedAt ? (
-                <RelativeTime date={apiKey.lastUsedAt} now={KIT_NOW} />
-              ) : (
-                "Never"
-              )}
-            </DetailFact>
-            <DetailFact
-              label={
-                apiKey.status === "revoked"
-                  ? "Revoked"
-                  : apiKey.status === "expired"
-                    ? "Expired"
-                    : "Expires"
-              }
-            >
-              {apiKey.status === "revoked" && apiKey.revokedAt
-                ? absoluteTime(apiKey.revokedAt)
-                : expiresText(apiKey)}
-            </DetailFact>
-            <DetailFact label="Created">
-              {dateLabel(apiKey.createdAt)} by {apiKey.createdBy}
-            </DetailFact>
-          </DetailFacts>
-        </DetailSection>
-      </DetailBody>
-      {footer}
+    <OpenedPage>
+      <DetailPage
+        back={{ label: "API keys", onClick: onBack }}
+        className="max-w-none px-0 pt-0 pb-0 max-sm:px-0"
+      >
+        <DetailPageHeader
+          leading={<LogoTile icon={<KeyRoundIcon />} />}
+          title={apiKey.name}
+          chips={
+            <>
+              {apiKey.isNew ? <MetaChip variant="outline">New</MetaChip> : null}
+              {live && !apiKey.isNew ? null : <KeyStatus apiKey={apiKey} look="header" />}
+            </>
+          }
+          meta={[
+            <span key="prefix" className="font-mono text-xs">
+              {apiKey.prefixLabel}
+            </span>,
+            <span key="access" className="whitespace-nowrap">
+              {accessShort(apiKey)}
+            </span>,
+            <span key="created" className="whitespace-nowrap">
+              created {dateLabel(apiKey.createdAt)}
+            </span>,
+          ]}
+          actions={actions}
+        />
+        <DetailPageBody
+          aside={
+            <DetailAside label={`${apiKey.name} details`}>
+              <DetailAsideItem label="Created by" icon={<UserIcon />}>
+                {apiKey.createdBy}
+              </DetailAsideItem>
+              <DetailAsideItem label="Key prefix" icon={<HashIcon />}>
+                <CopyField
+                  value={apiKey.prefix}
+                  display={apiKey.prefixLabel}
+                  label="key prefix"
+                  size="sm"
+                />
+              </DetailAsideItem>
+              <DetailAsideItem label="Last used" icon={<ClockIcon />}>
+                {apiKey.lastUsedAt ? (
+                  <RelativeTime date={apiKey.lastUsedAt} now={KIT_NOW} />
+                ) : (
+                  "Never"
+                )}
+              </DetailAsideItem>
+              <DetailAsideItem label={endLabel} icon={<CalendarIcon />}>
+                {endValue}
+              </DetailAsideItem>
+            </DetailAside>
+          }
+        >
+          {apiKey.status === "expired" && apiKey.expiresAt ? (
+            <div className="pt-8">
+              <Notice tone="muted">
+                Expired on {dateLabel(apiKey.expiresAt)}. Requests using it are refused. Create a
+                replacement to keep {apiKey.name} running.
+              </Notice>
+            </div>
+          ) : null}
+          {apiKey.status === "revoked" ? (
+            <div className="pt-8">
+              <Notice tone="muted">
+                Revoked. Requests using this key are refused. Create a replacement if a script still
+                needs access.
+              </Notice>
+            </div>
+          ) : null}
+          <DetailSection title="Access" description={apiKey.accessLabel}>
+            <PermissionList permissions={apiKey.permissions} />
+          </DetailSection>
+          <DetailSection
+            title="Use it"
+            description="Send the key as a bearer token. Scripts also need the workspace ID."
+          >
+            <WorkspaceIdLine />
+          </DetailSection>
+        </DetailPageBody>
+      </DetailPage>
       <DestructiveConfirm
-        open={typeOpen}
-        onOpenChange={setTypeOpen}
-        variant="type-to-confirm"
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        variant={picks.destructive === "type" ? "type-to-confirm" : "consequences"}
         title={`Revoke ${apiKey.name}?`}
         consequences={[
           "Scripts and CI using this key stop working right away.",
           `Last used ${apiKey.lastUsedAt ? absoluteTime(apiKey.lastUsedAt) : "never"}.`,
           "This can't be undone.",
         ]}
-        confirmText={apiKey.name}
-        confirmPlaceholder="Key name"
+        confirmText={picks.destructive === "type" ? apiKey.name : undefined}
+        confirmPlaceholder={picks.destructive === "type" ? "Key name" : undefined}
         confirmLabel="Revoke key"
         pendingLabel="Revoking…"
         onConfirm={() => revokeNow(apiKey)}
       />
-    </>
+    </OpenedPage>
   );
 }
 
@@ -705,19 +680,14 @@ const COLUMNS: RowListColumn[] = [
 
 function KeyRows({
   keys,
-  openId,
   onOpen,
   label,
-  inlineDetail,
 }: {
   keys: PreviewApiKey[];
-  openId: string | null;
   onOpen: (key: PreviewApiKey) => void;
   label: string;
-  inlineDetail?: (key: PreviewApiKey) => ReactNode;
 }) {
   const picks = useSettingsPicks();
-  const inline = picks.detail === "inline";
   return (
     <RowList variant={picks.list} label={label} columns={COLUMNS} nameLabel="Key">
       {keys.map((key) => (
@@ -748,11 +718,8 @@ function KeyRows({
               )
             ) : null,
           }}
-          indicator={inline ? "expand" : "open"}
+          indicator="open"
           onOpen={() => onOpen(key)}
-          selected={!inline && openId === key.id}
-          expanded={inline ? openId === key.id : undefined}
-          panel={inline && openId === key.id && inlineDetail ? inlineDetail(key) : undefined}
         />
       ))}
     </RowList>
@@ -761,14 +728,10 @@ function KeyRows({
 
 function OldKeys({
   keys,
-  openId,
   onOpen,
-  inlineDetail,
 }: {
   keys: PreviewApiKey[];
-  openId: string | null;
   onOpen: (key: PreviewApiKey) => void;
-  inlineDetail: (key: PreviewApiKey) => ReactNode;
 }) {
   const picks = useSettingsPicks();
   if (keys.length === 0) return null;
@@ -780,13 +743,7 @@ function OldKeys({
       summary={summary}
       sheetDescription="Keys that no longer work. They stay here so you can see what used them."
     >
-      <KeyRows
-        keys={keys}
-        openId={openId}
-        onOpen={onOpen}
-        label="Revoked and expired API keys"
-        inlineDetail={inlineDetail}
-      />
+      <KeyRows keys={keys} onOpen={onOpen} label="Revoked and expired API keys" />
     </Disclosure>
   );
 }
@@ -877,31 +834,31 @@ export function ApiKeysPage() {
     </AdminOnly>
   );
 
-  const detail = (key: PreviewApiKey) => (
-    <KeyDetail apiKey={key} onClose={() => setOpenId(null)} onReplace={replace} />
-  );
-  const inlineDetail = (key: PreviewApiKey) => (
-    <DetailInline className="mt-1">{detail(key)}</DetailInline>
-  );
-
+  // Creating and opening a key are pages of their own, in place of the list.
   let takeover: ReactNode;
-  if (creating && picks.form === "page") {
+  let takeoverKey: string | undefined;
+  if (creating) {
+    takeoverKey = "new";
     takeover = (
-      <CreateKeyInPage
-        layout="page"
+      <CreateKeyPage
         prefill={prefill}
         onCreated={onCreated}
         onClose={() => setCreating(false)}
+        onFinished={(key) => {
+          setCreating(false);
+          setOpenId(key.id);
+        }}
       />
     );
-  } else if (open && picks.detail === "page") {
+  } else if (open) {
+    takeoverKey = open.id;
     takeover = (
-      <DetailPage
-        back={{ label: "API keys", onClick: () => setOpenId(null) }}
-        className="max-w-none px-0 pt-0 pb-0 max-sm:px-0"
-      >
-        {detail(open)}
-      </DetailPage>
+      <KeyDetailPage
+        key={open.id}
+        apiKey={open}
+        onBack={() => setOpenId(null)}
+        onReplace={replace}
+      />
     );
   }
 
@@ -932,16 +889,6 @@ export function ApiKeysPage() {
       >
         Check your connection and try again. Your keys keep working.
       </ErrorMessage>
-    );
-  } else if (empty && creating && picks.form === "inline") {
-    // With no keys yet, the inline form takes the empty state's place.
-    body = (
-      <CreateKeyInPage
-        layout="inline"
-        prefill={prefill}
-        onCreated={onCreated}
-        onClose={() => setCreating(false)}
-      />
     );
   } else if (empty) {
     body = (
@@ -996,58 +943,27 @@ export function ApiKeysPage() {
             </div>
           </Notice>
         ) : null}
-        {creating && picks.form === "inline" ? (
-          <CreateKeyInPage
-            layout="inline"
-            prefill={prefill}
-            onCreated={onCreated}
-            onClose={() => setCreating(false)}
-          />
-        ) : null}
-        <KeyRows
-          keys={shown}
-          openId={openId}
-          onOpen={(key) => setOpenId((current) => (current === key.id ? null : key.id))}
-          label="API keys"
-          inlineDetail={inlineDetail}
-        />
-        {presets ? (
-          <OldKeys
-            keys={old}
-            openId={openId}
-            onOpen={(key) => setOpenId((current) => (current === key.id ? null : key.id))}
-            inlineDetail={inlineDetail}
-          />
-        ) : null}
+        <KeyRows keys={shown} onOpen={(key) => setOpenId(key.id)} label="API keys" />
+        {presets ? <OldKeys keys={old} onOpen={(key) => setOpenId(key.id)} /> : null}
       </div>
     );
   }
 
-  // One primary per region: the empty state and an open inline form carry their own.
-  const headerAction =
-    (empty && picks.empty === "page") || (creating && picks.form === "inline")
-      ? null
-      : createButton;
+  // One primary per region: the empty state carries its own.
+  const headerAction = empty && picks.empty === "page" ? null : createButton;
 
   return (
-    <SettingsFrame {...base} actions={headerAction} takeover={takeover}>
+    <SettingsFrame
+      {...base}
+      actions={headerAction}
+      takeover={takeover}
+      takeoverWide={Boolean(open) && !creating}
+      takeoverKey={takeoverKey}
+    >
       <div className="flex min-w-0 flex-col gap-6">
         {empty ? null : <WorkspaceIdLine />}
         {body}
       </div>
-      {picks.form === "dialog" ? (
-        <CreateKeyDialog
-          open={creating}
-          onOpenChange={setCreating}
-          prefill={prefill}
-          onCreated={onCreated}
-        />
-      ) : null}
-      {picks.detail === "sheet" ? (
-        <DetailSheet open={open !== null} onOpenChange={(next) => (next ? null : setOpenId(null))}>
-          {open ? <DetailSheetContent>{detail(open)}</DetailSheetContent> : null}
-        </DetailSheet>
-      ) : null}
     </SettingsFrame>
   );
 }

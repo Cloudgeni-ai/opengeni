@@ -35,7 +35,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { KIT_NOW, skillCapabilities, type LearningMode } from "../../fixtures";
 import { KitBlock } from "../../kit";
 import { PicksLine, PreviewDataToggle, QuestionBar, QuestionToggle } from "./chrome";
-import { AppFrame, ContentColumn } from "./frame";
+import { AppFrame, ContentColumn, ViewFocus } from "./frame";
 import {
   initialEntries,
   initialInstructionRevisions,
@@ -57,11 +57,15 @@ import {
   type KnowledgeTemplate,
   type NewEntry,
 } from "./knowledge-forms";
-import { InstructionsTab } from "./knowledge-instructions";
-import { LearningSheet } from "./knowledge-learning";
+import {
+  InstructionsEditPage,
+  InstructionsHistoryPage,
+  InstructionsTab,
+} from "./knowledge-instructions";
+import { LearningPage } from "./knowledge-learning";
 import {
   EntryDetail,
-  EntrySheet,
+  EntryEditPage,
   INITIAL_LIBRARY_VIEW,
   LibraryTab,
   type EntryPatch,
@@ -72,12 +76,29 @@ import { usePagePicks, wait, type PickedKey } from "./picks";
 
 /* ----------------------------------------------------------------------------
    Knowledge (brief section 10, "Agent Knowledge"): one rail page with the
-   Capabilities header and width, tabs Library / Instructions / Review, the
-   Learning sheet in the header, and one detail view per entry.
+   Capabilities header and width, tabs Library / Instructions / Review. Every
+   entry, Learning, Add knowledge, Edit and History open as their own pages
+   in the content area with a back link. No side sheets.
    -------------------------------------------------------------------------- */
 
 type Tab = "library" | "files" | "instructions" | "skills" | "review";
 type PreviewState = "filled" | "empty" | "loading";
+
+/** Which page the content area shows: the tabs, or one page you opened. */
+type KnowledgeView =
+  | { kind: "tabs" }
+  | { kind: "entry"; id: string }
+  | { kind: "edit-entry"; id: string }
+  | { kind: "add"; prefill: KnowledgeTemplate | null }
+  | { kind: "learning" }
+  | { kind: "edit-instructions" }
+  | { kind: "instructions-history" };
+
+const TABS_VIEW: KnowledgeView = { kind: "tabs" };
+
+function viewKey(view: KnowledgeView): string {
+  return "id" in view ? `${view.kind}:${view.id}` : view.kind;
+}
 
 interface Questions {
   q28: "one-page" | "kept";
@@ -105,7 +126,6 @@ const KNOWLEDGE_PICKS: readonly PickedKey[] = [
   "setting-row",
   "segmented-control",
   "select",
-  "disclosure",
   "status-badge",
   "form-dialog",
 ];
@@ -150,10 +170,7 @@ export function KnowledgePagePreview() {
   const [instructions, setInstructions] = useState<Revision[]>(initialInstructionRevisions);
   const [learning, setLearning] = useState(initialLearning);
   const [libraryView, setLibraryView] = useState<LibraryView>(INITIAL_LIBRARY_VIEW);
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [learningOpen, setLearningOpen] = useState(false);
-  const [addOpen, setAddOpen] = useState(false);
-  const [prefill, setPrefill] = useState<KnowledgeTemplate | null>(null);
+  const [view, setView] = useState<KnowledgeView>(TABS_VIEW);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [collectionOpen, setCollectionOpen] = useState(false);
 
@@ -163,11 +180,14 @@ export function KnowledgePagePreview() {
   const organizationWord = questions.q32 === "identity" ? "Organization" : "Company";
   const identityName = questions.q32 === "identity" ? "Organization identity" : "Company knowledge";
   const pendingCount = previewState === "empty" ? 0 : review.length;
-  const openEntry = entries.find((entry) => entry.id === openId) ?? null;
-  const detailPresentation =
-    picks.detail === "inline" && picks.list === "table" ? "sheet" : picks.detail;
-  const formPage = picks.form === "page" && addOpen;
-  const detailPage = detailPresentation === "page" && openEntry !== null && tab === "library";
+  const viewedEntry =
+    view.kind === "entry" || view.kind === "edit-entry"
+      ? (entries.find((entry) => entry.id === view.id) ?? null)
+      : null;
+  const openEntry = (id: string | null) => setView(id ? { kind: "entry", id } : TABS_VIEW);
+  const openAdd = (template?: KnowledgeTemplate) =>
+    setView({ kind: "add", prefill: template ?? null });
+  const openLearning = () => setView({ kind: "learning" });
   const libraryEmpty = previewState === "empty";
 
   const summary = learningSummary(learning.shared);
@@ -185,7 +205,6 @@ export function KnowledgePagePreview() {
   const archive = (entry: LibraryEntry) => {
     const before = entry.status;
     updateEntry(entry.id, (current) => ({ ...current, status: "archived" }));
-    if (openId === entry.id) setOpenId(null);
     showUndoToast({
       title: `Archived ${entry.title}`,
       description: "Agents stop using it. It stays under Filter › Archived.",
@@ -342,6 +361,7 @@ export function KnowledgePagePreview() {
     setEntries((current) => [entry, ...current]);
     if (previewState === "empty") setPreviewState("filled");
     setTab("library");
+    setView({ kind: "entry", id: entry.id });
     toast(`Added ${entry.title} to the Library`);
   };
 
@@ -379,7 +399,7 @@ export function KnowledgePagePreview() {
       <Button
         type="button"
         variant="outline"
-        onClick={() => setLearningOpen(true)}
+        onClick={openLearning}
         disabled={previewState === "loading"}
         className="pointer-coarse:h-11"
       >
@@ -399,12 +419,7 @@ export function KnowledgePagePreview() {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-48">
-          <DropdownMenuItem
-            onSelect={() => {
-              setPrefill(null);
-              setAddOpen(true);
-            }}
-          >
+          <DropdownMenuItem onSelect={() => openAdd()}>
             <PlusIcon />
             Add knowledge
           </DropdownMenuItem>
@@ -476,42 +491,12 @@ export function KnowledgePagePreview() {
           onViewChange={setLibraryView}
           state={previewState}
           organizationWord={organizationWord}
-          openId={openId}
-          onOpen={setOpenId}
+          openId={null}
+          onOpen={openEntry}
           onArchive={archive}
           onRestore={restore}
-          onAddKnowledge={(template) => {
-            setPrefill(template ?? null);
-            setAddOpen(true);
-          }}
+          onAddKnowledge={openAdd}
           onUpload={() => setUploadOpen(true)}
-          inlineForm={
-            picks.form === "inline" ? (
-              <AddKnowledgeForm
-                presentation="inline"
-                open={addOpen}
-                onOpenChange={setAddOpen}
-                picks={picks}
-                entries={entries}
-                collections={collections}
-                onCreate={create}
-                prefill={prefill}
-              />
-            ) : undefined
-          }
-          renderInlineDetail={(entry) => (
-            <EntryDetail
-              presentation="inline"
-              entry={entry}
-              picks={picks}
-              organizationWord={organizationWord}
-              onClose={() => setOpenId(null)}
-              onSave={saveEntry}
-              onArchive={archive}
-              onRestore={restore}
-              onRestoreRevision={restoreEntryRevision}
-            />
-          )}
         />
       </LineTabsContent>
       {questions.q28 === "kept" ? (
@@ -521,7 +506,7 @@ export function KnowledgePagePreview() {
               entries={entries}
               onOpen={(id) => {
                 setTab("library");
-                setOpenId(id);
+                openEntry(id);
               }}
             />
           </LineTabsContent>
@@ -534,8 +519,8 @@ export function KnowledgePagePreview() {
         <InstructionsTab
           picks={picks}
           revisions={instructions}
-          onSave={saveInstructions}
-          onRestore={restoreInstructions}
+          onEdit={() => setView({ kind: "edit-instructions" })}
+          onOpenHistory={() => setView({ kind: "instructions-history" })}
           showHistory={questions.q31 === "history"}
           identityName={identityName}
           onGoToLibrary={() => setTab("library")}
@@ -552,7 +537,7 @@ export function KnowledgePagePreview() {
           learningLine={learningLine}
           learningLink={
             questions.q29 === "header"
-              ? { label: "Change it", onClick: () => setLearningOpen(true) }
+              ? { label: "Change it", onClick: openLearning }
               : { label: "Change it in Settings › Agent learning", href: "#settings-learning" }
           }
         />
@@ -560,18 +545,82 @@ export function KnowledgePagePreview() {
     </LineTabs>
   );
 
-  const entryDetailProps = openEntry
-    ? {
-        entry: openEntry,
-        picks,
-        organizationWord,
-        onClose: () => setOpenId(null),
-        onSave: saveEntry,
-        onArchive: archive,
-        onRestore: restore,
-        onRestoreRevision: restoreEntryRevision,
-      }
-    : null;
+  const back = () => setView(TABS_VIEW);
+
+  const viewContent = () => {
+    if (view.kind === "add") {
+      return (
+        <AddKnowledgeForm
+          onClose={back}
+          picks={picks}
+          entries={entries}
+          collections={collections}
+          onCreate={create}
+          prefill={view.prefill}
+        />
+      );
+    }
+    if (view.kind === "edit-entry" && viewedEntry) {
+      return (
+        <EntryEditPage
+          entry={viewedEntry}
+          picks={picks}
+          onClose={() => openEntry(viewedEntry.id)}
+          onSave={saveEntry}
+        />
+      );
+    }
+    if (view.kind === "edit-instructions") {
+      return (
+        <InstructionsEditPage
+          current={previewState === "empty" ? "" : (instructions[0]?.content ?? "")}
+          onClose={() => {
+            setTab("instructions");
+            back();
+          }}
+          onSave={saveInstructions}
+        />
+      );
+    }
+    if (view.kind === "entry" && viewedEntry) {
+      return (
+        <EntryDetail
+          entry={viewedEntry}
+          picks={picks}
+          organizationWord={organizationWord}
+          onClose={back}
+          onEdit={(entry) => setView({ kind: "edit-entry", id: entry.id })}
+          onArchive={archive}
+          onRestore={restore}
+          onRestoreRevision={restoreEntryRevision}
+        />
+      );
+    }
+    if (view.kind === "learning") {
+      return (
+        <LearningPage
+          onClose={back}
+          picks={picks}
+          learning={learning}
+          onChange={changeLearning}
+          layout={questions.q30}
+        />
+      );
+    }
+    if (view.kind === "instructions-history") {
+      return (
+        <InstructionsHistoryPage
+          revisions={instructions}
+          onClose={() => {
+            setTab("instructions");
+            back();
+          }}
+          onRestore={restoreInstructions}
+        />
+      );
+    }
+    return <ContentColumn width="wide">{pageContent}</ContentColumn>;
+  };
 
   return (
     <div className="flex min-w-0 flex-col gap-8">
@@ -667,56 +716,15 @@ export function KnowledgePagePreview() {
         knowledgeAttention={pendingCount}
         onNavigate={(id) => {
           if (id === "knowledge") {
-            setOpenId(null);
-            setAddOpen(false);
+            setView(TABS_VIEW);
             setTab(pendingCount > 0 ? "review" : "library");
           }
         }}
         mobileTitle="Knowledge"
       >
-        {() =>
-          formPage ? (
-            <AddKnowledgeForm
-              presentation="page"
-              open
-              onOpenChange={setAddOpen}
-              picks={picks}
-              entries={entries}
-              collections={collections}
-              onCreate={create}
-              prefill={prefill}
-            />
-          ) : detailPage && entryDetailProps ? (
-            <ContentColumn width="standard">
-              <EntryDetail presentation="page" {...entryDetailProps} />
-            </ContentColumn>
-          ) : (
-            <ContentColumn width="wide">{pageContent}</ContentColumn>
-          )
-        }
+        {() => <ViewFocus viewKey={viewKey(view)}>{viewContent()}</ViewFocus>}
       </AppFrame>
 
-      {detailPresentation === "sheet" ? (
-        <EntrySheet
-          entry={openEntry}
-          open={openEntry !== null}
-          onOpenChange={(open) => (open ? null : setOpenId(null))}
-        >
-          {entryDetailProps ? <EntryDetail presentation="sheet" {...entryDetailProps} /> : null}
-        </EntrySheet>
-      ) : null}
-      {picks.form === "dialog" ? (
-        <AddKnowledgeForm
-          presentation="dialog"
-          open={addOpen}
-          onOpenChange={setAddOpen}
-          picks={picks}
-          entries={entries}
-          collections={collections}
-          onCreate={create}
-          prefill={prefill}
-        />
-      ) : null}
       <UploadFilesDialog open={uploadOpen} onOpenChange={setUploadOpen} onUpload={upload} />
       <NewCollectionDialog
         open={collectionOpen}
@@ -728,14 +736,6 @@ export function KnowledgePagePreview() {
           setTab("library");
           toast(`Created the ${name} collection`);
         }}
-      />
-      <LearningSheet
-        open={learningOpen}
-        onOpenChange={setLearningOpen}
-        picks={picks}
-        learning={learning}
-        onChange={changeLearning}
-        layout={questions.q30}
       />
     </div>
   );

@@ -11,8 +11,7 @@ import {
   type ConfirmDependency,
 } from "@/components/ui/destructive-confirm";
 import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog, FormInline, FormPage } from "@/components/ui/form-dialog";
-import { FormSheet } from "@/components/ui/form-sheet";
+import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
 import { SecretInput } from "@/components/ui/secret-field";
 
 import { KIT_NOW, currentWorkspace, you } from "../../fixtures";
@@ -40,8 +39,10 @@ import {
 } from "./state";
 
 /* ----------------------------------------------------------------------------
-   Every dialog the Models page opens. One place renders whichever is open, so
-   rows, sheets and menus only say what they want.
+   Every form the Models page opens. Connect is a full page (ConnectPage, shown
+   by the preview in the content area); the rest are one-field prompts and
+   confirmations, so they stay small centered dialogs. One place renders
+   whichever dialog is open, so rows, pages and menus only say what they want.
    -------------------------------------------------------------------------- */
 
 const GATEWAY_KEYS: Record<GatewayId, { prefix: string; where: string }> = {
@@ -61,9 +62,8 @@ export function ModelsDialogs() {
   if (!dialog) return null;
   switch (dialog.kind) {
     case "connect":
-      return (
-        <ConnectDialog scope={dialog.scope} initialProvider={dialog.provider} onClose={close} />
-      );
+      // A page, rendered by the preview in place of the list.
+      return null;
     case "rename":
       return <RenameDialog scope={dialog.scope} id={dialog.id} onClose={close} />;
     case "redeem":
@@ -80,12 +80,40 @@ export function ModelsDialogs() {
 }
 
 /* ----------------------------------------------------------------------------
-   Connect an account: pick a provider, then sign in or paste a key.
+   Connect an account, as its own page: pick a provider, then sign in or paste
+   a key. After connecting, the new account's page opens.
    -------------------------------------------------------------------------- */
 
 type ConnectStep = "provider" | "codex" | "key";
 
-function ConnectDialog({
+/** A full-page form with "← Models" and a sticky Cancel + primary footer. */
+function ModelsFormPage({
+  onClose,
+  backLabel = "Models",
+  ...props
+}: Omit<FormFrameProps, "variant" | "back" | "onCancel"> & {
+  onClose: () => void;
+  backLabel?: string;
+}) {
+  return (
+    <FormPage
+      back={{ label: backLabel, onClick: onClose }}
+      onCancel={onClose}
+      // The settings content column already has its gutter: start the form
+      // where a detail page starts instead of centring it again.
+      className={FLUSH_FORM_PAGE}
+      {...props}
+    />
+  );
+}
+
+const FLUSH_FORM_PAGE = [
+  "[&>form>header]:mx-0 [&>form>header]:px-0 [&>form>header]:pt-0",
+  "[&>form>[data-slot=form-body]]:mx-0 [&>form>[data-slot=form-body]]:px-0",
+  "[&>form>footer>div]:mx-0 [&>form>footer>div]:px-0",
+].join(" ");
+
+export function ConnectPage({
   scope,
   initialProvider,
   onClose,
@@ -95,9 +123,8 @@ function ConnectDialog({
   onClose: () => void;
 }) {
   const models = useModels();
-  const { data, setData, questions, scenario } = models;
+  const { data, setData, questions, scenario, openDetail } = models;
   const picks = useModelsPicks();
-  const [open, setOpen] = useState(true);
   const [step, setStep] = useState<ConnectStep>(
     initialProvider ? (initialProvider === "codex" ? "codex" : "key") : "provider",
   );
@@ -117,9 +144,11 @@ function ConnectDialog({
     effectiveSource(data, questions, scenario) === "organization";
   const gateways = data.gateways[scope];
 
+  const [added, setAdded] = useState<DetailTarget | null>(null);
+
   const finish = () => {
-    setOpen(false);
     onClose();
+    if (added) openDetail(added);
   };
 
   if (step === "key") {
@@ -128,7 +157,11 @@ function ConnectDialog({
         scope={scope}
         id={provider as GatewayId}
         mode="connect"
-        onClose={finish}
+        onClose={onClose}
+        onConnected={() => {
+          onClose();
+          openDetail({ kind: "gateway", scope, id: provider as GatewayId });
+        }}
         onBack={initialProvider ? undefined : () => setStep("provider")}
       />
     );
@@ -136,9 +169,8 @@ function ConnectDialog({
 
   if (step === "provider") {
     return (
-      <FormDialog
-        open={open}
-        onOpenChange={(next) => (next ? setOpen(true) : finish())}
+      <ModelsFormPage
+        onClose={onClose}
         title="Connect a model account"
         description={`Pick what pays for new work in ${scopeName(scope)}.`}
         submitLabel="Continue"
@@ -185,7 +217,7 @@ function ConnectDialog({
             />
           ))}
         </ChoiceCards>
-      </FormDialog>
+      </ModelsFormPage>
     );
   }
 
@@ -194,10 +226,8 @@ function ConnectDialog({
   const signedIn = signin === "done";
   const askSource = signedIn && orgPoolInUse;
   return (
-    <FormDialog
-      open={open}
-      onOpenChange={(next) => (next ? setOpen(true) : finish())}
-      leading={<ProviderTile provider="codex" />}
+    <ModelsFormPage
+      onClose={onClose}
       title="Connect Codex"
       description="Sign in with the ChatGPT account whose plan should pay."
       submitLabel="Add account"
@@ -257,6 +287,7 @@ function ConnectDialog({
               ? { allShared: true, workspaces: [], personal: true }
               : undefined,
         };
+        setAdded({ kind: "codex", scope, id: account.id });
         setData((value) => {
           const next =
             scope === "organization"
@@ -348,7 +379,7 @@ function ConnectDialog({
           </ChoiceCards>
         ) : null}
       </FieldStack>
-    </FormDialog>
+    </ModelsFormPage>
   );
 }
 
@@ -378,12 +409,16 @@ function KeyDialog({
   id,
   mode,
   onClose,
+  onConnected,
   onBack,
 }: {
   scope: Scope;
   id: GatewayId;
+  /** "connect" is a step of the Connect page; "replace" is a one-field dialog. */
   mode: "connect" | "replace";
   onClose: () => void;
+  /** Connect only: after the key is saved. */
+  onConnected?: () => void;
   onBack?: () => void;
 }) {
   const { data, setData } = useModels();
@@ -396,60 +431,46 @@ function KeyDialog({
     setOpen(false);
     onClose();
   };
-  return (
-    <FormDialog
-      open={open}
-      onOpenChange={(next) => (next ? setOpen(true) : close())}
-      size="sm"
-      leading={<ProviderTile provider={id} />}
-      title={mode === "connect" ? `Connect ${gateway.name}` : `Replace the ${gateway.name} key`}
-      description={
-        mode === "connect"
-          ? gateway.description
-          : "New work uses the new key right away. Work already running finishes on the old one."
+  const connect = mode === "connect";
+  const form = {
+    title: connect ? `Connect ${gateway.name}` : `Replace the ${gateway.name} key`,
+    description: connect
+      ? gateway.description
+      : "New work uses the new key right away. Work already running finishes on the old one.",
+    submitLabel: connect ? `Connect ${gateway.name}` : "Replace key",
+    pendingLabel: "Checking key…",
+    footerStart: onBack ? (
+      <Button type="button" variant="ghost" onClick={onBack} className="-ml-3 pointer-coarse:h-11">
+        Back
+      </Button>
+    ) : null,
+    onSubmit: async () => {
+      const trimmed = key.trim();
+      if (!trimmed) {
+        setError(`Paste your ${gateway.name} API key.`);
+        return false;
       }
-      submitLabel={mode === "connect" ? `Connect ${gateway.name}` : "Replace key"}
-      pendingLabel="Checking key…"
-      footerStart={
-        onBack ? (
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={onBack}
-            className="-ml-3 pointer-coarse:h-11"
-          >
-            Back
-          </Button>
-        ) : null
+      if (trimmed.length < 20) {
+        setError(`This key looks too short. Copy the whole key from ${gateway.name}.`);
+        return false;
       }
-      onSubmit={async () => {
-        const trimmed = key.trim();
-        if (!trimmed) {
-          setError(`Paste your ${gateway.name} API key.`);
-          return false;
-        }
-        if (trimmed.length < 20) {
-          setError(`This key looks too short. Copy the whole key from ${gateway.name}.`);
-          return false;
-        }
-        await wait(1000);
-        if (!trimmed.startsWith(rules.prefix)) {
-          throw new Error(
-            `${gateway.name} didn't accept this key. Keys from ${gateway.name} start with ${rules.prefix}.`,
-          );
-        }
-        setData((value) =>
-          updateGateway(value, scope, id, {
-            connected: true,
-            keyHint: trimmed.slice(-4),
-            connectedOn: "26 Sep 2026",
-            customModels: mode === "connect" ? [] : gateway.customModels,
-          }),
+      await wait(1000);
+      if (!trimmed.startsWith(rules.prefix)) {
+        throw new Error(
+          `${gateway.name} didn't accept this key. Keys from ${gateway.name} start with ${rules.prefix}.`,
         );
-        toast.success(mode === "connect" ? `Connected ${gateway.name}` : "Key replaced");
-      }}
-      onSubmitted={close}
-    >
+      }
+      setData((value) =>
+        updateGateway(value, scope, id, {
+          connected: true,
+          keyHint: trimmed.slice(-4),
+          connectedOn: "26 Sep 2026",
+          customModels: connect ? [] : gateway.customModels,
+        }),
+      );
+      toast.success(connect ? `Connected ${gateway.name}` : "Key replaced");
+    },
+    children: (
       <Field
         label="API key"
         hint={`${rules.where} It's stored encrypted and never shown again.`}
@@ -464,7 +485,20 @@ function KeyDialog({
           }}
         />
       </Field>
-    </FormDialog>
+    ),
+  };
+  if (connect) {
+    return <ModelsFormPage {...form} onClose={onClose} onSubmitted={onConnected ?? onClose} />;
+  }
+  return (
+    <FormDialog
+      {...form}
+      open={open}
+      onOpenChange={(next) => (next ? setOpen(true) : close())}
+      size="sm"
+      leading={<ProviderTile provider={id} />}
+      onSubmitted={close}
+    />
   );
 }
 
@@ -847,16 +881,16 @@ function useAllowedForm(target: AllowedTarget) {
 
 export function AllowedModelsForm({
   target,
-  presentation,
+  backLabel = "Models",
   onClose,
 }: {
   target: AllowedTarget;
-  presentation: "sheet" | "page" | "inline";
+  /** The page the form goes back to: "Models", or the account's name. */
+  backLabel?: string;
   onClose: () => void;
 }) {
   const picks = useModelsPicks();
   const form = useAllowedForm(target);
-  const [open, setOpen] = useState(true);
   const [mode, setMode] = useState<"all" | "only">(form.current === "all" ? "all" : "only");
   const [selected, setSelected] = useState<string[]>(
     form.current === "all" ? form.options.map((option) => option.id) : form.current,
@@ -864,10 +898,6 @@ export function AllowedModelsForm({
   const [error, setError] = useState<string | null>(null);
   const workspace = target.kind === "workspace";
   const groups = Array.from(new Set(form.options.map((option) => option.group)));
-  const close = () => {
-    setOpen(false);
-    onClose();
-  };
 
   const onSubmit = async () => {
     if (mode === "only") {
@@ -984,25 +1014,7 @@ export function AllowedModelsForm({
     children: body,
   };
 
-  if (presentation === "page") {
-    return (
-      <FormPage
-        {...common}
-        back={{ label: "Models", onClick: onClose }}
-        onCancel={onClose}
-        onSubmitted={onClose}
-      />
-    );
-  }
-  if (presentation === "inline") {
-    return <FormInline {...common} onCancel={onClose} onSubmitted={onClose} />;
-  }
   return (
-    <FormSheet
-      open={open}
-      onOpenChange={(next) => (next ? setOpen(true) : close())}
-      {...common}
-      onSubmitted={close}
-    />
+    <ModelsFormPage {...common} backLabel={backLabel} onClose={onClose} onSubmitted={onClose} />
   );
 }

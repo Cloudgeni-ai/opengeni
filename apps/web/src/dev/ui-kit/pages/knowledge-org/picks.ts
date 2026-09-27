@@ -1,5 +1,4 @@
 import type { ChoiceCardsVariant } from "@/components/ui/choice-cards";
-import type { DisclosureVariant } from "@/components/ui/disclosure";
 import type { DestructiveConfirmVariant } from "@/components/ui/destructive-confirm";
 import type { AccessListVariant } from "@/components/ui/access-list";
 import type { LineTabsVariant } from "@/components/ui/line-tabs";
@@ -13,17 +12,16 @@ import type { StatusBadgeVariant } from "@/components/ui/status-badge";
 import type { SwitchVariant } from "@/components/ui/switch";
 import type { EmptyStateVariant } from "@/components/ui/empty-state";
 
-import { usePickState } from "../../picks";
+import { storedPick, usePickState, type PickState } from "../../picks";
 import { getSection, type AlternativeId, type SectionKey } from "../../sections/registry";
 
 /* ----------------------------------------------------------------------------
    Bendik's picks, translated into the variants the primitives take. The page
    previews read everything through here, so one pick changes every place the
-   component shows up on the page.
+   component shows up on the page. Detail and form presentation are decided
+   (pages, never side sheets), so they are not picks here any more.
    -------------------------------------------------------------------------- */
 
-export type DetailPresentationPick = "sheet" | "page" | "inline";
-export type FormPresentationPick = "dialog" | "page" | "inline";
 export type NavigationPick = "column" | "rail" | "tabs";
 export type TabsPick = "underline" | "pill" | "filter-menu";
 
@@ -36,16 +34,13 @@ export interface PagePicks {
   /** Line tabs look for places on a page (the filter-menu pick keeps underline tabs). */
   tabVariant: LineTabsVariant;
   list: RowListVariant;
-  detail: DetailPresentationPick;
   empty: { variant: EmptyStateVariant; templates: boolean };
   settingRow: SettingRowVariant;
   switch: { variant: SwitchVariant; showStateText: boolean };
   segmented: SegmentedControlVariant;
   choice: ChoiceCardsVariant;
   select: SelectMenuVariant;
-  disclosure: DisclosureVariant;
   status: { header: StatusBadgeVariant; row: StatusBadgeVariant };
-  form: FormPresentationPick;
   destructive: DestructiveConfirmVariant | "undo";
   access: AccessListVariant;
 }
@@ -63,7 +58,6 @@ export const PICKED_KEYS = [
   "segmented-control",
   "choice-cards",
   "select",
-  "disclosure",
   "status-badge",
   "form-dialog",
   "destructive-confirm",
@@ -72,14 +66,14 @@ export const PICKED_KEYS = [
 
 export type PickedKey = (typeof PICKED_KEYS)[number];
 
-function pickOf(picks: Partial<Record<SectionKey, AlternativeId>>, key: PickedKey): AlternativeId {
-  return picks[key] ?? getSection(key).recommended ?? "a";
+function pickOf(state: PickState, key: PickedKey): AlternativeId {
+  return storedPick(state, key) ?? getSection(key).recommended ?? "a";
 }
 
 /** Every pick the two page previews use, as primitive variants. */
 export function usePagePicks(): PagePicks {
-  const { picks } = usePickState();
-  const letters = Object.fromEntries(PICKED_KEYS.map((key) => [key, pickOf(picks, key)])) as Record<
+  const state = usePickState();
+  const letters = Object.fromEntries(PICKED_KEYS.map((key) => [key, pickOf(state, key)])) as Record<
     PickedKey,
     AlternativeId
   >;
@@ -97,7 +91,6 @@ export function usePagePicks(): PagePicks {
     tabs: by<TabsPick>("tabs-toolbar", { a: "underline", b: "pill", c: "filter-menu" }),
     tabVariant: by<LineTabsVariant>("tabs-toolbar", { a: "underline", b: "pill", c: "underline" }),
     list: by<RowListVariant>("list-row", { a: "catalog", b: "resource", c: "table" }),
-    detail: by<DetailPresentationPick>("detail-sheet", { a: "sheet", b: "page", c: "inline" }),
     empty: by("empty-state", {
       a: { variant: "page" as EmptyStateVariant, templates: false },
       b: { variant: "inline" as EmptyStateVariant, templates: false },
@@ -120,13 +113,11 @@ export function usePagePicks(): PagePicks {
     }),
     choice: by<ChoiceCardsVariant>("choice-cards", { a: "ring", b: "radio", c: "list" }),
     select: by<SelectMenuVariant>("select", { a: "native", b: "menu", c: "combobox" }),
-    disclosure: by<DisclosureVariant>("disclosure", { a: "row", b: "inline", c: "sheet" }),
     status: by("status-badge", {
       a: { header: "dot" as StatusBadgeVariant, row: "dot" as StatusBadgeVariant },
       b: { header: "outline" as StatusBadgeVariant, row: "dot" as StatusBadgeVariant },
       c: { header: "tinted" as StatusBadgeVariant, row: "tinted" as StatusBadgeVariant },
     }),
-    form: by<FormPresentationPick>("form-dialog", { a: "dialog", b: "page", c: "inline" }),
     destructive: by<DestructiveConfirmVariant | "undo">("destructive-confirm", {
       a: "consequences",
       b: "type-to-confirm",

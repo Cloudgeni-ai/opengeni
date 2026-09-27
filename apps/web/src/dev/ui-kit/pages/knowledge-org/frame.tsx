@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -41,7 +42,7 @@ import { PagePreview, useKitPane } from "../../kit";
    - 640-1199px: the collapsed icon rail (the kit column is ~1136px wide at a
      1440px window, so this is what a laptop-sized preview shows). The rail
      button expands it to 240px.
-   - Under 640px: a top bar whose menu opens the rail as a sheet.
+   - Under 640px: a top bar whose menu opens the rail from the left.
    -------------------------------------------------------------------------- */
 
 export type RailId =
@@ -360,6 +361,37 @@ export function ContentColumn({
         className,
       )}
     >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Wraps the content of one in-preview view (a list, a detail page, a form
+ * page). When `viewKey` changes it scrolls the preview's content area to the
+ * top and moves focus to the new page's heading, like a route change. The
+ * first render leaves focus alone so opening the kit never steals it.
+ */
+export function ViewFocus({ viewKey, children }: { viewKey: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const mounted = useRef(false);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    element.closest<HTMLElement>('[data-slot="kit-app-main"]')?.scrollTo({ top: 0 });
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    const heading = element.querySelector<HTMLElement>("h1");
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.classList.add("outline-none");
+      heading.focus({ preventScroll: true });
+    }
+  }, [viewKey]);
+  return (
+    <div ref={ref} className="flex min-h-full min-w-0 flex-col">
       {children}
     </div>
   );

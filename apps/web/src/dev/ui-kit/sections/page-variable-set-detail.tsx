@@ -93,12 +93,12 @@ function DialogStates() {
 
   return (
     <StatesGrid
-      title="Dialogs on this page"
+      title="Forms and dialogs on this page"
       columns={2}
-      description="Drawn in place so you can compare them. In the page they open from Add variable, a row's ⋯ menu and the set's ⋯ menu."
+      description="Framed here so you can compare them. Add variable and Paste .env are pages with a back link to the set; Replace value is the one small centered dialog, and deletes are centered confirms."
     >
       <StateCell
-        label="Add variable"
+        label="Add variable (a page)"
         align="stretch"
         note='Typed "aws session token"; the name is saved in uppercase with underscores.'
       >
@@ -114,7 +114,7 @@ function DialogStates() {
         </div>
       </StateCell>
       <StateCell
-        label="Paste .env"
+        label="Paste .env (a page)"
         align="stretch"
         note="One name is reserved and one is already in the set; both are explained before anything is saved."
       >
@@ -130,7 +130,7 @@ function DialogStates() {
           />
         </div>
       </StateCell>
-      <StateCell label={verbs.replace} align="stretch">
+      <StateCell label={`${verbs.replace} (a dialog)`} align="stretch">
         <div className="flex min-w-0 flex-1 items-start justify-center">
           <ReplaceValueDialog
             presentation="panel"
@@ -197,7 +197,7 @@ export default function PageVariableSetDetailSection() {
     <KitSection sectionKey="page-variable-set-detail">
       <KitBlock
         title="The page"
-        description="What opens when you click a variable set. The back link returns to the list; every menu, dialog and form works on the fixtures."
+        description="What opens when you click a variable set: its own page with a back link, Variables and Used by tabs, and a quiet card with its facts. Add variable and Edit details open as pages; every menu, dialog and form works on the fixtures."
       >
         <div className="flex min-w-0 flex-col gap-4">
           {pane.mobileFrame ? null : <QuestionToggles collapsible={pane.count > 1} />}
@@ -251,7 +251,7 @@ export default function PageVariableSetDetailSection() {
         ]}
         avoid={[
           "Reveal, Copy, version numbers or a •••••• pill on every row.",
-          "An add form that is always open under the table.",
+          "An add form that is always open under the table, or a right-side sheet.",
           "Rotate and Revoke for values OpenGeni only stores.",
         ]}
       />

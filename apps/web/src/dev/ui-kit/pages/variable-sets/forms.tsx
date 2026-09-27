@@ -2,13 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { Disclosure } from "@/components/ui/disclosure";
 import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import {
-  FormDialog,
-  FormFrame,
-  FormInline,
-  FormPage,
-  type FormFrameProps,
-} from "@/components/ui/form-dialog";
+import { FormDialog, FormFrame, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
 import { InlineHelp } from "@/components/ui/inline-help";
 import {
   EnvPastePreview,
@@ -35,19 +29,20 @@ import {
 } from "./model";
 
 /* ----------------------------------------------------------------------------
-   Create and edit forms for the Variable sets pages. Creates follow the Form
-   dialog pick (a dialog, a full page, or inline on the page); small edits
-   (Replace value, Edit name and description) are always dialogs.
+   Create and edit forms for the Variable sets pages. New variable set, Add
+   variables and Edit details are their own pages with a back link and a
+   sticky footer (the decided form pick). Only the one-field Replace value
+   stays a small centered dialog.
    -------------------------------------------------------------------------- */
 
 export const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** "panel" draws the dialog in place, for the kit's dialog previews. */
-export type FormPresentation = "dialog" | "page" | "inline" | "panel";
+/** "page" is the in-preview page; "panel" draws the same form framed in place, for the kit's state grids. */
+export type FormPresentation = "page" | "panel";
 
 type FrameProps = Omit<FormFrameProps, "variant" | "children" | "onCancel" | "onSubmitted">;
 
-/** Renders one create form in the picked presentation. */
+/** Renders one create or edit form as its own page (the decided form pick). */
 export function FormHost({
   presentation,
   open,
@@ -61,54 +56,36 @@ export function FormHost({
   open: boolean;
   onClose: () => void;
   onSubmitted: () => void;
-  /** Page presentation: the back link ("Variable sets"). */
+  /** The back link ("Variable sets", or the set's name). */
   back?: { label: ReactNode; onClick: () => void };
   frame: FrameProps;
   children: ReactNode;
 }) {
-  if (presentation === "dialog") {
-    return (
-      <FormDialog
-        open={open}
-        onOpenChange={(next) => (next ? undefined : onClose())}
-        onSubmitted={onSubmitted}
-        {...frame}
-      >
-        {children}
-      </FormDialog>
-    );
-  }
   if (!open) return null;
   if (presentation === "panel") {
     return (
       <FormFrame
         variant="dialog"
         {...frame}
+        showClose={false}
         onCancel={onClose}
         onSubmitted={onSubmitted}
-        className="w-full max-w-[560px]"
+        className="w-full max-w-[640px]"
       >
         {children}
       </FormFrame>
     );
   }
-  if (presentation === "page") {
-    return (
-      <FormPage
-        {...frame}
-        back={back}
-        onCancel={onClose}
-        onSubmitted={onSubmitted}
-        className="min-h-full"
-      >
-        {children}
-      </FormPage>
-    );
-  }
   return (
-    <FormInline {...frame} onCancel={onClose} onSubmitted={onSubmitted}>
+    <FormPage
+      {...frame}
+      back={back}
+      onCancel={onClose}
+      onSubmitted={onSubmitted}
+      className="min-h-full"
+    >
       {children}
-    </FormInline>
+    </FormPage>
   );
 }
 
@@ -244,7 +221,8 @@ export function NewSetForm({
       presentation={presentation}
       open={open}
       onClose={onClose}
-      onSubmitted={onClose}
+      // onCreate navigates to the new set, so a successful submit does not close back to the list.
+      onSubmitted={() => undefined}
       back={back}
       frame={{
         title: "New variable set",
@@ -293,7 +271,7 @@ export function NewSetForm({
         >
           <SegmentedControl
             variant={picks.segmented}
-            fullWidth={presentation !== "inline"}
+            fullWidth
             className="max-w-[440px]"
             value={values.scope}
             onValueChange={(scope) => update("scope", scope)}
@@ -665,24 +643,25 @@ export function ReplaceValueDialog({
 }
 
 /* ----------------------------------------------------------------------------
-   Edit name and description, always a dialog.
+   Edit details (name and description): its own page, back to the set.
    -------------------------------------------------------------------------- */
 
-export function EditSetDialog({
+export function EditSetForm({
+  presentation = "page",
   set,
   sets,
   onClose,
   onSave,
 }: {
+  presentation?: FormPresentation;
   set: PreviewSet | undefined;
   sets: PreviewSet[];
   onClose: () => void;
   onSave: (name: string, description: string) => void;
 }) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [name, setName] = useState(set?.name ?? "");
+  const [description, setDescription] = useState(set?.description ?? "");
   const [tried, setTried] = useState(false);
-  const open = Boolean(set);
 
   useEffect(() => {
     if (set) {
@@ -704,20 +683,25 @@ export function EditSetDialog({
       : undefined;
 
   return (
-    <FormDialog
-      open={open}
-      onOpenChange={(next) => (next ? undefined : onClose())}
-      title="Edit name and description"
-      submitLabel="Save"
-      pendingLabel="Saving…"
-      onSubmit={async () => {
-        setTried(true);
-        if (!trimmed || duplicate) return false;
-        await wait(500);
-        onSave(trimmed, description.trim());
-        return true;
-      }}
+    <FormHost
+      presentation={presentation}
+      open={Boolean(set)}
+      onClose={onClose}
       onSubmitted={onClose}
+      back={set ? { label: set.name, onClick: onClose } : undefined}
+      frame={{
+        title: "Edit details",
+        description: set ? `The name and description of ${set.name}.` : undefined,
+        submitLabel: "Save changes",
+        pendingLabel: "Saving…",
+        onSubmit: async () => {
+          setTried(true);
+          if (!trimmed || duplicate) return false;
+          await wait(500);
+          onSave(trimmed, description.trim());
+          return true;
+        },
+      }}
     >
       <FieldStack>
         <Field label="Name" error={nameError}>
@@ -728,7 +712,7 @@ export function EditSetDialog({
             maxLength={80}
           />
         </Field>
-        <Field label="Description" optional>
+        <Field label="Description" optional hint="One line on what it's for.">
           <TextInput
             value={description}
             onChange={(event) => setDescription(event.target.value)}
@@ -738,6 +722,6 @@ export function EditSetDialog({
         </Field>
         {set ? <InlineHelp icon>{SCOPE_LOCKED[set.scope]}</InlineHelp> : null}
       </FieldStack>
-    </FormDialog>
+    </FormHost>
   );
 }

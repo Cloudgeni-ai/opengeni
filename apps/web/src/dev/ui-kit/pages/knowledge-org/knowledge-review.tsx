@@ -97,7 +97,7 @@ export interface ReviewTabProps {
   state: "filled" | "empty" | "loading";
   onApprove: (item: ReviewEntry, editedText?: string) => void;
   onReject: (item: ReviewEntry) => void;
-  /** Opens the Learning sheet, or points at settings (Q29). */
+  /** Opens the Learning page, or points at settings (Q29). */
   learningLink: { label: string; onClick?: () => void; href?: string };
   learningLine: string;
 }

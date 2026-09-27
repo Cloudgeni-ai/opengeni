@@ -13,30 +13,34 @@ import {
   ListIcon,
   LockIcon,
   MessageSquareIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
   PlusIcon,
   ShieldCheckIcon,
   SirenIcon,
   StickyNoteIcon,
   UploadIcon,
+  UserRoundIcon,
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
-  DetailBody,
-  DetailFact,
-  DetailFacts,
-  DetailFooter,
-  DetailHeader,
-  DetailInline,
+  DetailAside,
+  DetailAsideItem,
   DetailPage,
-  DetailSection,
-  DetailSheet,
-  DetailSheetContent,
-} from "@/components/ui/detail-sheet";
-import { Disclosure } from "@/components/ui/disclosure";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   EmptyState,
   EmptyStateLink,
@@ -44,9 +48,17 @@ import {
   EmptyStateTemplates,
 } from "@/components/ui/empty-state";
 import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
+import { FormPage } from "@/components/ui/form-dialog";
+import {
+  LineTabs,
+  LineTabsContent,
+  LineTabsList,
+  LineTabsTrigger,
+} from "@/components/ui/line-tabs";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -260,10 +272,6 @@ export interface LibraryTabProps {
   onRestore: (entry: LibraryEntry) => void;
   onAddKnowledge: (template?: KnowledgeTemplate) => void;
   onUpload: () => void;
-  /** Rendered in place of the list for the inline detail pick. */
-  renderInlineDetail: (entry: LibraryEntry) => ReactNode;
-  /** A create form shown inline above the list (form pick C). */
-  inlineForm?: ReactNode;
 }
 
 // The values explain themselves ("Decision", "8 days ago"); tables still show the headers.
@@ -286,8 +294,6 @@ export function LibraryTab({
   onRestore,
   onAddKnowledge,
   onUpload,
-  renderInlineDetail,
-  inlineForm,
 }: LibraryTabProps) {
   const loading = state === "loading";
   const empty = state === "empty";
@@ -302,7 +308,6 @@ export function LibraryTab({
   const shown = empty ? [] : visibleEntries(entries, view);
   const searching = view.query.trim().length > 0;
   const words = scopeWords(organizationWord);
-  const inline = picks.detail === "inline" && picks.list !== "table";
   const columns = picks.list === "catalog" ? undefined : COLUMNS;
   const set = (patch: Partial<LibraryView>) => onViewChange({ ...view, ...patch });
   const filtered =
@@ -335,9 +340,7 @@ export function LibraryTab({
         ].filter(Boolean)}
         cells={catalog ? undefined : { type: TYPE_LABEL[entry.type], updated }}
         selected={open}
-        onOpen={() => onOpen(open && inline ? null : entry.id)}
-        expanded={inline ? open : undefined}
-        panel={inline && open ? renderInlineDetail(entry) : undefined}
+        onOpen={() => onOpen(entry.id)}
         menu={
           <>
             <DropdownMenuItem onSelect={() => onOpen(entry.id)}>
@@ -531,7 +534,6 @@ export function LibraryTab({
 
   return (
     <div ref={ref} className="flex min-w-0 flex-col gap-4 pt-6">
-      {inlineForm}
       {empty && picks.empty.variant === "page" ? null : (
         <div className="flex min-w-0 flex-col gap-3">
           <Toolbar>
@@ -601,7 +603,10 @@ export function LibraryTab({
 }
 
 /* ----------------------------------------------------------------------------
-   One entry: the same parts in a sheet, a page or in place.
+   One entry: its own page, like a skill in Claude's settings. Back link,
+   tile, title with its scope, a "by · in · updated" line, Overview and
+   History tabs, the text in the main column and the facts in a quiet card.
+   Edit is its own page too.
    -------------------------------------------------------------------------- */
 
 export interface EntryPatch {
@@ -615,7 +620,7 @@ export interface EntryDetailProps {
   picks: PagePicks;
   organizationWord: string;
   onClose: () => void;
-  onSave: (entry: LibraryEntry, patch: EntryPatch) => Promise<void>;
+  onEdit: (entry: LibraryEntry) => void;
   onArchive: (entry: LibraryEntry) => void;
   onRestore: (entry: LibraryEntry) => void;
   onRestoreRevision: (entry: LibraryEntry, revision: Revision) => Promise<void>;
@@ -627,274 +632,265 @@ function whereLabel(scope: KnowledgeScope, organizationWord: string): string {
   return `${organizationWord} · ${organization.name}`;
 }
 
-function EntryDetailParts({
+type EntryTab = "overview" | "history";
+
+function EntryDetailPage({
   entry,
   picks,
   organizationWord,
   onClose,
-  onSave,
+  onEdit,
   onArchive,
   onRestore,
   onRestoreRevision,
 }: EntryDetailProps) {
-  const [editing, setEditing] = useState(false);
+  const [tab, setTab] = useState<EntryTab>("overview");
+  const Icon = TYPE_ICON[entry.type];
+  const words = scopeWords(organizationWord);
+  const published = entry.status === "published";
+
+  const aside = (
+    <DetailAside label={`About ${entry.title}`}>
+      <DetailAsideItem label="Created by" icon={<UserRoundIcon />}>
+        {entry.revisions.at(-1)?.author ?? entry.author}
+      </DetailAsideItem>
+      <DetailAsideItem
+        label="Where"
+        icon={entry.scope === "personal" ? <LockIcon /> : <Building2Icon />}
+      >
+        {whereLabel(entry.scope, organizationWord)}
+      </DetailAsideItem>
+      <DetailAsideItem label="Type" icon={<Icon />}>
+        {TYPE_LABEL[entry.type]}
+      </DetailAsideItem>
+      <DetailAsideItem label="Collection" icon={<FolderIcon />}>
+        {entry.collection ?? <span className="text-fg-muted">None</span>}
+      </DetailAsideItem>
+      {entry.source ? (
+        <DetailAsideItem
+          label="Source"
+          icon={entry.source.kind === "file" ? <FileTextIcon /> : <MessageSquareIcon />}
+        >
+          <button
+            type="button"
+            onClick={() => toast(`Opened ${entry.source?.name}`)}
+            className="max-w-full truncate rounded-[4px] text-left underline-offset-2 hover:underline pointer-coarse:min-h-11"
+          >
+            {entry.source.name}
+          </button>
+        </DetailAsideItem>
+      ) : null}
+    </DetailAside>
+  );
+
+  return (
+    <DetailPage back={{ label: "Knowledge", onClick: onClose }}>
+      <LineTabs
+        value={tab}
+        onValueChange={(value) => setTab(value as EntryTab)}
+        className="min-w-0"
+      >
+        <DetailPageHeader
+          leading={<LogoTile icon={<Icon />} name={TYPE_LABEL[entry.type]} />}
+          title={entry.title}
+          chips={
+            <>
+              <MetaChip variant="soft">{words[entry.scope]}</MetaChip>
+              <EntryStatus entry={entry} variant={picks.status.header} />
+            </>
+          }
+          meta={[
+            `by ${entry.author}`,
+            entry.collection ? `in ${entry.collection}` : null,
+            <span key="updated">
+              updated{" "}
+              <RelativeTime
+                date={entry.updatedAt}
+                now={KIT_NOW}
+                timeZone={KIT_TIME_ZONE}
+                inSentence
+              />
+            </span>,
+          ]}
+          actions={
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onEdit(entry)}
+                className="pointer-coarse:h-11"
+              >
+                <PencilIcon aria-hidden="true" />
+                Edit
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`More actions for ${entry.title}`}
+                    className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+                  >
+                    <MoreHorizontalIcon />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-44">
+                  <DropdownMenuItem onSelect={() => toast("Copied a link to this entry")}>
+                    <LinkIcon />
+                    Copy link
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {published ? (
+                    <DropdownMenuItem onSelect={() => onArchive(entry)}>
+                      <ArchiveIcon />
+                      Archive
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem onSelect={() => onRestore(entry)}>
+                      <ArchiveRestoreIcon />
+                      Restore
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </>
+          }
+          tabs={
+            <LineTabsList variant={picks.tabVariant} aria-label={entry.title}>
+              <LineTabsTrigger value="overview">Overview</LineTabsTrigger>
+              <LineTabsTrigger
+                value="history"
+                count={entry.revisions.length}
+                countLabel={`${entry.revisions.length} versions`}
+              >
+                History
+              </LineTabsTrigger>
+            </LineTabsList>
+          }
+        />
+        <LineTabsContent value="overview">
+          <DetailPageBody aside={aside}>
+            {published ? null : (
+              <DetailSection>
+                <Notice
+                  tone="muted"
+                  icon={<ArchiveIcon className="size-4" />}
+                  title={entry.status === "archived" ? "Archived" : "Rejected"}
+                  action={
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onRestore(entry)}
+                    >
+                      Restore
+                    </Button>
+                  }
+                  actionLayout="responsive"
+                >
+                  Agents don't use it. Restore it to make it available again.
+                </Notice>
+              </DetailSection>
+            )}
+            <DetailSection title="What agents know">
+              <p className="text-sm leading-6 text-pretty whitespace-pre-line text-fg">
+                {entry.content}
+              </p>
+            </DetailSection>
+          </DetailPageBody>
+        </LineTabsContent>
+        <LineTabsContent value="history">
+          <DetailPageBody>
+            <DetailSection description="Restoring saves that version again as the newest one, so you can always go back.">
+              <RevisionHistory
+                revisions={entry.revisions}
+                now={KIT_NOW}
+                format="text"
+                label={`History of ${entry.title}`}
+                onRestore={(revision) => onRestoreRevision(entry, revision)}
+              />
+            </DetailSection>
+          </DetailPageBody>
+        </LineTabsContent>
+      </LineTabs>
+    </DetailPage>
+  );
+}
+
+/** The entry's page. Remounts per entry so a tab choice never leaks into another entry. */
+export function EntryDetail(props: EntryDetailProps) {
+  return <EntryDetailPage key={props.entry.id} {...props} />;
+}
+
+/** Edit an entry: its own page, back to the entry. */
+export function EntryEditPage({
+  entry,
+  picks,
+  onClose,
+  onSave,
+}: {
+  entry: LibraryEntry;
+  picks: PagePicks;
+  onClose: () => void;
+  onSave: (entry: LibraryEntry, patch: EntryPatch) => Promise<void>;
+}) {
   const [title, setTitle] = useState(entry.title);
   const [content, setContent] = useState(entry.content);
   const [type, setType] = useState<EntryType>(entry.type);
   const [errors, setErrors] = useState<{ title?: string; content?: string }>({});
-  const [saving, setSaving] = useState(false);
-  const Icon = TYPE_ICON[entry.type];
-  const latest = entry.revisions[0];
   const unchanged =
     title.trim() === entry.title && content.trim() === entry.content && type === entry.type;
 
-  const startEdit = () => {
-    setTitle(entry.title);
-    setContent(entry.content);
-    setType(entry.type);
-    setErrors({});
-    setEditing(true);
-  };
-
-  const save = async () => {
-    const next = {
-      title: title.trim() ? undefined : "Add a title.",
-      content: content.trim() ? undefined : "Add what agents should know.",
-    };
-    setErrors(next);
-    if (next.title || next.content) return;
-    setSaving(true);
-    try {
-      await onSave(entry, { title: title.trim(), content: content.trim(), type });
-      setEditing(false);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // One version is the entry itself; History appears once there's something to go back to.
-  const showHistory = entry.revisions.length > 1;
-  const historySummary = latest
-    ? `${entry.revisions.length} versions · last by ${latest.author}`
-    : undefined;
-
   return (
-    <>
-      <DetailHeader
-        leading={<LogoTile icon={<Icon />} name={TYPE_LABEL[entry.type]} />}
-        title={entry.title}
-        subtitle={`${TYPE_LABEL[entry.type]} · ${scopeWords(organizationWord)[entry.scope]}`}
-        status={
-          entry.status === "published" ? undefined : (
-            <StatusBadge variant={picks.status.header} tone="neutral" icon={<ArchiveIcon />}>
-              {entry.status === "archived" ? "Archived" : "Rejected"}
-            </StatusBadge>
-          )
-        }
-      />
-      <DetailBody>
-        <DetailSection>
-          {editing ? (
-            <FieldStack>
-              <Field label="Title" error={errors.title}>
-                <TextInput
-                  value={title}
-                  onChange={(event) => setTitle(event.target.value)}
-                  suppressAutofill
-                />
-              </Field>
-              <Field
-                label="What agents should know"
-                hint="Keep it to one fact or decision. Rules for how agents work go in Instructions."
-                error={errors.content}
-              >
-                <TextArea
-                  rows={5}
-                  value={content}
-                  onChange={(event) => setContent(event.target.value)}
-                />
-              </Field>
-              <Field label="Type">
-                <SelectMenu<EntryType>
-                  variant={picks.select}
-                  size="md"
-                  options={ENTRY_TYPES.map((value) => ({ value, label: TYPE_LABEL[value] }))}
-                  value={type}
-                  onValueChange={setType}
-                  className="w-full max-w-60"
-                  searchPlaceholder="Search types"
-                />
-              </Field>
-            </FieldStack>
-          ) : (
-            <p className="text-sm leading-6 text-pretty whitespace-pre-line text-fg">
-              {entry.content}
-            </p>
-          )}
-        </DetailSection>
-        <DetailSection title="Details">
-          <DetailFacts>
-            <DetailFact label="Where">{whereLabel(entry.scope, organizationWord)}</DetailFact>
-            <DetailFact label="Collection">
-              {entry.collection ?? <span className="text-fg-muted">None</span>}
-            </DetailFact>
-            <DetailFact label="Last updated">
-              <RelativeTime date={entry.updatedAt} now={KIT_NOW} timeZone={KIT_TIME_ZONE} /> by{" "}
-              {entry.author}
-            </DetailFact>
-          </DetailFacts>
-        </DetailSection>
-        {entry.source ? (
-          <DetailSection title="Source">
-            <div className="flex min-w-0 items-center gap-3">
-              <LogoTile
-                size="md"
-                icon={entry.source.kind === "file" ? <FileTextIcon /> : <MessageSquareIcon />}
-              />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm leading-5 font-medium text-fg">
-                  {entry.source.name}
-                </p>
-                <p className="truncate text-xs leading-4.5 text-fg-muted">
-                  {entry.source.kind === "file" ? "PDF · 3 pages · Added by Bendik Hansen" : "Chat"}
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => toast(`Opened ${entry.source?.name}`)}
-                className="shrink-0 pointer-coarse:h-11"
-              >
-                Open
-              </Button>
-            </div>
-          </DetailSection>
-        ) : null}
-        {showHistory ? (
-        <DetailSection>
-          <Disclosure
-            variant={picks.disclosure}
-            // The body already draws hairlines between sections.
-            className={picks.disclosure === "inline" ? "border-y-0" : undefined}
-            title="History"
-            summary={historySummary}
-            sheetDescription={entry.title}
-          >
-            <RevisionHistory
-              revisions={entry.revisions}
-              now={KIT_NOW}
-              format="text"
-              label={`History of ${entry.title}`}
-              onRestore={(revision) => onRestoreRevision(entry, revision)}
-            />
-          </Disclosure>
-        </DetailSection>
-        ) : null}
-      </DetailBody>
-      {editing ? (
-        <DetailFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => setEditing(false)}
-            disabled={saving}
-            className="pointer-coarse:h-11"
-          >
-            Cancel
-          </Button>
-          <Button
-            type="button"
-            onClick={() => void save()}
-            disabled={unchanged || saving}
-            className="pointer-coarse:h-11"
-          >
-            {saving ? "Saving…" : "Save changes"}
-          </Button>
-        </DetailFooter>
-      ) : (
-        <DetailFooter
-          start={
-            entry.status === "published" ? (
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => onArchive(entry)}
-                className="-ml-3 text-fg-muted pointer-coarse:h-11"
-              >
-                <ArchiveIcon aria-hidden="true" />
-                Archive
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => onRestore(entry)}
-                className="-ml-3 text-fg-muted pointer-coarse:h-11"
-              >
-                <ArchiveRestoreIcon aria-hidden="true" />
-                Restore
-              </Button>
-            )
-          }
+    <FormPage
+      title={`Edit ${entry.title}`}
+      description="Agents use the new text from the next message. The old version stays in History."
+      back={{ label: entry.title, onClick: onClose }}
+      submitLabel="Save changes"
+      pendingLabel="Saving…"
+      submitDisabled={unchanged}
+      onCancel={onClose}
+      onSubmitted={onClose}
+      onSubmit={async () => {
+        const next = {
+          title: title.trim() ? undefined : "Add a title.",
+          content: content.trim() ? undefined : "Add what agents should know.",
+        };
+        setErrors(next);
+        if (next.title || next.content) return false;
+        await onSave(entry, { title: title.trim(), content: content.trim(), type });
+        return true;
+      }}
+      className="flex-1"
+    >
+      <FieldStack>
+        <Field label="Title" error={errors.title}>
+          <TextInput
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            suppressAutofill
+          />
+        </Field>
+        <Field
+          label="What agents should know"
+          hint="Keep it to one fact or decision. Rules for how agents work go in Instructions."
+          error={errors.content}
         >
-          {picks.detail === "sheet" ? (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onClose}
-              className="pointer-coarse:h-11"
-            >
-              Done
-            </Button>
-          ) : null}
-          <Button type="button" onClick={startEdit} className="pointer-coarse:h-11">
-            Edit
-          </Button>
-        </DetailFooter>
-      )}
-    </>
-  );
-}
-
-/** The entry in the picked presentation. Page and inline are placed by the caller. */
-export function EntryDetail(
-  props: EntryDetailProps & { presentation: "sheet" | "page" | "inline" },
-) {
-  const { presentation, ...rest } = props;
-  // Remount per entry so an edit in progress never leaks into another entry.
-  const parts = <EntryDetailParts key={rest.entry.id} {...rest} />;
-  if (presentation === "page") {
-    return (
-      <DetailPage
-        back={{ label: "Knowledge", onClick: rest.onClose }}
-        className="px-0 pt-0 max-sm:px-0"
-      >
-        {parts}
-      </DetailPage>
-    );
-  }
-  if (presentation === "inline") {
-    return <DetailInline className="mt-2 mb-3">{parts}</DetailInline>;
-  }
-  return parts;
-}
-
-/** The sheet shell, kept mounted so it can animate closed. */
-export function EntrySheet({
-  entry,
-  open,
-  onOpenChange,
-  children,
-}: {
-  entry: LibraryEntry | null;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  children: ReactNode;
-}) {
-  return (
-    <DetailSheet open={open && entry !== null} onOpenChange={onOpenChange}>
-      {entry ? <DetailSheetContent>{children}</DetailSheetContent> : null}
-    </DetailSheet>
+          <TextArea rows={6} value={content} onChange={(event) => setContent(event.target.value)} />
+        </Field>
+        <Field label="Type">
+          <SelectMenu<EntryType>
+            variant={picks.select}
+            size="md"
+            options={ENTRY_TYPES.map((value) => ({ value, label: TYPE_LABEL[value] }))}
+            value={type}
+            onValueChange={setType}
+            className="w-full max-w-60"
+            searchPlaceholder="Search types"
+          />
+        </Field>
+      </FieldStack>
+    </FormPage>
   );
 }

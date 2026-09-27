@@ -36,7 +36,7 @@ export interface Questions {
   /** Q11: remove the links to organization settings. */
   q11: "remove" | "keep";
   /** Q12: one row per account and one sheet, or expand in place. */
-  q12: "sheet" | "inline";
+  q12: "page" | "inline";
   /** Q13: "Organization | This workspace", or the four-option select. */
   q13: "segmented" | "select";
   /** Q14: "Spread work | Primary only" and a Primary chip, or radio + Auto-rotate. */
@@ -205,7 +205,7 @@ export function initialModelsData(): ModelsData {
 
 export const DEFAULT_QUESTIONS: Questions = {
   q11: "remove",
-  q12: "sheet",
+  q12: "page",
   q13: "segmented",
   q14: "modes",
   q15: "org_only",
@@ -401,7 +401,7 @@ interface ModelsContextValue {
   openDetail: (target: DetailTarget | null) => void;
   dialog: DialogState | null;
   openDialog: (dialog: DialogState | null) => void;
-  /** The "Allowed models" form, when it is open (sheet, page or inline). */
+  /** The "Allowed models" form, when it is open (a page, or inline). */
   allowed: AllowedTarget | null;
   openAllowed: (target: AllowedTarget | null) => void;
   reset: () => void;

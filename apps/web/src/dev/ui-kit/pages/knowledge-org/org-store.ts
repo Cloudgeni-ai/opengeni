@@ -6,7 +6,7 @@ import type { PagePicks } from "./picks";
 
 /* ----------------------------------------------------------------------------
    Shared state for the organization preview: people, workspaces, the open
-   questions and every action, so the pages, sheets and dialogs stay in step.
+   questions and every action, so the pages and dialogs stay in step.
    -------------------------------------------------------------------------- */
 
 export interface OrgQuestions {

@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  BoxIcon,
+  Building2Icon,
   CalendarClockIcon,
   ContainerIcon,
   EyeIcon,
@@ -9,18 +11,19 @@ import {
   PencilIcon,
   PlusIcon,
   Trash2Icon,
+  UserIcon,
   VariableIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
-  DetailBody,
-  DetailFooter,
-  DetailHeader,
-  DetailSection,
-  useDetailPresentation,
-} from "@/components/ui/detail-sheet";
+  DetailAside,
+  DetailAsideItem,
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,6 +34,12 @@ import {
 import { DisabledReason } from "@/components/ui/disabled-reason";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
 import { InlineHelp } from "@/components/ui/inline-help";
+import {
+  LineTabs,
+  LineTabsContent,
+  LineTabsList,
+  LineTabsTrigger,
+} from "@/components/ui/line-tabs";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
@@ -41,19 +50,21 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { KIT_NOW, KIT_TIME_ZONE, organization } from "../../fixtures";
 import { useAnswers, usePagePicks, useVerbs } from "./answers";
 import {
+  SCOPE_LABEL,
   exampleSecret,
   scopeChip,
   usageEntries,
   usageSummary,
+  variablesLabel,
   type PreviewSet,
   type PreviewVariable,
   type UsageEntry,
 } from "./model";
 
 /* ----------------------------------------------------------------------------
-   One variable set: header, variables table and "Used by". The same parts
-   render as a page (the recommendation), a right sheet, or expanded in place
-   (the other answers to Q19); the detail primitives adapt to where they are.
+   One variable set as its own page (the decided detail pick): back link,
+   header with tile, scope chip and meta line, Variables | Used by tabs, and a
+   quiet aside card with the set's facts.
    -------------------------------------------------------------------------- */
 
 const TIME = { now: KIT_NOW, timeZone: KIT_TIME_ZONE } as const;
@@ -100,7 +111,7 @@ export function SetMenu({
       <DropdownMenuContent align="end" className="w-60">
         <DropdownMenuItem onSelect={actions.editSet}>
           <PencilIcon aria-hidden="true" />
-          Edit name and description
+          Edit details
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {blocked ? (
@@ -349,58 +360,21 @@ export function ScopeChip({ set }: { set: PreviewSet }) {
   return label ? <MetaChip variant={picks.chip}>{label}</MetaChip> : null;
 }
 
-export function SetDetail({
-  set,
-  actions,
-  inlineForm,
-  onDone,
-}: {
-  set: PreviewSet;
-  actions: SetActions;
-  /** An inline Add variable form (Form dialog pick C), shown above the table. */
-  inlineForm?: ReactNode;
-  /** Sheet only: closes it. */
-  onDone?: () => void;
-}) {
-  const presentation = useDetailPresentation();
+export function SetDetail({ set, actions }: { set: PreviewSet; actions: SetActions }) {
   const picks = usePagePicks();
   const verbs = useVerbs();
   const answers = useAnswers();
+  const [tab, setTab] = useState<"variables" | "used-by">("variables");
   const blockedDelete = set.usedBy.length > 0 && answers.inUse === "disable";
-  const page = presentation === "page";
-  const sheet = presentation === "sheet" || presentation === "preview";
-  const inline = presentation === "inline";
   const empty = set.variables.length === 0;
-  // The Section pick's soft group (B) or tiles (C) put lists in one box on pages.
+  const usage = usageSummary(set.usedBy);
+  // The Section pick's soft group (B) or tiles (C) put lists in one box.
   const box = (node: ReactNode) =>
-    page && picks.section !== "open" ? (
+    picks.section !== "open" ? (
       <div className="overflow-hidden rounded-[14px] border border-border bg-surface">{node}</div>
     ) : (
       node
     );
-
-  const addButton = (
-    <Button
-      type="button"
-      onClick={() => actions.addVariable("one")}
-      className="pointer-coarse:h-11"
-    >
-      <PlusIcon aria-hidden="true" />
-      Add variable
-    </Button>
-  );
-  const smallAddButton = (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      onClick={() => actions.addVariable("one")}
-      className="pointer-coarse:h-11"
-    >
-      <PlusIcon aria-hidden="true" />
-      Add variable
-    </Button>
-  );
 
   const scopeNote =
     set.scope === "organization" ? (
@@ -413,148 +387,144 @@ export function SetDetail({
       </InlineHelp>
     ) : null;
 
-  const variables = (
-    <DetailSection
-      title={inline ? undefined : "Variables"}
-      description={
-        inline
-          ? undefined
-          : "Agents get these as environment variables. Changes apply from the next turn."
-      }
-      action={sheet && !empty ? smallAddButton : undefined}
-    >
-      {scopeNote}
-      {inlineForm ? <div className="mb-6">{inlineForm}</div> : null}
-      {empty ? (
-        <NoVariables actions={actions} />
-      ) : (
-        box(<VariablesTable set={set} actions={actions} />)
-      )}
-    </DetailSection>
+  const aside = (
+    <DetailAside label={`About ${set.name}`}>
+      {set.description ? (
+        <DetailAsideItem label="Description">{set.description}</DetailAsideItem>
+      ) : null}
+      <DetailAsideItem label="Available to" icon={SCOPE_ICON[set.scope]}>
+        {SCOPE_LABEL[set.scope]}
+      </DetailAsideItem>
+      <DetailAsideItem label="Last changed">
+        <RelativeTime date={set.updatedAt} {...TIME} />
+      </DetailAsideItem>
+      <div className="border-t border-border pt-4">
+        <DisabledReason
+          disabled={blockedDelete}
+          reason={`Used by ${usage ?? ""}. Remove it there first.`}
+        >
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={actions.deleteSet}
+            className="-ml-2.5 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+          >
+            <Trash2Icon aria-hidden="true" />
+            {verbs.remove} variable set
+          </Button>
+        </DisabledReason>
+      </div>
+    </DetailAside>
   );
-
-  // Each row names its kind (Schedule, Chat, Sandbox environment), so no description.
-  const usedBy = (
-    <DetailSection title="Used by">
-      {set.usedBy.length ? (
-        box(<UsedByList set={set} actions={actions} />)
-      ) : (
-        <UsedByList set={set} actions={actions} />
-      )}
-    </DetailSection>
-  );
-
-  if (inline) {
-    return (
-      <>
-        <DetailHeader
-          title="Variables"
-          subtitle={set.description}
-          actions={
-            <>
-              {empty ? null : smallAddButton}
-              <SetMenu set={set} actions={actions} size="sm" />
-            </>
-          }
-        />
-        <DetailBody>
-          {variables}
-          {usedBy}
-        </DetailBody>
-      </>
-    );
-  }
 
   return (
-    <>
-      <DetailHeader
-        // Gap: the page header keeps its actions beside the title however
-        // narrow the page gets; stack them under it on phone widths.
-        className={
-          page ? "@max-[560px]/detail:flex-col @max-[560px]/detail:items-stretch" : undefined
-        }
-        leading={
-          page && picks.settingsIcon === "show" ? <LogoTile icon={<VariableIcon />} /> : undefined
-        }
+    <LineTabs value={tab} onValueChange={(value) => setTab(value as typeof tab)}>
+      <DetailPageHeader
+        leading={<LogoTile icon={<VariableIcon />} />}
         title={set.name}
-        status={<ScopeChip set={set} />}
-        subtitle={set.description || undefined}
+        chips={<ScopeChip set={set} />}
+        meta={[
+          <span key="count">{variablesLabel(set)}</span>,
+          <span key="usage">{usage ? `used by ${usage}` : "not used yet"}</span>,
+          <span key="updated">
+            updated <RelativeTime date={set.updatedAt} {...TIME} />
+          </span>,
+        ]}
         actions={
-          page ? (
-            <>
-              {empty ? null : addButton}
-              <SetMenu set={set} actions={actions} />
-            </>
-          ) : (
-            <SetMenu set={set} actions={actions} size="sm" />
-          )
-        }
-      />
-      <DetailBody>
-        {variables}
-        {usedBy}
-      </DetailBody>
-      {sheet ? (
-        <DetailFooter
-          start={
-            <DisabledReason
-              disabled={blockedDelete}
-              reason={`Used by ${usageSummary(set.usedBy) ?? ""}. Remove it there first.`}
-            >
+          <>
+            {empty ? null : (
               <Button
                 type="button"
-                variant="ghost"
-                onClick={actions.deleteSet}
-                className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+                onClick={() => actions.addVariable("one")}
+                className="pointer-coarse:h-11"
               >
-                {verbs.remove} variable set
+                <PlusIcon aria-hidden="true" />
+                Add variable
               </Button>
-            </DisabledReason>
-          }
-        >
-          <Button type="button" onClick={onDone} className="pointer-coarse:h-11">
-            Done
-          </Button>
-        </DetailFooter>
-      ) : null}
-    </>
+            )}
+            <SetMenu set={set} actions={actions} />
+          </>
+        }
+        tabs={
+          <LineTabsList aria-label={`${set.name} sections`}>
+            <LineTabsTrigger value="variables" count={set.variables.length}>
+              Variables
+            </LineTabsTrigger>
+            <LineTabsTrigger value="used-by" count={set.usedBy.length}>
+              Used by
+            </LineTabsTrigger>
+          </LineTabsList>
+        }
+      />
+      <DetailPageBody aside={aside}>
+        {/* One child, so the body's hairlines never draw under a hidden tab panel. */}
+        <div className="min-w-0">
+          <LineTabsContent value="variables">
+            <DetailSection>
+              <p className="mb-4 text-sm leading-5 text-fg-muted">
+                Agents get these as environment variables. Changes apply from the next turn.
+              </p>
+              {scopeNote}
+              {empty ? (
+                <NoVariables actions={actions} />
+              ) : (
+                box(<VariablesTable set={set} actions={actions} />)
+              )}
+            </DetailSection>
+          </LineTabsContent>
+          <LineTabsContent value="used-by">
+            <DetailSection>
+              <p className="mb-4 text-sm leading-5 text-fg-muted">
+                Chats, schedules and environments that give agents this set.
+              </p>
+              {set.usedBy.length ? (
+                box(<UsedByList set={set} actions={actions} />)
+              ) : (
+                <UsedByList set={set} actions={actions} />
+              )}
+            </DetailSection>
+          </LineTabsContent>
+        </div>
+      </DetailPageBody>
+    </LineTabs>
   );
 }
 
-/**
- * Loading, in the page's own shape: the header, then the variables table and
- * Used by as row placeholders (DetailSkeleton draws label/value facts instead).
- */
+const SCOPE_ICON = {
+  workspace: <BoxIcon />,
+  organization: <Building2Icon />,
+  personal: <UserIcon />,
+} as const;
+
+/** Loading, in the page's own shape: header, tabs, then the variables table as row placeholders. */
 export function SetDetailLoading() {
   return (
     <div role="status" aria-label="Loading variable set" className="min-w-0">
-      <div aria-hidden="true" className="border-b border-border pb-4">
-        <Skeleton className="h-5 w-48 rounded-full bg-surface-3" />
-        <Skeleton className="mt-3 h-3.5 w-80 max-w-full rounded-full bg-surface-2" />
+      <div aria-hidden="true" className="flex items-start gap-4">
+        <Skeleton className="size-10 shrink-0 rounded-[10px] bg-surface-2" />
+        <div className="min-w-0 flex-1 pt-1">
+          <Skeleton className="h-5 w-48 rounded-full bg-surface-3" />
+          <Skeleton className="mt-3 h-3.5 w-80 max-w-full rounded-full bg-surface-2" />
+        </div>
       </div>
-      <DetailBody>
-        <DetailSection
-          title="Variables"
-          description="Agents get these as environment variables. Changes apply from the next turn."
+      <div aria-hidden="true" className="mt-6 flex gap-6 border-b border-border pb-3">
+        <Skeleton className="h-3.5 w-20 rounded-full bg-surface-2" />
+        <Skeleton className="h-3.5 w-16 rounded-full bg-surface-2" />
+      </div>
+      <div className="py-8">
+        <RowList
+          variant="table"
+          label="Variables"
+          busy
+          columns={[
+            { id: "value", label: "Value", width: 232 },
+            { id: "updated", label: "Updated", width: 120 },
+          ]}
         >
-          <RowList
-            variant="table"
-            label="Variables"
-            busy
-            columns={[
-              { id: "value", label: "Value", width: 232 },
-              { id: "updated", label: "Updated", width: 120 },
-            ]}
-          >
-            <ListRowSkeleton count={4} />
-          </RowList>
-        </DetailSection>
-        <DetailSection title="Used by">
-          <RowList variant="resource" label="What uses this set" busy>
-            <ListRowSkeleton count={1} />
-          </RowList>
-        </DetailSection>
-      </DetailBody>
+          <ListRowSkeleton count={4} />
+        </RowList>
+      </div>
     </div>
   );
 }

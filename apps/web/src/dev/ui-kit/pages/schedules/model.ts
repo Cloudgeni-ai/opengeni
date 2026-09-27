@@ -2,7 +2,7 @@
  * Kit-only data for the Schedules page previews: the fixture schedules as
  * editable items, the form draft, labels and permissions. Pure functions; the
  * cadence words and next runs come from the real CadencePicker logic so the
- * list, the sheet and the form always agree.
+ * list, the detail page and the form always agree.
  */
 import {
   DEFAULT_CADENCE_TIME,
@@ -193,7 +193,7 @@ function zoneLabels(timeZone: string) {
   return { timeZoneLabel: zone?.label, timeZoneShortLabel: zone?.shortLabel };
 }
 
-/** "Every weekday at 08:00 · Oslo", for rows and sheet subtitles. */
+/** "Every weekday at 08:00 · Oslo", for rows and page meta lines. */
 export function cadenceShort(cadence: CadenceValue): string {
   return describeCadence(cadence.rule, {
     timeZone: cadence.timeZone,

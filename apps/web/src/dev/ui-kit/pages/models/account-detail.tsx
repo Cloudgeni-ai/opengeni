@@ -1,11 +1,16 @@
 import { useState, type ReactNode } from "react";
 import {
+  BuildingIcon,
   CheckIcon,
+  FolderIcon,
+  KeyRoundIcon,
   LockIcon,
   MinusCircleIcon,
   MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
+  UnplugIcon,
+  UserIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -20,6 +25,12 @@ import {
   DetailSection,
   useDetailPresentation,
 } from "@/components/ui/detail-sheet";
+import {
+  DetailAside,
+  DetailAsideItem,
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
 import { Disclosure } from "@/components/ui/disclosure";
 import {
@@ -36,7 +47,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup } from "@/components/ui/usage-meter";
 
-import { KIT_NOW, KIT_TIME_ZONE, workspaces, you } from "../../fixtures";
+import { KIT_NOW, KIT_TIME_ZONE, currentWorkspace, workspaces, you } from "../../fixtures";
 import { ProviderTile } from "./marks";
 import { useModelsPicks } from "./picks";
 import {
@@ -56,9 +67,10 @@ import {
 } from "./state";
 
 /* ----------------------------------------------------------------------------
-   The account detail: one place for everything about one model account. The
-   same parts render in the sheet, the detail page, in place under a row, and
-   in the kit's sheet preview; DetailHeader and friends adapt to where they are.
+   The account detail: one place for everything about one model account. It is
+   its own page ("← Models", tile, title, chips, meta line, a main column and a
+   quiet aside card). The same sections also render in place under a row, for
+   question 12's other answer.
    -------------------------------------------------------------------------- */
 
 const TIME = { now: KIT_NOW, timeZone: KIT_TIME_ZONE } as const;
@@ -124,7 +136,7 @@ export interface AccountView {
   pageScope: Scope;
   /** Called when "Manage in organization settings" is chosen. */
   onManageInOrganization?: (id: string) => void;
-  /** Called when the detail closes itself (Done, or after Disconnect). */
+  /** Called when the detail closes itself (after Disconnect). */
   onClose?: () => void;
 }
 
@@ -177,6 +189,52 @@ export function CodexAccountDetail({
   const readOnly = account.scope === "organization" && view.pageScope === "workspace";
   const orgAdmin = scenario.viewer === "org_admin";
   const status = accountStatus(account, accountInUse(account, models));
+  const scopeLabel = account.scope === "organization" ? "Organization" : "Workspace";
+
+  const managedNote = readOnly ? (
+    <ManagedNote>
+      Managed by {ORG_NAME}.{" "}
+      {orgAdmin ? "Change it in organization settings." : "Only organization admins can change it."}
+    </ManagedNote>
+  ) : null;
+  const sections = (
+    <>
+      <UsageSection account={account} />
+      {readOnly ? <ReadOnlyFacts account={account} /> : <SettingsSection account={account} />}
+      {account.scope === "organization" && !readOnly ? (
+        <AvailabilitySection account={account} />
+      ) : null}
+      <ResetsSection account={account} readOnly={readOnly} />
+    </>
+  );
+
+  if (presentation === "page") {
+    return (
+      <>
+        <DetailPageHeader
+          leading={<ProviderTile provider="codex" />}
+          title={account.name}
+          chips={
+            <>
+              <StatusBadge status={status.status} tone={status.tone} variant={picks.statusHeader}>
+                {status.label}
+              </StatusBadge>
+              {/* "Primary" is not repeated here: the Settings row below says it. */}
+              {readOnly ? <MetaChip variant={picks.chip}>Organization</MetaChip> : null}
+            </>
+          }
+          meta={[account.plan, scopeLabel, `connected ${account.connectedOn}`]}
+          actions={
+            <CodexActions account={account} readOnly={readOnly} orgAdmin={orgAdmin} view={view} />
+          }
+        />
+        <DetailPageBody aside={<CodexAside account={account} />}>
+          {managedNote}
+          {sections}
+        </DetailPageBody>
+      </>
+    );
+  }
 
   return (
     <>
@@ -184,7 +242,7 @@ export function CodexAccountDetail({
         <DetailHeader
           leading={<ProviderTile provider="codex" />}
           title={account.name}
-          subtitle={`${account.plan} · ${account.scope === "organization" ? "Organization" : "Workspace"}`}
+          subtitle={`${account.plan} · ${scopeLabel}`}
           // "Primary" is not repeated here: the Settings row below says it.
           status={
             <StatusBadge status={status.status} tone={status.tone} variant={picks.statusHeader}>
@@ -194,30 +252,106 @@ export function CodexAccountDetail({
         />
       ) : null}
       <DetailBody>
-        {readOnly ? (
-          <ManagedNote>
-            Managed by {ORG_NAME}.{" "}
-            {orgAdmin
-              ? "Change it in organization settings."
-              : "Only organization admins can change it."}
-          </ManagedNote>
-        ) : null}
-        <UsageSection account={account} />
-        {readOnly ? <ReadOnlyFacts account={account} /> : <SettingsSection account={account} />}
-        {account.scope === "organization" && !readOnly ? (
-          <AvailabilitySection account={account} />
-        ) : null}
-        <ResetsSection account={account} readOnly={readOnly} />
+        {managedNote}
+        {sections}
         <TechnicalDetails account={account} />
       </DetailBody>
-      <CodexFooter
-        account={account}
-        readOnly={readOnly}
-        orgAdmin={orgAdmin}
-        view={view}
-        presentation={presentation}
-      />
+      <CodexFooter account={account} readOnly={readOnly} orgAdmin={orgAdmin} view={view} />
     </>
+  );
+}
+
+/** The page's actions: "Manage in organization settings" when read-only, otherwise ⋯. */
+function CodexActions({
+  account,
+  readOnly,
+  orgAdmin,
+  view,
+}: {
+  account: CodexAccount;
+  readOnly: boolean;
+  orgAdmin: boolean;
+  view: AccountView;
+}) {
+  const { openDialog } = useModels();
+  if (readOnly) {
+    return orgAdmin && view.onManageInOrganization ? (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => view.onManageInOrganization?.(account.id)}
+        className="rounded-[10px] pointer-coarse:h-11"
+      >
+        Manage in organization settings
+      </Button>
+    ) : null;
+  }
+  return (
+    <MoreMenu label={`More actions for ${account.name}`}>
+      <DropdownMenuItem
+        variant="destructive"
+        onSelect={() =>
+          openDialog({
+            kind: "disconnect",
+            target: { kind: "codex", scope: account.scope, id: account.id },
+          })
+        }
+      >
+        <UnplugIcon />
+        Disconnect
+      </DropdownMenuItem>
+    </MoreMenu>
+  );
+}
+
+function MoreMenu({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          aria-label={label}
+          className="rounded-[10px] text-fg-muted hover:text-fg pointer-coarse:size-11"
+        >
+          <MoreHorizontalIcon />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-44">
+        {children}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ScopeValue({ scope }: { scope: Scope }) {
+  return <>{scope === "organization" ? ORG_NAME : currentWorkspace.name}</>;
+}
+
+/** The quiet card on the right: who connected it, where it lives, its ID. */
+function CodexAside({ account }: { account: CodexAccount }) {
+  return (
+    <DetailAside label={`About ${account.name}`}>
+      <DetailAsideItem label="Connected by" icon={<UserIcon />}>
+        {account.connectedBy}
+      </DetailAsideItem>
+      <DetailAsideItem
+        label="Belongs to"
+        icon={account.scope === "organization" ? <BuildingIcon /> : <FolderIcon />}
+      >
+        <ScopeValue scope={account.scope} />
+      </DetailAsideItem>
+      {account.scope === "organization" ? (
+        <DetailAsideItem label="Available in">
+          {availabilitySummary(account.availability)}
+        </DetailAsideItem>
+      ) : null}
+      <DetailAsideItem label="Account ID">
+        <CopyField value={account.accountId} label="account ID" truncate="middle" />
+      </DetailAsideItem>
+    </DetailAside>
   );
 }
 
@@ -610,17 +744,13 @@ function CodexFooter({
   readOnly,
   orgAdmin,
   view,
-  presentation,
 }: {
   account: CodexAccount;
   readOnly: boolean;
   orgAdmin: boolean;
   view: AccountView;
-  presentation: string;
 }) {
   const { openDialog } = useModels();
-  const closable =
-    (presentation === "sheet" || presentation === "preview") && Boolean(view.onClose);
   const start = readOnly ? (
     orgAdmin && view.onManageInOrganization ? (
       <Button
@@ -644,21 +774,8 @@ function CodexFooter({
       Disconnect
     </DangerGhost>
   );
-  if (!start && !closable) return null;
-  return (
-    <DetailFooter start={start}>
-      {closable ? (
-        <Button
-          type="button"
-          variant="outline"
-          onClick={view.onClose}
-          className="pointer-coarse:h-11"
-        >
-          Done
-        </Button>
-      ) : null}
-    </DetailFooter>
-  );
+  if (!start) return null;
+  return <DetailFooter start={start} />;
 }
 
 /* ----------------------------------------------------------------------------
@@ -668,20 +785,18 @@ function CodexFooter({
 export function GatewayDetail({
   scope,
   id,
-  view,
   showHeader = true,
 }: {
   scope: Scope;
   id: GatewayId;
-  view: AccountView;
+  /** Accepted for parity with CodexAccountDetail; an API key has no organization link. */
+  view?: AccountView;
   showHeader?: boolean;
 }) {
   const { data, setData, openDialog, questions } = useModels();
   const picks = useModelsPicks();
   const presentation = useDetailPresentation();
   const gateway = data.gateways[scope][id];
-  const closable =
-    (presentation === "sheet" || presentation === "preview") && Boolean(view.onClose);
   if (!gateway.connected) {
     return (
       <DetailBody>
@@ -702,13 +817,142 @@ export function GatewayDetail({
       onUndo: () => setData((value) => updateGateway(value, scope, id, { customModels: before })),
     });
   };
+  const scopeLabel = scope === "organization" ? "Organization" : "Workspace";
+  const disconnect = () =>
+    openDialog({ kind: "disconnect", target: { kind: "gateway", scope, id } });
+  const shared = (
+    <>
+      <DetailSection
+        title="Custom models"
+        description="Extra model IDs agents can pick, billed to this key."
+        action={
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => openDialog({ kind: "add-model", scope, id })}
+            className="-mr-2 rounded-[10px] pointer-coarse:h-11"
+          >
+            <PlusIcon aria-hidden="true" />
+            Add model
+          </Button>
+        }
+      >
+        {gateway.customModels.length === 0 ? (
+          <EmptyState
+            variant="inline"
+            title="No custom models yet."
+            description="Add a model ID so agents can pick it for new work."
+          />
+        ) : (
+          // Flush rows like the settings above them: the IDs line up with the
+          // section title and the hairlines match the sheet's other rows.
+          <SettingRowGroup
+            className="-my-3"
+            role="list"
+            aria-label={`Custom models on ${gateway.name}`}
+          >
+            {gateway.customModels.map((slug) => (
+              <SettingRow
+                key={slug}
+                role="listitem"
+                // A row menu, not a setting: it stays at the row's end in every style.
+                variant="control-right"
+                label={<span className="font-mono text-xs font-normal">{slug}</span>}
+                control={
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={`More actions for ${slug}`}
+                        className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-fg pointer-coarse:size-11"
+                      >
+                        <MoreHorizontalIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem variant="destructive" onSelect={() => removeModel(slug)}>
+                        <MinusCircleIcon />
+                        Remove
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                }
+              />
+            ))}
+          </SettingRowGroup>
+        )}
+      </DetailSection>
+      {scope === "organization" || questions.q15 === "everywhere" ? (
+        <DetailSection title="Access">
+          <SettingRowGroup className="-my-3">
+            <ServedRow kind="gateway" scope={scope} id={id} />
+          </SettingRowGroup>
+        </DetailSection>
+      ) : null}
+    </>
+  );
+
+  if (presentation === "page") {
+    return (
+      <>
+        <DetailPageHeader
+          leading={<ProviderTile provider={id} />}
+          title={gateway.name}
+          chips={<StatusBadge status="connected" variant={picks.statusHeader} />}
+          meta={["API key", scopeLabel, `added ${gateway.connectedOn ?? "just now"}`]}
+          actions={
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => openDialog({ kind: "replace-key", scope, id })}
+                className="rounded-[10px] pointer-coarse:h-11"
+              >
+                Replace key
+              </Button>
+              <MoreMenu label={`More actions for ${gateway.name}`}>
+                <DropdownMenuItem variant="destructive" onSelect={disconnect}>
+                  <UnplugIcon />
+                  Disconnect
+                </DropdownMenuItem>
+              </MoreMenu>
+            </>
+          }
+        />
+        <DetailPageBody
+          aside={
+            <DetailAside label={`About ${gateway.name}`}>
+              <DetailAsideItem label="Key" icon={<KeyRoundIcon />}>
+                Ending <span className="font-mono text-xs">{gateway.keyHint ?? ""}</span>
+                <span className="text-fg-muted"> · stored encrypted</span>
+              </DetailAsideItem>
+              <DetailAsideItem
+                label="Belongs to"
+                icon={scope === "organization" ? <BuildingIcon /> : <FolderIcon />}
+              >
+                <ScopeValue scope={scope} />
+              </DetailAsideItem>
+              <DetailAsideItem label="Added">{gateway.connectedOn ?? "Just now"}</DetailAsideItem>
+            </DetailAside>
+          }
+        >
+          {shared}
+        </DetailPageBody>
+      </>
+    );
+  }
+
   return (
     <>
       {showHeader ? (
         <DetailHeader
           leading={<ProviderTile provider={id} />}
           title={gateway.name}
-          subtitle={`API key · ${scope === "organization" ? "Organization" : "Workspace"}`}
+          subtitle={`API key · ${scopeLabel}`}
           status={<StatusBadge status="connected" variant={picks.statusHeader} />}
         />
       ) : null}
@@ -728,99 +972,9 @@ export function GatewayDetail({
             />
           </SettingRowGroup>
         </DetailSection>
-        <DetailSection
-          title="Custom models"
-          description="Extra model IDs agents can pick, billed to this key."
-          action={
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => openDialog({ kind: "add-model", scope, id })}
-              className="-mr-2 rounded-[10px] pointer-coarse:h-11"
-            >
-              <PlusIcon aria-hidden="true" />
-              Add model
-            </Button>
-          }
-        >
-          {gateway.customModels.length === 0 ? (
-            <EmptyState
-              variant="inline"
-              title="No custom models yet."
-              description="Add a model ID so agents can pick it for new work."
-            />
-          ) : (
-            // Flush rows like the settings above them: the IDs line up with the
-            // section title and the hairlines match the sheet's other rows.
-            <SettingRowGroup
-              className="-my-3"
-              role="list"
-              aria-label={`Custom models on ${gateway.name}`}
-            >
-              {gateway.customModels.map((slug) => (
-                <SettingRow
-                  key={slug}
-                  role="listitem"
-                  // A row menu, not a setting: it stays at the row's end in every style.
-                  variant="control-right"
-                  label={<span className="font-mono text-xs font-normal">{slug}</span>}
-                  control={
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={`More actions for ${slug}`}
-                          className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-fg pointer-coarse:size-11"
-                        >
-                          <MoreHorizontalIcon />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem variant="destructive" onSelect={() => removeModel(slug)}>
-                          <MinusCircleIcon />
-                          Remove
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  }
-                />
-              ))}
-            </SettingRowGroup>
-          )}
-        </DetailSection>
-        {scope === "organization" || questions.q15 === "everywhere" ? (
-          <DetailSection title="Access">
-            <SettingRowGroup className="-my-3">
-              <ServedRow kind="gateway" scope={scope} id={id} />
-            </SettingRowGroup>
-          </DetailSection>
-        ) : null}
+        {shared}
       </DetailBody>
-      <DetailFooter
-        start={
-          <DangerGhost
-            onClick={() =>
-              openDialog({ kind: "disconnect", target: { kind: "gateway", scope, id } })
-            }
-          >
-            Disconnect
-          </DangerGhost>
-        }
-      >
-        {closable ? (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={view.onClose}
-            className="pointer-coarse:h-11"
-          >
-            Done
-          </Button>
-        ) : null}
-      </DetailFooter>
+      <DetailFooter start={<DangerGhost onClick={disconnect}>Disconnect</DangerGhost>} />
     </>
   );
 }

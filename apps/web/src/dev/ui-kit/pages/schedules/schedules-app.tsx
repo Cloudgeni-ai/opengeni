@@ -1,7 +1,9 @@
 /**
- * The Schedules page preview: the list, the schedule sheet (or page, or
- * expanded row), the create/edit form and the delete confirm, inside the app
- * frame. Everything runs on fixtures; nothing touches the network.
+ * The Schedules page preview: the list, each schedule's detail page, the
+ * New/Edit schedule pages, the Rename dialog and the delete confirm, inside
+ * the app frame. Detail, create and edit are pages in the content column with
+ * a back link; only Rename and Delete are small centered dialogs. Everything
+ * runs on fixtures; nothing touches the network.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -21,6 +23,8 @@ import { toast } from "sonner";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirmPanel, showUndoToast } from "@/components/ui/destructive-confirm";
+import { Field, FieldStack, TextInput } from "@/components/ui/field";
+import { FormFrame } from "@/components/ui/form-dialog";
 import { Disclosure } from "@/components/ui/disclosure";
 import {
   DropdownMenuItem,
@@ -72,12 +76,7 @@ import {
   type ScheduleItem,
   type SchedulesQuestions,
 } from "./model";
-import {
-  ScheduleInline,
-  SchedulePage,
-  ScheduleSheet,
-  type ScheduleDetailProps,
-} from "./schedule-detail";
+import { SchedulePage, type ScheduleDetailProps } from "./schedule-detail";
 import { ScheduleForm } from "./schedule-form";
 import { useSchedulePicks, type SchedulePicks } from "./use-picks";
 
@@ -94,10 +93,8 @@ interface FormState {
   mode: "create" | "edit";
   editingId?: string;
   initial: ScheduleDraft;
-  /** Reopen this schedule's detail after saving or cancelling. */
+  /** Go back to this schedule's page on Cancel (the form was opened from it). */
   returnTo?: string;
-  /** False for the form that is already open when the preview first renders. */
-  autoFocus: boolean;
 }
 
 const TEMPLATE_ICONS: Record<string, ReactNode> = {
@@ -197,6 +194,8 @@ export interface SchedulesAppProps {
   saveFails?: boolean;
   /** Open the form when the preview first renders (the form page preview). */
   initialForm?: InitialForm;
+  /** Open this schedule's page when the preview first renders. */
+  initialDetailId?: string;
 }
 
 export function SchedulesApp({
@@ -205,6 +204,7 @@ export function SchedulesApp({
   canRunSchedules = true,
   saveFails = false,
   initialForm,
+  initialDetailId,
 }: SchedulesAppProps) {
   const picks = useSchedulePicks();
   const [load, setLoad] = useState<SchedulesDataState>(dataState);
@@ -214,22 +214,19 @@ export function SchedulesApp({
   const [form, setForm] = useState<FormState | null>(() => {
     if (!initialForm) return null;
     if (initialForm.mode === "create") {
-      return { mode: "create", initial: emptyDraft(questions), autoFocus: false };
+      return { mode: "create", initial: emptyDraft(questions) };
     }
     if (initialForm.mode === "template") {
       return {
         mode: "create",
         initial: draftFromTemplate(initialForm.templateId, questions),
-        autoFocus: false,
       };
     }
     const item = initialItems().find((each) => each.id === initialForm.id);
-    return item
-      ? { mode: "edit", editingId: item.id, initial: draftOf(item), autoFocus: false }
-      : null;
+    return item ? { mode: "edit", editingId: item.id, initial: draftOf(item) } : null;
   });
-  const [formPending, setFormPending] = useState(false);
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(initialDetailId ?? null);
+  const [renameId, setRenameId] = useState<string | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [running, setRunning] = useState<ReadonlySet<string>>(() => new Set());
   const [savingActive, setSavingActive] = useState<string | null>(null);
@@ -255,6 +252,7 @@ export function SchedulesApp({
   const byId = useCallback((id: string | null) => items.find((item) => item.id === id), [items]);
   const detailItem = byId(detailId);
   const deleteItem = byId(deleteId);
+  const renameItem = byId(renameId);
 
   const updateItem = useCallback((id: string, patch: Partial<ScheduleItem>) => {
     setItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -331,7 +329,7 @@ export function SchedulesApp({
 
   const openCreate = useCallback((initial: ScheduleDraft) => {
     setDetailId(null);
-    setForm({ mode: "create", initial, autoFocus: true });
+    setForm({ mode: "create", initial });
   }, []);
 
   const openEdit = useCallback((item: ScheduleItem, fromDetail: boolean) => {
@@ -341,30 +339,36 @@ export function SchedulesApp({
       editingId: item.id,
       initial: draftOf(item),
       returnTo: fromDetail ? item.id : undefined,
-      autoFocus: true,
     });
   }, []);
 
-  const closeForm = useCallback(
-    (reopen = true) => {
-      const returnTo = form?.returnTo;
-      setForm(null);
-      setFormPending(false);
-      if (reopen && returnTo) setDetailId(returnTo);
-    },
-    [form?.returnTo],
-  );
+  /** Cancel: back to where the form was opened from. */
+  const cancelForm = useCallback(() => {
+    const returnTo = form?.returnTo;
+    setForm(null);
+    if (returnTo) setDetailId(returnTo);
+  }, [form?.returnTo]);
+
+  /** Saved: the schedule's own page. */
+  const savedId = useRef<string | null>(null);
+  const finishForm = useCallback(() => {
+    setForm(null);
+    setDetailId(savedId.current);
+    savedId.current = null;
+  }, []);
 
   const saveForm = useCallback(
     (draft: ScheduleDraft) => {
       if (form?.mode === "edit" && form.editingId) {
         const id = form.editingId;
         updateItem(id, { ...draft, name: displayName(draft) });
+        savedId.current = id;
         toast.success("Changes saved", { description: displayName(draft) });
         return;
       }
       const created = createItem(draft);
       setItems((current) => [...current, created]);
+      savedId.current = created.id;
       setHighlightId(created.id);
       later(2600, () => setHighlightId((current) => (current === created.id ? null : current)));
       const next = nextRunOf(created);
@@ -419,8 +423,9 @@ export function SchedulesApp({
       savingActive: savingActive === item.id,
       onActiveChange: (active) => setActive(item, active, { viaSwitch: true }),
       onRunNow: () => runNow(item),
-      onEdit: () => openEdit(item, picks.detail !== "inline"),
+      onEdit: () => openEdit(item, true),
       onDuplicate: () => openCreate(duplicateDraft(item)),
+      onRename: () => setRenameId(item.id),
       onCopyLink: () => copyLink(item),
       onDelete: () => requestDelete(item),
       onOpenRun: (run) =>
@@ -451,35 +456,34 @@ export function SchedulesApp({
 
   /* ---------------------------------------------------------------- views */
 
-  const formProps = form
-    ? {
-        mode: form.mode,
-        initial: form.initial,
-        editingName: form.editingId ? byId(form.editingId)?.name : undefined,
-        questions,
-        picks,
-        canRunSchedules,
-        saveFails,
-        onCancel: () => closeForm(true),
-        onSave: saveForm,
-        onDone: () => closeForm(true),
-        onPendingChange: setFormPending,
-      }
-    : null;
-
-  const formAsPage = formProps && picks.form === "page";
-  const detailAsPage = detailItem && picks.detail === "page";
+  const editing = form?.editingId ? byId(form.editingId) : undefined;
+  const viewKey = form
+    ? `form-${form.mode}-${form.editingId ?? "new"}`
+    : detailItem
+      ? `detail-${detailItem.id}`
+      : "list";
 
   let view: ReactNode;
-  if (formAsPage) {
+  if (form) {
     view = (
       <ScheduleForm
-        presentation="page"
-        {...formProps}
+        key={viewKey}
+        mode={form.mode}
+        initial={form.initial}
+        // From the schedule's page the back link already names it.
+        editingName={form.returnTo ? undefined : editing?.name}
+        backLabel={form.returnTo && editing ? editing.name : "Schedules"}
+        questions={questions}
+        picks={picks}
+        canRunSchedules={canRunSchedules}
+        saveFails={saveFails}
+        onCancel={cancelForm}
+        onSave={saveForm}
+        onDone={finishForm}
         className="-mx-4 -mt-6 -mb-16 sm:-mx-6 lg:-mx-8"
       />
     );
-  } else if (detailAsPage) {
+  } else if (detailItem) {
     view = <SchedulePage props={detailProps(detailItem)} onBack={() => setDetailId(null)} />;
   } else {
     view = (
@@ -489,27 +493,16 @@ export function SchedulesApp({
         picks={picks}
         questions={questions}
         running={running}
-        detailId={detailId}
         highlightId={highlightId}
-        inlineForm={
-          formProps && picks.form === "inline" ? (
-            <ScheduleForm presentation="inline" {...formProps} className="mb-8" />
-          ) : null
-        }
         onNew={() => openCreate(emptyDraft(questions))}
         onTemplate={(templateId) => openCreate(draftFromTemplate(templateId, questions))}
-        onOpen={(item) =>
-          setDetailId((current) =>
-            picks.detail === "inline" && current === item.id ? null : item.id,
-          )
-        }
+        onOpen={(item) => setDetailId(item.id)}
         onSetActive={(item, active) => setActive(item, active)}
         onRunNow={runNow}
         onEdit={(item) => openEdit(item, false)}
         onDuplicate={(item) => openCreate(duplicateDraft(item))}
         onDelete={requestDelete}
         onRetry={retry}
-        detailProps={detailProps}
       />
     );
   }
@@ -517,6 +510,7 @@ export function SchedulesApp({
   return (
     <AppFrame
       itemSize={picks.navItemSize}
+      viewKey={viewKey}
       onNavigate={(id) => {
         if (id !== "schedules") return;
         setForm(null);
@@ -526,32 +520,26 @@ export function SchedulesApp({
       {view}
 
       <FrameOverlay
-        open={Boolean(detailItem) && picks.detail === "sheet"}
-        onClose={() => setDetailId(null)}
-        width={520}
-        label={detailItem?.name}
-      >
-        {detailItem ? (
-          <ScheduleSheet props={detailProps(detailItem)} onClose={() => setDetailId(null)} />
-        ) : null}
-      </FrameOverlay>
-
-      <FrameOverlay
-        open={Boolean(formProps) && picks.form === "sheet"}
-        onClose={() => closeForm(true)}
-        width={720}
-        label={form?.mode === "edit" ? "Edit schedule" : "New schedule"}
+        open={Boolean(renameItem)}
+        onClose={() => setRenameId(null)}
+        label={renameItem ? `Rename ${renameItem.name}` : undefined}
         focus="field"
-        autoFocus={form?.autoFocus ?? true}
-        blockClose={formPending}
       >
-        {formProps ? <ScheduleForm presentation="sheet" {...formProps} className="h-full" /> : null}
+        {renameItem ? (
+          <RenameDialog
+            item={renameItem}
+            onClose={() => setRenameId(null)}
+            onRenamed={(name) => {
+              updateItem(renameItem.id, { name });
+              toast.success("Renamed", { description: name });
+            }}
+          />
+        ) : null}
       </FrameOverlay>
 
       <FrameOverlay
         open={Boolean(deleteItem)}
         onClose={() => setDeleteId(null)}
-        side="center"
         label={deleteItem ? `Delete ${deleteItem.name}?` : undefined}
       >
         {deleteItem ? (
@@ -567,6 +555,65 @@ export function SchedulesApp({
         ) : null}
       </FrameOverlay>
     </AppFrame>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   Rename: a one-field prompt, so a small centered dialog rather than a page.
+   -------------------------------------------------------------------------- */
+
+function RenameDialog({
+  item,
+  onClose,
+  onRenamed,
+}: {
+  item: ScheduleItem;
+  onClose: () => void;
+  onRenamed: (name: string) => void;
+}) {
+  const [name, setName] = useState(item.name);
+  const [error, setError] = useState<string | undefined>();
+  return (
+    <FormFrame
+      variant="dialog"
+      title="Rename schedule"
+      submitLabel="Rename"
+      pendingLabel="Renaming…"
+      onCancel={onClose}
+      onSubmit={async () => {
+        const trimmed = name.trim();
+        if (!trimmed) {
+          setError("Enter a name.");
+          return false;
+        }
+        if (trimmed.length > 80) {
+          setError("Keep the name under 80 characters.");
+          return false;
+        }
+        await wait(400);
+        onRenamed(trimmed);
+        return true;
+      }}
+      onSubmitted={onClose}
+      className="max-w-none @max-[639px]/frame:rounded-b-none @max-[639px]/frame:border-b-0"
+    >
+      <FieldStack>
+        <Field
+          label="Name"
+          error={error}
+          hint="Shown in the list and as the title of each run's chat."
+        >
+          <TextInput
+            value={name}
+            onChange={(event) => {
+              setName(event.target.value);
+              if (error) setError(undefined);
+            }}
+            suppressAutofill
+          />
+        </Field>
+      </FieldStack>
+    </FormFrame>
   );
 }
 
@@ -618,9 +665,7 @@ interface ListPageProps {
   picks: SchedulePicks;
   questions: SchedulesQuestions;
   running: ReadonlySet<string>;
-  detailId: string | null;
   highlightId: string | null;
-  inlineForm: ReactNode;
   onNew: () => void;
   onTemplate: (templateId: string) => void;
   onOpen: (item: ScheduleItem) => void;
@@ -630,13 +675,12 @@ interface ListPageProps {
   onDuplicate: (item: ScheduleItem) => void;
   onDelete: (item: ScheduleItem) => void;
   onRetry: () => void;
-  detailProps: (item: ScheduleItem) => ScheduleDetailProps;
 }
 
 function ListPage(props: ListPageProps) {
-  const { load, items, picks, inlineForm } = props;
+  const { load, items, picks } = props;
   const empty = load === "empty" || (load === "ready" && items.length === 0);
-  const showHeaderAction = !empty || Boolean(inlineForm);
+  const showHeaderAction = !empty;
   return (
     <PageHeaderStyleProvider variant={picks.headerVariant} icon={picks.headerIcon}>
       <PageHeader
@@ -653,9 +697,13 @@ function ListPage(props: ListPageProps) {
         }
       />
       <div className="mt-6 min-w-0">
-        {inlineForm}
         {load === "loading" ? (
-          <RowList label="Schedules" variant={picks.rowList} columns={columnsFor(picks, items)} busy>
+          <RowList
+            label="Schedules"
+            variant={picks.rowList}
+            columns={columnsFor(picks, items)}
+            busy
+          >
             <ListRowSkeleton count={4} />
           </RowList>
         ) : load === "error" ? (
@@ -672,9 +720,7 @@ function ListPage(props: ListPageProps) {
             Check your connection, then try again. Your schedules keep running either way.
           </ErrorMessage>
         ) : empty ? (
-          inlineForm ? null : (
-            <SchedulesEmpty picks={picks} onNew={props.onNew} onTemplate={props.onTemplate} />
-          )
+          <SchedulesEmpty picks={picks} onNew={props.onNew} onTemplate={props.onTemplate} />
         ) : (
           <ScheduleList {...props} />
         )}
@@ -783,7 +829,6 @@ function RowMenu({ item, props }: { item: ScheduleItem; props: ListPageProps }) 
 }
 
 function ScheduleRows({ items, props }: { items: ScheduleItem[]; props: ListPageProps }) {
-  const inline = props.picks.detail === "inline";
   return items.map((item) => {
     const paused = item.state === "paused";
     const perms = permissionsFor(item, props.questions);
@@ -821,14 +866,7 @@ function ScheduleRows({ items, props }: { items: ScheduleItem[]; props: ListPage
         menu={<RowMenu item={item} props={props} />}
         menuLabel={`More actions for ${item.name}`}
         onOpen={() => props.onOpen(item)}
-        selected={props.detailId === item.id || props.highlightId === item.id}
-        expanded={inline ? props.detailId === item.id : undefined}
-        indicator={inline ? "expand" : undefined}
-        panel={
-          inline && props.detailId === item.id ? (
-            <ScheduleInline props={props.detailProps(item)} />
-          ) : undefined
-        }
+        selected={props.highlightId === item.id}
       />
     );
   });
@@ -849,7 +887,11 @@ function ScheduleList(props: ListPageProps) {
   return (
     <div className="flex min-w-0 flex-col gap-6">
       {active.length > 0 ? (
-        <RowList label="Active schedules" variant={picks.rowList} columns={columnsFor(picks, items)}>
+        <RowList
+          label="Active schedules"
+          variant={picks.rowList}
+          columns={columnsFor(picks, items)}
+        >
           <ScheduleRows items={active} props={props} />
         </RowList>
       ) : (
@@ -865,7 +907,11 @@ function ScheduleList(props: ListPageProps) {
           title="Paused"
           summary={`${paused.length} ${paused.length === 1 ? "schedule" : "schedules"} · ${paused.map((item) => item.name).join(", ")}`}
         >
-          <RowList label="Paused schedules" variant={picks.rowList} columns={columnsFor(picks, items)}>
+          <RowList
+            label="Paused schedules"
+            variant={picks.rowList}
+            columns={columnsFor(picks, items)}
+          >
             <ScheduleRows items={paused} props={props} />
           </RowList>
         </Disclosure>

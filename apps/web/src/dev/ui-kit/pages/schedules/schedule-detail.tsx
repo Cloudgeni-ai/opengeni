@@ -1,30 +1,32 @@
 /**
- * The schedule's detail: one body shown as a right sheet (A), a page (B) or
- * expanded under its row (C), following the detail-sheet pick.
+ * The schedule's detail page: its own page in the content area with a back
+ * link to Schedules, never a side sheet.
  */
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import {
   CalendarClockIcon,
   CopyIcon,
   LinkIcon,
   MoreHorizontalIcon,
+  PauseIcon,
   PencilIcon,
   PlayIcon,
+  ServerIcon,
+  SparklesIcon,
+  TextCursorInputIcon,
   Trash2Icon,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
-  DetailBody,
-  DetailFact,
-  DetailFacts,
-  DetailFooter,
-  DetailHeader,
-  DetailInline,
+  DetailAside,
+  DetailAsideItem,
   DetailPage,
-  DetailSection,
-  DetailSheetPreview,
-} from "@/components/ui/detail-sheet";
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailFact, DetailFacts, DetailSection } from "@/components/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,6 +36,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InlineHelp } from "@/components/ui/inline-help";
+import {
+  LineTabs,
+  LineTabsContent,
+  LineTabsList,
+  LineTabsTrigger,
+} from "@/components/ui/line-tabs";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
@@ -43,13 +51,14 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
-import { KIT_NOW, KIT_TIME_ZONE, type ScheduleRun } from "../../fixtures";
+import { KIT_NOW, KIT_TIME_ZONE, personById, type ScheduleRun } from "../../fixtures";
 import {
   EACH_RUN_LABEL,
   IF_STILL_RUNNING_LABEL,
   NONE,
   WHERE_LABEL,
   cadenceSentence,
+  cadenceShort,
   environmentName,
   hasCustomLearning,
   learningSummary,
@@ -79,6 +88,8 @@ export interface ScheduleDetailProps {
   onRunNow: () => void;
   onEdit: () => void;
   onDuplicate: () => void;
+  /** Opens the one-field Rename dialog. */
+  onRename: () => void;
   onCopyLink: () => void;
   onDelete: () => void;
   onOpenRun: (run: ScheduleRun) => void;
@@ -136,22 +147,6 @@ function DuplicateButton({ props, size }: { props: ScheduleDetailProps; size?: "
   );
 }
 
-function DeleteButton({ props, size }: { props: ScheduleDetailProps; size?: "sm" }) {
-  if (!props.perms.canPauseOrDelete) return null;
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size={size}
-      onClick={props.onDelete}
-      className="text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
-    >
-      <Trash2Icon aria-hidden="true" />
-      Delete
-    </Button>
-  );
-}
-
 /** Edit and Run now for the owner, Duplicate for everyone else. */
 function MainActions({ props, size }: { props: ScheduleDetailProps; size?: "sm" }) {
   if (!props.perms.canEditOrRun) return <DuplicateButton props={props} size={size} />;
@@ -181,6 +176,12 @@ function MoreMenu({ props, withDelete }: { props: ScheduleDetailProps; withDelet
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-44">
+        {props.perms.canEditOrRun ? (
+          <DropdownMenuItem onSelect={props.onRename}>
+            <TextCursorInputIcon />
+            Rename
+          </DropdownMenuItem>
+        ) : null}
         {duplicate ? (
           <DropdownMenuItem onSelect={props.onDuplicate}>
             <CopyIcon />
@@ -296,14 +297,12 @@ function Setup({ props }: { props: ScheduleDetailProps }) {
   const showIfStillRunning = item.eachRun === "ongoing_chat" || !questions.q27OngoingOnly;
   return (
     <DetailFacts>
-      <DetailFact label="Model">{modelLabel(item.modelId)}</DetailFact>
       <DetailFact label="Each run">{EACH_RUN_LABEL[item.eachRun]}</DetailFact>
       {showIfStillRunning ? (
         <DetailFact label="If still running">
           {IF_STILL_RUNNING_LABEL[item.ifStillRunning]}
         </DetailFact>
       ) : null}
-      <DetailFact label="Where it runs">{WHERE_LABEL[item.whereItRuns]}</DetailFact>
       {setName ? (
         <DetailFact label="Variable set">
           <button
@@ -419,18 +418,71 @@ function FailedNotice({ props }: { props: ScheduleDetailProps }) {
   );
 }
 
-export function ScheduleDetailBody({ props }: { props: ScheduleDetailProps }) {
+function ownerLabel(props: ScheduleDetailProps): string {
+  return props.perms.own ? "by you" : `by ${props.perms.ownerName}`;
+}
+
+function StatusChip({ props }: { props: ScheduleDetailProps }) {
+  if (props.running) return <StatusBadge status="running" />;
+  if (props.item.state === "paused") return <StatusBadge status="paused" />;
+  if (props.item.lastRun.status === "failed") {
+    return <StatusBadge status="failed">Last run failed</StatusBadge>;
+  }
+  return <StatusBadge status="active" />;
+}
+
+function OwnerValue({ props }: { props: ScheduleDetailProps }) {
+  const owner = personById(props.item.ownerId);
+  return (
+    <span className="inline-flex max-w-full min-w-0 items-center gap-2">
+      <Avatar className="size-6">
+        <AvatarFallback className="bg-surface text-2xs font-semibold text-fg-muted">
+          {owner.initials}
+        </AvatarFallback>
+      </Avatar>
+      <span className="min-w-0 truncate">{owner.isYou ? `${owner.name} (you)` : owner.name}</span>
+    </span>
+  );
+}
+
+function ScheduleAside({ props }: { props: ScheduleDetailProps }) {
+  const { item } = props;
+  const next = nextRunOf(item);
+  return (
+    <DetailAside label={`About ${item.name}`}>
+      <DetailAsideItem label="Owner">
+        <OwnerValue props={props} />
+      </DetailAsideItem>
+      <DetailAsideItem label="Next run" icon={<CalendarClockIcon />}>
+        {item.state === "paused" ? (
+          <span className="text-fg-muted">Paused</span>
+        ) : next ? (
+          <RelativeTime date={next} format="absolute" {...TIME} />
+        ) : (
+          <span className="text-fg-muted">No runs left</span>
+        )}
+      </DetailAsideItem>
+      <DetailAsideItem label="Model" icon={<SparklesIcon />}>
+        {modelLabel(item.modelId)}
+      </DetailAsideItem>
+      <DetailAsideItem label="Where it runs" icon={<ServerIcon />}>
+        {WHERE_LABEL[item.whereItRuns]}
+      </DetailAsideItem>
+    </DetailAside>
+  );
+}
+
+function Overview({ props }: { props: ScheduleDetailProps }) {
   const { perms, item } = props;
   return (
-    <DetailBody>
-      <DetailSection className="pt-4">
+    <>
+      <DetailSection className="pt-6">
         <FailedNotice props={props} />
         <ActiveRow props={props} />
         {!perms.own ? (
           <InlineHelp icon className="mt-3">
-            It runs with {perms.ownerFirstName}'s connected accounts, so only{" "}
-            {perms.ownerFirstName} can{" "}
-            {perms.canPauseOrDelete ? "edit or run it." : "change, run, pause or delete it."}
+            It runs with {perms.ownerFirstName}'s connected accounts, so only {perms.ownerFirstName}{" "}
+            can {perms.canPauseOrDelete ? "edit or run it." : "change, run, pause or delete it."}
           </InlineHelp>
         ) : null}
       </DetailSection>
@@ -440,53 +492,13 @@ export function ScheduleDetailBody({ props }: { props: ScheduleDetailProps }) {
       <DetailSection title="Setup">
         <Setup props={props} />
       </DetailSection>
-      <DetailSection title="Runs">
-        <Runs props={props} />
-      </DetailSection>
-    </DetailBody>
-  );
-}
-
-function ownerSubtitle(props: ScheduleDetailProps): ReactNode {
-  return props.perms.own ? undefined : `Owned by ${props.perms.ownerName}`;
-}
-
-/* ----------------------------------------------------------------------------
-   A. Right sheet.
-   -------------------------------------------------------------------------- */
-
-export function ScheduleSheet({
-  props,
-  onClose,
-  className,
-}: {
-  props: ScheduleDetailProps;
-  onClose?: () => void;
-  className?: string;
-}) {
-  return (
-    <DetailSheetPreview
-      label={props.item.name}
-      onClose={onClose}
-      className={cn("h-full max-w-none border-l-0", className)}
-    >
-      <DetailHeader
-        leading={<LogoTile icon={<CalendarClockIcon />} />}
-        title={props.item.name}
-        subtitle={ownerSubtitle(props)}
-        actions={<MoreMenu props={props} />}
-        showClose={Boolean(onClose)}
-      />
-      <ScheduleDetailBody props={props} />
-      <DetailFooter start={<DeleteButton props={props} />}>
-        <MainActions props={props} />
-      </DetailFooter>
-    </DetailSheetPreview>
+    </>
   );
 }
 
 /* ----------------------------------------------------------------------------
-   B. Detail page.
+   The detail page (the decided detail pick): back link, tile, title with a
+   status chip, a meta line, Overview and Runs tabs, and a quiet aside card.
    -------------------------------------------------------------------------- */
 
 export function SchedulePage({
@@ -496,36 +508,50 @@ export function SchedulePage({
   props: ScheduleDetailProps;
   onBack: () => void;
 }) {
+  const { item } = props;
+  const [tab, setTab] = useState("overview");
+  const runCount = item.runs.length + (props.running ? 1 : 0);
   return (
     <DetailPage back={{ label: "Schedules", onClick: onBack }} className="px-0 pt-0 max-sm:px-0">
-      <DetailHeader
-        leading={<LogoTile icon={<CalendarClockIcon />} />}
-        title={props.item.name}
-        subtitle={ownerSubtitle(props)}
-        actions={
-          <>
-            <MainActions props={props} />
-            <MoreMenu props={props} withDelete />
-          </>
-        }
-      />
-      <ScheduleDetailBody props={props} />
+      <LineTabs value={tab} onValueChange={setTab}>
+        <DetailPageHeader
+          leading={
+            <LogoTile icon={item.state === "paused" ? <PauseIcon /> : <CalendarClockIcon />} />
+          }
+          title={item.name}
+          chips={<StatusChip props={props} />}
+          meta={[cadenceShort(item.cadence), ownerLabel(props)]}
+          actions={
+            <>
+              <MainActions props={props} />
+              <MoreMenu props={props} withDelete />
+            </>
+          }
+          tabs={
+            <LineTabsList aria-label={`${item.name} sections`}>
+              <LineTabsTrigger value="overview">Overview</LineTabsTrigger>
+              <LineTabsTrigger value="runs" count={runCount}>
+                Runs
+              </LineTabsTrigger>
+            </LineTabsList>
+          }
+        />
+        <LineTabsContent value="overview">
+          <DetailPageBody aside={<ScheduleAside props={props} />}>
+            <Overview props={props} />
+          </DetailPageBody>
+        </LineTabsContent>
+        <LineTabsContent value="runs">
+          <DetailPageBody>
+            <DetailSection className="pt-4">
+              <p className="m-0 mb-2 text-xs leading-4.5 text-fg-muted">
+                Each run opens its own chat in Agents.
+              </p>
+              <Runs props={props} />
+            </DetailSection>
+          </DetailPageBody>
+        </LineTabsContent>
+      </LineTabs>
     </DetailPage>
-  );
-}
-
-/* ----------------------------------------------------------------------------
-   C. Expanded under the row.
-   -------------------------------------------------------------------------- */
-
-export function ScheduleInline({ props }: { props: ScheduleDetailProps }) {
-  return (
-    <DetailInline>
-      <ScheduleDetailBody props={props} />
-      <DetailFooter start={<DeleteButton props={props} size="sm" />}>
-        <MoreMenu props={props} />
-        <MainActions props={props} size="sm" />
-      </DetailFooter>
-    </DetailInline>
   );
 }

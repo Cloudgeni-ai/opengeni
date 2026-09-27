@@ -1,8 +1,10 @@
 /**
  * Kit-only app frame for page previews: the proposed main rail (240px), a
- * phone top bar under 840px of frame width, the page column, and overlays
- * (sheets and dialogs) contained inside the frame so a preview reads like a
- * browser window. Built from the real NavItem, NavGroup, ContentPage and
+ * phone top bar under 840px of frame width, the page column, and centered
+ * dialogs contained inside the frame so a preview reads like a browser
+ * window. Detail, create and edit views are pages in the column: pass
+ * `viewKey` and the column scrolls to the top and focuses the new page's
+ * heading whenever it changes. Built from the real NavItem, NavGroup, ContentPage and
  * ScopeSwitcherTrigger primitives.
  */
 import {
@@ -183,11 +185,14 @@ export function AppFrame({
   active = "schedules",
   itemSize,
   onNavigate,
+  viewKey,
   children,
 }: {
   active?: string;
   itemSize?: NavItemSize;
   onNavigate?: (id: string) => void;
+  /** Changes when the page in the column changes (list, a detail page, a form page). */
+  viewKey?: string;
   /** The page. Rendered inside ContentPage (the standard 960px column). */
   children: ReactNode;
 }) {
@@ -199,6 +204,24 @@ export function AppFrame({
     return () => setOpenCount((count) => count - 1);
   }, []);
   const value = useMemo(() => ({ host, register }), [host, register]);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const firstView = useRef(true);
+
+  // A new page: start at its top and move focus to its heading, like a route change.
+  useLayoutEffect(() => {
+    if (firstView.current) {
+      firstView.current = false;
+      return;
+    }
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    scroller.scrollTop = 0;
+    const heading = scroller.querySelector<HTMLElement>("h1");
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+    }
+  }, [viewKey]);
 
   return (
     <FrameContext.Provider value={value}>
@@ -208,7 +231,7 @@ export function AppFrame({
             active={active}
             itemSize={itemSize}
             onNavigate={onNavigate}
-            // Frames under 840px wide use the phone layout: a top bar and a rail sheet.
+            // Frames under 840px wide use the phone layout: a top bar and a slide-in nav.
             className="hidden @[840px]/frame:flex"
           />
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -228,7 +251,7 @@ export function AppFrame({
                 {currentWorkspace.name}
               </span>
             </header>
-            <ContentPage width="standard" className="pt-6 pb-16">
+            <ContentPage ref={scrollerRef} width="standard" className="pt-6 pb-16">
               {children}
             </ContentPage>
           </div>
@@ -268,10 +291,11 @@ export function AppFrame({
 }
 
 /* ----------------------------------------------------------------------------
-   FrameOverlay: a sheet or dialog inside the frame.
+   FrameOverlay: a centered dialog (or the phone nav) inside the frame.
    -------------------------------------------------------------------------- */
 
-export type FrameOverlaySide = "right" | "left" | "center";
+/** "center" for confirmations and one-field prompts; "left" only for the phone nav. No right sheets. */
+export type FrameOverlaySide = "left" | "center";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -301,8 +325,7 @@ function trapTab(event: KeyboardEvent<HTMLDivElement>, panel: HTMLElement | null
 export function FrameOverlay({
   open,
   onClose,
-  side = "right",
-  width = 520,
+  side = "center",
   label,
   labelledBy,
   focus = "panel",
@@ -314,8 +337,6 @@ export function FrameOverlay({
   open: boolean;
   onClose: () => void;
   side?: FrameOverlaySide;
-  /** Panel width in px (right sheets). Phones get the full width. */
-  width?: number;
   /** Accessible name, unless `labelledBy` points at a visible title. */
   label?: string;
   labelledBy?: string;
@@ -405,11 +426,8 @@ export function FrameOverlay({
         aria-labelledby={labelledBy}
         tabIndex={-1}
         onInput={() => setDirty(true)}
-        style={side === "right" ? { width: `min(100%, ${width}px)` } : undefined}
         className={cn(
           "relative z-10 flex min-h-0 min-w-0 flex-col outline-none",
-          side === "right" &&
-            "ml-auto h-full border-l border-border bg-surface shadow-[var(--og-shadow-lg)] transition-transform duration-200 ease-out starting:translate-x-full motion-reduce:transition-none",
           side === "left" &&
             "mr-auto h-full bg-bg shadow-[var(--og-shadow-lg)] transition-transform duration-200 ease-out starting:-translate-x-full motion-reduce:transition-none",
           center &&

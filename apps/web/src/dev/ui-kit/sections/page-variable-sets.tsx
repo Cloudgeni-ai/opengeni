@@ -33,7 +33,7 @@ export default function PageVariableSetsSection() {
     <KitSection sectionKey="page-variable-sets">
       <KitBlock
         title="The page"
-        description="Workspace settings, Variable sets, built from your picks. Click a row to open its page. Creating, adding, replacing and deleting all work on the fixtures."
+        description="Workspace settings, Variable sets, built from the decided picks. A row opens the set's own page with a back link; New variable set is its own page too. Creating, adding, replacing and deleting all work on the fixtures."
       >
         <div className="flex min-w-0 flex-col gap-4">
           {pane.mobileFrame ? null : <QuestionToggles collapsible={pane.count > 1} />}
@@ -61,7 +61,7 @@ export default function PageVariableSetsSection() {
       <StatesGrid
         title="New variable set"
         columns={2}
-        description="The create form, drawn in place. It opens as a dialog, a page or inline, following your Form dialog pick."
+        description="The create form, framed here so the states sit side by side. In the page it is its own page (/variable-sets/new) with a back link and a sticky footer."
       >
         <StateCell label="Empty" align="stretch" canvas="bg">
           <div className="flex min-w-0 flex-1 items-start justify-center">
@@ -97,12 +97,13 @@ export default function PageVariableSetsSection() {
         title="What this page does"
         use={[
           "One borderless list. The whole row opens the set's own page, where its variables and what uses it live.",
+          "New variable set opens its own page. After Create, you land on the new set's page.",
           "Who can use a set shows only when it isn't this workspace, and the list groups by it only when sets are mixed.",
           "Search appears past 10 sets and also matches variable names.",
           "The header's New variable set hides while the empty state offers it.",
         ]}
         avoid={[
-          "Expanding cards in place, a card inside a card, or a dropdown-looking expander.",
+          "A right-side sheet, expanding cards in place, a card inside a card, or a dropdown-looking expander.",
           "Manage variables, Edit details and a trash icon on every row.",
           'A Workspace chip on every row, timestamps with seconds, or "attachment" wording.',
         ]}

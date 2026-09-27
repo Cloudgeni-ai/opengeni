@@ -1,9 +1,9 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { FileTextIcon, UploadIcon, XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FormDialog, FormInline, FormPage } from "@/components/ui/form-dialog";
+import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu } from "@/components/ui/select-menu";
@@ -15,11 +15,11 @@ import {
   type EntryType,
   type LibraryEntry,
 } from "./knowledge-data";
-import { wait, type FormPresentationPick, type PagePicks } from "./picks";
+import { wait, type PagePicks } from "./picks";
 
 /* ----------------------------------------------------------------------------
-   Create forms for the Knowledge page: Add knowledge (in the picked form
-   presentation), Upload files and New collection (small dialogs).
+   Create forms for the Knowledge page: Add knowledge (a page), and Upload
+   files and New collection (small centered dialogs: one field each).
    -------------------------------------------------------------------------- */
 
 /** A starter from the empty state. */
@@ -39,19 +39,20 @@ export interface NewEntry {
 
 const NO_COLLECTION = "none";
 
+/**
+ * Add knowledge: its own page ("← Knowledge"). Mount it only while it's
+ * open. `onCreate` navigates to the new entry, so a successful submit
+ * doesn't also call `onClose`.
+ */
 export function AddKnowledgeForm({
-  presentation,
-  open,
-  onOpenChange,
+  onClose,
   picks,
   entries,
   collections,
   onCreate,
   prefill,
 }: {
-  presentation: FormPresentationPick;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
   picks: PagePicks;
   entries: LibraryEntry[];
   collections: string[];
@@ -59,33 +60,12 @@ export function AddKnowledgeForm({
   /** Starts the form from a template (the empty state's starter cards). */
   prefill?: KnowledgeTemplate | null;
 }) {
-  const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
-  const [type, setType] = useState<NewEntry["type"]>("fact");
+  const [title, setTitle] = useState(prefill?.title ?? "");
+  const [content, setContent] = useState(prefill?.content ?? "");
+  const [type, setType] = useState<NewEntry["type"]>(prefill?.type ?? "fact");
   const [scope, setScope] = useState<NewEntry["scope"]>("workspace");
   const [collection, setCollection] = useState<string>(NO_COLLECTION);
   const [errors, setErrors] = useState<{ title?: ReactNode; content?: ReactNode }>({});
-
-  useEffect(() => {
-    if (!open || !prefill) return;
-    setTitle(prefill.title);
-    setContent(prefill.content);
-    if (prefill.type) setType(prefill.type);
-  }, [open, prefill]);
-
-  const reset = () => {
-    setTitle("");
-    setContent("");
-    setType("fact");
-    setScope("workspace");
-    setCollection(NO_COLLECTION);
-    setErrors({});
-  };
-
-  const close = () => {
-    onOpenChange(false);
-    reset();
-  };
 
   const submit = async () => {
     const trimmed = title.trim();
@@ -110,7 +90,6 @@ export function AddKnowledgeForm({
       scope,
       collection: collection === NO_COLLECTION ? null : collection,
     });
-    reset();
     return true;
   };
 
@@ -192,46 +171,19 @@ export function AddKnowledgeForm({
     </FieldStack>
   );
 
-  const shared = {
-    title: "Add knowledge",
-    description: "Something agents should look up when it's relevant.",
-    submitLabel: "Add to Library",
-    pendingLabel: "Adding…",
-    onSubmit: submit,
-  };
-
-  if (presentation === "page") {
-    if (!open) return null;
-    return (
-      <FormPage
-        {...shared}
-        back={{ label: "Knowledge", onClick: close }}
-        onCancel={close}
-        onSubmitted={close}
-      >
-        {fields}
-      </FormPage>
-    );
-  }
-  if (presentation === "inline") {
-    if (!open) return null;
-    return (
-      <FormInline {...shared} onCancel={close} onSubmitted={close}>
-        {fields}
-      </FormInline>
-    );
-  }
   return (
-    <FormDialog
-      {...shared}
-      open={open}
-      onOpenChange={(next) => {
-        onOpenChange(next);
-        if (!next) reset();
-      }}
+    <FormPage
+      title="Add knowledge"
+      description="Something agents should look up when it's relevant."
+      submitLabel="Add to Library"
+      pendingLabel="Adding…"
+      onSubmit={submit}
+      back={{ label: "Knowledge", onClick: onClose }}
+      onCancel={onClose}
+      className="flex-1"
     >
       {fields}
-    </FormDialog>
+    </FormPage>
   );
 }
 

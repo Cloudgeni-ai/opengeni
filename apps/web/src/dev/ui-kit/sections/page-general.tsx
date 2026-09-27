@@ -6,7 +6,7 @@ export default function PageGeneralSection() {
     <KitSection sectionKey="page-general">
       <KitBlock
         title="Page"
-        description="General inside the app, built from your picks. Everything works on fixtures: rename, pause, the session defaults, connecting AI Gateway and deleting the workspace. The sub-nav moves between General, Access and API keys. In a frame narrower than 1208px the main rail folds to icons, so the page keeps its 720px column."
+        description="General inside the app, built from your picks. Everything works on fixtures: rename (a small dialog, one field), pause, the session defaults, connecting AI Gateway (its own page) and deleting the workspace. The sub-nav moves between General, Access and API keys. In a frame narrower than 1208px the main rail folds to icons, so the page keeps its 720px column."
       >
         <SettingsPreview initialPage="general" label="General" />
       </KitBlock>

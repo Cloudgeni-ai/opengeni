@@ -2,15 +2,8 @@ import { useState } from "react";
 import { CalendarClockIcon, GraduationCapIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import {
-  DetailBody,
-  DetailFooter,
-  DetailHeader,
-  DetailSection,
-  DetailSheet,
-  DetailSheetContent,
-} from "@/components/ui/detail-sheet";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import { InlineHelp } from "@/components/ui/inline-help";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
@@ -31,9 +24,9 @@ import {
 import { wait, type PagePicks } from "./picks";
 
 /* ----------------------------------------------------------------------------
-   The Learning sheet (Q29, Q30): one control, "Automatic | Review first |
+   The Learning page (Q29, Q30): one control, "Automatic | Review first |
    Off", worded the same everywhere. Shared chats and your private chats are
-   two labelled groups; each change saves at once.
+   two labelled groups; each change saves at once, so the page has no footer.
    -------------------------------------------------------------------------- */
 
 const DESTINATIONS: LearningDestination[] = ["knowledge", "instructions", "skills"];
@@ -77,9 +70,9 @@ function ModeRow({
   );
 }
 
-export interface LearningSheetProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+export interface LearningPageProps {
+  /** Back to Knowledge. */
+  onClose: () => void;
   picks: PagePicks;
   learning: LearningState;
   onChange: (group: LearningGroup, destination: LearningDestination, mode: LearningMode) => void;
@@ -87,14 +80,7 @@ export interface LearningSheetProps {
   layout: "groups" | "switcher";
 }
 
-export function LearningSheet({
-  open,
-  onOpenChange,
-  picks,
-  learning,
-  onChange,
-  layout,
-}: LearningSheetProps) {
+export function LearningPage({ onClose, picks, learning, onChange, layout }: LearningPageProps) {
   const [switcher, setSwitcher] = useState<LearningGroup>("shared");
 
   const change = async (
@@ -124,78 +110,69 @@ export function LearningSheet({
   );
 
   return (
-    <DetailSheet open={open} onOpenChange={onOpenChange}>
-      <DetailSheetContent>
-        <DetailHeader
-          leading={<LogoTile icon={<GraduationCapIcon />} />}
-          title="Learning"
-          subtitle="What agents can change on their own, and what waits in Review."
-        />
-        <DetailBody>
-          {layout === "groups" ? (
-            <>
-              <DetailSection
-                title={`Shared chats in ${KNOWLEDGE_WORKSPACE.name}`}
-                description="Everyone's shared chats and schedules here. Workspace admins can change this."
-              >
-                {rows("shared", DESTINATIONS)}
-              </DetailSection>
-              <DetailSection
-                title="Your private chats (all workspaces)"
-                description={`Only me chats and your Personal workspace, anywhere in ${organization.name}.`}
-              >
-                {rows("private", ["knowledge", "skills"])}
-                <InlineHelp icon className="mt-3">
-                  Instructions for private chats only apply in your Personal workspace, so they're
-                  set there.
-                </InlineHelp>
-              </DetailSection>
-            </>
-          ) : (
-            <DetailSection>
-              <SegmentedControl<LearningGroup>
-                aria-label="Defaults"
-                variant={picks.segmented}
-                options={[
-                  { value: "shared", label: "Workspace defaults" },
-                  { value: "private", label: "My defaults" },
-                ]}
-                value={switcher}
-                onValueChange={setSwitcher}
-              />
-              <div className="mt-3">{rows(switcher, DESTINATIONS)}</div>
+    <DetailPage back={{ label: "Knowledge", onClick: onClose }}>
+      <DetailPageHeader
+        leading={<LogoTile icon={<GraduationCapIcon />} />}
+        title="Learning"
+        meta={[
+          `in ${KNOWLEDGE_WORKSPACE.name}`,
+          "What agents can change on their own, and what waits in Review",
+        ]}
+      />
+      <DetailPageBody>
+        {layout === "groups" ? (
+          <>
+            <DetailSection
+              title={`Shared chats in ${KNOWLEDGE_WORKSPACE.name}`}
+              description="Everyone's shared chats and schedules here. Workspace admins can change this."
+            >
+              {rows("shared", DESTINATIONS)}
             </DetailSection>
-          )}
-          <DetailSection
-            title="Different settings"
-            description={`${LEARNING_OVERRIDES.length} schedules use their own settings.`}
-          >
-            <RowList label="Schedules with their own learning settings">
-              {LEARNING_OVERRIDES.map((override) => (
-                <ListRow
-                  key={override.id}
-                  leading={<LogoTile icon={<CalendarClockIcon />} />}
-                  title={override.name}
-                  description={override.detail}
-                  href={`#${override.id}`}
-                  onOpen={(event) => event.preventDefault()}
-                  indicator="open"
-                />
-              ))}
-            </RowList>
+            <DetailSection
+              title="Your private chats (all workspaces)"
+              description={`Only me chats and your Personal workspace, anywhere in ${organization.name}.`}
+            >
+              {rows("private", ["knowledge", "skills"])}
+              <InlineHelp icon className="mt-3">
+                Instructions for private chats only apply in your Personal workspace, so they're set
+                there.
+              </InlineHelp>
+            </DetailSection>
+          </>
+        ) : (
+          <DetailSection>
+            <SegmentedControl<LearningGroup>
+              aria-label="Defaults"
+              variant={picks.segmented}
+              options={[
+                { value: "shared", label: "Workspace defaults" },
+                { value: "private", label: "My defaults" },
+              ]}
+              value={switcher}
+              onValueChange={setSwitcher}
+            />
+            <div className="mt-3">{rows(switcher, DESTINATIONS)}</div>
           </DetailSection>
-        </DetailBody>
-        <DetailFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            className="pointer-coarse:h-11"
-          >
-            Done
-          </Button>
-        </DetailFooter>
-      </DetailSheetContent>
-    </DetailSheet>
+        )}
+        <DetailSection
+          title="Different settings"
+          description={`${LEARNING_OVERRIDES.length} schedules use their own settings.`}
+        >
+          <RowList label="Schedules with their own learning settings">
+            {LEARNING_OVERRIDES.map((override) => (
+              <ListRow
+                key={override.id}
+                leading={<LogoTile icon={<CalendarClockIcon />} />}
+                title={override.name}
+                description={override.detail}
+                href={`#${override.id}`}
+                onOpen={(event) => event.preventDefault()}
+                indicator="open"
+              />
+            ))}
+          </RowList>
+        </DetailSection>
+      </DetailPageBody>
+    </DetailPage>
   );
 }

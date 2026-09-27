@@ -11,7 +11,7 @@ import {
   TextInput,
   useFieldControlProps,
 } from "@/components/ui/field";
-import { FormDialog, FormInline, FormPage } from "@/components/ui/form-dialog";
+import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { InlineHelp } from "@/components/ui/inline-help";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { RoleSelect } from "@/components/ui/role-select";
@@ -32,7 +32,8 @@ import { useOrg } from "./org-store";
 import { wait } from "./picks";
 
 /* ----------------------------------------------------------------------------
-   Invite people, and the confirmations the organization pages use.
+   Invite people, New workspace and Fine-tune (pages), and the confirmations
+   the organization pages use (small centered dialogs).
    -------------------------------------------------------------------------- */
 
 interface EmailChip {
@@ -153,15 +154,12 @@ function EmailChipsInput({
 
 type InviteRole = OrganizationRole;
 
+/** Invite people: its own page ("← People"). Mount it only while it's open. */
 export function InviteForm({
-  presentation,
-  open,
-  onOpenChange,
+  onClose,
   onInvite,
 }: {
-  presentation: "dialog" | "page" | "inline";
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
   onInvite: (
     invites: { email: string; role: InviteRole; grants: Record<string, WorkspaceRole> }[],
   ) => void;
@@ -206,18 +204,6 @@ export function InviteForm({
   const reinvite = emails.includes(REMOVED_PERSON.email) && questions.q37 === "allowed";
   const count = Math.max(1, chips.length - problems.length);
 
-  const reset = () => {
-    setEmails([]);
-    setRole("member");
-    setGrants({});
-    setMemberOnly({});
-    setShowErrors(false);
-  };
-  const close = () => {
-    onOpenChange(false);
-    reset();
-  };
-
   const submit = async () => {
     setShowErrors(true);
     if (emails.length === 0 || problems.length > 0) return false;
@@ -229,7 +215,6 @@ export function InviteForm({
       for (const [id, checked] of Object.entries(memberOnly)) if (checked) chosen[id] = "member";
     }
     onInvite(emails.map((email) => ({ email, role, grants: chosen })));
-    reset();
     return true;
   };
 
@@ -324,48 +309,21 @@ export function InviteForm({
     </FieldStack>
   );
 
-  const shared = {
-    title: vocab.invite,
-    description: `They'll get an email with a link to join ${organization.name}.`,
-    submitLabel: count > 1 ? `Send ${count} invitations` : "Send invitation",
-    pendingLabel: "Sending…",
-    onSubmit: submit,
-    footerStart: "Invitations expire in 7 days.",
-  };
-
-  if (presentation === "page") {
-    if (!open) return null;
-    return (
-      <FormPage
-        {...shared}
-        back={{ label: vocab.peopleTitle, onClick: close }}
-        onCancel={close}
-        onSubmitted={close}
-      >
-        {fields}
-      </FormPage>
-    );
-  }
-  if (presentation === "inline") {
-    if (!open) return null;
-    return (
-      <FormInline {...shared} onCancel={close} onSubmitted={close}>
-        {fields}
-      </FormInline>
-    );
-  }
   return (
-    <FormDialog
-      {...shared}
-      size="lg"
-      open={open}
-      onOpenChange={(next) => {
-        onOpenChange(next);
-        if (!next) reset();
-      }}
+    <FormPage
+      title={vocab.invite}
+      description={`They'll get an email with a link to join ${organization.name}.`}
+      submitLabel={count > 1 ? `Send ${count} invitations` : "Send invitation"}
+      pendingLabel="Sending…"
+      onSubmit={submit}
+      footerStart="Invitations expire in 7 days."
+      back={{ label: vocab.peopleTitle, onClick: onClose }}
+      onCancel={onClose}
+      onSubmitted={onClose}
+      className="flex-1"
     >
       {fields}
-    </FormDialog>
+    </FormPage>
   );
 }
 
@@ -547,35 +505,26 @@ export function OrgConfirmDialog({
   return null;
 }
 
-export function NewWorkspaceDialog({
-  open,
-  onOpenChange,
+/** New workspace: its own page ("← Workspaces"). `onCreate` opens the new workspace. */
+export function NewWorkspacePage({
+  onClose,
   onCreate,
 }: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
   onCreate: (name: string, description: string) => void;
 }) {
   const store = useOrg();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const reset = () => {
-    setName("");
-    setDescription("");
-    setError(null);
-  };
   return (
-    <FormDialog
-      open={open}
-      onOpenChange={(next) => {
-        onOpenChange(next);
-        if (!next) reset();
-      }}
+    <FormPage
       title="New workspace"
       description={`A shared space for a team in ${organization.name}. You'll be its workspace admin.`}
+      back={{ label: "Workspaces", onClick: onClose }}
       submitLabel="Create workspace"
       pendingLabel="Creating…"
+      onCancel={onClose}
       onSubmit={async () => {
         const trimmed = name.trim();
         if (!trimmed) {
@@ -592,9 +541,9 @@ export function NewWorkspaceDialog({
         }
         await wait(700);
         onCreate(trimmed, description.trim());
-        reset();
         return true;
       }}
+      className="flex-1"
     >
       <FieldStack>
         <Field label="Name" error={error ?? undefined}>
@@ -610,14 +559,14 @@ export function NewWorkspaceDialog({
         </Field>
         <Field label="Description" optional>
           <TextArea
-            rows={2}
+            rows={3}
             value={description}
             placeholder="What the team uses it for"
             onChange={(event) => setDescription(event.target.value)}
           />
         </Field>
       </FieldStack>
-    </FormDialog>
+    </FormPage>
   );
 }
 
@@ -650,12 +599,14 @@ const FINE_TUNE_PERMISSIONS = [
   { id: "access", label: "Manage who has access", description: "Add and remove people." },
 ] as const;
 
-/** Q34, the other answer: hand-picked permissions, in human words. */
-export function FineTuneDialog({
-  target,
+/** Q34, the other answer: hand-picked permissions, in human words. Its own page. */
+export function FineTunePage({
+  person,
+  workspace,
   onClose,
 }: {
-  target: { person: OrgPerson; workspace: OrgWorkspace } | null;
+  person: OrgPerson;
+  workspace: OrgWorkspace;
   onClose: () => void;
 }) {
   const [checked, setChecked] = useState<Record<string, boolean>>({
@@ -664,21 +615,19 @@ export function FineTuneDialog({
     connections: true,
   });
   return (
-    <FormDialog
-      open={target !== null}
-      onOpenChange={(next) => (next ? null : onClose())}
+    <FormPage
       title="Fine-tune permissions"
-      description={
-        target
-          ? `${target.person.name} in ${target.workspace.name}. They'll show as Custom.`
-          : undefined
-      }
+      description={`${person.name} in ${workspace.name}. They'll show as Custom.`}
+      back={{ label: person.name, onClick: onClose }}
       submitLabel="Save permissions"
       pendingLabel="Saving…"
+      onCancel={onClose}
+      onSubmitted={onClose}
       onSubmit={async () => {
         await wait(600);
         return true;
       }}
+      className="flex-1"
     >
       <div className="flex min-w-0 flex-col gap-3">
         {FINE_TUNE_PERMISSIONS.map((permission) => (
@@ -693,6 +642,6 @@ export function FineTuneDialog({
           />
         ))}
       </div>
-    </FormDialog>
+    </FormPage>
   );
 }

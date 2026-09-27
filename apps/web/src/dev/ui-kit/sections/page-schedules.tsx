@@ -4,7 +4,6 @@ import { KitBlock, KitSection, PagePreview, useKitPane } from "../kit";
 import { RECOMMENDED_QUESTIONS, type SchedulesQuestions } from "../pages/schedules/model";
 import { PreviewControls, PreviewToggle } from "../pages/schedules/preview-controls";
 import { SchedulesApp, type SchedulesDataState } from "../pages/schedules/schedules-app";
-import { ScheduleSheetDemo } from "../pages/schedules/sheet-demo";
 
 const SHOW_OPTIONS = [
   { value: "ready", label: "4 schedules" },
@@ -20,6 +19,7 @@ export default function PageSchedulesSection() {
   const [adminsManage, setAdminsManage] = useState<"yes" | "no">("yes");
   const [ongoingOnly, setOngoingOnly] = useState<"ongoing" | "always">("ongoing");
   const [resetKey, setResetKey] = useState(0);
+  const [detail, setDetail] = useState<"failed" | "others">("failed");
 
   const questions: SchedulesQuestions = {
     ...RECOMMENDED_QUESTIONS,
@@ -33,7 +33,7 @@ export default function PageSchedulesSection() {
     <KitSection sectionKey="page-schedules">
       <KitBlock
         title="Schedules"
-        description="Click a row to open its sheet, use ⋯ or Resume on a row, or press New schedule. The page follows your picks for the header, rows, detail view, empty state, switch, cadence picker and delete confirm."
+        description="Click a row to open its page, use ⋯ or Resume on a row, or press New schedule. Every schedule, New schedule and Edit schedule is its own page with a back link; only Rename and Delete are small centered dialogs."
       >
         <PreviewControls
           onReset={() => setResetKey((key) => key + 1)}
@@ -89,17 +89,29 @@ export default function PageSchedulesSection() {
       </KitBlock>
 
       <KitBlock
-        title="The schedule sheet"
-        description="Two sheets side by side: a schedule whose last run failed, and Maria Chen's schedule as you see it as a workspace admin (flip Q26 above to compare)."
+        title="A schedule's page"
+        description="Opened straight on a schedule's page: one whose last run failed, and Maria Chen's schedule as you see it as a workspace admin (flip Q26 above to compare). Overview and Runs are tabs; the card on the right holds the quiet facts."
       >
-        <div className="grid min-w-0 gap-4 @4xl/kit-section:grid-cols-2">
-          <ScheduleSheetDemo scheduleId="sched-aws-cost" questions={questions} />
-          <ScheduleSheetDemo
-            key={`maria-${adminsManage}`}
-            scheduleId="sched-access-review"
+        <PreviewControls
+          state={
+            <PreviewToggle
+              label="Schedule"
+              value={detail}
+              options={[
+                { value: "failed", label: "Last run failed" },
+                { value: "others", label: "Maria Chen's" },
+              ]}
+              onChange={setDetail}
+            />
+          }
+        />
+        <PagePreview label="Schedule page preview" height={height}>
+          <SchedulesApp
+            key={`${detail}-${adminsManage}`}
             questions={questions}
+            initialDetailId={detail === "failed" ? "sched-aws-cost" : "sched-access-review"}
           />
-        </div>
+        </PagePreview>
       </KitBlock>
     </KitSection>
   );

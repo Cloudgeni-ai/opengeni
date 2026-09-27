@@ -1,6 +1,7 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useState } from "react";
 import {
   BotIcon,
+  CalendarIcon,
   CopyIcon,
   LockIcon,
   MailIcon,
@@ -18,15 +19,13 @@ import { toast } from "sonner";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
-  DetailBody,
-  DetailFact,
-  DetailFacts,
-  DetailFooter,
-  DetailHeader,
-  DetailInline,
+  DetailAside,
+  DetailAsideItem,
   DetailPage,
-  DetailSection,
-} from "@/components/ui/detail-sheet";
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -74,7 +73,7 @@ import { personStatusKey, useOrg, type OrgQuestions } from "./org-store";
 
 /* ----------------------------------------------------------------------------
    People: one list for everyone in the organization, invitations included,
-   and the person sheet where role and workspace access change.
+   and the person's own page where role and workspace access change.
    -------------------------------------------------------------------------- */
 
 export function PersonAvatar({
@@ -224,7 +223,14 @@ function RoleCell({ person }: { person: OrgPerson }) {
   );
 }
 
-export function PersonMenuItems({ person }: { person: OrgPerson }) {
+export function PersonMenuItems({
+  person,
+  onPage = false,
+}: {
+  person: OrgPerson;
+  /** On the person's own page: leave out "Change role and access". */
+  onPage?: boolean;
+}) {
   const store = useOrg();
   const key = personStatusKey(person, store.questions);
   if (person.kind === "service") {
@@ -271,11 +277,15 @@ export function PersonMenuItems({ person }: { person: OrgPerson }) {
   }
   return (
     <>
-      <DropdownMenuItem onSelect={() => store.openPerson(person.id)}>
-        <UserRoundIcon />
-        Change role and access
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
+      {onPage ? null : (
+        <>
+          <DropdownMenuItem onSelect={() => store.openPerson(person.id)}>
+            <UserRoundIcon />
+            Change role and access
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+        </>
+      )}
       <DropdownMenuItem onSelect={() => store.requestSuspend(person)}>
         <PauseIcon />
         {store.vocab.suspendMenu}
@@ -302,13 +312,7 @@ const COLUMNS: RowListColumn[] = [
 
 const ROLE_RANK = { owner: 0, admin: 1, member: 2 } as const;
 
-export function PeopleView({
-  state,
-  renderInlineDetail,
-}: {
-  state: "filled" | "just-you" | "loading";
-  renderInlineDetail: (person: OrgPerson) => ReactNode;
-}) {
+export function PeopleView({ state }: { state: "filled" | "just-you" | "loading" }) {
   const store = useOrg();
   const { picks, vocab, questions } = store;
   const [query, setQuery] = useState("");
@@ -326,7 +330,6 @@ export function PeopleView({
     invited: humans.filter(isInvite).length,
     suspended: humans.filter((person) => person.status === "suspended").length,
   };
-  const inline = picks.detail === "inline" && picks.list !== "table";
 
   const statusFilter: PeopleFilter =
     picks.tabs === "filter-menu"
@@ -380,11 +383,9 @@ export function PeopleView({
             : { role: <RoleCell person={person} />, workspaces: <WorkspaceChips person={person} /> }
         }
         selected={open}
-        onOpen={() => store.openPerson(open && inline ? null : person.id)}
-        expanded={inline ? open : undefined}
-        panel={inline && open ? renderInlineDetail(person) : undefined}
+        onOpen={() => store.openPerson(person.id)}
         menu={person.isYou ? undefined : <PersonMenuItems person={person} />}
-        indicator={person.isYou && !inline ? "open" : undefined}
+        indicator={person.isYou ? "open" : undefined}
       />
     );
   };
@@ -610,7 +611,7 @@ function WorkspaceAccessRows({ person }: { person: OrgPerson }) {
   );
 }
 
-function PersonDetailParts({ person, onClose }: { person: OrgPerson; onClose: () => void }) {
+function PersonDetailPage({ person, onClose }: { person: OrgPerson; onClose: () => void }) {
   const store = useOrg();
   const { picks, vocab, questions } = store;
   const roleHeadingId = useId();
@@ -618,6 +619,7 @@ function PersonDetailParts({ person, onClose }: { person: OrgPerson; onClose: ()
   const invite = key === "invited" || key === "invite_failed";
   const suspended = key === "suspended" || key === "paused";
   const roles = organizationRoleOptions(vocab.adminLabel);
+  const roleLabel = roles.find((role) => role.id === person.organizationRole)?.label;
   const roleLocked = person.isOnlyOwner
     ? `${person.isYou ? "You're" : `${firstName(person)} is`} the only owner. Make someone else an owner first.`
     : person.isYou
@@ -627,22 +629,100 @@ function PersonDetailParts({ person, onClose }: { person: OrgPerson; onClose: ()
         : store.local
           ? "Single-user mode has one owner: you."
           : undefined;
-  const subtitle = [
-    person.kind === "service" ? "Service account" : person.email,
-    person.joinedLabel,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+
+  const primary = suspended ? (
+    <Button
+      type="button"
+      onClick={() => store.restoreAccess(person)}
+      className="pointer-coarse:h-11"
+    >
+      {vocab.restoreLabel}
+    </Button>
+  ) : invite ? (
+    <Button
+      type="button"
+      variant="outline"
+      onClick={() => store.resendInvite(person)}
+      className="pointer-coarse:h-11"
+    >
+      <MailIcon aria-hidden="true" />
+      Resend invitation
+    </Button>
+  ) : null;
+
+  const menu = person.isYou ? null : (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label={`More actions for ${person.name}`}
+          className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+        >
+          <MoreHorizontalIcon />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-52">
+        <PersonMenuItems person={person} onPage />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  const aside = (
+    <DetailAside label={`About ${person.name}`}>
+      {person.joinedLabel ? (
+        <DetailAsideItem label="Joined" icon={<CalendarIcon />}>
+          {person.joinedLabel}
+        </DetailAsideItem>
+      ) : null}
+      {person.kind === "service" ? (
+        <>
+          <DetailAsideItem label="Used by" icon={<BotIcon />}>
+            CI pipeline API key
+          </DetailAsideItem>
+          <DetailAsideItem label="Managed in" icon={<SlidersHorizontalIcon />}>
+            Developer
+          </DetailAsideItem>
+        </>
+      ) : (
+        <DetailAsideItem label="Personal workspace" icon={<LockIcon />}>
+          Private to {person.isYou ? "you" : firstName(person)}. Nobody else can open it, including
+          owners and admins.
+        </DetailAsideItem>
+      )}
+    </DetailAside>
+  );
 
   return (
-    <>
-      <DetailHeader
+    <DetailPage
+      back={{ label: vocab.peopleTitle, onClick: onClose }}
+      className="px-0 pt-0 max-sm:px-0"
+    >
+      <DetailPageHeader
         leading={<PersonAvatar person={person} size="lg" />}
-        title={person.isYou ? `${person.name} (you)` : person.name}
-        subtitle={subtitle}
-        status={<PersonStatus person={person} variant={picks.status.header} />}
+        title={person.name}
+        chips={
+          <>
+            {person.isYou ? <MetaChip variant="outline">You</MetaChip> : null}
+            <PersonStatus person={person} variant={picks.status.header} />
+          </>
+        }
+        meta={[
+          person.kind === "service" ? "Service account" : person.email,
+          roleLabel,
+          person.joinedLabel,
+        ]}
+        actions={
+          primary || menu ? (
+            <>
+              {primary}
+              {menu}
+            </>
+          ) : undefined
+        }
       />
-      <DetailBody>
+      <DetailPageBody aside={aside}>
         {key === "invite_failed" ? (
           <DetailSection>
             <Notice
@@ -699,106 +779,12 @@ function PersonDetailParts({ person, onClose }: { person: OrgPerson; onClose: ()
         >
           <WorkspaceAccessRows person={person} />
         </DetailSection>
-        {person.kind === "person" ? (
-          <DetailSection title="Personal workspace">
-            <p className="flex min-w-0 items-start gap-2 text-sm leading-5 text-fg-muted">
-              <LockIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
-              <span>
-                Private to {person.isYou ? "you" : firstName(person)}. Nobody else can open it,
-                including owners and admins.
-              </span>
-            </p>
-          </DetailSection>
-        ) : (
-          <DetailSection title="Details">
-            <DetailFacts>
-              <DetailFact label="Used by">CI pipeline API key</DetailFact>
-              <DetailFact label="Managed in">Developer</DetailFact>
-            </DetailFacts>
-          </DetailSection>
-        )}
-      </DetailBody>
-      <DetailFooter
-        start={
-          person.isYou || person.kind === "service" ? null : invite ? (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => store.revokeInvite(person)}
-              className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
-            >
-              Revoke invitation
-            </Button>
-          ) : (
-            // Wraps onto two lines in a phone-width sheet instead of running under Done.
-            <div className="-ml-3 flex min-w-0 flex-wrap items-center">
-              {suspended ? null : (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => store.requestSuspend(person)}
-                  className="text-fg-muted pointer-coarse:h-11"
-                >
-                  {vocab.suspendMenu}
-                </Button>
-              )}
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => store.requestRemove(person)}
-                className="text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
-              >
-                Remove from organization…
-              </Button>
-            </div>
-          )
-        }
-      >
-        {suspended ? (
-          <Button
-            type="button"
-            onClick={() => store.restoreAccess(person)}
-            className="pointer-coarse:h-11"
-          >
-            {vocab.restoreLabel}
-          </Button>
-        ) : invite ? (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => store.resendInvite(person)}
-            className="pointer-coarse:h-11"
-          >
-            Resend invitation
-          </Button>
-        ) : null}
-        {picks.detail === "sheet" ? (
-          <Button type="button" variant="outline" onClick={onClose} className="pointer-coarse:h-11">
-            Done
-          </Button>
-        ) : null}
-      </DetailFooter>
-    </>
+      </DetailPageBody>
+    </DetailPage>
   );
 }
 
-export function PersonDetail({
-  person,
-  presentation,
-  onClose,
-}: {
-  person: OrgPerson;
-  presentation: "sheet" | "page" | "inline";
-  onClose: () => void;
-}) {
-  const parts = <PersonDetailParts key={person.id} person={person} onClose={onClose} />;
-  if (presentation === "page") {
-    return (
-      <DetailPage back={{ label: "People", onClick: onClose }} className="px-0 pt-0 max-sm:px-0">
-        {parts}
-      </DetailPage>
-    );
-  }
-  if (presentation === "inline") return <DetailInline className="mt-2 mb-3">{parts}</DetailInline>;
-  return parts;
+/** The person's own page ("← People"). Remounts per person. */
+export function PersonDetail({ person, onClose }: { person: OrgPerson; onClose: () => void }) {
+  return <PersonDetailPage key={person.id} person={person} onClose={onClose} />;
 }

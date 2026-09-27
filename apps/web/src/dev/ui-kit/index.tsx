@@ -34,7 +34,13 @@ import { BrandMark } from "@/components/brand-mark";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { KitErrorBoundary, KitNote, KitPaneContext, KitSectionHeader, type KitPane } from "./kit";
-import { formatPicksForExport, pickProgress, usePickState, type PickState } from "./picks";
+import {
+  formatPicksForExport,
+  pickProgress,
+  storedPick,
+  usePickState,
+  type PickState,
+} from "./picks";
 import {
   FORK_SECTIONS,
   SECTIONS,
@@ -212,7 +218,7 @@ function SidebarContent({
             <p className="px-3 pb-1 text-xs font-medium text-fg-subtle">{group}</p>
             <ul className="flex flex-col gap-px">
               {sectionsInGroup(group).map((section) => {
-                const pick = state.picks[section.key];
+                const pick = storedPick(state, section.key);
                 return (
                   <li key={section.key}>
                     <NavLink
@@ -609,7 +615,7 @@ function CopyPicksButton() {
 function Overview({ goTo }: { goTo: (section: SectionKey | null) => void }) {
   const state = usePickState();
   const progress = pickProgress(state);
-  const nextSection = FORK_SECTIONS.find((section) => !state.picks[section.key]);
+  const nextSection = FORK_SECTIONS.find((section) => !storedPick(state, section.key));
   return (
     <>
       <header className="border-b border-border pb-4">
@@ -669,7 +675,7 @@ function OverviewGroup({
   const headingId = useId();
   const sections = sectionsInGroup(group);
   const forks = sections.filter((section) => section.recommended);
-  const pickedCount = forks.filter((section) => state.picks[section.key]).length;
+  const pickedCount = forks.filter((section) => storedPick(state, section.key)).length;
   return (
     <section aria-labelledby={headingId} className="mt-8">
       <div className="flex items-baseline justify-between gap-4">
@@ -716,7 +722,7 @@ function OverviewGroup({
 }
 
 function OverviewStatus({ section, state }: { section: SectionMeta; state: PickState }) {
-  const pick = state.picks[section.key];
+  const pick = storedPick(state, section.key);
   if (pick) {
     const name = alternativeMeta(section.key, pick)?.name;
     return (
@@ -732,7 +738,7 @@ function OverviewStatus({ section, state }: { section: SectionMeta; state: PickS
   if (section.recommended) {
     return (
       <span className="hidden shrink-0 text-xs text-fg-subtle sm:inline">
-        Recommended {alternativeLetter(section.recommended)}
+        Decided {alternativeLetter(section.recommended)}
       </span>
     );
   }

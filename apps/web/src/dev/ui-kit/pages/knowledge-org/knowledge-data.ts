@@ -143,27 +143,27 @@ export function initialEntries(): LibraryEntry[] {
   const base: LibraryEntry[] = knowledgeEntries.map((fixture) => {
     const entry = { ...fixture, ...ENTRY_OVERRIDES[fixture.id] };
     return {
-    ...entry,
-    status: "published" as const,
-    revisions:
-      entry.id === residency.id
-        ? [
-            {
-              id: `${entry.id}-r2`,
-              author: "Bendik Hansen",
-              createdAt: entry.updatedAt,
-              summary: "Added the rule for analytics exports",
-              content: entry.content,
-            },
-            {
-              id: `${entry.id}-r1`,
-              author: "Maria Chen",
-              createdAt: "2026-08-12T08:30:00Z",
-              summary: "Created the entry",
-              content: residencyBefore,
-            },
-          ]
-        : [firstRevision(entry)],
+      ...entry,
+      status: "published" as const,
+      revisions:
+        entry.id === residency.id
+          ? [
+              {
+                id: `${entry.id}-r2`,
+                author: "Bendik Hansen",
+                createdAt: entry.updatedAt,
+                summary: "Added the rule for analytics exports",
+                content: entry.content,
+              },
+              {
+                id: `${entry.id}-r1`,
+                author: "Maria Chen",
+                createdAt: "2026-08-12T08:30:00Z",
+                summary: "Created the entry",
+                content: residencyBefore,
+              },
+            ]
+          : [firstRevision(entry)],
     };
   });
   const extra = extraEntries.map((entry) => ({

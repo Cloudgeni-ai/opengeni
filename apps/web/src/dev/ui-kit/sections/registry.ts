@@ -56,6 +56,8 @@ export interface SectionMeta {
   recommended?: AlternativeId;
   /** Why the recommended alternative is the default. */
   whyRecommended?: string;
+  /** Set when the pick changed after review: what was decided, when and why. */
+  decision?: string;
   alternatives?: readonly AlternativeMeta[];
   load: () => Promise<{ default: ComponentType }>;
 }
@@ -175,7 +177,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Frame",
     title: "Section",
     purpose: "Group related rows on a page without boxing them.",
-    usedOn: "Settings pages, detail sheets, organization pages",
+    usedOn: "Settings pages, detail pages, organization pages",
     recommended: "a",
     whyRecommended: "Matches Capabilities and can never produce a card inside a card.",
     alternatives: [
@@ -264,25 +266,28 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "detail-sheet",
     group: "Lists",
-    title: "Detail sheet",
+    title: "Detail page",
     purpose:
-      "The single place to manage one thing: anything with more than one control or its own list.",
+      "The single place to manage one thing: its own page in the content area, with a back link to its list.",
     usedOn:
-      "Model accounts, People, API keys, Schedules, Variable sets, Environments, Knowledge entries",
-    recommended: "a",
+      "Model accounts, People, API keys, Schedules, Variable sets, Environments, Knowledge entries, Workspaces",
+    recommended: "b",
     whyRecommended:
-      "Sheets for small objects, pages for objects with their own tables. Both remove the nested disclosures.",
+      "No side sheets anywhere. Anything you open is its own page with a back link, like Claude and Codex settings: deep-linkable, room for tabs and tables, and one pattern for every object.",
+    decision:
+      "Decided 27 Sep 2026: B everywhere. Changed from A (right sheet) - Bendik wants no right-side panels at all. Centered modals stay only for short confirmations and one-field prompts.",
     alternatives: [
       {
         id: "a",
         name: "Right sheet",
         rationale:
-          "520px with sections and a sticky footer, full screen on phones. Keeps the list in view. For accounts, people, keys and schedules.",
+          "520px with sections and a sticky footer, full screen on phones. Keeps the list in view. Retired: no side sheets.",
       },
       {
         id: "b",
         name: "Detail page",
-        rationale: "Deep-linkable and scales to 100 rows. For variable sets and environments.",
+        rationale:
+          "Back link, 40px tile, title with chips, a meta line, underline tabs, a main column and a quiet aside card. Deep-linkable and scales to 100 rows.",
       },
       {
         id: "c",
@@ -327,7 +332,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Selection",
     title: "Setting row",
     purpose: "One setting, one row, exactly one control, aligned with its neighbours.",
-    usedOn: "General, Model account sheet, Organization security, Integrations",
+    usedOn: "General, Model account page, Organization security, Integrations",
     recommended: "a",
     whyRecommended: "Every control lines up, and labels stop truncating on phones.",
     alternatives: [
@@ -487,7 +492,7 @@ export const SECTIONS: readonly SectionMeta[] = [
       {
         id: "c",
         name: "No disclosure",
-        rationale: "Secondary options always live in the detail sheet instead.",
+        rationale: "Secondary options always live on the detail page instead.",
       },
     ],
     load: () => import("./disclosure"),
@@ -499,7 +504,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Status",
     title: "Status badge",
     purpose: "One status vocabulary, and one quiet chip for metadata.",
-    usedOn: "Every list and sheet",
+    usedOn: "Every list and detail page",
     recommended: "b",
     whyRecommended: "A in rows, B in headers. The tone table is the real decision.",
     alternatives: [
@@ -512,7 +517,7 @@ export const SECTIONS: readonly SectionMeta[] = [
         id: "b",
         name: "Bordered pill",
         rationale:
-          "A 22px pill with a border and a 6px dot. The Capabilities chip; for headers and sheets.",
+          "A 22px pill with a border and a 6px dot. The Capabilities chip; for page headers.",
       },
       {
         id: "c",
@@ -527,9 +532,9 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Status",
     title: "Usage meter",
     purpose: "Show remaining quota at a glance and in detail.",
-    usedOn: "Model account rows and sheets, machine rows",
+    usedOn: "Model account rows and pages, machine rows",
     recommended: "a",
-    whyRecommended: "A bar in the sheet, text in the row.",
+    whyRecommended: "A bar on the account page, text in the row.",
     alternatives: [
       {
         id: "a",
@@ -563,22 +568,27 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "form-dialog",
     group: "Forms",
-    title: "Form dialog",
-    purpose: "Create and edit in one clean vertical column.",
+    title: "Form page",
+    purpose: "Create and edit in one clean vertical column, on its own page.",
     usedOn:
-      "New variable set, Add variable, Create API key, Invite people, New schedule, Connect account",
-    recommended: "a",
-    whyRecommended: "Always a title, a Cancel and an obvious primary, and the list stays put.",
+      "New variable set, Add variable, Create API key, Invite people, New schedule, Edit schedule, Connect account",
+    recommended: "b",
+    whyRecommended:
+      "Every create and edit flow is a full page (/schedules/new) with a back link and a sticky Cancel + primary footer. Nothing slides in from the side.",
+    decision:
+      "Decided 27 Sep 2026: B everywhere. Changed from A (dialog or sheet by size). A small centered dialog stays only for one-field prompts such as Rename or Replace value.",
     alternatives: [
       {
         id: "a",
         name: "Dialog or sheet by size",
-        rationale: "A dialog for 4 fields or fewer, a sheet for longer forms.",
+        rationale:
+          "A dialog for 4 fields or fewer, a sheet for longer forms. Retired: no side sheets, and only one-field prompts stay in a dialog.",
       },
       {
         id: "b",
-        name: "Full page for long creates",
-        rationale: "New schedule as its own page.",
+        name: "Full page",
+        rationale:
+          "Its own page with a back link, a 640px column and a sticky footer. For every create and edit flow.",
       },
       {
         id: "c",
@@ -681,7 +691,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "People",
     title: "Access list",
     purpose: "The single membership editor, used everywhere access is edited.",
-    usedOn: "Workspace Access, person sheet, workspace sheet, invite dialog",
+    usedOn: "Workspace Access, person page, workspace page, invite page",
     recommended: "a",
     whyRecommended: "The same rows, verbs and role definitions in all four places.",
     alternatives: [
@@ -694,7 +704,7 @@ export const SECTIONS: readonly SectionMeta[] = [
       {
         id: "b",
         name: "Role as text",
-        rationale: "Quieter rows; change the role inside the person sheet.",
+        rationale: "Quieter rows; change the role on the person's page.",
       },
       {
         id: "c",
@@ -712,7 +722,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     title: "Logo tile",
     purpose:
       "One tile for logos, monograms and icons, at 40, 32 and 24px, the same in both themes.",
-    usedOn: "Capabilities, Model accounts, Variable sets, API keys, detail sheet headers",
+    usedOn: "Capabilities, Model accounts, Variable sets, API keys, detail page headers",
     load: () => import("./logo-tile"),
   },
   {
@@ -720,7 +730,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Foundations",
     title: "Relative time",
     purpose: "'3 days ago' with the exact local time on hover, and one absolute date format.",
-    usedOn: "Every list, sheet and run history",
+    usedOn: "Every list, detail page and run history",
     load: () => import("./relative-time"),
   },
   {
@@ -769,7 +779,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     key: "page-models",
     group: "Pages",
     title: "Models",
-    purpose: "How new work is paid for and which models it may use, with the account sheet.",
+    purpose: "How new work is paid for and which models it may use, with the account page.",
     usedOn: "Workspace settings, Organization settings",
     load: () => import("./page-models"),
   },
@@ -793,7 +803,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     key: "page-schedules",
     group: "Pages",
     title: "Schedules",
-    purpose: "Recurring agent work in this workspace, with the schedule sheet.",
+    purpose: "Recurring agent work in this workspace, with the schedule page.",
     usedOn: "Main rail",
     load: () => import("./page-schedules"),
   },
@@ -817,7 +827,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     key: "page-org-people",
     group: "Pages",
     title: "Organization people",
-    purpose: "Everyone in Acme Robotics, with the person sheet.",
+    purpose: "Everyone in Acme Robotics, with the person page.",
     usedOn: "Organization settings",
     load: () => import("./page-org-people"),
   },

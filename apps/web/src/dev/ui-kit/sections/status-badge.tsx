@@ -172,7 +172,7 @@ const ROWS: DemoRow[] = [
   },
 ];
 
-function SheetHeader({ variant, chip }: { variant: StatusBadgeVariant; chip: MetaChipVariant }) {
+function PageHeaderDemo({ variant, chip }: { variant: StatusBadgeVariant; chip: MetaChipVariant }) {
   return (
     <div className="flex min-w-0 items-start gap-3 rounded-[14px] border border-border bg-surface p-4">
       <span
@@ -235,8 +235,8 @@ function VersionDemo({ id }: { id: AlternativeId }) {
   return (
     <div className="flex min-w-0 flex-col gap-5">
       <div>
-        <Label>In a sheet header</Label>
-        <SheetHeader variant={variant} chip={CHIP_BY_PICK[id]} />
+        <Label>In a detail page header</Label>
+        <PageHeaderDemo variant={variant} chip={CHIP_BY_PICK[id]} />
       </div>
       <div>
         <Label>In rows</Label>
@@ -421,7 +421,7 @@ export default function StatusBadgeSection() {
           padding={false}
         >
           <div className="p-3">
-            <SheetHeader variant="outline" chip="outline" />
+            <PageHeaderDemo variant="outline" chip="outline" />
           </div>
         </StateCell>
       </StatesGrid>
@@ -436,7 +436,7 @@ export default function StatusBadgeSection() {
       <UsageNotes
         use={[
           "The health or lifecycle of one thing: Connected, Running, Failed, Paused.",
-          "A in rows next to the meta line, B in sheet and dialog headers, C only inside alerts.",
+          "A in rows next to the meta line, B in detail page and dialog headers, C only inside alerts.",
           "A reason whenever the status needs one: Unavailable, Off, Failed. Say why and who can fix it.",
           "One label per state everywhere. Add new statuses to the tone table, not at the call site.",
         ]}

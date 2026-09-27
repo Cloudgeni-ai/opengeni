@@ -13,8 +13,6 @@ import type { AccessListVariant } from "@/components/ui/access-list";
 import { usePick } from "../../picks";
 
 export type SettingsNavLayout = "column" | "rail" | "tabs";
-export type DetailLayout = "sheet" | "page" | "inline";
-export type FormLayout = "dialog" | "page" | "inline";
 export type DestructiveLayout = "consequences" | "type" | "undo";
 
 export interface SettingsPicks {
@@ -28,14 +26,12 @@ export interface SettingsPicks {
   segmented: SegmentedControlVariant;
   select: SelectMenuVariant;
   list: RowListVariant;
-  detail: DetailLayout;
   empty: EmptyStateVariant;
   emptyTemplates: boolean;
   /** Status look in headers and sheets. */
   statusHeader: StatusBadgeVariant;
   /** Status look inside rows. */
   statusRow: StatusBadgeVariant;
-  form: FormLayout;
   destructive: DestructiveLayout;
   access: AccessListVariant;
   disclosure: DisclosureVariant;
@@ -44,7 +40,8 @@ export interface SettingsPicks {
 /**
  * Every component pick the settings pages follow, mapped to the real
  * primitive's variant names. The pages render with whatever Bendik picked (or
- * the recommended default), so decisions are judged in context.
+ * the decided default), so decisions are judged in context. Detail views and
+ * create/edit forms are always pages (decided), so they have no pick here.
  */
 export function useSettingsPicks(): SettingsPicks {
   const nav = usePick("navigation");
@@ -55,10 +52,8 @@ export function useSettingsPicks(): SettingsPicks {
   const segmented = usePick("segmented-control");
   const select = usePick("select");
   const list = usePick("list-row");
-  const detail = usePick("detail-sheet");
   const empty = usePick("empty-state");
   const status = usePick("status-badge");
-  const form = usePick("form-dialog");
   const destructive = usePick("destructive-confirm");
   const access = usePick("access-list");
   const disclosure = usePick("disclosure");
@@ -73,12 +68,10 @@ export function useSettingsPicks(): SettingsPicks {
     segmented: segmented === "b" ? "outlined" : segmented === "c" ? "underline" : "filled",
     select: select === "a" ? "native" : select === "c" ? "combobox" : "menu",
     list: list === "a" ? "catalog" : list === "c" ? "table" : "resource",
-    detail: detail === "b" ? "page" : detail === "c" ? "inline" : "sheet",
     empty: empty === "b" ? "inline" : "page",
     emptyTemplates: empty === "c",
     statusHeader: status === "a" ? "dot" : status === "c" ? "tinted" : "outline",
     statusRow: status === "c" ? "tinted" : "dot",
-    form: form === "b" ? "page" : form === "c" ? "inline" : "dialog",
     destructive: destructive === "b" ? "type" : destructive === "c" ? "undo" : "consequences",
     access: access === "b" ? "text" : access === "c" ? "matrix" : "inline",
     disclosure: disclosure === "b" ? "inline" : disclosure === "c" ? "sheet" : "row",

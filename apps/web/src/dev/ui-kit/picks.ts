@@ -116,12 +116,25 @@ export function usePickState(): PickState {
  */
 export function usePick(key: SectionKey): AlternativeId {
   const state = usePickState();
-  return state.picks[key] ?? getSection(key).recommended ?? "a";
+  return storedPick(state, key) ?? getSection(key).recommended ?? "a";
 }
 
 /** Bendik's explicit pick for `key`, or null when he hasn't picked. */
 export function useExplicitPick(key: SectionKey): AlternativeId | null {
-  return usePickState().picks[key] ?? null;
+  return storedPick(usePickState(), key);
+}
+
+/**
+ * The stored pick, except where a later decision overrides it: a section with
+ * a `decision` only honours a stored pick that matches the decided version,
+ * so an older click on a retired version (for example the right sheet) no
+ * longer steers the page previews.
+ */
+export function storedPick(state: PickState, key: SectionKey): AlternativeId | null {
+  const pick = state.picks[key] ?? null;
+  const section = getSection(key);
+  if (pick && section.decision && section.recommended && pick !== section.recommended) return null;
+  return pick;
 }
 
 /** Pick an alternative. Pass null to clear the pick. */
@@ -152,7 +165,7 @@ export interface PickProgress {
 
 export function pickProgress(state: PickState): PickProgress {
   return {
-    picked: FORK_SECTIONS.filter((section) => state.picks[section.key]).length,
+    picked: FORK_SECTIONS.filter((section) => storedPick(state, section.key)).length,
     total: FORK_SECTIONS.length,
   };
 }
@@ -176,10 +189,10 @@ export function formatPicksForExport(state: PickState): string {
     const groupLines: string[] = [];
     for (const section of sectionsInGroup(group)) {
       const note = state.notes[section.key]?.trim();
-      const pick = state.picks[section.key];
+      const pick = storedPick(state, section.key);
       if (section.recommended) {
         if (pick) {
-          const recommended = pick === section.recommended ? " (recommended)" : "";
+          const recommended = pick === section.recommended ? " (decided)" : "";
           groupLines.push(
             `- ${section.title}: ${describeAlternative(section.key, pick)}${recommended}`,
           );
@@ -187,7 +200,7 @@ export function formatPicksForExport(state: PickState): string {
           unpicked.push(section.title);
           if (!note) continue;
           groupLines.push(
-            `- ${section.title}: not picked (recommended ${describeAlternative(section.key, section.recommended)})`,
+            `- ${section.title}: decided ${describeAlternative(section.key, section.recommended)}`,
           );
         }
       } else if (note) {
@@ -207,7 +220,7 @@ export function formatPicksForExport(state: PickState): string {
   }
 
   if (unpicked.length > 0) {
-    lines.push("", `Not picked yet (the recommended version is used): ${unpicked.join(", ")}`);
+    lines.push("", `Using the decided version: ${unpicked.join(", ")}`);
   }
   if (progress.picked === 0 && Object.keys(state.notes).length === 0) {
     lines.push("", "No picks or notes yet.");

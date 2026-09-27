@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BoxIcon, ClipboardPasteIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
+import { ClipboardPasteIcon, KeyRoundIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,6 @@ import {
   useField,
 } from "@/components/ui/field";
 import { FormDialog, FormFrame, FormInline, FormPage } from "@/components/ui/form-dialog";
-import { FormSheet } from "@/components/ui/form-sheet";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { PageHeader } from "@/components/ui/page-header";
@@ -175,26 +174,29 @@ function NewSetFields({
   );
 }
 
-/** A static, interactive dialog panel for New variable set. */
+/** A live New variable set form: a page (the decision), or the retired dialog and inline shapes. */
 function NewSetPanel({
   initial = EMPTY_SET,
   initialErrors,
-  variant = "dialog",
+  variant = "page",
   pending,
   error,
   submitDisabled,
   disabledReason,
   title = "New variable set",
+  onDone,
   className,
 }: {
   initial?: NewSetValues;
   initialErrors?: { name?: string };
-  variant?: "dialog" | "sheet" | "inline";
+  variant?: "page" | "dialog" | "inline";
   pending?: boolean;
   error?: ReactNode;
   submitDisabled?: boolean;
   disabledReason?: ReactNode;
   title?: ReactNode;
+  /** Called on Cancel, the back link and after a successful create. */
+  onDone?: (created?: string) => void;
   className?: string;
 }) {
   const [values, setValues] = useState(initial);
@@ -213,12 +215,20 @@ function NewSetPanel({
       setErrors({ name });
       if (name) return false;
       await wait(900);
+      if (values.name.trim().toLowerCase() === "offline") {
+        throw new Error("Couldn't create the variable set. Check your connection and try again.");
+      }
       return true;
     },
-    onSubmitted: () => toast.success(`Created ${values.name.trim()}`),
+    onSubmitted: () => {
+      toast.success(`Created ${values.name.trim()}`);
+      onDone?.(values.name.trim());
+      setValues(initial);
+    },
     onCancel: () => {
       setValues(initial);
       setErrors({});
+      onDone?.();
     },
     children: (
       <NewSetFields
@@ -232,23 +242,33 @@ function NewSetPanel({
     ),
   };
   if (variant === "inline") return <FormInline {...props} className={className} />;
-  return <FormFrame variant={variant} {...props} className={className} />;
+  if (variant === "page") {
+    return (
+      <FormPage
+        {...props}
+        back={{ label: "Variable sets", onClick: () => onDone?.() }}
+        className={cn("min-h-full", className)}
+      />
+    );
+  }
+  return <FormFrame variant="dialog" {...props} className={className} />;
 }
 
-/** The real modal, for "Open" buttons. */
-function NewSetDialog({
+/** The one kind of form that stays a centered dialog: a one-field prompt. */
+function RenameDialog({
   open,
   onOpenChange,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const [values, setValues] = useState(EMPTY_SET);
-  const [errors, setErrors] = useState<{ name?: string }>({});
+  const current = variableSets[1]!.name;
+  const [name, setName] = useState(current);
+  const [error, setError] = useState<string>();
   const change = (next: boolean) => {
     if (!next) {
-      setValues(EMPTY_SET);
-      setErrors({});
+      setName(current);
+      setError(undefined);
     }
     onOpenChange(next);
   };
@@ -256,33 +276,32 @@ function NewSetDialog({
     <FormDialog
       open={open}
       onOpenChange={change}
-      title="New variable set"
-      description="Environment variables and secrets your agents get in their sandbox."
-      submitLabel="Create variable set"
-      pendingLabel="Creating…"
+      size="sm"
+      title={`Rename ${current}`}
+      submitLabel="Rename"
+      pendingLabel="Renaming…"
       onSubmit={async () => {
-        const name = nameError(values.name);
-        setErrors({ name });
-        if (name) return false;
-        await wait(900);
-        if (values.name.trim().toLowerCase() === "offline") {
-          throw new Error("Couldn't create the variable set. Check your connection and try again.");
-        }
+        const problem = name.trim() === current ? undefined : nameError(name);
+        setError(problem);
+        if (problem) return false;
+        await wait(600);
         return true;
       }}
       onSubmitted={() => {
-        toast.success(`Created ${values.name.trim()}`);
+        toast.success(`Renamed to ${name.trim()}`);
         change(false);
       }}
     >
-      <NewSetFields
-        values={values}
-        onChange={(next) => {
-          setValues(next);
-          if (errors.name && next.name !== values.name) setErrors({});
-        }}
-        errors={errors}
-      />
+      <Field label="Name" error={error}>
+        <TextInput
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value);
+            setError(undefined);
+          }}
+          suppressAutofill
+        />
+      </Field>
     </FormDialog>
   );
 }
@@ -424,54 +443,37 @@ export function ApiKeySecretStep() {
   );
 }
 
-function CreateApiKeyDialog({
-  open,
-  onOpenChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
+/** Create API key on its own page; the one-time token is step 2 of the same page. */
+function CreateApiKeyPage({ onDone }: { onDone: () => void }) {
   const [step, setStep] = useState<"form" | "secret">("form");
   const [name, setName] = useState("");
   const [access, setAccess] = useState<ApiKeyAccess>("run_sessions");
   const [expiry, setExpiry] = useState(defaultApiKeyExpiry);
   const [error, setError] = useState<string>();
-  const change = (next: boolean) => {
-    if (!next) {
-      setStep("form");
-      setName("");
-      setAccess("run_sessions");
-      setExpiry(defaultApiKeyExpiry);
-      setError(undefined);
-    }
-    onOpenChange(next);
-  };
-  // One dialog for both steps, so the overlay stays put between them. On the
-  // one-time step focus moves to Copy, so a second Enter can't close it unseen.
+  // On the one-time step focus moves to Copy, so a second Enter can't leave it unseen.
   const secret = step === "secret";
   const secretRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (secret) secretRef.current?.querySelector<HTMLElement>("button")?.focus();
   }, [secret]);
   return (
-    <FormDialog
-      open={open}
-      onOpenChange={change}
+    <FormPage
+      className="min-h-full"
+      back={secret ? undefined : { label: "API keys", onClick: onDone }}
       {...(secret
         ? {
             title: "Copy your new API key",
             description: `${name.trim() || newApiKeySecret.name} is ready.`,
             submitLabel: "I've saved it",
             cancelLabel: null,
-            showClose: false,
-            dismissible: false,
-            onSubmitted: () => change(false),
+            onSubmitted: onDone,
           }
         : {
             title: "Create API key",
             description: `For scripts and CI that work in ${currentWorkspace.name}.`,
             submitLabel: "Create API key",
             pendingLabel: "Creating…",
+            onCancel: onDone,
             onSubmit: async () => {
               if (!name.trim()) {
                 setError("Name the key.");
@@ -501,7 +503,7 @@ function CreateApiKeyDialog({
           nameError={error}
         />
       )}
-    </FormDialog>
+    </FormPage>
   );
 }
 
@@ -625,10 +627,100 @@ function Scrim() {
    The section.
    -------------------------------------------------------------------------- */
 
+/** Scroll the frame to the top and focus the new view's heading when the view changes. */
+function useViewFocus(view: string) {
+  const ref = useRef<HTMLDivElement>(null);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    const root = ref.current;
+    if (!root) return;
+    root.scrollTop = 0;
+    root.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
+  }, [view]);
+  return ref;
+}
+
+/** B: the list's "New variable set" opens /variable-sets/new; Cancel and back return. */
+function NewSetFlow() {
+  const [view, setView] = useState<"list" | "new">("list");
+  const [created, setCreated] = useState<string | null>(null);
+  const ref = useViewFocus(view);
+  return (
+    <Backdrop height={640}>
+      <div ref={ref} className="h-full overflow-y-auto [&_h1]:outline-none">
+        {view === "new" ? (
+          <NewSetPanel
+            onDone={(name) => {
+              if (name) setCreated(name);
+              setView("list");
+            }}
+          />
+        ) : (
+          <div className="mx-auto max-w-[960px] px-4 pt-6 pb-8 sm:px-6">
+            <SetsHeader onNew={() => setView("new")} />
+            {created ? (
+              <p role="status" className="mt-4 text-sm text-fg-muted">
+                Created <span className="font-medium text-fg">{created}</span>. It opens on its own
+                page in the real app.
+              </p>
+            ) : null}
+            <div className="mt-6">
+              <SetsList />
+            </div>
+          </div>
+        )}
+      </div>
+    </Backdrop>
+  );
+}
+
+/** Create API key: list, then the create page, then the one-time token on the same page. */
+function ApiKeyFlow() {
+  const [view, setView] = useState<"list" | "new">("list");
+  const ref = useViewFocus(view);
+  return (
+    <Backdrop height={600}>
+      <div ref={ref} className="h-full overflow-y-auto [&_h1]:outline-none">
+        {view === "new" ? (
+          <CreateApiKeyPage onDone={() => setView("list")} />
+        ) : (
+          <div className="mx-auto max-w-[960px] px-4 pt-6 pb-8 sm:px-6">
+            <PageHeader
+              title="API keys"
+              description={`Keys for scripts and CI that work in ${currentWorkspace.name}.`}
+              actions={
+                <Button
+                  type="button"
+                  onClick={() => setView("new")}
+                  className="pointer-coarse:h-11"
+                >
+                  <PlusIcon aria-hidden="true" />
+                  Create API key
+                </Button>
+              }
+            />
+          </div>
+        )}
+      </div>
+    </Backdrop>
+  );
+}
+
+/** A page-sized cell for the states grid. */
+function PageCell({ height = 560, children }: { height?: number; children: ReactNode }) {
+  return (
+    <div className="w-full overflow-y-auto rounded-[13px] bg-bg" style={{ height }}>
+      {children}
+    </div>
+  );
+}
+
 export default function FormDialogSection() {
-  const [openSet, setOpenSet] = useState(false);
-  const [openKey, setOpenKey] = useState(false);
-  const [openSheet, setOpenSheet] = useState(false);
+  const [openRename, setOpenRename] = useState(false);
 
   return (
     <KitSection sectionKey="form-dialog">
@@ -644,8 +736,8 @@ export default function FormDialogSection() {
               </div>
             </Behind>
             <Scrim />
-            <div className="absolute inset-x-0 top-10 flex justify-center px-4">
-              <NewSetPanel className="w-full max-w-[560px]" />
+            <div className="absolute inset-x-0 top-10 flex justify-center px-4" inert>
+              <NewSetPanel variant="dialog" className="w-full max-w-[560px]" />
             </div>
           </Backdrop>
           <div className="border-t border-border">
@@ -665,45 +757,43 @@ export default function FormDialogSection() {
                 </div>
               </Behind>
               <Scrim />
-              <div className="absolute inset-y-0 right-0 flex w-full max-w-[560px] border-l border-border shadow-[var(--og-shadow-lg)]">
-                <FormFrame
-                  variant="sheet"
-                  {...ENVIRONMENT_FRAME}
-                  className="w-full"
-                  onCancel={() => undefined}
-                >
+              <div
+                className="absolute inset-y-0 right-0 flex w-full max-w-[560px] border-l border-border shadow-[var(--og-shadow-lg)]"
+                inert
+              >
+                <FormFrame variant="sheet" {...ENVIRONMENT_FRAME} className="w-full">
                   <EnvironmentFields />
                 </FormFrame>
               </div>
             </Backdrop>
           </div>
           <p className="border-t border-border px-4 py-3 text-xs leading-4.5 text-fg-muted">
-            Four fields or fewer open as a dialog. Longer forms, like this five-field environment,
-            open as a sheet. Both use the same header, column and footer.
+            Retired. A dialog for four fields or fewer and a right sheet for longer forms. Kept as a
+            picture for the history: nothing opens from the side any more.
           </p>
         </Alternative>
 
-        <Alternative
-          id="b"
-          padding={false}
-          rationale="Long creates, like a new sandbox environment or schedule, get their own page."
-        >
-          <Backdrop height={640}>
-            <div className="h-full overflow-y-auto">
-              <FormPage
-                {...ENVIRONMENT_FRAME}
-                back={{ label: "Sandbox environments", onClick: () => undefined }}
-                onSubmit={() => wait(900)}
-                onSubmitted={() => toast.success("Building Firmware build")}
-                className="min-h-full"
-              >
-                <EnvironmentFields />
-              </FormPage>
-            </div>
-          </Backdrop>
+        <Alternative id="b" padding={false}>
+          <NewSetFlow />
+          <div className="border-t border-border">
+            <Backdrop height={640}>
+              <div className="h-full overflow-y-auto">
+                <FormPage
+                  {...ENVIRONMENT_FRAME}
+                  back={{ label: "Sandbox environments", onClick: () => undefined }}
+                  onSubmit={() => wait(900)}
+                  onSubmitted={() => toast.success("Building Firmware build")}
+                  className="min-h-full"
+                >
+                  <EnvironmentFields />
+                </FormPage>
+              </div>
+            </Backdrop>
+          </div>
           <p className="border-t border-border px-4 py-3 text-xs leading-4.5 text-fg-muted">
-            The same five-field environment on its own page, with a footer that stays in view. Short
-            forms still open as a dialog. Scroll it: the list is gone until you go back.
+            Every create and edit flow is its own page, short or long: a back link, one 640px column
+            and a footer that stays in view. Try the top frame: New variable set, then Cancel or
+            Create.
           </p>
         </Alternative>
 
@@ -727,128 +817,134 @@ export default function FormDialogSection() {
       </Fork>
 
       <KitBlock
-        title="Open the real thing"
-        description="Enter submits. Cmd or Ctrl + Enter submits from a multi-line field. Escape and Cancel close; a click outside never throws away what you typed. Type “offline” as the name to see a server error."
+        title="Try the flows"
+        description="Enter submits. Cmd or Ctrl + Enter submits from a multi-line field. Cancel and the back link return to the list. Type “offline” as a variable set name to see a server error."
+      >
+        <div className="grid min-w-0 gap-4">
+          <div className="overflow-hidden rounded-[14px] border border-border">
+            <ApiKeyFlow />
+          </div>
+        </div>
+      </KitBlock>
+
+      <KitBlock
+        title="When a centered dialog is still right"
+        description="Only for one-field prompts such as Rename or Replace value, where a page would be absurd, and for destructive confirms (see Destructive confirm). Never a sheet."
       >
         <div className="flex flex-wrap gap-2">
-          <Button type="button" onClick={() => setOpenSet(true)} className="pointer-coarse:h-11">
-            <KeyRoundIcon aria-hidden="true" />
-            New variable set
-          </Button>
           <Button
             type="button"
             variant="outline"
-            onClick={() => setOpenKey(true)}
+            onClick={() => setOpenRename(true)}
             className="pointer-coarse:h-11"
           >
-            Create API key
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setOpenSheet(true)}
-            className="pointer-coarse:h-11"
-          >
-            <BoxIcon aria-hidden="true" />
-            New sandbox environment
+            <PencilIcon aria-hidden="true" />
+            Rename {variableSets[1]!.name}
           </Button>
         </div>
-        <NewSetDialog open={openSet} onOpenChange={setOpenSet} />
-        <CreateApiKeyDialog open={openKey} onOpenChange={setOpenKey} />
-        <FormSheet
-          open={openSheet}
-          onOpenChange={setOpenSheet}
-          {...ENVIRONMENT_FRAME}
-          onSubmit={async () => {
-            await wait(900);
-          }}
-          onSubmitted={() => {
-            toast.success("Building Firmware build");
-            setOpenSheet(false);
-          }}
-        >
-          <EnvironmentFields />
-        </FormSheet>
+        <RenameDialog open={openRename} onOpenChange={setOpenRename} />
       </KitBlock>
 
       <StatesGrid
         columns={2}
-        description="The recommended dialog. Every panel is live: type, submit, cancel."
+        description="The form page (B). Every panel is live: type, submit, cancel."
       >
-        <StateCell label="Empty" align="stretch">
-          <NewSetPanel className="w-full" />
+        <StateCell label="Empty" align="stretch" padding={false}>
+          <PageCell>
+            <NewSetPanel />
+          </PageCell>
         </StateCell>
-        <StateCell label="Filled" align="stretch">
-          <NewSetPanel className="w-full" initial={FILLED_SET} />
+        <StateCell label="Filled" align="stretch" padding={false}>
+          <PageCell>
+            <NewSetPanel initial={FILLED_SET} />
+          </PageCell>
         </StateCell>
         <StateCell
           label="Invalid"
           align="stretch"
+          padding={false}
           note="Errors sit under the field, set aria-invalid, and take focus after submit."
         >
-          <NewSetPanel
-            className="w-full"
-            initial={{ ...FILLED_SET, name: "AWS production" }}
-            initialErrors={{ name: nameError("AWS production") }}
-          />
+          <PageCell>
+            <NewSetPanel
+              initial={{ ...FILLED_SET, name: "AWS production" }}
+              initialErrors={{ name: nameError("AWS production") }}
+            />
+          </PageCell>
         </StateCell>
         <StateCell
           label="Loading"
           align="stretch"
+          padding={false}
           note="Editing waits for the current values. Save stays off until they arrive."
         >
-          <FormFrame
-            title="Edit GitHub automation"
-            description="Name and description. Variables are edited on the set's page."
-            submitLabel="Save changes"
-            loading
-            loadingFields={2}
-            className="w-full"
-          />
+          <PageCell>
+            <FormPage
+              title="Edit GitHub automation"
+              description="Name and description. Variables are edited on the set's page."
+              submitLabel="Save changes"
+              back={{ label: "GitHub automation", onClick: () => undefined }}
+              loading
+              loadingFields={2}
+              className="min-h-full"
+            />
+          </PageCell>
         </StateCell>
-        <StateCell label="Submitting" align="stretch">
-          <NewSetPanel className="w-full" initial={FILLED_SET} pending />
+        <StateCell label="Submitting" align="stretch" padding={false}>
+          <PageCell>
+            <NewSetPanel initial={FILLED_SET} pending />
+          </PageCell>
         </StateCell>
         <StateCell
           label="Server error"
           align="stretch"
-          note="What happened and what to do, inside the dialog. Never a raw API message."
+          padding={false}
+          note="What happened and what to do, inside the form. Never a raw API message."
         >
-          <NewSetPanel
-            className="w-full"
-            initial={FILLED_SET}
-            error="Couldn't create the variable set. Check your connection and try again."
-          />
+          <PageCell>
+            <NewSetPanel
+              initial={FILLED_SET}
+              error="Couldn't create the variable set. Check your connection and try again."
+            />
+          </PageCell>
         </StateCell>
         <StateCell
           label="Success · step 2"
           align="stretch"
-          note="Shown once. No Cancel or close button, and a click outside doesn't dismiss it."
+          padding={false}
+          note="Shown once, on the same page. No Cancel and no back link until it's saved."
         >
-          <FormFrame
-            title="Copy your new API key"
-            description={`${newApiKeySecret.name} is ready.`}
-            submitLabel="I've saved it"
-            cancelLabel={null}
-            showClose={false}
-            className="w-full"
-          >
-            <ApiKeySecretStep />
-          </FormFrame>
+          <PageCell height={440}>
+            <FormPage
+              title="Copy your new API key"
+              description={`${newApiKeySecret.name} is ready.`}
+              submitLabel="I've saved it"
+              cancelLabel={null}
+              className="min-h-full"
+            >
+              <ApiKeySecretStep />
+            </FormPage>
+          </PageCell>
         </StateCell>
         <StateCell
           label="Disabled with reason"
           align="stretch"
+          padding={false}
           note="Say who can fix it. Hide the entry point instead when nobody on the page can."
         >
-          <NewSetPanel
-            className="w-full"
-            initial={FILLED_SET}
-            submitDisabled
-            disabledReason={`Only workspace admins can create variable sets. Ask ${people[0]!.name}.`}
-          />
+          <PageCell>
+            <NewSetPanel
+              initial={FILLED_SET}
+              submitDisabled
+              disabledReason={`Only workspace admins can create variable sets. Ask ${people[0]!.name}.`}
+            />
+          </PageCell>
         </StateCell>
-        <StateCell label="Long text" align="stretch">
+        <StateCell
+          label="Long text · one-field prompt"
+          align="stretch"
+          note="Replace value is one field, so it stays a small centered dialog."
+        >
           <FormFrame
             title="Replace the value of DATADOG_SYNTHETICS_PRIVATE_LOCATION_WORKER_CONFIG"
             description="Takes effect from the next turn. Turns already running in Monthly access review and Summarize new Sentry errors keep the current value."
@@ -868,21 +964,11 @@ export default function FormDialogSection() {
           align="stretch"
           width="mobile"
           padding={false}
-          note="A bottom sheet: full width, stacked 44px buttons, safe-area padding."
+          note="The same page: full width, stacked 44px buttons in a sticky footer, safe-area padding."
         >
-          <div className="relative flex h-[680px] flex-col justify-end overflow-hidden rounded-[14px] bg-bg">
-            <div className="absolute inset-x-0 top-0 px-4 pt-4">
-              <PageHeader
-                title="Variable sets"
-                description="Environment variables and secrets your agents get in their sandbox."
-              />
-            </div>
-            <Scrim />
-            <NewSetPanel
-              className={cn("relative w-full rounded-b-none border-x-0 border-b-0")}
-              initial={FILLED_SET}
-            />
-          </div>
+          <PageCell height={680}>
+            <NewSetPanel initial={FILLED_SET} />
+          </PageCell>
         </StateCell>
       </StatesGrid>
 
@@ -929,11 +1015,12 @@ export default function FormDialogSection() {
 
       <UsageNotes
         use={[
-          "Creating or editing one object: a dialog for four fields or fewer",
-          "A sheet for longer forms, or when the form needs room for a preview",
-          "A second step after submit, like an API key shown once",
+          "Creating or editing one object: its own page, for example /schedules/new or /variable-sets/aws-production/edit",
+          "A second step after submit, like an API key shown once, on the same page",
+          "A small centered dialog only for one-field prompts: Rename, Replace value",
         ]}
         avoid={[
+          "Right-side sheets, for any form",
           "Settings that save on change: use a switch or a setting row",
           "Confirming a delete: use Destructive confirm",
           "Inline create forms that push the list down",

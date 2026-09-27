@@ -331,7 +331,7 @@ function PickLink({ sectionKey }: { sectionKey: SectionKey }) {
           <span className="truncate text-sm leading-5 font-medium text-fg">{section.title}</span>
           <span className="truncate text-xs leading-4.5 text-fg-subtle">
             {name}
-            {explicit ? "" : " · recommended"}
+            {explicit ? "" : " · decided"}
           </span>
         </span>
       </a>
@@ -344,7 +344,7 @@ export function PicksInUse({ keys, children }: { keys: SectionKey[]; children?: 
   return (
     <KitBlock
       title="Built from your picks"
-      description="Change a pick in its section and this page follows. A filled letter is your pick; an outlined one is the recommended default."
+      description="Change a pick in its section and this page follows. A filled letter is your pick; an outlined one is the decided default."
     >
       <ul className="m-0 grid min-w-0 list-none gap-x-4 gap-y-0.5 p-0 @xl/kit-section:grid-cols-2 @4xl/kit-section:grid-cols-3">
         {keys.map((key) => (

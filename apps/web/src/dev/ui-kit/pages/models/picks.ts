@@ -19,11 +19,11 @@ import { usePick } from "../../picks";
    Every component pick the Models page follows, translated into the variant
    names the real primitives take. The page renders with Bendik's picks (or the
    recommended default), so a pick anywhere in the kit changes this page too.
+   Detail and forms are decided: every account and every create or edit form
+   is its own page, so they are not picks here.
    -------------------------------------------------------------------------- */
 
 export type NavLayout = "column" | "rail" | "tabs";
-export type DetailLayout = "sheet" | "page" | "inline";
-export type FormLayout = "dialog" | "page" | "inline";
 
 export interface ModelsPicks {
   nav: NavLayout;
@@ -33,7 +33,6 @@ export interface ModelsPicks {
   tabs: LineTabsVariant;
   section: SectionVariant;
   list: RowListVariant;
-  detail: DetailLayout;
   settingRow: SettingRowVariant;
   switchVariant: SwitchVariant;
   switchStateText: boolean;
@@ -46,7 +45,6 @@ export interface ModelsPicks {
   /** The look of "Primary" and "Organization" chips next to a row title. */
   chip: MetaChipVariant;
   meter: UsageMeterVariant;
-  form: FormLayout;
   destructive: DestructiveConfirmVariant;
   /** "Undo instead" was picked. Disconnect can't be undone, so it keeps the list. */
   destructiveUndo: boolean;
@@ -58,7 +56,6 @@ export function useModelsPicks(): ModelsPicks {
   const tabs = usePick("tabs-toolbar");
   const section = usePick("section");
   const list = usePick("list-row");
-  const detail = usePick("detail-sheet");
   const row = usePick("setting-row");
   const toggle = usePick("switch");
   const segmented = usePick("segmented-control");
@@ -67,7 +64,6 @@ export function useModelsPicks(): ModelsPicks {
   const disclosure = usePick("disclosure");
   const status = usePick("status-badge");
   const meter = usePick("usage-meter");
-  const form = usePick("form-dialog");
   const destructive = usePick("destructive-confirm");
   return {
     nav: nav === "b" ? "rail" : nav === "c" ? "tabs" : "column",
@@ -76,7 +72,6 @@ export function useModelsPicks(): ModelsPicks {
     tabs: tabs === "b" ? "pill" : "underline",
     section: section === "b" ? "group" : section === "c" ? "tiles" : "open",
     list: list === "a" ? "catalog" : list === "c" ? "table" : "resource",
-    detail: detail === "b" ? "page" : detail === "c" ? "inline" : "sheet",
     settingRow: row === "b" ? "control-left" : row === "c" ? "stacked" : "control-right",
     switchVariant: toggle === "b" ? "neutral" : "brand",
     switchStateText: toggle === "c",
@@ -89,7 +84,6 @@ export function useModelsPicks(): ModelsPicks {
     statusRow: status === "c" ? "tinted" : "dot",
     chip: status === "a" ? "text" : status === "c" ? "soft" : "outline",
     meter: meter === "b" ? "text" : meter === "c" ? "ring" : "bar",
-    form: form === "b" ? "page" : form === "c" ? "inline" : "dialog",
     destructive: destructive === "b" ? "type-to-confirm" : "consequences",
     destructiveUndo: destructive === "c",
   };

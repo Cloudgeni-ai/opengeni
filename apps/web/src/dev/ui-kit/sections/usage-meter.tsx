@@ -63,7 +63,7 @@ function useFakeRefresh(initial: string) {
   };
 }
 
-function SheetPanel({ children, title = "Usage" }: { children: ReactNode; title?: string }) {
+function AccountPanel({ children, title = "Usage" }: { children: ReactNode; title?: string }) {
   return (
     <section className="min-w-0 rounded-[16px] border border-border bg-surface p-4">
       <h4 className="mb-3 text-sm font-semibold text-fg">{title}</h4>
@@ -72,10 +72,10 @@ function SheetPanel({ children, title = "Usage" }: { children: ReactNode; title?
   );
 }
 
-function SheetUsage({ variant }: { variant: UsageMeterVariant }) {
+function AccountUsage({ variant }: { variant: UsageMeterVariant }) {
   const refresh = useFakeRefresh(ops.checkedLabel);
   return (
-    <SheetPanel>
+    <AccountPanel>
       <UsageMeterGroup
         windows={readings(ops)}
         variant={variant}
@@ -83,7 +83,7 @@ function SheetUsage({ variant }: { variant: UsageMeterVariant }) {
         refreshing={refresh.refreshing}
         onRefresh={refresh.onRefresh}
       />
-    </SheetPanel>
+    </AccountPanel>
   );
 }
 
@@ -152,8 +152,8 @@ function VersionDemo({ id }: { id: AlternativeId }) {
   return (
     <div className="flex min-w-0 flex-col gap-5">
       <div>
-        <Label>In the account sheet</Label>
-        <SheetUsage variant={variant} />
+        <Label>On the account page</Label>
+        <AccountUsage variant={variant} />
       </div>
       <div>
         <Label>In rows</Label>
@@ -161,7 +161,7 @@ function VersionDemo({ id }: { id: AlternativeId }) {
       </div>
       <div>
         <Label>Limit reached</Label>
-        <SheetPanel>
+        <AccountPanel>
           <UsageMeterGroup
             windows={[
               {
@@ -173,7 +173,7 @@ function VersionDemo({ id }: { id: AlternativeId }) {
             ]}
             variant={variant}
           />
-        </SheetPanel>
+        </AccountPanel>
       </div>
     </div>
   );
@@ -196,7 +196,7 @@ export default function UsageMeterSection() {
     <KitSection sectionKey="usage-meter">
       <Fork>
         {/* One line each, so the three versions start at the same height. */}
-        <Alternative id="a" rationale="A 4px bar in the sheet, plain text in rows.">
+        <Alternative id="a" rationale="A 4px bar on the account page, plain text in rows.">
           <VersionDemo id="a" />
         </Alternative>
         <Alternative id="b" rationale="Text everywhere, no bar. The quietest.">
@@ -286,7 +286,7 @@ export default function UsageMeterSection() {
         </StateCell>
         <StateCell
           label="In a row"
-          note="Weekly only; the sheet shows both windows."
+          note="Weekly only; the account page shows both windows."
           align="stretch"
           canvas="bg"
         >
@@ -314,26 +314,26 @@ export default function UsageMeterSection() {
         </StateCell>
         <StateCell
           label="Mobile 390"
-          note="The account sheet at phone width."
+          note="The account page at phone width."
           width="mobile"
           align="stretch"
           span={2}
           canvas="surface"
         >
-          <SheetPanel>
+          <AccountPanel>
             <UsageMeterGroup
               windows={readings(research)}
               checked={research.checkedLabel}
               onRefresh={() => undefined}
             />
-          </SheetPanel>
+          </AccountPanel>
         </StateCell>
       </StatesGrid>
 
       <UsageNotes
         use={[
           "What's left of an account's quota: the Codex Weekly and 5-hour limits, with the reset time.",
-          "Both windows in the account sheet; only the Weekly window in account rows, as text.",
+          "Both windows on the account page; only the Weekly window in account rows, as text.",
           "Machine resources, counted as used: Memory 5.1 of 16 GB.",
         ]}
         avoid={[

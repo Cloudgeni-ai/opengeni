@@ -1,5 +1,15 @@
 import { useState, type ReactNode } from "react";
-import { ArrowUpRightIcon, LockKeyholeIcon, PencilIcon, UserPlusIcon } from "lucide-react";
+import {
+  ArrowUpRightIcon,
+  HashIcon,
+  LockKeyholeIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  TextIcon,
+  Trash2Icon,
+  UserPlusIcon,
+  UserRoundIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { AccessList, type AccessMember } from "@/components/ui/access-list";
@@ -7,18 +17,25 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
 import {
-  DetailBody,
-  DetailFact,
-  DetailFacts,
-  DetailFooter,
-  DetailHeader,
-  DetailInline,
+  DetailAside,
+  DetailAsideItem,
   DetailPage,
-  DetailSection,
-} from "@/components/ui/detail-sheet";
-import { TextInput } from "@/components/ui/field";
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Field, TextInput } from "@/components/ui/field";
+import { FormDialog } from "@/components/ui/form-dialog";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SelectMenu } from "@/components/ui/select-menu";
@@ -35,7 +52,7 @@ import { personStatusKey, useOrg } from "./org-store";
 
 /* ----------------------------------------------------------------------------
    Workspaces: every shared workspace, who is in it, and your own access
-   (content-blind admins join explicitly, Q38). The workspace sheet edits
+   (content-blind admins join explicitly, Q38). The workspace's own page edits
    access with the shared AccessList.
    -------------------------------------------------------------------------- */
 
@@ -98,17 +115,14 @@ const COLUMNS: RowListColumn[] = [
 
 export function WorkspacesView({
   state,
-  renderInlineDetail,
   matrix,
 }: {
   state: "filled" | "just-you" | "loading";
-  renderInlineDetail: (workspace: OrgWorkspace) => ReactNode;
   /** Pick C of the access list: people by workspaces under the list. */
   matrix?: ReactNode;
 }) {
   const store = useOrg();
   const { picks } = store;
-  const inline = picks.detail === "inline" && picks.list !== "table";
   const columns = picks.list === "catalog" ? undefined : COLUMNS;
   const people = store.local ? [LOCAL_USER] : store.people;
 
@@ -164,10 +178,8 @@ export function WorkspacesView({
                     }
               }
               selected={open}
-              onOpen={() => store.openWorkspace(open && inline ? null : workspace.id)}
-              expanded={inline ? open : undefined}
-              panel={inline && open ? renderInlineDetail(workspace) : undefined}
-              indicator={inline ? "expand" : "open"}
+              onOpen={() => store.openWorkspace(workspace.id)}
+              indicator="open"
             />
           );
         })}
@@ -262,112 +274,63 @@ function accessMembers(
   });
 }
 
-function RenameFact({ workspace }: { workspace: OrgWorkspace }) {
+/** Rename: a one-field prompt, so a small centered dialog. */
+function RenameWorkspaceDialog({
+  workspace,
+  open,
+  onOpenChange,
+}: {
+  workspace: OrgWorkspace;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const store = useOrg();
-  const [editing, setEditing] = useState(false);
   const [name, setName] = useState(workspace.name);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  if (!editing) {
-    return (
-      <DetailFact
-        label="Name"
-        action={
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setName(workspace.name);
-              setError(null);
-              setEditing(true);
-            }}
-            className="text-fg-muted pointer-coarse:h-11"
-          >
-            <PencilIcon aria-hidden="true" />
-            Rename
-          </Button>
-        }
-      >
-        {workspace.name}
-      </DetailFact>
-    );
-  }
-  const save = async () => {
-    const trimmed = name.trim();
-    if (!trimmed) {
-      setError("Name the workspace.");
-      return;
-    }
-    if (
-      store.workspaces.some(
-        (each) =>
-          each.id !== workspace.id && each.name.toLocaleLowerCase() === trimmed.toLocaleLowerCase(),
-      )
-    ) {
-      setError(`There's already a workspace called ${trimmed}.`);
-      return;
-    }
-    setSaving(true);
-    try {
-      await store.renameWorkspace(workspace, trimmed);
-      setEditing(false);
-    } finally {
-      setSaving(false);
-    }
-  };
   return (
-    <DetailFact label="Name">
-      <form
-        className="flex min-w-0 flex-col gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void save();
-        }}
-      >
+    <FormDialog
+      open={open}
+      onOpenChange={(next) => {
+        onOpenChange(next);
+        setName(workspace.name);
+        setError(null);
+      }}
+      size="sm"
+      title="Rename workspace"
+      submitLabel="Rename"
+      pendingLabel="Renaming…"
+      submitDisabled={name.trim() === workspace.name}
+      onSubmit={async () => {
+        const trimmed = name.trim();
+        if (!trimmed) {
+          setError("Name the workspace.");
+          return false;
+        }
+        if (
+          store.workspaces.some(
+            (each) =>
+              each.id !== workspace.id &&
+              each.name.toLocaleLowerCase() === trimmed.toLocaleLowerCase(),
+          )
+        ) {
+          setError(`There's already a workspace called ${trimmed}.`);
+          return false;
+        }
+        await store.renameWorkspace(workspace, trimmed);
+        return true;
+      }}
+    >
+      <Field label="Name" error={error ?? undefined}>
         <TextInput
           value={name}
-          aria-label="Workspace name"
-          aria-invalid={error ? true : undefined}
-          autoFocus
           suppressAutofill
           onChange={(event) => {
             setName(event.target.value);
             setError(null);
           }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.stopPropagation();
-              setEditing(false);
-            }
-          }}
         />
-        {error ? (
-          <p role="alert" className="text-xs leading-4.5 text-danger">
-            {error}
-          </p>
-        ) : null}
-        <div className="flex items-center justify-end gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setEditing(false)}
-            className="pointer-coarse:h-11"
-          >
-            Cancel
-          </Button>
-          <Button
-            type="submit"
-            size="sm"
-            disabled={saving || name.trim() === workspace.name}
-            className="pointer-coarse:h-11"
-          >
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </div>
-      </form>
-    </DetailFact>
+      </Field>
+    </FormDialog>
   );
 }
 
@@ -421,7 +384,7 @@ function AddPeople({ workspace }: { workspace: OrgWorkspace }) {
   );
 }
 
-function WorkspaceDetailParts({
+function WorkspaceDetailPage({
   workspace,
   onClose,
 }: {
@@ -430,53 +393,99 @@ function WorkspaceDetailParts({
 }) {
   const store = useOrg();
   const { picks } = store;
+  const [renameOpen, setRenameOpen] = useState(false);
   const members = accessMembers(workspace, store.people, store.local);
   const youHaveAccess = store.local || Boolean(store.you.grants[workspace.id]);
   const variant = picks.access === "matrix" ? "inline" : picks.access;
+  const peopleLine = `${members.length} ${members.length === 1 ? "person" : "people"}`;
+
+  const aside = (
+    <DetailAside label={`About ${workspace.name}`}>
+      <DetailAsideItem label="Description" icon={<TextIcon />}>
+        {workspace.description}
+      </DetailAsideItem>
+      <DetailAsideItem label="Your access" icon={<UserRoundIcon />}>
+        <YourAccess workspace={workspace} />
+      </DetailAsideItem>
+      <DetailAsideItem label="Workspace ID" icon={<HashIcon />}>
+        <CopyField value={workspace.id} label="workspace ID" truncate="middle" maxLength={20} />
+      </DetailAsideItem>
+    </DetailAside>
+  );
+
   return (
-    <>
-      <DetailHeader
+    <DetailPage back={{ label: "Workspaces", onClick: onClose }} className="px-0 pt-0 max-sm:px-0">
+      <DetailPageHeader
         leading={<LogoTile name={workspace.name} />}
         title={workspace.name}
-        subtitle={`Shared · ${workspace.createdLabel} · ${members.length} ${members.length === 1 ? "person" : "people"}`}
+        chips={<MetaChip variant="soft">Shared</MetaChip>}
+        meta={[workspace.createdLabel, peopleLine]}
+        actions={
+          <>
+            {youHaveAccess ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => toast(`Opening ${workspace.name}`)}
+                className="pointer-coarse:h-11"
+              >
+                Open workspace
+                <ArrowUpRightIcon aria-hidden="true" />
+              </Button>
+            ) : store.questions.q38 === "join" ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => store.requestJoin(workspace)}
+                className="pointer-coarse:h-11"
+              >
+                Join
+              </Button>
+            ) : null}
+            {store.local ? null : (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`More actions for ${workspace.name}`}
+                    className="text-fg-muted hover:text-fg pointer-coarse:size-11"
+                  >
+                    <MoreHorizontalIcon />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-44">
+                  <DropdownMenuItem onSelect={() => setRenameOpen(true)}>
+                    <PencilIcon />
+                    Rename
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => store.requestDeleteWorkspace(workspace)}
+                  >
+                    <Trash2Icon />
+                    Delete workspace…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </>
+        }
       />
-      <DetailBody>
+      <DetailPageBody aside={aside}>
         {!youHaveAccess && store.questions.q38 === "join" ? (
           <DetailSection>
             <Notice
               tone="muted"
               icon={<LockKeyholeIcon className="size-4" />}
               title="You can manage who has access, but not open it"
-              action={
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => store.requestJoin(workspace)}
-                >
-                  Join
-                </Button>
-              }
-              actionLayout="responsive"
             >
               Join to see its chats and files. Its workspace admins will see that you joined.
             </Notice>
           </DetailSection>
         ) : null}
-        <DetailSection title="Details">
-          <DetailFacts>
-            <RenameFact workspace={workspace} />
-            <DetailFact label="Description">{workspace.description}</DetailFact>
-            <DetailFact label="Workspace ID">
-              <CopyField
-                value={workspace.id}
-                label="workspace ID"
-                truncate="middle"
-                maxLength={20}
-              />
-            </DetailFact>
-          </DetailFacts>
-        </DetailSection>
         <DetailSection
           title="People with access"
           description={
@@ -492,7 +501,6 @@ function WorkspaceDetailParts({
               label={`People with access to ${workspace.name}`}
               roles={WORKSPACE_ROLE_OPTIONS}
               members={members}
-              canvas="surface"
               readOnlyReason={
                 store.local ? "Single-user mode: only you use this OpenGeni." : undefined
               }
@@ -516,62 +524,19 @@ function WorkspaceDetailParts({
             />
           </div>
         </DetailSection>
-      </DetailBody>
-      <DetailFooter
-        start={
-          store.local ? null : (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => store.requestDeleteWorkspace(workspace)}
-              className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
-            >
-              Delete workspace…
-            </Button>
-          )
-        }
-      >
-        {youHaveAccess ? (
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => toast(`Opening ${workspace.name}`)}
-            className="pointer-coarse:h-11"
-          >
-            Open workspace
-            <ArrowUpRightIcon aria-hidden="true" />
-          </Button>
-        ) : null}
-        {picks.detail === "sheet" ? (
-          <Button type="button" variant="outline" onClick={onClose} className="pointer-coarse:h-11">
-            Done
-          </Button>
-        ) : null}
-      </DetailFooter>
-    </>
+      </DetailPageBody>
+      <RenameWorkspaceDialog workspace={workspace} open={renameOpen} onOpenChange={setRenameOpen} />
+    </DetailPage>
   );
 }
 
+/** The workspace's own page ("← Workspaces"). Remounts per workspace. */
 export function WorkspaceDetail({
   workspace,
-  presentation,
   onClose,
 }: {
   workspace: OrgWorkspace;
-  presentation: "sheet" | "page" | "inline";
   onClose: () => void;
 }) {
-  const parts = <WorkspaceDetailParts key={workspace.id} workspace={workspace} onClose={onClose} />;
-  if (presentation === "page") {
-    return (
-      <DetailPage
-        back={{ label: "Workspaces", onClick: onClose }}
-        className="px-0 pt-0 max-sm:px-0"
-      >
-        {parts}
-      </DetailPage>
-    );
-  }
-  if (presentation === "inline") return <DetailInline className="mt-2 mb-3">{parts}</DetailInline>;
-  return parts;
+  return <WorkspaceDetailPage key={workspace.id} workspace={workspace} onClose={onClose} />;
 }

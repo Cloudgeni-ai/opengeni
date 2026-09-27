@@ -2,14 +2,13 @@ import { useId, type ReactNode } from "react";
 import { RotateCcwIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { DetailSheetPreview } from "@/components/ui/detail-sheet";
+import { DetailPage } from "@/components/ui/detail-sheet";
 import { Disclosure } from "@/components/ui/disclosure";
 import { HelpTip } from "@/components/ui/inline-help";
 import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 
 import { organization } from "../fixtures";
-import { KitBlock, KitSection, useKitPane } from "../kit";
-import { usePick } from "../picks";
+import { KitBlock, KitCanvas, KitSection, useKitPane } from "../kit";
 import { DetailView, ModelsPreview } from "../pages/models/models-page";
 import {
   DEFAULT_QUESTIONS,
@@ -139,12 +138,12 @@ function PreviewControls() {
         />
         <Control
           label="Q12 Account details"
-          help="Recommended: one row per account that opens one detail view. Other answer: expand each account in place."
+          help="Recommended: one row per account that opens the account's own page. Other answer: expand each account in place."
           value={questions.q12}
-          recommended="sheet"
+          recommended="page"
           onChange={question("q12")}
           options={[
-            { value: "sheet", label: "Detail view" },
+            { value: "page", label: "Own page" },
             { value: "inline", label: "In place" },
           ]}
         />
@@ -264,7 +263,7 @@ function PreviewControls() {
   );
 }
 
-function SheetPreviews() {
+function DetailPagePreviews() {
   const { setScenario, openDetail } = useModels();
   const previews: Array<{
     label: string;
@@ -284,28 +283,30 @@ function SheetPreviews() {
   ];
   return (
     <KitBlock
-      title="Account sheet"
-      description="The sheet a row opens, drawn in place so both kinds can be compared. It shares state with the page above."
+      title="Account pages"
+      description="The page a row opens, drawn in place so both kinds can be compared. It shares state with the page above."
     >
-      <div className="grid min-w-0 gap-4 @4xl/kit-section:grid-cols-2">
+      <div className="flex min-w-0 flex-col gap-6">
         {previews.map((preview) => (
           <figure key={preview.label} className="m-0 flex min-w-0 flex-col gap-2">
             <figcaption className="text-xs font-medium text-fg-muted">{preview.note}</figcaption>
-            <DetailSheetPreview
-              label={preview.label}
-              className="h-[760px] max-w-none overflow-hidden rounded-[16px] border shadow-none"
-            >
-              <DetailView
-                target={preview.target}
-                view={{
-                  pageScope: "workspace",
-                  onManageInOrganization: (id) => {
-                    setScenario({ scope: "organization" });
-                    openDetail({ kind: "codex", scope: "organization", id });
-                  },
-                }}
-              />
-            </DetailSheetPreview>
+            <KitCanvas>
+              <DetailPage
+                back={{ label: "Models" }}
+                className="max-w-none px-0 pt-0 pb-0 max-sm:px-0"
+              >
+                <DetailView
+                  target={preview.target}
+                  view={{
+                    pageScope: "workspace",
+                    onManageInOrganization: (id) => {
+                      setScenario({ scope: "organization" });
+                      openDetail({ kind: "codex", scope: "organization", id });
+                    },
+                  }}
+                />
+              </DetailPage>
+            </KitCanvas>
           </figure>
         ))}
       </div>
@@ -314,20 +315,19 @@ function SheetPreviews() {
 }
 
 export default function PageModelsSection() {
-  const detailPick = usePick("detail-sheet");
   return (
     <KitSection sectionKey="page-models">
-      <ModelsProvider initialQuestions={{ q12: detailPick === "c" ? "inline" : "sheet" }}>
+      <ModelsProvider>
         <KitBlock
           title="Page"
-          description="Settings > Models inside the app, with your picks. Open a row, Connect, Edit, or the Organization link in the sub-nav."
+          description="Settings > Models inside the app, with your picks. Open a row, Connect, Edit, or the Organization link in the sub-nav. Every account and form is its own page with a back link."
         >
           <PreviewControls />
           <div className="mt-4 min-w-0">
             <ModelsPreview />
           </div>
         </KitBlock>
-        <SheetPreviews />
+        <DetailPagePreviews />
       </ModelsProvider>
     </KitSection>
   );

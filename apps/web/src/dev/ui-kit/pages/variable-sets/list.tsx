@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { DetailInline } from "@/components/ui/detail-sheet";
 import {
   EmptyState,
   EmptyStateLink,
@@ -28,11 +27,10 @@ import { LogoTile } from "@/components/ui/logo-tile";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Section } from "@/components/ui/section";
 import { Toolbar, ToolbarSearch, ToolbarSummary } from "@/components/ui/toolbar";
-import { cn } from "@/lib/utils";
 
 import { KIT_NOW, KIT_TIME_ZONE, organization, type VariableSetScope } from "../../fixtures";
-import { useAnswers, usePagePicks } from "./answers";
-import { ScopeChip, SetDetail, type SetActions } from "./detail";
+import { usePagePicks } from "./answers";
+import { ScopeChip } from "./detail";
 import { SET_TEMPLATES, type SetTemplate } from "./forms";
 import { useFrame } from "./frame";
 import { joinAnd, usageParts, usageSummary, variablesLabel, type PreviewSet } from "./model";
@@ -137,15 +135,9 @@ export interface ListPageProps {
   sets: PreviewSet[];
   loadState: LoadState;
   onRetry: () => void;
-  /** The set whose sheet is open (Q19: sheet), for the selected row. */
-  selectedId: string | null;
-  /** The set expanded in place (Q19: in place). */
-  expandedId: string | null;
+  /** Opens the set's own page. */
   onOpenSet: (set: PreviewSet) => void;
-  actionsFor: (set: PreviewSet) => SetActions;
   onNewSet: (template?: SetTemplate) => void;
-  /** The inline New variable set form (Form dialog pick C). */
-  inlineForm?: ReactNode;
 }
 
 /** Whether the page header should hide its primary action (the empty state shows it). */
@@ -153,19 +145,8 @@ export function listIsEmpty(sets: PreviewSet[], loadState: LoadState): boolean {
   return loadState === "ready" && sets.length === 0;
 }
 
-export function ListPage({
-  sets,
-  loadState,
-  onRetry,
-  selectedId,
-  expandedId,
-  onOpenSet,
-  actionsFor,
-  onNewSet,
-  inlineForm,
-}: ListPageProps) {
+export function ListPage({ sets, loadState, onRetry, onOpenSet, onNewSet }: ListPageProps) {
   const picks = usePagePicks();
-  const answers = useAnswers();
   const { mode } = useFrame();
   const phone = mode === "phone";
   const [query, setQuery] = useState("");
@@ -186,7 +167,6 @@ export function ListPage({
   const showSearch = sets.length > SEARCH_THRESHOLD;
 
   const renderRow = (set: PreviewSet) => {
-    const expandable = answers.opens === "inline";
     const usage = usageSummary(set.usedBy);
     return (
       <ListRow
@@ -208,17 +188,8 @@ export function ListPage({
                 updated: compact ? null : <RelativeTime date={set.updatedAt} {...TIME} />,
               }
         }
-        indicator={expandable ? "expand" : "open"}
-        selected={selectedId === set.id}
+        indicator="open"
         onOpen={() => onOpenSet(set)}
-        expanded={expandable ? expandedId === set.id : undefined}
-        panel={
-          expandable && expandedId === set.id ? (
-            <DetailInline className="mt-1">
-              <SetDetail set={set} actions={actionsFor(set)} />
-            </DetailInline>
-          ) : undefined
-        }
       />
     );
   };
@@ -379,10 +350,5 @@ export function ListPage({
     );
   }
 
-  return (
-    <div className={cn("min-w-0")}>
-      {inlineForm ? <div className="mb-8">{inlineForm}</div> : null}
-      {body}
-    </div>
-  );
+  return <div className="min-w-0">{body}</div>;
 }

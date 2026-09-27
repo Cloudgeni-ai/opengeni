@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   BoxIcon,
   BracesIcon,
@@ -12,22 +12,18 @@ import {
   RefreshCwIcon,
   StarIcon,
   Trash2Icon,
+  UsersIcon,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
 import {
   DetailBody,
-  DetailFact,
-  DetailFacts,
   DetailFooter,
-  DetailFooterConfirm,
   DetailHeader,
   DetailInline,
   DetailPage,
   DetailSection,
-  DetailSheet,
-  DetailSheetContent,
   DetailSheetPreview,
   DetailSkeleton,
   useDetailPresentation,
@@ -39,7 +35,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  DetailAside,
+  DetailAsideItem,
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DestructiveConfirmPanel } from "@/components/ui/destructive-confirm";
 import { ErrorMessage } from "@/components/ui/error-message";
+import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
 import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
@@ -66,6 +70,7 @@ import {
 import {
   Alternative,
   Fork,
+  KitBlock,
   KitSection,
   PagePreview,
   StateCell,
@@ -202,26 +207,18 @@ function UsedByList({ set }: { set: VariableSet }) {
   );
 }
 
-function VariableSetDetail({ set }: { set: VariableSet }) {
-  const presentation = useDetailPresentation();
-  const page = presentation === "page";
-  const inline = presentation === "inline";
-  const addVariable = (
-    <Button
-      type="button"
-      variant={page ? "default" : "outline"}
-      size={page ? "default" : "sm"}
-      className={cn(!page && "h-7 rounded-[10px] px-2.5", "pointer-coarse:h-11")}
-    >
-      <PlusIcon />
-      Add variable
-    </Button>
-  );
-  const menu = (
+/* ----------------------------------------------------------------------------
+   The variable set detail, in each presentation. B uses the page anatomy
+   (DetailPageHeader + DetailPageBody); A and C keep the retired shapes for
+   the history.
+   -------------------------------------------------------------------------- */
+
+function VariableSetMenu({ set }: { set: VariableSet }) {
+  return (
     <MoreMenu label={`More actions for ${set.name}`}>
       <DropdownMenuItem>
         <PencilIcon />
-        Edit name and description
+        Rename
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem variant="destructive">
@@ -230,7 +227,108 @@ function VariableSetDetail({ set }: { set: VariableSet }) {
       </DropdownMenuItem>
     </MoreMenu>
   );
+}
 
+function AddVariableButton({ compact }: { compact?: boolean }) {
+  return (
+    <Button
+      type="button"
+      variant={compact ? "outline" : "default"}
+      size={compact ? "sm" : "default"}
+      className={cn(compact && "h-7 rounded-[10px] px-2.5", "pointer-coarse:h-11")}
+    >
+      <PlusIcon />
+      Add variable
+    </Button>
+  );
+}
+
+function scopeText(set: VariableSet): string {
+  return set.scope === "organization"
+    ? `Everyone in ${organization.name}`
+    : `Everyone in ${currentWorkspace.name}`;
+}
+
+type VariableSetTab = "variables" | "used-by";
+
+/** B: the decided detail page. */
+function VariableSetPage({ set, onBack }: { set: VariableSet; onBack: () => void }) {
+  const [tab, setTab] = useState<VariableSetTab>("variables");
+  return (
+    <DetailPage back={{ label: "Variable sets", onClick: onBack }}>
+      <DetailPageHeader
+        leading={<LogoTile icon={<BracesIcon />} />}
+        title={set.name}
+        chips={set.scopeLabel ? <MetaChip variant="soft">{set.scopeLabel}</MetaChip> : null}
+        meta={[
+          set.variablesLabel,
+          set.usageLabel,
+          <RelativeTime key="updated" date={set.updatedAt} prefix="updated" {...TIME} />,
+        ]}
+        actions={
+          <>
+            <AddVariableButton />
+            <VariableSetMenu set={set} />
+          </>
+        }
+        tabs={
+          <LineTabsNav aria-label={`${set.name} sections`}>
+            <LineTabsLink asChild active={tab === "variables"} count={set.variables.length}>
+              <button type="button" onClick={() => setTab("variables")}>
+                Variables
+              </button>
+            </LineTabsLink>
+            <LineTabsLink asChild active={tab === "used-by"} count={set.usedBy.length}>
+              <button type="button" onClick={() => setTab("used-by")}>
+                Used by
+              </button>
+            </LineTabsLink>
+          </LineTabsNav>
+        }
+      />
+      <DetailPageBody
+        aside={
+          <DetailAside label={`About ${set.name}`}>
+            <DetailAsideItem label="Available to" icon={<UsersIcon />}>
+              {scopeText(set)}
+            </DetailAsideItem>
+            <DetailAsideItem label="Last change" icon={<CalendarClockIcon />}>
+              <RelativeTime date={set.updatedAt} {...TIME} />
+            </DetailAsideItem>
+            <DetailAsideItem label="Variable set ID">
+              <CopyField value={set.id} label="variable set ID" />
+            </DetailAsideItem>
+          </DetailAside>
+        }
+      >
+        {tab === "variables" ? (
+          <DetailSection title="Description" className="pb-2">
+            <p className="text-sm leading-6 text-fg">{set.description}</p>
+          </DetailSection>
+        ) : null}
+        {tab === "variables" ? (
+          <DetailSection
+            title="Variables"
+            description="Secrets are write-only. Agents get them in their sandbox."
+          >
+            <VariablesList set={set} table />
+          </DetailSection>
+        ) : (
+          <DetailSection
+            title="Used by"
+            description="Turning the set off here stops new work from getting it."
+          >
+            <UsedByList set={set} />
+          </DetailSection>
+        )}
+      </DetailPageBody>
+    </DetailPage>
+  );
+}
+
+/** A and C: the retired sheet body and today's inline body. */
+function VariableSetCompact({ set }: { set: VariableSet }) {
+  const inline = useDetailPresentation() === "inline";
   return (
     <>
       {inline ? null : (
@@ -239,50 +337,21 @@ function VariableSetDetail({ set }: { set: VariableSet }) {
           title={set.name}
           subtitle={set.description}
           status={set.scopeLabel ? <MetaChip variant="outline">{set.scopeLabel}</MetaChip> : null}
-          actions={
-            page ? (
-              <>
-                {addVariable}
-                {menu}
-              </>
-            ) : (
-              menu
-            )
-          }
+          actions={<VariableSetMenu set={set} />}
         />
       )}
       <DetailBody>
         <DetailSection
           title={`Variables (${set.variables.length})`}
-          description={
-            inline ? undefined : "Secrets are write-only. Agents get them in their sandbox."
-          }
-          action={page ? null : addVariable}
+          action={<AddVariableButton compact />}
         >
-          <VariablesList set={set} table={page} />
+          <VariablesList set={set} />
         </DetailSection>
         <DetailSection title="Used by">
           <UsedByList set={set} />
         </DetailSection>
-        {inline ? null : (
-          <DetailSection title="Details">
-            <DetailFacts>
-              <DetailFact label="Available to">
-                {set.scope === "organization"
-                  ? `Everyone in ${organization.name}`
-                  : `Everyone in ${currentWorkspace.name}`}
-              </DetailFact>
-              <DetailFact label="Last change">
-                <RelativeTime date={set.updatedAt} {...TIME} />
-              </DetailFact>
-              <DetailFact label="Variable set ID">
-                <CopyField value={set.id} label="variable set ID" />
-              </DetailFact>
-            </DetailFacts>
-          </DetailSection>
-        )}
       </DetailBody>
-      {page || inline ? null : (
+      {inline ? null : (
         <DetailFooter start={<DangerGhost>Delete variable set</DangerGhost>}>
           <Button type="button" variant="outline" className="pointer-coarse:h-11">
             Done
@@ -349,7 +418,7 @@ function VariableSetsPage({
               panel={
                 expanded ? (
                   <DetailInline>
-                    <VariableSetDetail set={set} />
+                    <VariableSetCompact set={set} />
                   </DetailInline>
                 ) : undefined
               }
@@ -362,65 +431,58 @@ function VariableSetsPage({
   );
 }
 
-/** A: the list stays in view; the sheet opens over it. */
+/** A (retired): the sheet over the list. A static picture, kept for the history. */
 function SheetFrame() {
-  const [openId, setOpenId] = useState<string | null>(variableSets[0]!.id);
-  const [realOpen, setRealOpen] = useState(false);
-  const set = variableSets.find((each) => each.id === openId) ?? null;
+  const set = variableSets[0]!;
   return (
-    <div className="flex min-w-0 flex-col gap-3">
-      <PagePreview label="Variable sets with a detail sheet" height={FRAME_HEIGHT}>
-        <div className="relative h-full min-w-0">
-          <div className="h-full overflow-auto">
-            <VariableSetsPage selectedId={openId} onOpen={setOpenId} />
-          </div>
-          {set ? (
-            <>
-              <button
-                type="button"
-                tabIndex={-1}
-                aria-label="Close details"
-                onClick={() => setOpenId(null)}
-                className="absolute inset-0 z-10 cursor-default bg-black/50"
-              />
-              <DetailSheetPreview
-                label={set.name}
-                onClose={() => setOpenId(null)}
-                className="absolute inset-y-0 right-0 z-20 max-w-[min(520px,100%)]"
-              >
-                <VariableSetDetail set={set} />
-              </DetailSheetPreview>
-            </>
-          ) : null}
+    <PagePreview label="Variable sets with a detail sheet (retired)" height={FRAME_HEIGHT}>
+      <div className="relative h-full min-w-0" inert>
+        <div className="h-full overflow-hidden">
+          <VariableSetsPage selectedId={set.id} onOpen={() => {}} />
         </div>
-      </PagePreview>
-      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-4.5 text-fg-subtle">
-        Click a row to show its sheet in the frame.
-        <button
-          type="button"
-          onClick={() => setRealOpen(true)}
-          className="rounded-[6px] font-medium text-brand hover:underline pointer-coarse:min-h-11"
+        <div aria-hidden="true" className="absolute inset-0 z-10 bg-black/50" />
+        <DetailSheetPreview
+          label={set.name}
+          className="absolute inset-y-0 right-0 z-20 max-w-[min(520px,100%)]"
         >
-          Open the real sheet
-        </button>
-      </p>
-      <DetailSheet open={realOpen} onOpenChange={setRealOpen}>
-        <DetailSheetContent>
-          <VariableSetDetail set={variableSets[0]!} />
-        </DetailSheetContent>
-      </DetailSheet>
-    </div>
+          <VariableSetCompact set={set} />
+        </DetailSheetPreview>
+      </div>
+    </PagePreview>
   );
 }
 
-/** B: the row navigates to its own page. */
+/** Scroll the preview frame back to the top and focus the new view's heading. */
+function useViewFocus(view: string | null) {
+  const ref = useRef<HTMLDivElement>(null);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    const root = ref.current;
+    if (!root) return;
+    root.scrollTop = 0;
+    root.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
+  }, [view]);
+  return ref;
+}
+
+/** B (decided): the row opens its own page; the back link returns to the list. */
 function PageFrame() {
-  const set = variableSets[0]!;
+  const [openId, setOpenId] = useState<string | null>(null);
+  const set = variableSets.find((each) => each.id === openId) ?? null;
+  const ref = useViewFocus(openId);
   return (
-    <PagePreview label={`${set.name} detail page`} height={FRAME_HEIGHT}>
-      <DetailPage back={{ label: "Variable sets", onClick: () => {} }}>
-        <VariableSetDetail set={set} />
-      </DetailPage>
+    <PagePreview label="Variable sets with detail pages" height={FRAME_HEIGHT}>
+      <div ref={ref} className="h-full overflow-auto [&_h1]:outline-none" data-kit-scroller="">
+        {set ? (
+          <VariableSetPage set={set} onBack={() => setOpenId(null)} />
+        ) : (
+          <VariableSetsPage selectedId={null} onOpen={setOpenId} />
+        )}
+      </div>
     </PagePreview>
   );
 }
@@ -440,41 +502,47 @@ function InlineFrame() {
 }
 
 /* ----------------------------------------------------------------------------
-   The account sheet (brief sample content), for the states.
+   The account page (brief sample content), for the anatomy and the states.
    -------------------------------------------------------------------------- */
 
-type AccountState = "default" | "readonly" | "saving" | "confirm" | "error";
+type AccountState = "default" | "readonly" | "saving" | "error";
 
-function AccountDetail({
+function AccountPage({
   account,
   state = "default",
 }: {
   account: ModelAccount;
   state?: AccountState;
 }) {
+  const [tab, setTab] = useState<"overview" | "resets">("overview");
   const readOnly = state === "readonly";
   const weekly = account.usage.find((window) => window.label === "Weekly");
   const fiveHour = account.usage.find((window) => window.label === "5-hour");
   const lockedReason = `Managed by ${organization.name}. Only organization admins can change it.`;
 
   return (
-    <>
-      <DetailHeader
+    <DetailPage back={{ label: "Models", onClick: () => {} }}>
+      <DetailPageHeader
         leading={<LogoTile name="Codex" monogram="C" />}
         title={account.name}
-        subtitle={`${account.plan} · ${account.sourceLabel}`}
-        status={
+        chips={
           <>
             <StatusBadge status={account.state === "paused" ? "paused" : "connected"} />
             {account.isPrimary ? (
-              <MetaChip variant="outline" icon={<StarIcon />}>
+              <MetaChip variant="soft" icon={<StarIcon />}>
                 Primary
               </MetaChip>
             ) : null}
           </>
         }
+        meta={[account.plan, account.sourceLabel, account.checkedLabel]}
         actions={
-          readOnly ? null : (
+          state === "saving" ? (
+            <span role="status" className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
+              <LoaderCircleIcon aria-hidden="true" className="size-3.5 motion-safe:animate-spin" />
+              Saving
+            </span>
+          ) : readOnly ? null : (
             <MoreMenu label={`More actions for ${account.name}`}>
               <DropdownMenuItem>
                 <PencilIcon />
@@ -484,188 +552,179 @@ function AccountDetail({
                 <StarIcon />
                 Make primary
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem variant="destructive">
+                <Trash2Icon />
+                Disconnect
+              </DropdownMenuItem>
             </MoreMenu>
           )
         }
+        tabs={
+          <LineTabsNav aria-label={`${account.name} sections`}>
+            <LineTabsLink asChild active={tab === "overview"}>
+              <button type="button" onClick={() => setTab("overview")}>
+                Overview
+              </button>
+            </LineTabsLink>
+            <LineTabsLink asChild active={tab === "resets"} count={account.resets.length}>
+              <button type="button" onClick={() => setTab("resets")}>
+                Usage limit resets
+              </button>
+            </LineTabsLink>
+          </LineTabsNav>
+        }
       />
       {state === "error" ? (
-        <DetailBody>
-          <div className="py-10">
-            <ErrorMessage
-              title="Couldn't load this account."
-              align="center"
-              action={
-                <Button type="button" variant="outline" size="sm">
-                  <RefreshCwIcon />
-                  Try again
-                </Button>
-              }
-              reference="req_7c41e2d09a"
-            >
-              Check your connection and try again. Your settings are unchanged.
-            </ErrorMessage>
-          </div>
-        </DetailBody>
+        <div className="py-12">
+          <ErrorMessage
+            title="Couldn't load this account."
+            align="center"
+            action={
+              <Button type="button" variant="outline" size="sm">
+                <RefreshCwIcon />
+                Try again
+              </Button>
+            }
+            reference="req_7c41e2d09a"
+          >
+            Check your connection and try again. Your settings are unchanged.
+          </ErrorMessage>
+        </div>
       ) : (
-        <DetailBody>
+        <DetailPageBody
+          aside={
+            <DetailAside label={`About ${account.name}`}>
+              <DetailAsideItem label="Plan" icon={<BoxIcon />}>
+                {account.plan}
+              </DetailAsideItem>
+              <DetailAsideItem label="Connected in" icon={<UsersIcon />}>
+                {account.sourceLabel === "Organization"
+                  ? organization.name
+                  : account.sourceLabel === "Only you"
+                    ? "Only you"
+                    : currentWorkspace.name}
+              </DetailAsideItem>
+              <DetailAsideItem label="Can serve">
+                {account.modelsServedLabel === "All" ? "All models" : account.modelsServedLabel}
+              </DetailAsideItem>
+              {account.availableInLabel ? (
+                <DetailAsideItem label="Available in">{account.availableInLabel}</DetailAsideItem>
+              ) : null}
+            </DetailAside>
+          }
+        >
           {readOnly ? (
             <p className="flex items-start gap-2 py-4 text-xs leading-4.5 text-fg-muted">
               <LockIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
               {lockedReason}
             </p>
           ) : null}
-          <DetailSection
-            title="Usage"
-            description={account.checkedLabel}
-            action={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Check usage now"
-                className="-mr-2 text-fg-muted hover:text-fg pointer-coarse:size-11"
+          {tab === "overview" ? (
+            <>
+              <DetailSection
+                title="Usage"
+                description={account.checkedLabel}
+                action={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Check usage now"
+                    className="-mr-2 text-fg-muted hover:text-fg pointer-coarse:size-11"
+                  >
+                    <RefreshCwIcon />
+                  </Button>
+                }
               >
-                <RefreshCwIcon />
-              </Button>
-            }
-          >
-            <div className="flex flex-col gap-4">
-              {weekly ? (
-                <UsageMeter
-                  label="Weekly"
-                  percent={weekly.percentLeft}
-                  resetsLabel={weekly.resetsLabel}
-                />
-              ) : null}
-              {fiveHour ? (
-                <UsageMeter
-                  label="5-hour"
-                  percent={fiveHour.percentLeft}
-                  resetsLabel={fiveHour.resetsLabel}
-                />
-              ) : null}
-            </div>
-          </DetailSection>
-          <DetailSection title="Settings">
-            <SettingRowGroup className="-my-3">
-              <SettingRow
-                label="Use for new work"
-                description="New chats and schedules can use this account."
-                control={
-                  <Switch
-                    defaultChecked={account.useForNewWork}
-                    pending={state === "saving"}
-                    disabled={readOnly}
-                    disabledReason={readOnly ? lockedReason : undefined}
-                  />
-                }
-              />
-              <SettingRow
-                label="Codex Apps"
-                description="Let agents use the ChatGPT apps connected to this account."
-                control={
-                  <Switch
-                    defaultChecked={account.codexApps}
-                    disabled={readOnly}
-                    disabledReason={readOnly ? lockedReason : undefined}
-                  />
-                }
-              />
-            </SettingRowGroup>
-          </DetailSection>
-          {account.resets.length > 0 ? (
-            <DetailSection
-              title={`Usage limit resets (${account.resets.length})`}
-              description="Each reset gives this account a fresh weekly limit. Only you can redeem them."
-            >
-              <RowList label="Usage limit resets">
-                {account.resets.map((reset, index) => (
-                  <ListRow
-                    key={reset.id}
-                    title={reset.label}
-                    description={reset.expiresLabel}
+                <div className="flex flex-col gap-4">
+                  {weekly ? (
+                    <UsageMeter
+                      label="Weekly"
+                      percent={weekly.percentLeft}
+                      resetsLabel={weekly.resetsLabel}
+                    />
+                  ) : null}
+                  {fiveHour ? (
+                    <UsageMeter
+                      label="5-hour"
+                      percent={fiveHour.percentLeft}
+                      resetsLabel={fiveHour.resetsLabel}
+                    />
+                  ) : null}
+                </div>
+              </DetailSection>
+              <DetailSection title="Settings">
+                <SettingRowGroup className="-my-3">
+                  <SettingRow
+                    label="Use for new work"
+                    description="New chats and schedules can use this account."
                     control={
-                      index === 0 && !readOnly ? (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 rounded-[10px] px-2.5 pointer-coarse:h-11"
-                        >
-                          Redeem
-                        </Button>
-                      ) : null
+                      <Switch
+                        defaultChecked={account.useForNewWork}
+                        pending={state === "saving"}
+                        disabled={readOnly}
+                        disabledReason={readOnly ? lockedReason : undefined}
+                      />
                     }
                   />
-                ))}
-              </RowList>
+                  <SettingRow
+                    label="Codex Apps"
+                    description="Let agents use the ChatGPT apps connected to this account."
+                    control={
+                      <Switch
+                        defaultChecked={account.codexApps}
+                        disabled={readOnly}
+                        disabledReason={readOnly ? lockedReason : undefined}
+                      />
+                    }
+                  />
+                </SettingRowGroup>
+              </DetailSection>
+            </>
+          ) : (
+            <DetailSection
+              title="Usage limit resets"
+              description="Each reset gives this account a fresh weekly limit. Only you can redeem them."
+            >
+              {account.resets.length === 0 ? (
+                <p className="text-sm text-fg-muted">No resets available right now.</p>
+              ) : (
+                <RowList label="Usage limit resets">
+                  {account.resets.map((reset, index) => (
+                    <ListRow
+                      key={reset.id}
+                      title={reset.label}
+                      description={reset.expiresLabel}
+                      control={
+                        index === 0 && !readOnly ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 rounded-[10px] px-2.5 pointer-coarse:h-11"
+                          >
+                            Redeem
+                          </Button>
+                        ) : null
+                      }
+                    />
+                  ))}
+                </RowList>
+              )}
             </DetailSection>
-          ) : null}
-          <DetailSection title="Models">
-            <DetailFacts>
-              <DetailFact
-                label="Can serve"
-                action={
-                  readOnly ? null : (
-                    <Button type="button" variant="ghost" size="sm" className="-mr-2 h-7">
-                      Edit
-                    </Button>
-                  )
-                }
-              >
-                {account.modelsServedLabel === "All" ? "All models" : account.modelsServedLabel}
-              </DetailFact>
-              {account.availableInLabel ? (
-                <DetailFact label="Available in">{account.availableInLabel}</DetailFact>
-              ) : null}
-            </DetailFacts>
-          </DetailSection>
-        </DetailBody>
+          )}
+        </DetailPageBody>
       )}
-      {state === "confirm" ? (
-        <DetailFooterConfirm
-          title={`Disconnect ${account.name}?`}
-          description="New work moves to research@acme.dev. Work already running finishes first."
-          confirmLabel="Disconnect"
-        />
-      ) : (
-        <DetailFooter
-          start={
-            state === "saving" ? (
-              <span
-                role="status"
-                className="inline-flex items-center gap-1.5 text-xs text-fg-muted"
-              >
-                <LoaderCircleIcon
-                  aria-hidden="true"
-                  className="size-3.5 motion-safe:animate-spin"
-                />
-                Saving
-              </span>
-            ) : readOnly || state === "error" ? null : (
-              <DangerGhost>Disconnect</DangerGhost>
-            )
-          }
-        >
-          <Button type="button" variant="outline" className="pointer-coarse:h-11">
-            Done
-          </Button>
-        </DetailFooter>
-      )}
-    </>
+    </DetailPage>
   );
 }
 
-function SheetState({ label, children }: { label: string; children: ReactNode }) {
+function PageState({ height = 600, children }: { height?: number; children: ReactNode }) {
   return (
-    <DetailSheetPreview
-      label={label}
-      // The cell is the sheet's frame: the panel fills it and follows its corners.
-      className="h-[600px] max-w-none overflow-hidden rounded-[13px] border-l-0 shadow-none"
-      onClose={() => {}}
-    >
+    <div className="w-full overflow-auto rounded-[13px] bg-bg" style={{ height }}>
       {children}
-    </DetailSheetPreview>
+    </div>
   );
 }
 
@@ -696,29 +755,35 @@ export default function DetailSheetSection() {
         </Alternative>
       </Fork>
 
+      <KitBlock
+        title="Anatomy"
+        description="DetailPage, DetailPageHeader, DetailPageBody and DetailAside from components/ui/detail-page.tsx. Back link, 40px tile, title with chips, a meta line, underline tabs, a main column and a quiet aside card."
+      >
+        <PagePreview label={`${ops.name} account page`} height={FRAME_HEIGHT}>
+          <AccountPage account={ops} />
+        </PagePreview>
+      </KitBlock>
+
       <StatesGrid
         columns={2}
-        description="The recommended right sheet (A), with the Codex account from Models."
+        description="The detail page (B), with the Codex account from Models."
       >
-        <StateCell label="Default" padding={false} align="stretch" canvas="bg">
-          <SheetState label={ops.name}>
-            <AccountDetail account={ops} />
-          </SheetState>
-        </StateCell>
         <StateCell label="Loading" padding={false} align="stretch">
-          <SheetState label="Loading account">
-            <DetailSkeleton sections={3} />
-          </SheetState>
+          <PageState>
+            <DetailPage back={{ label: "Models", onClick: () => {} }}>
+              <DetailSkeleton sections={3} />
+            </DetailPage>
+          </PageState>
         </StateCell>
         <StateCell
           label="Read-only"
-          note="An organization account seen by a member: says who manages it, no destructive action."
+          note="An organization account seen by a member: says who manages it, no ⋯ menu."
           padding={false}
           align="stretch"
         >
-          <SheetState label={platform.name}>
-            <AccountDetail account={platform} state="readonly" />
-          </SheetState>
+          <PageState>
+            <AccountPage account={platform} state="readonly" />
+          </PageState>
         </StateCell>
         <StateCell
           label="Couldn't load"
@@ -726,64 +791,70 @@ export default function DetailSheetSection() {
           padding={false}
           align="stretch"
         >
-          <SheetState label={ops.name}>
-            <AccountDetail account={ops} state="error" />
-          </SheetState>
+          <PageState height={420}>
+            <AccountPage account={ops} state="error" />
+          </PageState>
         </StateCell>
         <StateCell
           label="Saving"
-          note="Switches save on change: the switch spins and the footer says so."
+          note="Switches save on change: the switch spins and the header says so."
           padding={false}
           align="stretch"
         >
-          <SheetState label={ops.name}>
-            <AccountDetail account={ops} state="saving" />
-          </SheetState>
+          <PageState height={420}>
+            <AccountPage account={ops} state="saving" />
+          </PageState>
         </StateCell>
         <StateCell
-          label="Destructive confirm"
-          note="The footer asks with the real name and the real consequence."
-          padding={false}
-          align="stretch"
+          label="Disconnect"
+          note="Destructive actions live in the ⋯ menu and confirm in a small centered modal over the page."
+          align="center"
         >
-          <SheetState label={ops.name}>
-            <AccountDetail account={ops} state="confirm" />
-          </SheetState>
+          <DestructiveConfirmPanel
+            title={`Disconnect ${ops.name}?`}
+            consequences={[
+              "New work moves to research@acme.dev.",
+              "Work already running finishes first.",
+            ]}
+            confirmLabel="Disconnect"
+          />
         </StateCell>
         <StateCell
           label="Long text"
-          note="Titles wrap; nothing overlaps the ⋯ and close buttons."
+          note="Titles wrap; the actions stay on the right or drop under the title."
           padding={false}
           align="stretch"
         >
-          <SheetState label={longAccount.name}>
-            <AccountDetail account={longAccount} />
-          </SheetState>
+          <PageState height={420}>
+            <AccountPage account={longAccount} />
+          </PageState>
         </StateCell>
         <StateCell
           label="Mobile 390"
-          note="Full screen on phones; fact rows stack; the footer stays reachable."
+          note="The aside drops under the main column; tabs scroll sideways."
           padding={false}
           width="mobile"
           align="stretch"
+          span="full"
         >
-          <SheetState label={ops.name}>
-            <AccountDetail account={ops} />
-          </SheetState>
+          <PageState>
+            <AccountPage account={ops} />
+          </PageState>
         </StateCell>
       </StatesGrid>
 
       <UsageNotes
         use={[
-          "One object with a few settings and a short sub-list: model accounts, people, API keys, schedules (sheet).",
-          "Objects with their own table of 10 to 100 rows: variable sets, sandbox environments (page).",
-          "Any detail people link to. Keep the sheet in the URL, for example ?account=ops.",
+          "Anything you open: model accounts, people, API keys, schedules, variable sets, environments, knowledge entries, workspaces. Each is its own page in the content area.",
+          'A back link to the list at the top: "← Models", "← Variable sets".',
+          "Keep the page in the URL, for example /models/accounts/ops so people can link to it.",
+          "Destructive actions in the ⋯ menu, confirmed in a small centered modal.",
         ]}
         avoid={[
-          "Create and edit forms: use a form dialog or form sheet.",
+          "Right-side sheets or panels, for anything.",
           "Expanding a row in place for anything with its own list.",
-          "A card inside a section, or a sheet opened from a sheet.",
-          "More than one primary action in the footer.",
+          "A card inside a section. The aside card is the only card on the page.",
+          "More than one primary action in the header.",
         ]}
       />
     </KitSection>

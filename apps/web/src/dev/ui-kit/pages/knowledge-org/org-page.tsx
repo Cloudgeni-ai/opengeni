@@ -23,7 +23,6 @@ import { toast } from "sonner";
 import { AccessList } from "@/components/ui/access-list";
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
-import { DetailSheet, DetailSheetContent } from "@/components/ui/detail-sheet";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Field, TextInput } from "@/components/ui/field";
@@ -50,7 +49,7 @@ import {
 import { KitBlock } from "../../kit";
 import { kitHref } from "../../view";
 import { PicksLine, PreviewDataToggle, QuestionBar, QuestionToggle } from "./chrome";
-import { AppFrame, ContentColumn, type FrameLayout } from "./frame";
+import { AppFrame, ContentColumn, ViewFocus, type FrameLayout } from "./frame";
 import {
   initialPeople,
   initialWorkspaces,
@@ -63,9 +62,9 @@ import {
   type OrgWorkspace,
 } from "./org-data";
 import {
-  FineTuneDialog,
+  FineTunePage,
   InviteForm,
-  NewWorkspaceDialog,
+  NewWorkspacePage,
   OrgConfirmDialog,
   type OrgConfirm,
 } from "./org-forms";
@@ -84,8 +83,9 @@ import { usePagePicks, wait, type PickedKey } from "./picks";
 
 /* ----------------------------------------------------------------------------
    Organization settings (brief section 10, "Organization: people and
-   workspaces"): People and Workspaces tables that open sheets, one access
-   editor everywhere, and the Invite dialog.
+   workspaces"): People and Workspaces lists whose rows open their own pages,
+   one access editor everywhere, and Invite people, New workspace and
+   Fine-tune as pages. Only confirmations and Rename stay small dialogs.
    -------------------------------------------------------------------------- */
 
 type PreviewState = "filled" | "just-you" | "loading";
@@ -214,11 +214,17 @@ export function OrgPagePreview() {
 
   const openPerson = (id: string | null) => {
     setOpenWorkspaceId(null);
+    setInviteOpen(false);
+    setNewWorkspaceOpen(false);
+    setFineTune(null);
     setOpenPersonId(id);
     if (id) setPage("people");
   };
   const openWorkspace = (id: string | null) => {
     setOpenPersonId(null);
+    setInviteOpen(false);
+    setNewWorkspaceOpen(false);
+    setFineTune(null);
     setOpenWorkspaceId(id);
     if (id) setPage("workspaces");
   };
@@ -305,7 +311,7 @@ export function OrgPagePreview() {
       toast(
         questions.q36 === "pause"
           ? `Resumed ${person.name}'s access, with the same workspaces as before`
-          : `Restored ${person.name}. Give workspace access again from their sheet.`,
+          : `Restored ${person.name}. Give workspace access again from their page.`,
       );
     },
     resendInvite: (person: OrgPerson) => {
@@ -369,13 +375,34 @@ export function OrgPagePreview() {
     );
   };
 
-  const presentation = picks.detail === "inline" && picks.list === "table" ? "sheet" : picks.detail;
   const openPersonRecord = store.people.find((person) => person.id === openPersonId) ?? null;
   const openWorkspaceRecord =
     workspaces.find((workspace) => workspace.id === openWorkspaceId) ?? null;
   const closeDetail = () => {
     setOpenPersonId(null);
     setOpenWorkspaceId(null);
+    setFineTune(null);
+  };
+
+  const createWorkspace = (name: string, description: string) => {
+    const created: OrgWorkspace = {
+      id: `ws-new-${Date.now()}`,
+      name,
+      kind: "shared",
+      typeLabel: `Shared · ${organization.name}`,
+      description: description || "No description yet.",
+      createdLabel: "Created today",
+      peopleCount: 1,
+      createdAt: KIT_NOW.toISOString(),
+    };
+    setWorkspaces((current) => [...current, created]);
+    updatePerson(you.id, (current) => ({
+      ...current,
+      grants: { ...current.grants, [created.id]: "workspace_admin" },
+    }));
+    setNewWorkspaceOpen(false);
+    toast(`Created ${name}. You're its workspace admin.`);
+    openWorkspace(created.id);
   };
 
   const navigate = (id: OrgPageId) => {
@@ -383,6 +410,7 @@ export function OrgPagePreview() {
     setMobileIndex(false);
     closeDetail();
     setInviteOpen(false);
+    setNewWorkspaceOpen(false);
   };
 
   const headerAction =
@@ -399,7 +427,10 @@ export function OrgPagePreview() {
     ) : activePage === "workspaces" && !local ? (
       <Button
         type="button"
-        onClick={() => setNewWorkspaceOpen(true)}
+        onClick={() => {
+          closeDetail();
+          setNewWorkspaceOpen(true);
+        }}
         disabled={previewState === "loading"}
         className="pointer-coarse:h-11"
       >
@@ -410,35 +441,13 @@ export function OrgPagePreview() {
 
   const pageBody = (): ReactNode => {
     if (activePage === "people") {
-      return (
-        <>
-          {picks.form === "inline" ? (
-            <div className="mb-6">
-              <InviteForm
-                presentation="inline"
-                open={inviteOpen}
-                onOpenChange={setInviteOpen}
-                onInvite={invite}
-              />
-            </div>
-          ) : null}
-          <PeopleView
-            state={previewState}
-            renderInlineDetail={(person) => (
-              <PersonDetail person={person} presentation="inline" onClose={closeDetail} />
-            )}
-          />
-        </>
-      );
+      return <PeopleView state={previewState} />;
     }
     if (activePage === "workspaces") {
       return (
         <WorkspacesView
           state={previewState}
           matrix={picks.access === "matrix" && !local ? <AccessMatrix /> : undefined}
-          renderInlineDetail={(workspace) => (
-            <WorkspaceDetail workspace={workspace} presentation="inline" onClose={closeDetail} />
-          )}
         />
       );
     }
@@ -451,7 +460,7 @@ export function OrgPagePreview() {
         title="Not part of this preview."
         description={
           activePage === "models"
-            ? "Organization models share the workspace Models page and its account sheet."
+            ? "Organization models share the workspace Models page and its account pages."
             : "This preview covers People, Workspaces, General and Security & data."
         }
         action={
@@ -584,23 +593,33 @@ export function OrgPagePreview() {
   };
 
   const pageColumn = (layout: FrameLayout) => {
-    const personPage = presentation === "page" && openPersonRecord && activePage === "people";
-    const workspacePage =
-      presentation === "page" && openWorkspaceRecord && activePage === "workspaces";
-    const invitePage = picks.form === "page" && inviteOpen;
-    if (invitePage) {
-      return <InviteForm presentation="page" open onOpenChange={setInviteOpen} onInvite={invite} />;
-    }
-    if (personPage)
-      return <PersonDetail person={openPersonRecord} presentation="page" onClose={closeDetail} />;
-    if (workspacePage) {
-      return (
-        <WorkspaceDetail
-          workspace={openWorkspaceRecord}
-          presentation="page"
-          onClose={closeDetail}
-        />
+    // Form pages bring their own page padding; cancel the column's so the back
+    // link lines up with the other pages.
+    const formPage = (node: ReactNode) => (
+      <div className="-mx-4 -mt-6 flex min-w-0 flex-col @[640px]/main:-mx-8">{node}</div>
+    );
+    if (fineTune) {
+      return formPage(
+        <FineTunePage
+          person={fineTune.person}
+          workspace={fineTune.workspace}
+          onClose={() => setFineTune(null)}
+        />,
       );
+    }
+    if (inviteOpen && activePage === "people") {
+      return formPage(<InviteForm onClose={() => setInviteOpen(false)} onInvite={invite} />);
+    }
+    if (newWorkspaceOpen && activePage === "workspaces") {
+      return formPage(
+        <NewWorkspacePage onClose={() => setNewWorkspaceOpen(false)} onCreate={createWorkspace} />,
+      );
+    }
+    if (openPersonRecord && activePage === "people") {
+      return <PersonDetail person={openPersonRecord} onClose={closeDetail} />;
+    }
+    if (openWorkspaceRecord && activePage === "workspaces") {
+      return <WorkspaceDetail workspace={openWorkspaceRecord} onClose={closeDetail} />;
     }
     return (
       <>
@@ -645,8 +664,15 @@ export function OrgPagePreview() {
     return <ContentColumn>{pageColumn(layout)}</ContentColumn>;
   };
 
-  const sheetPerson = presentation === "sheet" ? openPersonRecord : null;
-  const sheetWorkspace = presentation === "sheet" ? openWorkspaceRecord : null;
+  const viewKey = [
+    activePage,
+    mobileIndex ? "index" : "",
+    openPersonId ?? "",
+    openWorkspaceId ?? "",
+    inviteOpen ? "invite" : "",
+    newWorkspaceOpen ? "new-workspace" : "",
+    fineTune ? `fine-tune:${fineTune.person.id}:${fineTune.workspace.id}` : "",
+  ].join("|");
 
   return (
     // oxlint-disable-next-line react/jsx-no-constructed-context-values -- rebuilt on every state change by design; the whole preview re-renders with it
@@ -789,64 +815,9 @@ export function OrgPagePreview() {
           rail={railNav}
           mobileTitle="Organization"
         >
-          {content}
+          {(layout) => <ViewFocus viewKey={viewKey}>{content(layout)}</ViewFocus>}
         </AppFrame>
 
-        <DetailSheet
-          open={sheetPerson !== null}
-          onOpenChange={(open) => (open ? null : closeDetail())}
-        >
-          {sheetPerson ? (
-            <DetailSheetContent>
-              <PersonDetail person={sheetPerson} presentation="sheet" onClose={closeDetail} />
-            </DetailSheetContent>
-          ) : null}
-        </DetailSheet>
-        <DetailSheet
-          open={sheetWorkspace !== null}
-          onOpenChange={(open) => (open ? null : closeDetail())}
-        >
-          {sheetWorkspace ? (
-            <DetailSheetContent>
-              <WorkspaceDetail
-                workspace={sheetWorkspace}
-                presentation="sheet"
-                onClose={closeDetail}
-              />
-            </DetailSheetContent>
-          ) : null}
-        </DetailSheet>
-        {picks.form === "dialog" ? (
-          <InviteForm
-            presentation="dialog"
-            open={inviteOpen}
-            onOpenChange={setInviteOpen}
-            onInvite={invite}
-          />
-        ) : null}
-        <NewWorkspaceDialog
-          open={newWorkspaceOpen}
-          onOpenChange={setNewWorkspaceOpen}
-          onCreate={(name, description) => {
-            const created: OrgWorkspace = {
-              id: `ws-new-${Date.now()}`,
-              name,
-              kind: "shared",
-              typeLabel: `Shared · ${organization.name}`,
-              description: description || "No description yet.",
-              createdLabel: "Created today",
-              peopleCount: 1,
-              createdAt: KIT_NOW.toISOString(),
-            };
-            setWorkspaces((current) => [...current, created]);
-            updatePerson(you.id, (current) => ({
-              ...current,
-              grants: { ...current.grants, [created.id]: "workspace_admin" },
-            }));
-            toast(`Created ${name}. You're its workspace admin.`);
-            openWorkspace(created.id);
-          }}
-        />
         <OrgConfirmDialog
           confirm={confirm}
           onClose={() => setConfirm(null)}
@@ -876,7 +847,6 @@ export function OrgPagePreview() {
             toast(`You joined ${workspace.name} as a workspace admin`);
           }}
         />
-        <FineTuneDialog target={fineTune} onClose={() => setFineTune(null)} />
         <RenameOrganizationDialog open={renameOpen} onOpenChange={setRenameOpen} />
       </div>
     </OrgStoreContext.Provider>

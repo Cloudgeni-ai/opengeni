@@ -6,7 +6,7 @@ export default function PageApiKeysSection() {
     <KitSection sectionKey="page-api-keys">
       <KitBlock
         title="Page"
-        description="API keys inside the app, built from your picks. Open a key, revoke it, create one (the token shows once), or open the revoked and expired keys at the bottom. In a frame narrower than 1208px the main rail folds to icons, so the page keeps its 720px column."
+        description="API keys inside the app, built from your picks. A key opens as its own page with a back link; revoke it there. Create API key is a page too, and the token shows once on it. The revoked and expired keys sit at the bottom. In a frame narrower than 1208px the main rail folds to icons, so the page keeps its 720px column."
       >
         <SettingsPreview initialPage="api-keys" label="API keys" />
       </KitBlock>

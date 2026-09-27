@@ -38,7 +38,7 @@ export default function PageScheduleFormSection() {
     <KitSection sectionKey="page-schedule-form">
       <KitBlock
         title="New schedule"
-        description="What to do first, then when, then an optional name, with the rest in a closed Advanced section. Opens as a sheet, a page or an inline panel, following your form pick. Try Create with the field empty, pick a one-time date in the past, or open Advanced."
+        description="What to do first, then when, then an optional name, with the rest in a closed Advanced section. New schedule and Edit schedule are full pages with a back link and a sticky footer; saving opens the schedule's page. Try Create with the field empty, pick a one-time date in the past, or open Advanced."
       >
         <PreviewControls
           onReset={remount}

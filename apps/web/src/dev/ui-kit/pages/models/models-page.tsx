@@ -9,12 +9,7 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import {
-  DetailInline,
-  DetailPage,
-  DetailSheet,
-  DetailSheetContent,
-} from "@/components/ui/detail-sheet";
+import { DetailInline, DetailPage } from "@/components/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,7 +50,7 @@ import {
   buttonWidth,
   type AccountView,
 } from "./account-detail";
-import { AllowedModelsForm, ModelsDialogs } from "./dialogs";
+import { AllowedModelsForm, ConnectPage, ModelsDialogs } from "./dialogs";
 import { ModelsFrame, SettingsPageHeader, useFrame } from "./frame";
 import { ProviderTile } from "./marks";
 import { useModelsPicks } from "./picks";
@@ -67,6 +62,7 @@ import {
   availabilitySummary,
   codexOn,
   effectiveSource,
+  findAccount,
   modelChoices,
   resetsLabel,
   sameTarget,
@@ -76,6 +72,7 @@ import {
   type DetailTarget,
   type GatewayId,
   type LegacySource,
+  type ModelsData,
   type Rotation,
   type Scope,
   type Source,
@@ -83,8 +80,9 @@ import {
 
 /* ----------------------------------------------------------------------------
    Settings > Models, for a workspace and for the organization, built from the
-   real primitives and driven by Bendik's picks. Rows open the account detail
-   (sheet, page or in place); every control saves with fixtures.
+   real primitives and driven by Bendik's picks. Rows open the account's own
+   detail page (or expand in place, for question 12's other answer); Connect
+   and Edit open full-page forms; every control saves with fixtures.
    -------------------------------------------------------------------------- */
 
 const COLUMNS: RowListColumn[] = [
@@ -117,32 +115,38 @@ const LEGACY_SOURCE_OPTIONS: SelectOption<LegacySource>[] = [
   { value: "disabled", label: "Turn off Codex", description: "New work can't use Codex here." },
 ];
 
-/** Where the account detail shows: a sheet, a page, or in place under its row. */
-function useDetailLayout(): "sheet" | "page" | "inline" {
+/** Where the account detail shows: its own page, or in place under its row. */
+function useDetailLayout(): "page" | "inline" {
   const { questions } = useModels();
   const picks = useModelsPicks();
-  // Tables don't expand in place; they keep the sheet.
+  // Tables don't expand in place; they keep the page.
   if (questions.q12 === "inline" && picks.list !== "table") return "inline";
-  return picks.detail === "page" ? "page" : "sheet";
+  return "page";
 }
 
 /* ----------------------------------------------------------------------------
-   The preview: frame, page, and whatever is open.
+   The preview: frame, and the one page that is showing. Everything you open
+   is a page in the content area with a back link; only confirmations and
+   one-field prompts are centered dialogs.
    -------------------------------------------------------------------------- */
 
 export function ModelsPreview() {
-  const { scenario, setScenario, detail, openDetail, allowed, openAllowed } = useModels();
+  const {
+    data,
+    scenario,
+    setScenario,
+    detail,
+    openDetail,
+    allowed,
+    openAllowed,
+    dialog,
+    openDialog,
+  } = useModels();
   const picks = useModelsPicks();
   const layout = useDetailLayout();
   const viewerIsOrgAdmin = scenario.viewer === "org_admin";
-  const allowedLayout =
-    allowed?.kind === "workspace"
-      ? picks.form === "page"
-        ? "page"
-        : picks.form === "inline"
-          ? "inline"
-          : "sheet"
-      : "sheet";
+  const detailPage = layout === "page" ? detail : null;
+  const connect = dialog?.kind === "connect" ? dialog : null;
 
   const view: AccountView = {
     pageScope: scenario.scope,
@@ -154,24 +158,46 @@ export function ModelsPreview() {
   };
 
   let page: ReactNode;
-  if (layout === "page" && detail) {
+  let key: string;
+  if (connect) {
+    key = `connect:${connect.scope}`;
+    page = (
+      <ConnectPage
+        key={key}
+        scope={connect.scope}
+        initialProvider={connect.provider}
+        onClose={() => openDialog(null)}
+      />
+    );
+  } else if (allowed) {
+    key = `allowed:${JSON.stringify(allowed)}`;
+    page = (
+      <AllowedModelsForm
+        key={key}
+        target={allowed}
+        backLabel={detailPage ? detailTitle(data, detailPage) : "Models"}
+        onClose={() => openAllowed(null)}
+      />
+    );
+  } else if (detailPage) {
+    key = `detail:${detailPage.kind}:${detailPage.scope}:${detailPage.id}`;
     page = (
       <DetailPage
         back={{ label: "Models", onClick: () => openDetail(null) }}
         className="max-w-none px-0 pt-0 pb-0 max-sm:px-0"
       >
-        <DetailView target={detail} view={view} />
+        <DetailView target={detailPage} view={view} />
       </DetailPage>
     );
-  } else if (allowed && allowedLayout === "page") {
-    page = (
-      <AllowedModelsForm target={allowed} presentation="page" onClose={() => openAllowed(null)} />
-    );
   } else if (scenario.scope === "organization") {
+    key = "list:organization";
     page = <OrganizationModels />;
   } else {
+    key = "list:workspace";
     page = <WorkspaceModels />;
   }
+
+  const focusRoot = useFocusOnChange(key, detailPage ? detailTitle(data, detailPage) : null);
 
   return (
     <>
@@ -192,40 +218,55 @@ export function ModelsPreview() {
         headerVariant={picks.headerVariant}
         headerIcon={picks.headerIcon}
       >
-        <ScrollOnChange
-          value={
-            layout === "page" && detail
-              ? `detail:${detail.scope}:${detail.id}`
-              : allowed && allowedLayout === "page"
-                ? "allowed"
-                : "list"
-          }
-        />
-        {page}
+        <ScrollOnChange value={key} />
+        <div ref={focusRoot} className="min-w-0">
+          {page}
+        </div>
       </ModelsFrame>
-      {layout === "sheet" ? (
-        <DetailSheet
-          open={detail !== null}
-          onOpenChange={(open) => (open ? null : openDetail(null))}
-        >
-          {detail ? (
-            <DetailSheetContent>
-              <DetailView target={detail} view={view} />
-            </DetailSheetContent>
-          ) : null}
-        </DetailSheet>
-      ) : null}
-      {allowed && allowedLayout === "sheet" ? (
-        <AllowedModelsForm
-          key={JSON.stringify(allowed)}
-          target={allowed}
-          presentation="sheet"
-          onClose={() => openAllowed(null)}
-        />
-      ) : null}
       <ModelsDialogs />
     </>
   );
+}
+
+/** The back label for a form opened from an account's page: the account's name. */
+function detailTitle(data: ModelsData, target: DetailTarget): string {
+  return target.kind === "codex"
+    ? (findAccount(data, target.scope, target.id)?.name ?? "Models")
+    : data.gateways[target.scope][target.id].name;
+}
+
+/**
+ * After a navigation, focus lands on the new page's title so keyboard and
+ * screen reader users start at the top of it. Back on the list, focus returns
+ * to the row that was opened.
+ */
+function useFocusOnChange(value: string, openedName: string | null) {
+  const ref = useRef<HTMLDivElement>(null);
+  const first = useRef(true);
+  const lastOpened = useRef<string | null>(null);
+  useEffect(() => {
+    const root = ref.current;
+    const returnTo = lastOpened.current;
+    lastOpened.current = openedName;
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    if (!root) return;
+    if (value.startsWith("list:")) {
+      if (!returnTo) return;
+      const row = Array.from(root.querySelectorAll<HTMLElement>("[data-slot=list-row]")).find(
+        (each) => each.textContent?.includes(returnTo),
+      );
+      row?.querySelector<HTMLElement>("[data-row-action]")?.focus({ preventScroll: true });
+      return;
+    }
+    const heading = root.querySelector<HTMLElement>("h1");
+    if (heading && !heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+    heading?.focus({ preventScroll: true });
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- only when the page changes
+  }, [value]);
+  return ref;
 }
 
 /** Detail pages and full-page forms start at the top, like a navigation. */
@@ -302,7 +343,6 @@ function WorkspaceModels() {
                 <DefaultModelRow />
                 <AllowedModelsRow />
               </SettingRowGroup>
-              <AllowedInline />
             </Section>
             <Section
               title="Model accounts"
@@ -520,18 +560,6 @@ function AllowedModelsRow() {
   );
 }
 
-/** The Allowed models form in place, when the Form pick is "Inline on the page". */
-function AllowedInline() {
-  const { allowed, openAllowed } = useModels();
-  const picks = useModelsPicks();
-  if (allowed?.kind !== "workspace" || picks.form !== "inline") return null;
-  return (
-    <div className="mt-2 mb-2">
-      <AllowedModelsForm target={allowed} presentation="inline" onClose={() => openAllowed(null)} />
-    </div>
-  );
-}
-
 /* ----------------------------------------------------------------------------
    Model accounts: providers as groups, one row per account.
    -------------------------------------------------------------------------- */
@@ -637,7 +665,9 @@ function GroupHeader({
           <h3 className="text-sm leading-5 font-semibold text-fg">{title}</h3>
           <p className="text-xs leading-4.5 text-fg-muted">{subtitle}</p>
         </div>
-        {trailing ? <div className="flex shrink-0 items-center empty:hidden">{trailing}</div> : null}
+        {trailing ? (
+          <div className="flex shrink-0 items-center empty:hidden">{trailing}</div>
+        ) : null}
       </div>
       {controls ? (
         // Empty (one account, or Codex off) collapses instead of leaving a gap.
@@ -913,7 +943,7 @@ function useDetailRowProps(target: DetailTarget, render: () => ReactNode) {
   const open = sameTarget(detail, target);
   const inline = layout === "inline";
   return {
-    selected: open && layout !== "inline",
+    selected: false,
     onOpen: () => openDetail(open && inline ? null : target),
     expanded: inline ? open : undefined,
     panel: inline && open ? <DetailInline className="mt-1">{render()}</DetailInline> : undefined,

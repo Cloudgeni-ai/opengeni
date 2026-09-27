@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { CirclePauseIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -129,12 +129,14 @@ export function useFrameBase(): Omit<SettingsFrameProps, "children"> {
 }
 
 /**
- * FormPage centres its own 640px column with padding, for a page of its own.
- * Inside the settings column it starts at the column's edge instead, so the
- * back link and title line up with the sub-nav like every other page.
+ * FormPage and DetailPage share one frame (960px, 32px sides). Inside the
+ * settings column the frame already has its padding, so detail pages pass
+ * `px-0` and form pages drop the frame's sides here too: the back link and
+ * title of both line up with the settings page header. The footer rule stops
+ * with the 640px field column, like the header rule.
  */
 export const FORM_PAGE_IN_SETTINGS =
-  "[&_header]:mx-0 [&_header]:px-0 [&_header]:pt-0 [&_[data-slot=form-body]]:mx-0 [&_[data-slot=form-body]]:px-0 [&_footer]:justify-start [&_footer>div]:mx-0 [&_footer>div]:px-0";
+  "[&_header]:mx-0 [&_header]:px-0 [&_header]:pt-0 [&_[data-slot=form-body]]:mx-0 [&_[data-slot=form-body]]:px-0 [&_footer]:max-w-[640px] [&_footer>div]:mx-0 [&_footer>div]:px-0";
 
 /* ----------------------------------------------------------------------------
    Small pieces.
@@ -157,4 +159,26 @@ export function AdminOnly({
   const { canManage } = useSettingsPreview();
   if (canManage) return children;
   return <DisabledReason reason={ADMIN_ONLY_REASON}>{children}</DisabledReason>;
+}
+
+/**
+ * A page that opened in place of the list (a detail page or a form page).
+ * Focus moves to its heading (or, failing that, the back link), so keyboard
+ * and screen reader users land on the new page instead of a row that no
+ * longer exists.
+ */
+export function OpenedPage({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const root = ref.current;
+    const target =
+      root?.querySelector<HTMLElement>("h1[tabindex]") ??
+      root?.querySelector<HTMLElement>("a[href], button");
+    target?.focus({ preventScroll: true });
+  }, []);
+  return (
+    <div ref={ref} className="min-w-0">
+      {children}
+    </div>
+  );
 }

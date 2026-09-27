@@ -89,7 +89,7 @@ export function RecommendedTag({ className }: { className?: string }) {
         className,
       )}
     >
-      Recommended
+      Decided
     </span>
   );
 }
@@ -309,7 +309,7 @@ function useRequiredSectionKey(explicit: SectionKey | undefined, component: stri
  */
 export function Fork({
   pickKey,
-  title = "Pick a version",
+  title = "Versions",
   description,
   layout = "columns",
   showNote = true,
@@ -340,8 +340,11 @@ export function Fork({
     description ??
     (recommended ? (
       <>
-        We recommend {alternativeLetter(recommended)}
-        {section.whyRecommended ? `: ${section.whyRecommended}` : "."}
+        Decided: {alternativeLetter(recommended)}
+        {section.whyRecommended ? `. ${section.whyRecommended}` : "."}
+        {section.decision ? (
+          <span className="mt-1.5 block text-fg-subtle">{section.decision}</span>
+        ) : null}
       </>
     ) : null);
 
@@ -357,6 +360,8 @@ export function Fork({
                 <CheckIcon className="size-3.5" aria-hidden="true" />
                 You picked {alternativeLetter(pick)}
               </span>
+            ) : recommended ? (
+              `Using ${alternativeLetter(recommended)}`
             ) : (
               "Not picked yet"
             )}
