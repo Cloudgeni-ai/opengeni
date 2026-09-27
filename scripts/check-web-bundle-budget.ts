@@ -518,6 +518,16 @@ const effectiveBudgets = {
     // 693,801 gzip across 33 files locally. Keep the established 1.5 KiB
     // headroom; gzip, file-count and other caps stay fixed.
     wholeKibEnvelope(2_454_752, 1.5 * kib),
+    // Compact exchange timeline: each delegated question folds behind one
+    // live status row, with the exchange projection and presented-image facts
+    // shared by the session-only entry. Base 3fbd98bab measures 2,456,156 raw
+    // / 693,311 gzip across 33 files; the candidate 2,475,118 / 700,029 across
+    // 35 (Bun 1.3.14 macOS/arm64), and 2,475,114-2,475,118 raw / 700,026-700,042
+    // gzip in Linux/x64 Bun 1.4 CI. The +18,962 raw / +6,718 gzip delta is the
+    // timeline code itself; its two extra shared chunks stay under the file cap.
+    // Keep the established 1.5 KiB headroom; initial, per-file, lazy, and CSS
+    // caps stay fixed.
+    wholeKibEnvelope(2_475_118, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
@@ -577,6 +587,10 @@ const effectiveBudgets = {
     // macOS and 659,488 in Linux CI. Keep the existing minimum 1-KiB
     // headroom policy and round the envelope to whole KiB.
     wholeKibEnvelope(659_492),
+    // Same compact exchange timeline measurement documented in the raw bound
+    // above: the largest observed gzip graph is 700,042 bytes (Linux/x64 CI).
+    // Retain the established 1.5 KiB platform-skew allowance.
+    wholeKibEnvelope(700_042, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
