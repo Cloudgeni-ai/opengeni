@@ -18,7 +18,7 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
-import { ToolbarSearch } from "@/components/ui/toolbar";
+import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
 import {
   beginOrganizationAdminOperation,
   ownsOrganizationAdminOperation,
@@ -290,14 +290,14 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
             }
           >
             <div className="flex min-w-0 flex-col gap-3">
-              <div className="min-w-0">
+              <Toolbar>
                 <ToolbarSearch
                   value={search}
                   onValueChange={setSearch}
                   placeholder="Search integrations"
                   aria-label="Search integrations"
                 />
-              </div>
+              </Toolbar>
               {options.length === 0 && unknownKeys.length === 0 ? (
                 <EmptyState
                   variant="inline"

@@ -33,6 +33,9 @@ const workspaceRouteContracts = {
   },
   workspaceLegacyCapabilitiesRoute: { kind: "redirect" },
   workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleNewRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleDetailRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleEditRoute: { kind: "page", source: "routes/schedules.tsx" },
   workspaceDocumentsRoute: {
     kind: "page",
     source: "routes/documents.tsx",

@@ -192,6 +192,13 @@ mock.module("@tanstack/react-router", () => ({
   ...RouterPackage,
   Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
   useNavigate: () => navigate,
+  useRouterState: (options?: { select?: (state: unknown) => unknown }) => {
+    const state = {
+      location: { pathname: "/", search: { section: "page" }, href: "/" },
+      matches: [],
+    };
+    return options?.select ? options.select(state) : state;
+  },
 }));
 mock.module("@/lib/analytics", () => ({ ...AnalyticsModule, captureAnalyticsEvent }));
 mock.module("sonner", () => ({

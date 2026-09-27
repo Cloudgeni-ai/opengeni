@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-const schedulesSource = await Bun.file(`${import.meta.dir}/routes/schedules.tsx`).text();
+const schedulesSource = await Bun.file(`${import.meta.dir}/components/schedules/schedules-list-page.tsx`).text();
 
 describe("schedules refresh surface", () => {
   test("reconciles external changes automatically without restoring a refresh button", () => {

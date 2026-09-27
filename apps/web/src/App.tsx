@@ -15,7 +15,10 @@
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
-//   /workspaces/:id/schedules                → scheduled tasks + run history
+//   /workspaces/:id/schedules                → schedules list
+//   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
+//   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
+//   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
@@ -135,6 +138,14 @@ const LazyRigDetailRoute = lazyRouteComponent(
   "RigDetailRoute",
 );
 const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
+const LazyScheduleDetailRoute = lazyRouteComponent(
+  () => import("@/routes/schedules"),
+  "ScheduleDetailRoute",
+);
+const LazyScheduleFormRoute = lazyRouteComponent(
+  () => import("@/routes/schedules"),
+  "ScheduleFormRoute",
+);
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
 const LazySessionDeepLinkRoute = lazyRouteComponent(
   () => import("@/routes/session-deep-link"),
@@ -422,6 +433,36 @@ const workspaceSchedulesRoute = createRoute({
   }),
   component: Schedules,
 });
+const SCHEDULE_TEMPLATE_IDS = new Set(["morning-brief", "dependency-pr", "cost-check"]);
+const workspaceScheduleNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/new",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { template?: string; from?: string; sourceSessionId?: string } => ({
+    ...(typeof search.template === "string" && SCHEDULE_TEMPLATE_IDS.has(search.template)
+      ? { template: search.template }
+      : {}),
+    ...(typeof search.from === "string" && SCHEDULES_SEARCH_UUID.test(search.from)
+      ? { from: search.from }
+      : {}),
+    ...(typeof search.sourceSessionId === "string" &&
+    SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
+      ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+  }),
+  component: ScheduleNew,
+});
+const workspaceScheduleDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/$scheduleId",
+  component: ScheduleDetail,
+});
+const workspaceScheduleEditRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/$scheduleId/edit",
+  component: ScheduleEdit,
+});
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
@@ -606,6 +647,9 @@ const routeTree = rootRoute.addChildren([
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
     workspaceSchedulesRoute,
+    workspaceScheduleNewRoute,
+    workspaceScheduleDetailRoute,
+    workspaceScheduleEditRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
@@ -785,6 +829,27 @@ function Schedules() {
       targetSessionId={targetSessionId}
     />
   );
+}
+
+function ScheduleNew() {
+  const { workspaceId } = workspaceScheduleNewRoute.useParams();
+  const { template, from, sourceSessionId } = workspaceScheduleNewRoute.useSearch();
+  return (
+    <LazyScheduleFormRoute
+      workspaceId={workspaceId}
+      mode={{ kind: "create", template, from, sourceSessionId }}
+    />
+  );
+}
+
+function ScheduleDetail() {
+  const { workspaceId, scheduleId } = workspaceScheduleDetailRoute.useParams();
+  return <LazyScheduleDetailRoute workspaceId={workspaceId} scheduleId={scheduleId} />;
+}
+
+function ScheduleEdit() {
+  const { workspaceId, scheduleId } = workspaceScheduleEditRoute.useParams();
+  return <LazyScheduleFormRoute workspaceId={workspaceId} mode={{ kind: "edit", scheduleId }} />;
 }
 
 function Documents() {

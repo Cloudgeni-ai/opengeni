@@ -9,7 +9,7 @@ describe("session control surface architecture", () => {
     for (const [path, workspace] of [
       ["routes/session.tsx", "props.session.workspaceId"],
       ["routes/sessions-index.tsx", "workspaceId"],
-      ["routes/schedules.tsx", "props.workspaceId"],
+      ["components/schedules/schedule-form-page.tsx", "workspaceId"],
     ] as const) {
       const route = await source(path);
       const start = route.indexOf("const connectionAccounts = useConnectionAccounts(");
