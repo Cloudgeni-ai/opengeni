@@ -2974,6 +2974,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const backendDOMNodeId = await this.uniqueDomMatch(state, selector);
       return syntheticEntry(backendDOMNodeId);
     }
+    // A reference already identifies one concrete node. Revalidate that node
+    // against Chromium instead of reading every unrelated node before input.
+    // Frame/engine cases without this exact proof retain full-tree resolution.
+    if (locator.kind === "ref" && this.engine === "chromium") {
+      const cached = state.accessibility?.entriesByRef.get(locator.ref);
+      if (cached?.backendDOMNodeId != null && cached.frameId === state.frame.id) {
+        const partial = await this.resolveMainFrameReference(state, cached);
+        if (partial) return partial;
+      }
+    }
     const accessibility = await this.refreshAccessibility(state);
     if (locator.kind === "ref") {
       const entry = accessibility.entriesByRef.get(locator.ref);
@@ -3021,6 +3031,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     return unique;
+  }
+
+  private async resolveMainFrameReference(
+    state: TargetState,
+    previous: CdpAccessibilityEntry,
+  ): Promise<CdpAccessibilityEntry | null> {
+    const frame = state.frame;
+    let response: { nodes?: unknown };
+    try {
+      response = await this.sendTarget(state, "Accessibility.getPartialAXTree", {
+        backendNodeId: previous.backendDOMNodeId,
+        fetchRelatives: false,
+      });
+    } catch (error) {
+      // Older CDP implementations and disappeared nodes can reject this read.
+      // Full-tree resolution remains authoritative; no input has been sent.
+      if (error instanceof CdpProtocolError) return null;
+      throw error;
+    }
+    if (!Array.isArray(response.nodes)) return null;
+    await this.refreshFrame(state);
+    if (frame.id !== state.frame.id || frame.loaderId !== state.frame.loaderId) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "browser document changed while resolving the element reference",
+      );
+    }
+    const current = normalizeCdpAccessibilityTree({
+      nodes: namespaceCdpAccessibilityFrame(
+        frame.id,
+        response.nodes as CdpAxNode[],
+        `${frame.id}\0${frame.loaderId}`,
+      ),
+      controllerGeneration: this.controllerGeneration,
+      targetId: state.targetId,
+      documentGeneration: state.documentGeneration,
+    }).entriesByRef.get(previous.ref);
+    if (!current || current.backendDOMNodeId !== previous.backendDOMNodeId) {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "browser element reference is stale or unavailable",
+      );
+    }
+    return current;
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
