@@ -2705,6 +2705,130 @@ describe("session-level wait_for_input", () => {
     expect((await waitColumns(ctx)).input_wait_turn_id).toBeNull();
   });
 
+  async function addPendingChildUpdate(
+    ctx: GoalFixture,
+    kind: "child_terminal_result" | "child_progress",
+  ) {
+    const childSessionId = crypto.randomUUID();
+    const common = {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      sourceId: childSessionId,
+      dedupeKey: `${kind}:${childSessionId}:1`,
+      lineage: { parentSessionId: ctx.session.id, parentTurnId: ctx.turn.id, childSessionId },
+    };
+    const added =
+      kind === "child_terminal_result"
+        ? await addSessionSystemUpdate(client.db, {
+            ...common,
+            kind,
+            classification: "success",
+            summary: "A worker session you spawned has finished its work and gone idle.",
+            payload: { type: kind, childSessionId, status: "idle" },
+          })
+        : await addSessionSystemUpdate(client.db, {
+            ...common,
+            kind,
+            classification: "info",
+            summary: "A worker session reported progress.",
+            payload: {
+              type: kind,
+              childSessionId,
+              goalId: crypto.randomUUID(),
+              objectiveRevision: 1,
+              operationId: crypto.randomUUID(),
+              progressNote: "half of the rows are counted",
+            },
+          });
+    if (!added.added) throw new Error(`${kind} was not inserted`);
+  }
+
+  // The reverse ordering: the awaited child result is already pending when a
+  // person's queued turn is claimed, so that turn consumes it as coalesced
+  // machine input. It is the input the wait was for, so it retires the wait
+  // exactly like a system turn would; otherwise the session would sit
+  // "waiting" until the deadline and an active goal would stall behind it.
+  test.each(["with a goal", "without a goal"] as const)(
+    "a person's turn that consumed the awaited child result retires the wait (%s)",
+    async (variant) => {
+      const ctx = await runningGoalFixture();
+      if (variant === "without a goal") {
+        await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      }
+      const waiting = await wait(ctx, { timeoutSeconds: 600 });
+      await settleIdle(ctx);
+      await addPendingChildUpdate(ctx, "child_terminal_result");
+      const question = await submitPrompt(ctx, "user", "is it done yet?");
+      const answer = await claimNext(ctx);
+      expect(answer.claimed.turn.id).toBe(question.turn.id);
+      expect(
+        (
+          await listSessionSystemUpdatesForTurn(
+            client.db,
+            ctx.grant.workspaceId!,
+            ctx.session.id,
+            answer.claimed.turn.id,
+          )
+        ).map((update) => update.kind),
+      ).toEqual(["child_terminal_result"]);
+      await settleClaimedIdle(ctx, answer.claimed, answer.attemptId);
+      expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+        kind: "input-wait",
+        disposition: "superseded",
+        waitTurnId: ctx.turn.id,
+        deadlineAt: waiting.deadlineAt,
+      });
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+      ).toBeNull();
+      const superseded = await settleSessionInputWait(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        waitTurnId: ctx.turn.id,
+        disposition: "superseded",
+      });
+      expect(superseded.action).toBe("superseded");
+      expect(superseded.events[0]!.payload).toMatchObject({ outcome: "input" });
+      if (variant === "with a goal") {
+        // The goal continues now instead of stalling behind a spent wait.
+        expect((await materialize(ctx)).action).toBe("continue");
+      } else {
+        expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+          kind: "idle",
+        });
+      }
+    },
+  );
+
+  test("a person's turn that consumed only deferred child notices leaves the wait held", async () => {
+    const ctx = await runningGoalFixture();
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    const waiting = await wait(ctx, { timeoutSeconds: 600 });
+    await settleIdle(ctx);
+    await addPendingChildUpdate(ctx, "child_progress");
+    await submitPrompt(ctx, "user", "how's it going?");
+    const answer = await claimNext(ctx);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          ctx.grant.workspaceId!,
+          ctx.session.id,
+          answer.claimed.turn.id,
+        )
+      ).map((update) => update.kind),
+    ).toEqual(["child_progress"]);
+    await settleClaimedIdle(ctx, answer.claimed, answer.attemptId);
+    expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+      kind: "input-wait",
+      disposition: "held",
+      waitTurnId: ctx.turn.id,
+      deadlineAt: waiting.deadlineAt,
+    });
+  });
+
   test.each(["system", "goal"] as const)(
     "a %s turn still supersedes a wait that outlived a person's turn",
     async (kind) => {

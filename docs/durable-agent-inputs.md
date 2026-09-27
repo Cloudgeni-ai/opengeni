@@ -53,9 +53,14 @@ passes unchanged, settlement clears the wait and atomically queues one typed
 `session_wait_timeout` input plus its workflow wake.
 
 The wait is retired only by a newer finished turn that a person did not start,
-or by its own timeout. A person's turn (`source` `user` or `api`, or an
-operator's manual `/compact`) still runs immediately, but unless that turn calls
-`wait_for_input` again, the wait keeps its declaring turn, reason, and deadline.
+by a person's turn that consumed immediate machine input, or by its own timeout.
+A person's turn (`source` `user` or `api`, or an operator's manual `/compact`)
+still runs immediately, but unless that turn calls `wait_for_input` again, the
+wait keeps its declaring turn, reason, and deadline. The exception is a queued
+person's turn that claims pending `immediate` machine input as coalesced
+context, for example a child result that arrived just before the question ran:
+it consumed what the wait was for, so it retires the wait like the system turn
+it replaced. Coalesced `deferred` notices alone do not retire it.
 This is what lets a status question asked while a child runs get its answer and
 still leave the child's later result able to wake a goalless parent; without
 it, the answer turn retired the wait and the result stayed pending with nothing

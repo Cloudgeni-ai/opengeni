@@ -35027,9 +35027,10 @@ type SessionRow = typeof schema.sessions.$inferSelect & {
 
 /**
  * Turn sources a person starts: a human or API message, or an operator's
- * manual `/compact`. Such a turn carries no machine input the agent is waiting
- * for, so unless it declares its own wait it does not retire the held session
- * wait. Every wait reader filters through `sessionInputWaitDecidingTurnSql`.
+ * manual `/compact`. Such a turn brings no machine input the agent is waiting
+ * for, so unless it declares its own wait or consumes awaited machine input,
+ * it does not retire the held session wait. Every wait reader filters through
+ * `sessionInputWaitDecidingTurnSql`.
  */
 const SESSION_INPUT_WAIT_PERSON_TURN_SOURCES = [
   "user",
@@ -35038,21 +35039,44 @@ const SESSION_INPUT_WAIT_PERSON_TURN_SOURCES = [
 ] as const satisfies readonly SessionTurnSource[];
 
 /**
+ * Machine input a held wait is waiting for: every `immediate` kind. A person's
+ * queued turn claims pending machine input as coalesced context, so a delivered
+ * member of one of these kinds makes that turn retire the wait exactly like the
+ * system turn it replaced. Deferred child notices never end a wait, so a
+ * person's turn that coalesced only those leaves it held.
+ */
+const SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS = (
+  Object.entries(SESSION_SYSTEM_UPDATE_WAKE_CLASS) as Array<[SessionSystemUpdateKind, string]>
+)
+  .filter(([, wakeClass]) => wakeClass === "immediate")
+  .map(([kind]) => kind);
+
+/**
  * The one predicate for "finished turns that decide the session wait": the
- * declaring turn itself, plus every turn a person did not start. The newest
- * finished turn matching it decides the disposition; if that is not the
- * declaring turn, the wait is superseded. Worker settlement, peek/claim/wake
- * admission, public projections, and descendant counts all use this so they
- * cannot drift apart.
+ * declaring turn itself, every turn a person did not start, and a person's turn
+ * that consumed awaited machine input. The newest finished turn matching it
+ * decides the disposition; if that is not the declaring turn, the wait is
+ * superseded. Worker settlement, peek/claim/wake admission, public projections,
+ * and descendant counts all use this so they cannot drift apart.
  */
 function sessionInputWaitDecidingTurnSql(
-  turn: { id: SQLWrapper; source: SQLWrapper },
+  turn: { id: SQLWrapper; source: SQLWrapper; workspaceId: SQLWrapper; sessionId: SQLWrapper },
   waitTurnId: SQLWrapper | string,
 ): SQL {
   return sql`(${turn.id} = ${waitTurnId} or ${turn.source} not in (${sql.join(
     SESSION_INPUT_WAIT_PERSON_TURN_SOURCES.map((source) => sql`${source}`),
     sql`, `,
-  )}))`;
+  )}) or exists (
+    select 1 from ${schema.sessionSystemUpdates} consumed
+    where consumed.workspace_id = ${turn.workspaceId}
+      and consumed.session_id = ${turn.sessionId}
+      and consumed.state = 'delivered'
+      and consumed.delivered_turn_id = ${turn.id}
+      and consumed.kind in (${sql.join(
+        SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS.map((kind) => sql`${kind}`),
+        sql`, `,
+      )})
+  ))`;
 }
 
 /** One bounded query in the caller's RLS scope; never infer waits from history text. */
@@ -35494,7 +35518,12 @@ export async function sessionTreeStatsForSessions(
                     where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
                       and finished.finished_at is not null
                       and ${sessionInputWaitDecidingTurnSql(
-                        { id: sql`finished.id`, source: sql`finished.source` },
+                        {
+                          id: sql`finished.id`,
+                          source: sql`finished.source`,
+                          workspaceId: sql`finished.workspace_id`,
+                          sessionId: sql`finished.session_id`,
+                        },
                         sql`waiting_session.input_wait_turn_id`,
                       )}
                     order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1

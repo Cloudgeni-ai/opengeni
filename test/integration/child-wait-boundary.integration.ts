@@ -260,3 +260,111 @@ test("a person's answer turn keeps a goalless root waiting so its child result w
     expect(waitFinished[0]!.payload).toMatchObject({ outcome: "input" });
   });
 }, 300000);
+
+test("a person's turn that consumed the awaited child result retires the wait at once", async () => {
+  await withScenarioStack(
+    "held-wait-consumed-by-person-turn",
+    "opengeni-consumed-wait-",
+    async (stack) => {
+      const { base, topology, receiptDir } = stack;
+      const marker = join(receiptDir, "question-queued");
+      const create = await fetch(`${base}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          initialMessage: `CONSUMED_WAIT_ROOT_FIXTURE CONSUMED_WAIT_MARKER=${marker} count the customers in a child session`,
+          sandboxBackend: "none",
+          tools: [{ id: "opengeni", kind: "mcp" }],
+        }),
+      });
+      expect(create.status).toBe(202);
+      const parent = (await create.json()) as SessionProjection;
+      const events = async () =>
+        (await (
+          await fetch(
+            `${base}/sessions/${parent.id}/events?mode=forensic&payloadMode=full&limit=1000`,
+          )
+        ).json()) as EventProjection[];
+      const turns = async () =>
+        (await (await fetch(`${base}/sessions/${parent.id}/turns`)).json()) as TurnProjection[];
+      const describe = () => `receipt=${receiptDir}\n${topology.logs()}`;
+      const isChildResult = (e: EventProjection) =>
+        e.type === "system.update.pending" && e.payload.kind === "child_terminal_result";
+      try {
+        // The child finishes while the root's first turn is still running, so
+        // its result is pending when the person's question is queued.
+        await waitFor(async () => (await events()).some(isChildResult), {
+          timeoutMs: 150000,
+          describe,
+        });
+        const question = await fetch(`${base}/sessions/${parent.id}/events`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            type: "user.message",
+            payload: { text: "CONSUMED_WAIT_QUESTION is it done yet?" },
+          }),
+        });
+        expect(question.status).toBe(202);
+        await Bun.write(marker, "queued");
+        // Well inside the 45 s wait deadline: the answer turn retires the wait.
+        await waitFor(
+          async () => (await events()).some((e) => e.type === "session.wait.finished"),
+          { timeoutMs: 30000, describe },
+        );
+      } finally {
+        await Bun.write(
+          `${receiptDir}/receipt.json`,
+          JSON.stringify(
+            { parentId: parent.id, events: await events(), turns: await turns() },
+            null,
+            2,
+          ),
+        );
+      }
+      const parentEvents = await events();
+      const parentTurns = await turns();
+      const first = (predicate: (e: EventProjection) => boolean) => {
+        const event = parentEvents.find(predicate);
+        if (!event) throw new Error(`missing expected event in ${receiptDir}/receipt.json`);
+        return event;
+      };
+      const questionQueued = first(
+        (e) =>
+          e.type === "user.message" && JSON.stringify(e.payload).includes("CONSUMED_WAIT_QUESTION"),
+      );
+      const answerTurnId = first(
+        (e) => e.type === "turn.queued" && e.sequence > questionQueued.sequence,
+      ).turnId;
+      const answerTurn = parentTurns.find((turn) => turn.id === answerTurnId);
+      expect(answerTurn).toMatchObject({ source: "user", status: "completed" });
+      const waitStarted = first((e) => e.type === "session.wait.started");
+      const childResult = first(isChildResult);
+      const answerCompleted = first(
+        (e) => e.type === "turn.completed" && e.turnId === answerTurn!.id,
+      );
+      // The ordering under test: the child result was pending before the wait
+      // was declared, and the person's turn ran next and consumed it.
+      expect(childResult.sequence).toBeLessThan(waitStarted.sequence);
+      expect(
+        parentEvents.some(
+          (e) =>
+            e.type === "agent.message.completed" &&
+            e.turnId === answerTurn!.id &&
+            JSON.stringify(e.payload).includes("CONSUMED_WAIT_ROOT_FINAL"),
+        ),
+      ).toBe(true);
+      // That turn consumed the input the wait was for, so it retired the wait
+      // with outcome input; no timeout turn follows and no system turn ran.
+      const waitFinished = parentEvents.filter((e) => e.type === "session.wait.finished");
+      expect(waitFinished).toHaveLength(1);
+      expect(waitFinished[0]!.payload).toMatchObject({ outcome: "input" });
+      expect(waitFinished[0]!.sequence).toBeGreaterThan(answerCompleted.sequence);
+      expect(parentTurns.some((turn) => turn.source === "system")).toBe(false);
+      const session = (await (await fetch(`${base}/sessions/${parent.id}`)).json()) as {
+        inputWait?: unknown;
+      };
+      expect(session.inputWait ?? null).toBeNull();
+    },
+  );
+}, 300000);
