@@ -33,7 +33,10 @@ import {
   setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  fetchCodexUsageForAccount,
   listCodexAccountStatuses,
+  requestSessionCompaction,
+  isSessionCompactionRequested,
   setInitialActiveCodexCredential,
   setSessionCodexPin,
   updateCodexRotationSettings,
@@ -5061,10 +5064,14 @@ describe("worker activities integration", () => {
         const downgraded = accounts.find(
           (account) => account.id === credentialIds.get("acct-downgraded"),
         );
-        expect(downgraded).toMatchObject({ planType: "free", status: "active" });
+        expect(downgraded).toMatchObject({
+          planType: "free",
+          planPreviousType: "pro",
+          status: "active",
+        });
         expect(downgraded?.planEntitlementExclusion).toEqual({
           planType: "free",
-          modelIds: ["codex/gpt-6-sol"],
+          models: [{ modelId: "codex/gpt-6-sol", excludedAt: expect.any(Date) }],
         });
 
         const second = await runCodexTurn(activities, grant, session.id);
@@ -5122,7 +5129,10 @@ describe("worker activities integration", () => {
           id: credentialIds.get("acct-solo"),
           planType: "free",
           status: "active",
-          planEntitlementExclusion: { planType: "free", modelIds: ["codex/gpt-6-sol"] },
+          planEntitlementExclusion: {
+            planType: "free",
+            models: [{ modelId: "codex/gpt-6-sol", excludedAt: expect.any(Date) }],
+          },
         });
 
         // A new message while the account is still Free fails at admission:
@@ -5211,6 +5221,190 @@ describe("worker activities integration", () => {
         expect(callsFor("responses", ["acct-paid", "acct-other"])).toEqual(["acct-paid"]);
       }
     }, 60_000);
+
+    // Shared driver: the first attempt fails over with a plan entitlement
+    // receipt, and the recovered attempt of the SAME turn is served by the
+    // healthy account.
+    async function expectPlanFailover(input: {
+      failing: string;
+      healthy: string;
+      excludedPlan: string;
+      beforeTurn?: (seeded: Awaited<ReturnType<typeof seedCodexTurn>>) => Promise<void>;
+    }) {
+      const seeded = await seedCodexTurn({
+        accounts: [
+          { externalId: input.failing, label: "Failing" },
+          { externalId: input.healthy, label: "Healthy" },
+        ],
+        homeExternalId: input.failing,
+        pinSource: "policy",
+      });
+      const { grant, session, credentialIds } = seeded;
+      await input.beforeTurn?.(seeded);
+      const activities = createWorkerActivities({
+        settings: codexSettings(),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime(),
+      });
+      const first = await runCodexTurn(activities, grant, session.id);
+      let events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+      expect(events.find((event) => event.type === "turn.failed")?.payload ?? null).toBeNull();
+      expect(first).toMatchObject({ status: "recovering" });
+      expect(
+        events.find((event) => event.type === "turn.recovery.requested")?.payload,
+      ).toMatchObject({
+        reason: "codex_credential_failover",
+        credentialId: credentialIds.get(input.failing),
+        failureKind: "plan_entitlement",
+      });
+      const failing = (await listCodexAccountStatuses(dbClient.db, grant.workspaceId)).find(
+        (account) => account.id === credentialIds.get(input.failing),
+      );
+      expect(failing).toMatchObject({
+        status: "active",
+        exhaustedUntil: null,
+        planEntitlementExclusion: {
+          planType: input.excludedPlan,
+          models: [{ modelId: "codex/gpt-6-sol", excludedAt: expect.any(Date) }],
+        },
+      });
+      const second = await runCodexTurn(activities, grant, session.id);
+      expect(second).toMatchObject({ status: "idle", turnId: first.turnId });
+      events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 300);
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      expect(
+        JSON.stringify(events.filter((event) => event.type === "turn.completed").at(-1)),
+      ).toContain(`Served by ${input.healthy}`);
+      expect(await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10)).toHaveLength(
+        1,
+      );
+      expect(callsFor("responses", [input.failing, input.healthy])).toEqual([
+        input.failing,
+        input.healthy,
+      ]);
+      return seeded;
+    }
+
+    test("a Pro to Plus downgrade that a usage read observed first still fails over the same turn", async () => {
+      // The Plus plan does not include gpt-6-sol here, and Codex answers with an
+      // empty 400. The accounts page (a usage read) sees Plus BEFORE the turn,
+      // so the failing turn's own re-check reads Plus again; the recorded
+      // change from Pro is what still explains the refusal.
+      Object.assign(fakeAccounts, {
+        "acct-plus-first": { responses: "empty_400", usagePlan: "plus", refreshedPlan: "plus" },
+        "acct-plus-healthy": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+      });
+      await expectPlanFailover({
+        failing: "acct-plus-first",
+        healthy: "acct-plus-healthy",
+        excludedPlan: "plus",
+        beforeTurn: async ({ grant, credentialIds }) => {
+          const usage = await fetchCodexUsageForAccount(
+            dbClient.db,
+            codexSettings(),
+            grant.workspaceId,
+            credentialIds.get("acct-plus-first")!,
+          );
+          expect(usage.planType).toBe("plus");
+          const observed = (await listCodexAccountStatuses(dbClient.db, grant.workspaceId)).find(
+            (account) => account.id === credentialIds.get("acct-plus-first"),
+          );
+          expect(observed).toMatchObject({ planType: "plus", planPreviousType: "pro" });
+        },
+      });
+    }, 60_000);
+
+    test("an explicit plan 403 fails over within the same turn even on an unchanged plan", async () => {
+      Object.assign(fakeAccounts, {
+        "acct-plan-403": { responses: "plan_403", usagePlan: "pro", refreshedPlan: "pro" },
+        "acct-plan-403-healthy": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+      });
+      await expectPlanFailover({
+        failing: "acct-plan-403",
+        healthy: "acct-plan-403-healthy",
+        excludedPlan: "pro",
+      });
+    }, 60_000);
+
+    test("a usage_not_included 429 is a plan refusal, not a rate-limit cooldown", async () => {
+      Object.assign(fakeAccounts, {
+        "acct-not-included": {
+          responses: "usage_not_included_429",
+          usagePlan: "free",
+          refreshedPlan: "free",
+        },
+        "acct-not-included-healthy": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+      });
+      await expectPlanFailover({
+        failing: "acct-not-included",
+        healthy: "acct-not-included-healthy",
+        excludedPlan: "free",
+      });
+    }, 60_000);
+
+    test("an empty 400 on the remote compaction request fails over like an ordinary request", async () => {
+      const home: FakeCodexAccountBehavior = {
+        responses: "ok",
+        usagePlan: "pro",
+        refreshedPlan: "pro",
+      };
+      Object.assign(fakeAccounts, {
+        "acct-compact-home": home,
+        "acct-compact-healthy": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+      });
+      const { grant, session, credentialIds } = await seedCodexTurn({
+        accounts: [
+          { externalId: "acct-compact-home", label: "Home" },
+          { externalId: "acct-compact-healthy", label: "Healthy" },
+        ],
+        homeExternalId: "acct-compact-home",
+        pinSource: "policy",
+      });
+      const activities = createWorkerActivities({
+        settings: codexSettings(),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime(),
+      });
+      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({ status: "idle" });
+      expect(
+        (await getSession(dbClient.db, grant.workspaceId, session.id))?.codexCompactionMode,
+      ).toBe("remote_v2");
+
+      // The home account drops to Free; the next work is an operator /compact.
+      home.responses = "empty_400";
+      home.usagePlan = "free";
+      home.refreshedPlan = "free";
+      await requestSessionCompaction(dbClient.db, grant.workspaceId, session.id);
+      const compactionCallsBefore = backend.calls.filter((call) => call.compaction).length;
+      const first = await runCodexTurn(activities, grant, session.id);
+      let events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 300);
+      expect(first).toMatchObject({ status: "recovering" });
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      expect(
+        events.filter((event) => event.type === "turn.recovery.requested").at(-1)?.payload,
+      ).toMatchObject({
+        reason: "codex_credential_failover",
+        credentialId: credentialIds.get("acct-compact-home"),
+        failureKind: "plan_entitlement",
+      });
+
+      const second = await runCodexTurn(activities, grant, session.id);
+      expect(second).toMatchObject({ turnId: first.turnId });
+      expect(second.status).not.toBe("failed");
+      events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 400);
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      expect(
+        backend.calls
+          .filter((call) => call.compaction)
+          .slice(compactionCallsBefore)
+          .map((call) => call.account),
+      ).toEqual(["acct-compact-home", "acct-compact-healthy"]);
+      expect(await isSessionCompactionRequested(dbClient.db, grant.workspaceId, session.id)).toBe(
+        false,
+      );
+    }, 60_000);
   });
 });
 
@@ -5266,10 +5460,17 @@ async function connectFakeCodexCredential(
 }
 
 type FakeCodexAccountBehavior = {
-  responses: "ok" | "empty_400" | "plan_403";
+  responses: "ok" | "empty_400" | "plan_403" | "usage_not_included_429";
   usagePlan: string | null;
   refreshedPlan: string;
 };
+
+function fakeCodexSse(events: unknown[]): Response {
+  return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
 
 /**
  * A fake ChatGPT/Codex backend on the real transport: every model, usage and
@@ -5279,7 +5480,11 @@ type FakeCodexAccountBehavior = {
  */
 function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavior>) {
   const original = globalThis.fetch;
-  const calls: Array<{ route: "responses" | "usage" | "refresh"; account: string | null }> = [];
+  const calls: Array<{
+    route: "responses" | "usage" | "refresh";
+    account: string | null;
+    compaction?: boolean;
+  }> = [];
   const refreshGenerations = new Map<string, number>();
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url =
@@ -5287,10 +5492,75 @@ function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavi
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : {}));
     const account = headers.get("ChatGPT-Account-ID");
     if (url === "https://chatgpt.com/backend-api/codex/responses") {
-      calls.push({ route: "responses", account });
+      // The transport may stream the request body; this fake is its endpoint.
+      let body: { input?: unknown; stream?: unknown } = {};
+      try {
+        const raw =
+          init?.body == null
+            ? input instanceof Request
+              ? await input.text()
+              : "{}"
+            : typeof init.body === "string"
+              ? init.body
+              : await new Response(init.body as BodyInit).text();
+        body = JSON.parse(raw || "{}") as typeof body;
+      } catch {
+        body = {};
+      }
+      // Codex remote compaction v2 ends its input with a compaction trigger.
+      const compaction =
+        Array.isArray(body.input) &&
+        body.input.some(
+          (item) =>
+            !!item &&
+            typeof item === "object" &&
+            (item as { type?: unknown }).type === "compaction_trigger",
+        );
+      calls.push({ route: "responses", account, compaction });
       const behavior = account ? accounts[account] : undefined;
       if (!behavior) return new Response("", { status: 401 });
       if (behavior.responses === "empty_400") return new Response("", { status: 400 });
+      if (behavior.responses === "usage_not_included_429") {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "usage_not_included",
+              message: "To use Codex with your ChatGPT plan, upgrade to Plus.",
+            },
+          }),
+          { status: 429, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (compaction && behavior.responses === "ok") {
+        const item = { type: "compaction", encrypted_content: `compacted-by-${account}` };
+        const response = {
+          id: `resp-compact-${account}`,
+          object: "response",
+          status: "completed",
+          output: [item],
+          usage: {
+            input_tokens: 10,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 2,
+            output_tokens_details: { reasoning_tokens: 0 },
+            total_tokens: 12,
+          },
+        };
+        if (body.stream === false) {
+          return new Response(JSON.stringify(response), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return fakeCodexSse([
+          {
+            type: "response.created",
+            response: { ...response, status: "in_progress", output: [] },
+          },
+          { type: "response.output_item.done", output_index: 0, item },
+          { type: "response.completed", response },
+        ]);
+      }
       if (behavior.responses === "plan_403") {
         return new Response(
           JSON.stringify({

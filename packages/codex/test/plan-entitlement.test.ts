@@ -6,6 +6,7 @@ import {
   classifyCodexUsageLimitError,
   codexPlanDisplayName,
   codexPlanEntitlementLost,
+  codexPlanIsUpgrade,
   codexPlanKey,
 } from "../src";
 
@@ -37,6 +38,41 @@ describe("Codex plan entitlement rejection classification", () => {
       status: 400,
       evidence: "empty_body",
     });
+  });
+
+  test("reaches the provider's empty 400 beneath a compaction request wrapper", () => {
+    // Mirrors the runtime CompactionProviderResponseError: its own status 400,
+    // its own message, and the SDK APIError as `cause`.
+    const compaction = Object.assign(
+      new Error(
+        "Compaction provider request was rejected (HTTP 400); active history was preserved",
+      ),
+      { name: "CompactionProviderResponseError", status: 400, cause: codexApiError(400) },
+    );
+    expect(classifyCodexEntitlementRejection(compaction)).toEqual({
+      status: 400,
+      evidence: "empty_body",
+    });
+    const explicit = Object.assign(new Error("Compaction provider request was rejected"), {
+      status: 403,
+      cause: codexApiError(403, {
+        code: "model_not_available_on_plan",
+        message: "This model is not available on your current plan.",
+      }),
+    });
+    expect(classifyCodexEntitlementRejection(explicit)).toEqual({
+      status: 403,
+      evidence: "plan_entitlement",
+    });
+    // Other definitive compaction rejections keep their terminal path.
+    const invalid = Object.assign(new Error("Compaction provider request was rejected"), {
+      status: 400,
+      cause: codexApiError(400, {
+        type: "invalid_request_error",
+        message: "Invalid value for 'input[3].content'.",
+      }),
+    });
+    expect(classifyCodexEntitlementRejection(invalid)).toBeNull();
   });
 
   test("treats explicit plan codes and plan wording as authoritative evidence", () => {
@@ -141,24 +177,54 @@ describe("Codex plan helpers", () => {
     expect(codexPlanDisplayName(null)).toBeNull();
   });
 
-  test("an empty 400 is explained only by Free or a changed plan", () => {
-    const decide = (previousPlanType: string | null, currentPlanType: string | null) =>
-      codexPlanEntitlementLost({ evidence: "empty_body", previousPlanType, currentPlanType });
-    expect(decide("pro", "free")).toBe(true);
-    expect(decide("free", "free")).toBe(true);
-    expect(decide("pro", "plus")).toBe(true);
-    expect(decide("pro", "pro")).toBe(false);
-    expect(decide(null, "pro")).toBe(false);
-    expect(decide("pro", null)).toBe(false);
+  test("an empty 400 is explained by Free, a recorded non-upgrade change, or a prior refusal", () => {
+    const decide = (
+      currentPlanType: string | null,
+      planChangedFrom: string | null = null,
+      previouslyExcluded = false,
+    ) =>
+      codexPlanEntitlementLost({
+        evidence: "empty_body",
+        currentPlanType,
+        planChangedFrom,
+        previouslyExcluded,
+      });
+    expect(decide("free")).toBe(true);
+    expect(decide("free", "pro")).toBe(true);
+    // The recorded change survives observers that saw the new plan first.
+    expect(decide("plus", "pro")).toBe(true);
+    expect(decide("team", "pro")).toBe(true);
+    // Moving up the consumer ladder cannot remove a model.
+    expect(decide("pro", "plus")).toBe(false);
+    expect(decide("plus", "free")).toBe(false);
+    // An unchanged paid plan stays unexplained unless it refused this model before.
+    expect(decide("pro")).toBe(false);
+    expect(decide("pro", null, true)).toBe(true);
+    // The plan could not be observed: never a loss on ambiguous evidence.
+    expect(decide(null, "pro", true)).toBe(false);
   });
 
   test("explicit plan evidence is authoritative even when the plan looks unchanged", () => {
     expect(
       codexPlanEntitlementLost({
         evidence: "plan_entitlement",
-        previousPlanType: "plus",
         currentPlanType: "plus",
       }),
     ).toBe(true);
+    expect(
+      codexPlanEntitlementLost({
+        evidence: "plan_entitlement",
+        currentPlanType: null,
+      }),
+    ).toBe(true);
+  });
+
+  test("only a known move up the consumer ladder is an upgrade", () => {
+    expect(codexPlanIsUpgrade("free", "pro")).toBe(true);
+    expect(codexPlanIsUpgrade("Plus", "PRO")).toBe(true);
+    expect(codexPlanIsUpgrade("pro", "plus")).toBe(false);
+    expect(codexPlanIsUpgrade("pro", "team")).toBe(false);
+    expect(codexPlanIsUpgrade(null, "pro")).toBe(false);
+    expect(codexPlanIsUpgrade("pro", "pro")).toBe(false);
   });
 });

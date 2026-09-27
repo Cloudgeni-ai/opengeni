@@ -534,32 +534,68 @@ drops from Pro to Free, the Codex backend rejects requests for models the new
 plan does not include. It sometimes says so (an explicit plan code or message,
 or `usage_not_included`), and it has also been observed to answer HTTP 400 with
 an empty body. `classifyCodexEntitlementRejection` (`packages/codex`) recognizes
-only Codex transport errors of that shape. The encrypted-content 400 family, usage
-limits, 401 and generic 403 keep their existing paths.
+only Codex transport errors of that shape, anywhere in the error's cause chain,
+so the remote compaction request's `CompactionProviderResponseError` wrapper is
+covered too. The encrypted-content 400 family, usage limits, 401 and generic
+403 keep their existing paths.
 
 Entitlement evidence is not a definitive refusal on its own. Before any durable
 decision, failure settlement re-reads the serving account's CURRENT plan under
 the exact live lease holder (`recheckCodexCredentialPlan`): `/wham/usage`
 `plan_type` first, then one forced token refresh whose id_token carries
-`chatgpt_plan_type`. The observation is persisted. The plan counts as lost for
-the accepted model when the provider was explicit, the plan is now Free, or it
-differs from the plan OpenGeni last recorded. Then:
+`chatgpt_plan_type`. The observation is persisted before the decision.
+
+Every plan observation (usage read, token refresh, reconnect, or this re-check)
+that sees a different plan also records a plan change: `plan_previous_type` and
+`plan_changed_at`. An observation of the same plan never overwrites that
+record. This matters because the accounts page, the capped-pool refresh, and
+routine token refreshes all observe plans: whichever sees a downgrade first
+must not consume the evidence the failing turn needs. The plan counts as lost
+for the accepted model when:
+
+- the provider was explicit (a plan code, plan wording, or `usage_not_included`);
+- the re-checked plan is Free;
+- the re-checked plan was reached by the most recent recorded plan change, and
+  that change was not a known upgrade (Free, Go, Plus, Pro, in that order); or
+- the same plan already refused the same model before (an expired exclusion
+  entry is kept as evidence).
+
+An empty 400 with no observable plan, or on a paid plan with none of that
+history, is unexplained. Then:
 
 - The quarantine is `plan_entitlement`: `plan_entitlement_exclusion` records
-  `{planType, modelIds}` for that model. Status, cooldown, allocator eligibility,
-  and every other model stay unchanged. The turn records a `plan` failure receipt
-  bound to that plan.
+  `{planType, models: [{modelId, excludedAt}]}`. Status, cooldown, allocator
+  eligibility, and every other model stay unchanged. The turn records a `plan`
+  failure receipt bound to that plan. When the provider was explicit but the
+  plan could not be observed, the exclusion binds to the recorded plan, the
+  receipt names no plan (so nothing makes that account eligible again for the
+  same turn), and the copy says "no longer has access to <model> on its current
+  plan" instead of naming a plan that may be stale.
 - The normal checkpointed failover moves the SAME turn to another eligible
   account. A rotation-on pool whose other accounts are only capped waits
   durably. With a manual pin, rotation off, or no other account, the turn fails
-  with `codex_plan_entitlement` and copy naming the account, plan, and model.
-- An unexplained rejection (unchanged paid plan, or no plan observable) stays
-  terminal with `codex_request_rejected`. It never loops, and it never carries
-  the SDK's raw `400 status code (no body)` text.
+  with `codex_plan_entitlement` and copy naming the account label (never the
+  account email), plan, and model. The web banner keeps Retry: an upgrade or
+  another account clears the condition, and admission re-checks the plan
+  without a model request.
+- An unexplained rejection stays terminal with `codex_request_rejected`. It
+  never loops, and it never carries the SDK's raw `400 status code (no body)`
+  text.
 
-The exclusion is bound to the plan it was observed under, so it is inert as soon
-as any later observation reports a different plan: a `/wham/usage` read (account
-overview, capped-pool refresh), a token refresh id_token, or a reconnect.
+The exclusion is bound to the plan it was observed under and retires when any
+later observation reports a different plan: a `/wham/usage` read (account
+overview, "refresh usage", capped-pool refresh), a token refresh id_token, or a
+reconnect. Each excluded model also expires from allocation after 24 hours
+(`CODEX_PLAN_ENTITLEMENT_EXCLUSION_TTL_MS`), so one request re-probes the
+account in case the plan gained the model or the original refusal was
+unrelated; a repeat refusal on the same plan excludes it again. Retiring an
+exclusion through a usage read or a token refresh raises a capacity wake, so a
+waiter blocked partly by it re-evaluates. The Codex account JSON exposes
+`planChangedFrom`, `planChangedAt`, and the active `planExcludedModels` (model,
+label, `excludedAt`, `retryAfter`), and the Codex subscriptions card shows them.
+Recovery for an operator: upgrade the ChatGPT plan and refresh usage (or wait
+for the next observation), reconnect the account, or wait for `retryAfter`.
+
 Admission filters plan-excluded accounts for the accepted model. When they are
 the only possible candidates (manual pin, rotation-off pointer, or the whole
 allocatable pool), admission re-reads those plans once, selects again if the plan
@@ -567,10 +603,11 @@ changed, and otherwise fails with `codex_plan_entitlement` without sending a
 model request. Standalone compaction turns cancel with that reason instead.
 
 Migration `0524_codex_plan_entitlement.sql` is rolling. It adds the nullable
-`plan_checked_at` and `plan_entitlement_exclusion` columns, and widens the
-organization runtime-update guard: runtime context may rewrite `plan_type` on
-an inherited organization credential only together with a new `plan_checked_at`.
-Older binaries ignore both columns.
+`plan_checked_at`, `plan_previous_type`, `plan_changed_at`, and
+`plan_entitlement_exclusion` columns, and widens the organization runtime-update
+guard: runtime context may rewrite `plan_type` and the plan change record on an
+inherited organization credential only together with a new `plan_checked_at`.
+Older binaries ignore all four columns.
 
 Ambiguous failures never walk the pool because a partial stream may already have
 performed tools or consumed allowance. Every terminal failure path reconciles
@@ -746,8 +783,9 @@ the presence of shadow records alone is not evidence of adaptive benefit.
   `packages/db/test/codex-plan-entitlement.test.ts`,
   `apps/worker/test/codex-plan-entitlement.test.ts`, and
   `apps/worker/test/codex-failure-settlement.test.ts`; the fake-backend worker
-  turns (empty 400 failover, no-alternative failure and upgrade, unchanged plan)
-  live in `test/integration/worker-activity.integration.ts`. Adaptive replay/policy and worker privacy,
+  turns (empty 400 failover, a downgrade a usage read saw first, explicit 403,
+  `usage_not_included` 429, remote compaction, no-alternative failure and
+  upgrade, unchanged plan) live in `test/integration/worker-activity.integration.ts`. Adaptive replay/policy and worker privacy,
   lifecycle, payload, and metric bounds are covered by
   `packages/contracts/test/codex-fleet-policy.test.ts` and
   `apps/worker/test/codex-fleet-shadow.test.ts`.

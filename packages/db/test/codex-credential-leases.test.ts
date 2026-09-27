@@ -3383,7 +3383,12 @@ describe("Codex plan entitlement state", () => {
       holderId: first.holderId!,
       generation: first.generation!,
       maxFailovers: first.failoverLimit,
-      quarantine: { kind: "plan_entitlement", modelId: acceptedModel, planType: "free" },
+      quarantine: {
+        kind: "plan_entitlement",
+        modelId: acceptedModel,
+        planType: "free",
+        planObserved: true,
+      },
     });
     expect(receipt).toMatchObject({ action: "recorded", failoverCount: 1, exhausted: false });
 
@@ -3392,10 +3397,15 @@ describe("Codex plan entitlement state", () => {
     expect(servingStatus).toMatchObject({
       status: "active",
       planType: "free",
+      planPreviousType: "pro",
       exhaustedUntil: null,
-      planEntitlementExclusion: { planType: "free", modelIds: [acceptedModel] },
+      planEntitlementExclusion: {
+        planType: "free",
+        models: [{ modelId: acceptedModel, excludedAt: expect.any(Date) }],
+      },
     });
     expect(servingStatus?.planCheckedAt).toBeInstanceOf(Date);
+    expect(servingStatus?.planChangedAt).toBeInstanceOf(Date);
     const [metadata] = await admin<{ evidence: unknown }[]>`
       select metadata->'codexCredentialFailureEvidenceV1'->${serving}::text as evidence
       from session_turns where id = ${turnId}`;
@@ -3447,13 +3457,24 @@ describe("Codex plan entitlement state", () => {
     const [ws] = await freshAccount();
     const credential = await connectCredential(ws!, "plan-observation");
     const [connected] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
-    expect(connected).toMatchObject({ planType: "pro", planEntitlementExclusion: null });
+    expect(connected).toMatchObject({
+      planType: "pro",
+      planPreviousType: null,
+      planChangedAt: null,
+      planEntitlementExclusion: null,
+    });
     expect(connected?.planCheckedAt).toBeInstanceOf(Date);
 
+    const excludedAt = new Date().toISOString();
+    const exclusionJson = (planType: string) =>
+      JSON.stringify({
+        planType,
+        models: [{ modelId: "codex/gpt-5.6-sol", excludedAt }],
+      });
     await admin`
       update codex_subscription_credentials
       set plan_type = 'free',
-          plan_entitlement_exclusion = '{"planType":"free","modelIds":["codex/gpt-5.6-sol"]}'
+          plan_entitlement_exclusion = ${exclusionJson("free")}::text::jsonb
       where id = ${credential}`;
     // Same plan: the exclusion stays, only the timestamp advances.
     const samePlanAt = new Date(Date.now() + 1_000);
@@ -3464,9 +3485,11 @@ describe("Codex plan entitlement state", () => {
     let [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
     expect(row?.planEntitlementExclusion).toEqual({
       planType: "free",
-      modelIds: ["codex/gpt-5.6-sol"],
+      models: [{ modelId: "codex/gpt-5.6-sol", excludedAt: new Date(excludedAt) }],
     });
     expect(row?.planCheckedAt?.getTime()).toBe(samePlanAt.getTime());
+    // The admin edit bypassed the observation path, so no change is recorded.
+    expect(row?.planPreviousType).toBeNull();
 
     // An upgrade observed by /wham/usage retires the exclusion and counts as a
     // capacity-truth change.
@@ -3478,12 +3501,18 @@ describe("Codex plan entitlement state", () => {
     );
     expect(upgraded.result).toBe(true);
     [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
-    expect(row).toMatchObject({ planType: "pro", planEntitlementExclusion: null });
+    expect(row).toMatchObject({
+      planType: "pro",
+      planPreviousType: "free",
+      planEntitlementExclusion: null,
+    });
+    const upgradedAt = row?.planChangedAt?.getTime();
+    expect(upgradedAt).toBeNumber();
 
     // A rotated id_token is also a plan observation.
     await admin`
       update codex_subscription_credentials
-      set plan_entitlement_exclusion = '{"planType":"pro","modelIds":["codex/gpt-5.6-sol"]}'
+      set plan_entitlement_exclusion = ${exclusionJson("pro")}::text::jsonb
       where id = ${credential}`;
     const current = (await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, credential))!;
     expect(
@@ -3498,16 +3527,37 @@ describe("Codex plan entitlement state", () => {
       }),
     ).toBe(true);
     [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
-    expect(row).toMatchObject({ planType: "plus", planEntitlementExclusion: null });
+    expect(row).toMatchObject({
+      planType: "plus",
+      planPreviousType: "pro",
+      planEntitlementExclusion: null,
+    });
+    const downgradedAt = row!.planChangedAt!.getTime();
+    expect(downgradedAt).not.toBe(upgradedAt!);
 
-    // Reconnecting is a fresh observation and starts without exclusions.
+    // Observers that see the SAME plan never overwrite the recorded change:
+    // it stays evidence for the next ambiguous refusal of this account.
+    await recordCodexAccountUsage(dbA, ws!.workspaceId, credential, {
+      planType: "plus",
+      planCheckedAt: new Date(Date.now() + 5_000),
+    });
+    [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
+    expect(row).toMatchObject({ planType: "plus", planPreviousType: "pro" });
+    expect(row?.planChangedAt?.getTime()).toBe(downgradedAt);
+
+    // Reconnecting is a fresh observation and starts without exclusions; the
+    // plan change it reveals is recorded.
     await admin`
       update codex_subscription_credentials
-      set plan_entitlement_exclusion = '{"planType":"plus","modelIds":["codex/gpt-5.6-sol"]}'
+      set plan_entitlement_exclusion = ${exclusionJson("plus")}::text::jsonb
       where id = ${credential}`;
     await connectCredential(ws!, "plan-observation");
     [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
-    expect(row).toMatchObject({ planType: "pro", planEntitlementExclusion: null });
+    expect(row).toMatchObject({
+      planType: "pro",
+      planPreviousType: "plus",
+      planEntitlementExclusion: null,
+    });
   });
 
   test("inherited organization credentials accept runtime plan observations only with a new stamp", async () => {
@@ -3551,6 +3601,53 @@ describe("Codex plan entitlement state", () => {
     expect(cause?.code).toBe("42501");
     expect(cause?.message).toContain("organization administration");
 
+    // A token refresh from workspace runtime context rotates tokens and records
+    // a plan change on the inherited organization credential in one write;
+    // this goes through the guard's second (token-refresh shape) block.
+    const refreshedAt = new Date(Date.now() + 1_000);
+    const [beforeRefresh] = await admin<{ version: number }[]>`
+      select version from codex_subscription_credentials where id = ${credential!.id}`;
+    expect(
+      await recordCodexTokenRefresh(dbA, {
+        id: credential!.id,
+        version: beforeRefresh!.version,
+        workspaceId: ws!.workspaceId,
+        credentialEncrypted: "rotated-ciphertext",
+        expiresAt: new Date(Date.now() + 60_000),
+        lastRefreshAt: refreshedAt,
+        planType: "plus",
+      }),
+    ).toBe(true);
+    const [refreshed] = await admin<
+      {
+        plan_type: string;
+        plan_previous_type: string | null;
+        plan_checked_at: Date;
+        version: number;
+        credential_encrypted: string;
+      }[]
+    >`
+      select plan_type, plan_previous_type, plan_checked_at, version, credential_encrypted
+      from codex_subscription_credentials where id = ${credential!.id}`;
+    expect(refreshed).toMatchObject({
+      plan_type: "plus",
+      plan_previous_type: "free",
+      version: beforeRefresh!.version + 1,
+      credential_encrypted: "rotated-ciphertext",
+    });
+    expect(refreshed?.plan_checked_at.getTime()).toBe(refreshedAt.getTime());
+
+    // The change record may not move without a new plan observation stamp.
+    const rewritten = await withRlsContext(
+      dbA,
+      { accountId: ws!.accountId, workspaceId: ws!.workspaceId },
+      (scoped) =>
+        scoped.execute(sql`
+          update codex_subscription_credentials set plan_previous_type = 'enterprise'
+          where id = ${credential!.id}`),
+    ).catch((error: unknown) => error);
+    expect((rewritten as { cause?: { code?: string } }).cause?.code).toBe("42501");
+
     // The replaced guard keeps its hardened definer posture.
     const [guard] = await admin<{ prosecdef: boolean; proconfig: string[] | null }[]>`
       select p.prosecdef, p.proconfig
@@ -3562,7 +3659,11 @@ describe("Codex plan entitlement state", () => {
 
     // The exclusion shape is bounded by a CHECK constraint. (postgres.js
     // queries start on `.then`, so resolve them explicitly.)
-    for (const malformed of ['{"planType":"free","modelIds":[]}', '["free"]']) {
+    for (const malformed of [
+      '{"planType":"free","models":[]}',
+      '{"planType":"free","modelIds":["codex/gpt-5.6-sol"]}',
+      '["free"]',
+    ]) {
       const error = await admin`
         update codex_subscription_credentials
         set plan_entitlement_exclusion = ${malformed}::jsonb

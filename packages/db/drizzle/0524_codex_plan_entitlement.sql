@@ -2,30 +2,38 @@
 --
 -- Codex plan entitlement. A connected ChatGPT account can change plan (for
 -- example Pro to Free) without reconnecting. Record when the plan was last
--- observed from the provider, and which product models the CURRENT plan was
--- proven not to include. Both columns are nullable additive metadata that
--- older binaries ignore. The exclusion names the plan it was observed under,
--- so any later plan observation that reports another plan makes it inert.
+-- observed from the provider, the most recent plan change (the plan before it
+-- and when it was observed), and which product models the CURRENT plan was
+-- proven not to include. All columns are nullable additive metadata that older
+-- binaries ignore. The exclusion names the plan it was observed under, so any
+-- later plan observation that reports another plan retires it, and each
+-- excluded model carries the time of its refusal so it can expire.
 --
 -- Inherited organization credentials are maintained from workspace runtime
 -- context under a column-limited guard. Widen that guard only so a plan
--- observation (plan_checked_at advancing) may rewrite plan_type; every other
--- identity and administration column stays organization-administered.
+-- observation (plan_checked_at advancing) may rewrite plan_type and the plan
+-- change record; every other identity and administration column stays
+-- organization-administered.
 
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE "codex_subscription_credentials"
   ADD COLUMN "plan_checked_at" timestamptz,
+  ADD COLUMN "plan_previous_type" text,
+  ADD COLUMN "plan_changed_at" timestamptz,
   ADD COLUMN "plan_entitlement_exclusion" jsonb,
+  ADD CONSTRAINT "codex_credentials_plan_previous_type_len_chk" CHECK (
+    "plan_previous_type" IS NULL OR char_length("plan_previous_type") BETWEEN 1 AND 128
+  ),
   ADD CONSTRAINT "codex_credentials_plan_entitlement_exclusion_shape_chk" CHECK (
     "plan_entitlement_exclusion" IS NULL
     OR CASE
       WHEN jsonb_typeof("plan_entitlement_exclusion") = 'object'
         AND jsonb_typeof("plan_entitlement_exclusion" -> 'planType') = 'string'
-        AND jsonb_typeof("plan_entitlement_exclusion" -> 'modelIds') = 'array'
+        AND jsonb_typeof("plan_entitlement_exclusion" -> 'models') = 'array'
       THEN
-        jsonb_array_length("plan_entitlement_exclusion" -> 'modelIds') BETWEEN 1 AND 64
-        AND pg_column_size("plan_entitlement_exclusion") <= 8192
+        jsonb_array_length("plan_entitlement_exclusion" -> 'models') BETWEEN 1 AND 64
+        AND pg_column_size("plan_entitlement_exclusion") <= 16384
       ELSE false
     END
   );
@@ -54,10 +62,14 @@ BEGIN
     OR NEW.organization_user_resource_authority_generation IS DISTINCT FROM OLD.organization_user_resource_authority_generation
     OR NEW.chatgpt_account_id IS DISTINCT FROM OLD.chatgpt_account_id
     OR NEW.scopes IS DISTINCT FROM OLD.scopes
-    -- A provider plan observation may rewrite plan_type, but only together
-    -- with a new plan_checked_at stamp.
+    -- A provider plan observation may rewrite plan_type and the plan change
+    -- record, but only together with a new plan_checked_at stamp.
     OR (
-      NEW.plan_type IS DISTINCT FROM OLD.plan_type
+      (
+        NEW.plan_type IS DISTINCT FROM OLD.plan_type
+        OR NEW.plan_previous_type IS DISTINCT FROM OLD.plan_previous_type
+        OR NEW.plan_changed_at IS DISTINCT FROM OLD.plan_changed_at
+      )
       AND (
         NEW.plan_checked_at IS NULL
         OR NEW.plan_checked_at IS NOT DISTINCT FROM OLD.plan_checked_at

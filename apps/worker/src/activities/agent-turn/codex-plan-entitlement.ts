@@ -11,11 +11,13 @@ import { productLabelForModelId } from "@opengeni/config";
 import {
   codexPlanDisplayName,
   codexPlanEntitlementLost,
+  codexPlanIsUpgrade,
   codexPlanKey,
   type CodexEntitlementRejection,
 } from "@opengeni/codex";
 import {
   codexPlanExcludesModel,
+  codexPlanPreviouslyExcludedModel,
   connectionModelAllowed,
   type CodexCredentialPlanRecheck,
   type CodexPlanEntitlementExclusion,
@@ -41,11 +43,17 @@ export type CodexRequestRejectedFailurePayload = {
   detail?: string;
 };
 
-/** The name a user recognizes for one connected ChatGPT account. */
+/**
+ * The user-set label of one connected ChatGPT account. The account email is
+ * deliberately never used: this text lands in the durable `turn.failed` event
+ * that every session reader (including embedding-host end users) can see, and
+ * an inherited organization credential's email may be a member's personal
+ * address. Without a label the copy says "The connected ChatGPT account".
+ */
 export function codexAccountDisplayLabel(
-  account: { label: string | null; accountEmail: string | null } | null | undefined,
+  account: { label: string | null } | null | undefined,
 ): string | null {
-  const label = account?.label?.trim() || account?.accountEmail?.trim() || null;
+  const label = account?.label?.trim() || null;
   return label ? label.slice(0, 120) : null;
 }
 
@@ -134,7 +142,14 @@ export class CodexPlanEntitlementError extends Error {
 export type CodexPlanEntitlementAssessment =
   | {
       kind: "entitlement_lost";
+      /**
+       * Plan the exclusion binds to: the freshly observed plan, or the
+       * recorded plan when the provider reported none.
+       */
       planType: string | null;
+      /** The provider reported the current plan during this re-check. */
+      planObserved: boolean;
+      /** The observed plan was reached by a recorded (non-upgrade) plan change. */
       planChanged: boolean;
       credentialVersion: number | null;
     }
@@ -144,32 +159,49 @@ export type CodexPlanEntitlementAssessment =
 export function assessCodexPlanEntitlement(
   rejection: CodexEntitlementRejection,
   recheck: CodexCredentialPlanRecheck,
+  modelId: string | null,
 ): CodexPlanEntitlementAssessment {
-  const planType = recheck.planType ?? recheck.previousPlanType;
+  const planObserved = recheck.planType !== null;
+  // The persisted change record, or (if that write did not land) the plan
+  // recorded just before this re-check when the fresh observation differs.
+  const planChangedFrom =
+    planObserved &&
+    recheck.previousPlanType !== null &&
+    codexPlanKey(recheck.previousPlanType) !== codexPlanKey(recheck.planType)
+      ? recheck.previousPlanType
+      : recheck.planChangedFrom;
+  const planChanged =
+    planObserved &&
+    planChangedFrom !== null &&
+    codexPlanKey(planChangedFrom) !== codexPlanKey(recheck.planType) &&
+    !codexPlanIsUpgrade(planChangedFrom, recheck.planType);
   if (
     codexPlanEntitlementLost({
       evidence: rejection.evidence,
-      previousPlanType: recheck.previousPlanType,
       currentPlanType: recheck.planType,
+      planChangedFrom,
+      previouslyExcluded:
+        planObserved &&
+        codexPlanPreviouslyExcludedModel(
+          { planType: recheck.planType, planEntitlementExclusion: recheck.exclusion },
+          modelId,
+        ),
     })
   ) {
     return {
       kind: "entitlement_lost",
-      planType,
-      planChanged:
-        recheck.planType !== null &&
-        recheck.previousPlanType !== null &&
-        codexPlanKey(recheck.planType) !== codexPlanKey(recheck.previousPlanType),
+      planType: planObserved ? recheck.planType : recheck.previousPlanType,
+      planObserved,
+      planChanged,
       credentialVersion: recheck.credentialVersion,
     };
   }
-  return { kind: "unexplained", planType };
+  return { kind: "unexplained", planType: recheck.planType };
 }
 
 type AdmissionAccount = {
   id: string;
   label: string | null;
-  accountEmail: string | null;
   planType: string | null;
   allocatorEnabled: boolean;
   allowedModelIds?: string[] | null;
@@ -194,12 +226,15 @@ export function codexPlanEntitlementAdmissionBlock<T extends AdmissionAccount>(i
   activeCredentialId: string | null;
   pinnedCredentialId: string | null;
   pinSource: "manual" | "policy" | null;
+  now: Date;
 }): T[] | null {
   if (input.credentialId !== null) return null;
   const permitted = input.accounts.filter((account) =>
     connectionModelAllowed(account.allowedModelIds, input.modelId),
   );
-  const excluded = permitted.filter((account) => codexPlanExcludesModel(account, input.modelId));
+  const excluded = permitted.filter((account) =>
+    codexPlanExcludesModel(account, input.modelId, input.now),
+  );
   if (excluded.length === 0) return null;
   if (input.pinnedCredentialId && input.pinSource !== "policy") {
     const pinned = excluded.find((account) => account.id === input.pinnedCredentialId);
@@ -211,7 +246,7 @@ export function codexPlanEntitlementAdmissionBlock<T extends AdmissionAccount>(i
   }
   const allocatable = permitted.filter((account) => account.allocatorEnabled);
   const allocatableExcluded = allocatable.filter((account) =>
-    codexPlanExcludesModel(account, input.modelId),
+    codexPlanExcludesModel(account, input.modelId, input.now),
   );
   return allocatable.length > 0 && allocatableExcluded.length === allocatable.length
     ? allocatableExcluded

@@ -265,6 +265,7 @@ export async function selectCodexTurnCapacity(
           activeCredentialId: current.activeCredentialId,
           pinnedCredentialId: current.sessionCodexState.pinnedCredentialId,
           pinSource: current.sessionCodexState.pinSource,
+          now: new Date(),
         });
       const blocked = planBlock(leased);
       if (blocked) {
@@ -305,9 +306,13 @@ export async function selectCodexTurnCapacity(
         const stillBlocked = planMoved ? planBlock(leased) : blocked;
         if (stillBlocked) {
           const account = stillBlocked[0]!;
+          // Name the plan only when this admission just observed it.
+          const observedPlan =
+            rechecks[blocked.findIndex((candidate) => candidate.id === account.id)]?.planType ??
+            null;
           const payload = codexPlanEntitlementFailurePayload({
             accountLabel: stillBlocked.length === 1 ? codexAccountDisplayLabel(account) : null,
-            planType: account.planType,
+            planType: observedPlan,
             planChanged: false,
             modelId: productModelId,
           });

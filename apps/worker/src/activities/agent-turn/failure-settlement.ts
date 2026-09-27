@@ -768,6 +768,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   let codexPlanEntitlement: {
     modelId: string;
     planType: string | null;
+    planObserved: boolean;
     credentialVersion: number | null;
     waitPayload: CodexPlanEntitlementFailurePayload;
   } | null = null;
@@ -800,17 +801,18 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         generation: leases.codex.generation,
       },
     ).catch(() => null);
+    const modelId = providerTurn.codexProductModelId ?? null;
     const assessment = recheck
-      ? assessCodexPlanEntitlement(codexEntitlementRejection, recheck)
+      ? assessCodexPlanEntitlement(codexEntitlementRejection, recheck, modelId)
       : codexEntitlementRejection.evidence === "plan_entitlement"
         ? {
             kind: "entitlement_lost" as const,
             planType: servingAccount?.planType ?? null,
+            planObserved: false,
             planChanged: false,
             credentialVersion: null,
           }
         : { kind: "unexplained" as const, planType: null };
-    const modelId = providerTurn.codexProductModelId ?? null;
     observability.incrementCounter({
       name: "opengeni_codex_plan_rechecks_total",
       help: "Codex plan re-checks after an entitlement-shaped rejection, by outcome.",
@@ -824,7 +826,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     if (assessment.kind === "entitlement_lost") {
       const payloadInput = {
         accountLabel,
-        planType: assessment.planType,
+        // Name a plan only when the provider just reported it; a recorded
+        // plan may be the very one that changed.
+        planType: assessment.planObserved ? assessment.planType : null,
         planChanged: assessment.planChanged,
         modelId,
         rejection: codexEntitlementRejection,
@@ -835,6 +839,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         codexPlanEntitlement = {
           modelId,
           planType: assessment.planType,
+          planObserved: assessment.planObserved,
           credentialVersion: assessment.credentialVersion,
           waitPayload: codexPlanEntitlementFailurePayload({ ...payloadInput, waiting: true }),
         };
@@ -952,6 +957,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
                           kind: "plan_entitlement",
                           modelId: codexPlanEntitlement!.modelId,
                           planType: codexPlanEntitlement!.planType,
+                          planObserved: codexPlanEntitlement!.planObserved,
                         }
                       : {
                           kind: "cooldown",

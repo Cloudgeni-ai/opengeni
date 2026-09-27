@@ -15,7 +15,33 @@ import {
 import { selectCodexCredentialLeaseForTurn } from "../src/activities/codex-rotation";
 
 const model = "codex/gpt-6-sol";
-const freeExclusion = { planType: "free", modelIds: [model] };
+const now = new Date("2026-09-27T12:00:00.000Z");
+const freeExclusion = {
+  planType: "free",
+  models: [{ modelId: model, excludedAt: new Date(now.getTime() - 60 * 60 * 1000) }],
+};
+const expiredFreeExclusion = {
+  planType: "free",
+  models: [
+    {
+      modelId: model,
+      excludedAt: new Date(now.getTime() - 48 * 60 * 60 * 1000),
+    },
+  ],
+};
+
+function recheck(overrides: Record<string, unknown> = {}) {
+  return {
+    previousPlanType: "pro",
+    planType: "pro",
+    source: "usage" as const,
+    credentialVersion: 1,
+    planChangedFrom: null,
+    planChangedAt: null,
+    exclusion: null,
+    ...overrides,
+  } as Parameters<typeof assessCodexPlanEntitlement>[1];
+}
 
 function account(id: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -33,7 +59,11 @@ function account(id: string, overrides: Record<string, unknown> = {}) {
 function transportError(status: number, body?: Record<string, unknown>) {
   return Object.assign(
     new Error(body ? `${status} ${JSON.stringify(body)}` : `${status} status code (no body)`),
-    { status, error: body, headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }) },
+    {
+      status,
+      error: body,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    },
   );
 }
 
@@ -82,13 +112,18 @@ describe("Codex plan entitlement copy", () => {
     );
   });
 
-  test("prefers the user's label, then the account email", () => {
-    expect(codexAccountDisplayLabel({ label: " Work ", accountEmail: "a@example.test" })).toBe(
-      "Work",
-    );
-    expect(codexAccountDisplayLabel({ label: null, accountEmail: "a@example.test" })).toBe(
-      "a@example.test",
-    );
+  test("uses only the user's label, never the account email", () => {
+    expect(codexAccountDisplayLabel({ label: " Work " })).toBe("Work");
+    const emailOnly = { label: null, accountEmail: "member@example.test" };
+    expect(codexAccountDisplayLabel(emailOnly)).toBeNull();
+    expect(
+      codexPlanEntitlementFailurePayload({
+        accountLabel: codexAccountDisplayLabel(emailOnly),
+        planType: "free",
+        planChanged: true,
+        modelId: model,
+      }).error,
+    ).not.toContain("member@example.test");
     expect(codexAccountDisplayLabel(undefined)).toBeNull();
   });
 });
@@ -98,29 +133,122 @@ describe("Codex plan entitlement assessment", () => {
     expect(
       assessCodexPlanEntitlement(
         { status: 400, evidence: "empty_body" },
-        { previousPlanType: "pro", planType: "free", source: "usage", credentialVersion: 4 },
+        recheck({
+          planType: "free",
+          credentialVersion: 4,
+          planChangedFrom: "pro",
+          planChangedAt: now,
+        }),
+        model,
       ),
     ).toEqual({
       kind: "entitlement_lost",
       planType: "free",
+      planObserved: true,
       planChanged: true,
       credentialVersion: 4,
     });
   });
 
-  test("an unchanged paid plan or an unknown plan leaves an empty 400 unexplained", () => {
+  test("a downgrade another observer recorded first still explains an empty 400", () => {
+    // Pro -> Plus was seen by a usage read before the turn: the re-check reads
+    // Plus again (previous == current), but the recorded change remains.
     expect(
       assessCodexPlanEntitlement(
         { status: 400, evidence: "empty_body" },
-        { previousPlanType: "pro", planType: "pro", source: "usage", credentialVersion: 1 },
+        recheck({
+          previousPlanType: "plus",
+          planType: "plus",
+          planChangedFrom: "pro",
+          planChangedAt: now,
+        }),
+        model,
       ),
+    ).toMatchObject({
+      kind: "entitlement_lost",
+      planType: "plus",
+      planChanged: true,
+    });
+  });
+
+  test("a fresh observation that differs from the recorded plan is evidence even unpersisted", () => {
+    expect(
+      assessCodexPlanEntitlement(
+        { status: 400, evidence: "empty_body" },
+        recheck({ previousPlanType: "pro", planType: "plus", planChangedFrom: null }),
+        model,
+      ),
+    ).toMatchObject({ kind: "entitlement_lost", planType: "plus", planChanged: true });
+  });
+
+  test("an expired refusal of the same plan and model stays evidence", () => {
+    expect(
+      assessCodexPlanEntitlement(
+        { status: 400, evidence: "empty_body" },
+        recheck({
+          planType: "plus",
+          previousPlanType: "plus",
+          exclusion: {
+            ...expiredFreeExclusion,
+            planType: "plus",
+          },
+        }),
+        model,
+      ),
+    ).toMatchObject({
+      kind: "entitlement_lost",
+      planType: "plus",
+      planChanged: false,
+    });
+    expect(
+      assessCodexPlanEntitlement(
+        { status: 400, evidence: "empty_body" },
+        recheck({
+          planType: "plus",
+          previousPlanType: "plus",
+          exclusion: {
+            ...expiredFreeExclusion,
+            planType: "plus",
+          },
+        }),
+        "codex/gpt-6-luna",
+      ).kind,
+    ).toBe("unexplained");
+  });
+
+  test("an unchanged paid plan, an upgrade, or an unknown plan leaves an empty 400 unexplained", () => {
+    expect(
+      assessCodexPlanEntitlement({ status: 400, evidence: "empty_body" }, recheck(), model),
     ).toEqual({ kind: "unexplained", planType: "pro" });
     expect(
       assessCodexPlanEntitlement(
         { status: 400, evidence: "empty_body" },
-        { previousPlanType: "pro", planType: null, source: null, credentialVersion: 1 },
+        recheck({ planChangedFrom: "plus", planChangedAt: now }),
+        model,
       ).kind,
     ).toBe("unexplained");
+    expect(
+      assessCodexPlanEntitlement(
+        { status: 400, evidence: "empty_body" },
+        recheck({ planType: null, source: null, planChangedFrom: "pro" }),
+        model,
+      ).kind,
+    ).toBe("unexplained");
+  });
+
+  test("explicit evidence without a fresh plan binds to the recorded plan but is not named", () => {
+    const assessment = assessCodexPlanEntitlement(
+      { status: 403, evidence: "plan_entitlement" },
+      recheck({ planType: null, source: null }),
+      model,
+    );
+    expect(assessment).toEqual({
+      kind: "entitlement_lost",
+      planType: "pro",
+      planObserved: false,
+      planChanged: false,
+      credentialVersion: 1,
+    });
   });
 });
 
@@ -132,11 +260,15 @@ describe("Codex plan entitlement admission", () => {
     activeCredentialId: "a",
     pinnedCredentialId: null,
     pinSource: null,
+    now,
   } as const;
 
   test("blocks a manual pin whose plan excludes the model, even with other accounts", () => {
     const accounts = [
-      account("a", { planType: "free", planEntitlementExclusion: freeExclusion }),
+      account("a", {
+        planType: "free",
+        planEntitlementExclusion: freeExclusion,
+      }),
       account("b"),
     ];
     expect(
@@ -151,20 +283,31 @@ describe("Codex plan entitlement admission", () => {
 
   test("blocks a rotation-off active account whose plan excludes the model", () => {
     const accounts = [
-      account("a", { planType: "free", planEntitlementExclusion: freeExclusion }),
+      account("a", {
+        planType: "free",
+        planEntitlementExclusion: freeExclusion,
+      }),
       account("b"),
     ];
     expect(
-      codexPlanEntitlementAdmissionBlock({ ...base, accounts, rotationEnabled: false })?.map(
-        (candidate) => candidate.id,
-      ),
+      codexPlanEntitlementAdmissionBlock({
+        ...base,
+        accounts,
+        rotationEnabled: false,
+      })?.map((candidate) => candidate.id),
     ).toEqual(["a"]);
   });
 
   test("blocks rotation only when every allocatable account is plan-excluded", () => {
-    const excluded = account("a", { planType: "free", planEntitlementExclusion: freeExclusion });
+    const excluded = account("a", {
+      planType: "free",
+      planEntitlementExclusion: freeExclusion,
+    });
     expect(
-      codexPlanEntitlementAdmissionBlock({ ...base, accounts: [excluded, account("b")] }),
+      codexPlanEntitlementAdmissionBlock({
+        ...base,
+        accounts: [excluded, account("b")],
+      }),
     ).toBeNull();
     expect(
       codexPlanEntitlementAdmissionBlock({
@@ -184,9 +327,16 @@ describe("Codex plan entitlement admission", () => {
   });
 
   test("never blocks a selected credential, another model, or an upgraded plan", () => {
-    const excluded = account("a", { planType: "free", planEntitlementExclusion: freeExclusion });
+    const excluded = account("a", {
+      planType: "free",
+      planEntitlementExclusion: freeExclusion,
+    });
     expect(
-      codexPlanEntitlementAdmissionBlock({ ...base, accounts: [excluded], credentialId: "a" }),
+      codexPlanEntitlementAdmissionBlock({
+        ...base,
+        accounts: [excluded],
+        credentialId: "a",
+      }),
     ).toBeNull();
     expect(
       codexPlanEntitlementAdmissionBlock({
@@ -198,7 +348,24 @@ describe("Codex plan entitlement admission", () => {
     expect(
       codexPlanEntitlementAdmissionBlock({
         ...base,
-        accounts: [account("a", { planType: "pro", planEntitlementExclusion: freeExclusion })],
+        accounts: [
+          account("a", {
+            planType: "pro",
+            planEntitlementExclusion: freeExclusion,
+          }),
+        ],
+      }),
+    ).toBeNull();
+    // An expired exclusion lets one request re-probe the account.
+    expect(
+      codexPlanEntitlementAdmissionBlock({
+        ...base,
+        accounts: [
+          account("a", {
+            planType: "free",
+            planEntitlementExclusion: expiredFreeExclusion,
+          }),
+        ],
       }),
     ).toBeNull();
   });
@@ -225,11 +392,14 @@ describe("Codex plan entitlement allocation", () => {
       selectionCount: 0,
       lastSelectedAt: null,
     });
-    const select = (modelId: string) =>
+    const select = (modelId: string, at = now) =>
       selectCodexCredentialLeaseForTurn({
         context: {
           accounts: [
-            leaseAccount("a", { planType: "free", planEntitlementExclusion: freeExclusion }),
+            leaseAccount("a", {
+              planType: "free",
+              planEntitlementExclusion: freeExclusion,
+            }),
             leaseAccount("b"),
           ] as never,
           activeCredentialId: "a",
@@ -244,11 +414,13 @@ describe("Codex plan entitlement allocation", () => {
         sessionPinnedCredentialId: null,
         sessionPinSource: null,
         sessionLastCredentialId: null,
-        now: new Date(),
+        now: at,
       });
     // Even the existing same-turn lease is not reused for the excluded model.
     expect(select(model).credentialId).toBeNull();
     expect(select("codex/gpt-6-luna").credentialId).toBe("a");
+    // After the TTL the account may serve the model again (one probe).
+    expect(select(model, new Date(now.getTime() + 48 * 60 * 60 * 1000)).credentialId).toBe("a");
   });
 });
 

@@ -37,6 +37,7 @@ import {
   refreshCodexToken,
 } from "@opengeni/codex";
 import { encryptEnvironmentValue } from "./environment-crypto";
+import type { CodexPlanEntitlementExclusion } from "./codex-plan-entitlement";
 import type { Database } from "./database";
 
 export type CodexCredentialTokens = {
@@ -55,6 +56,11 @@ export type CodexCredentialForRun = {
   chatgptAccountId: string | null;
   scopes: string | null;
   planType: string | null;
+  /** Plan before the most recent recorded plan change (see migration 0524). */
+  planPreviousType?: string | null;
+  planChangedAt?: Date | null;
+  /** Models the recorded plan was proven not to include, expired or not. */
+  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
   isFedramp: boolean;
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
@@ -238,6 +244,16 @@ export type CodexAuthDeps = {
     credentialId: string,
     snapshot: CodexAccountUsageSnapshot,
   ) => Promise<boolean>;
+  /**
+   * A token refresh observed a different plan on a credential that carried a
+   * plan exclusion, which that write retired. Called after the refresh lock is
+   * released so capacity waiters blocked by the exclusion can re-evaluate.
+   */
+  onPlanExclusionRetired?: (
+    db: Database,
+    workspaceId: string,
+    credentialId: string,
+  ) => Promise<void>;
 };
 
 export function buildCodexTokenResolver(
@@ -263,6 +279,9 @@ export function buildCodexTokenResolver(
     planType: cred.planType,
   });
 
+  // Credentials whose refresh just retired a plan exclusion; drained after the
+  // refresh lock is released (see onPlanExclusionRetired).
+  const planExclusionRetired = new Set<string>();
   const performRefresh = async (
     refreshDb: Database,
     cred: CodexCredentialForRun,
@@ -307,6 +326,13 @@ export function buildCodexTokenResolver(
         throw new CodexReloginRequired(
           "Codex credential changed during token refresh; reconnect required.",
         );
+      }
+      if (
+        refreshedPlanType &&
+        cred.planEntitlementExclusion &&
+        (cred.planType ?? "").toLowerCase() !== refreshedPlanType.toLowerCase()
+      ) {
+        planExclusionRetired.add(cred.id);
       }
       return {
         accessToken: tokens.access_token,
@@ -360,7 +386,10 @@ export function buildCodexTokenResolver(
           return { ok: false as const, error };
         }
       })
-      .then((outcome) => {
+      .then(async (outcome) => {
+        if (planExclusionRetired.delete(cred.id)) {
+          await deps.onPlanExclusionRetired?.(db, workspaceId, cred.id).catch(() => undefined);
+        }
         if (!outcome.ok) throw outcome.error;
         return outcome.value;
       })
@@ -516,6 +545,15 @@ export type CodexCredentialPlanRecheck = {
   source: "usage" | "token_refresh" | null;
   /** Credential version the observation belongs to (after any refresh). */
   credentialVersion: number | null;
+  /**
+   * The credential's most recent recorded plan change after this observation
+   * was persisted (including one this re-check itself observed). Ordinary
+   * observers of an unchanged plan never overwrite it.
+   */
+  planChangedFrom: string | null;
+  planChangedAt: Date | null;
+  /** Plan exclusion after this observation, including expired entries. */
+  exclusion: CodexPlanEntitlementExclusion | null;
 };
 
 /**
@@ -524,7 +562,8 @@ export type CodexCredentialPlanRecheck = {
  * it reports no plan, one forced token refresh reads `chatgpt_plan_type` from
  * the new id_token (under the shared refresh lock and version CAS). Provider
  * failures produce `planType: null`, never an exception, so a caller can fall
- * back to its existing terminal behavior.
+ * back to its existing terminal behavior. The returned change record and
+ * exclusion are read back after the observation is persisted.
  */
 export async function recheckCodexCredentialPlan(
   db: Database,
@@ -534,10 +573,26 @@ export async function recheckCodexCredentialPlan(
   deps: CodexAuthDeps,
   fetchImpl: CodexFetch = fetch,
 ): Promise<CodexCredentialPlanRecheck> {
-  const before = await deps
-    .loadCredential(db, settings, workspaceId, credentialId)
-    .catch(() => null);
+  const load = () => deps.loadCredential(db, settings, workspaceId, credentialId).catch(() => null);
+  const before = await load();
   const previousPlanType = before?.planType ?? null;
+  const result = (
+    planType: string | null,
+    source: CodexCredentialPlanRecheck["source"],
+    after: CodexCredentialForRun | null,
+    credentialVersion: number | null,
+  ): CodexCredentialPlanRecheck => {
+    const record = after ?? before;
+    return {
+      previousPlanType,
+      planType,
+      source,
+      credentialVersion,
+      planChangedFrom: record?.planPreviousType ?? null,
+      planChangedAt: record?.planChangedAt ?? null,
+      exclusion: record?.planEntitlementExclusion ?? null,
+    };
+  };
   const usage = await fetchCodexUsageForAccount(
     db,
     settings,
@@ -551,15 +606,8 @@ export async function recheckCodexCredentialPlan(
       ? usage.planType.trim() || null
       : null;
   if (usagePlan) {
-    const after = await deps
-      .loadCredential(db, settings, workspaceId, credentialId)
-      .catch(() => null);
-    return {
-      previousPlanType,
-      planType: usagePlan,
-      source: "usage",
-      credentialVersion: after?.version ?? before?.version ?? null,
-    };
+    const after = await load();
+    return result(usagePlan, "usage", after, after?.version ?? before?.version ?? null);
   }
   try {
     const refreshed = await buildCodexTokenResolver(
@@ -571,19 +619,10 @@ export async function recheckCodexCredentialPlan(
     ).refresh();
     const planType =
       typeof refreshed.planType === "string" ? refreshed.planType.trim() || null : null;
-    return {
-      previousPlanType,
-      planType,
-      source: planType ? "token_refresh" : null,
-      credentialVersion: refreshed.credentialVersion,
-    };
+    const after = await load();
+    return result(planType, planType ? "token_refresh" : null, after, refreshed.credentialVersion);
   } catch {
-    return {
-      previousPlanType,
-      planType: null,
-      source: null,
-      credentialVersion: before?.version ?? null,
-    };
+    return result(null, null, null, before?.version ?? null);
   }
 }
 

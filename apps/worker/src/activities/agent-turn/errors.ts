@@ -691,6 +691,12 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   // invalidates only the exact participating artifacts and recovers the same
   // logical turn; when nothing can be invalidated it fails closed there.
   if (classifyCodexEncryptedArtifactRejection(error)) return true;
+  // A ChatGPT plan that no longer includes the model refuses the compaction
+  // request exactly as it refuses an ordinary one (often with an empty 400).
+  // Failure settlement re-checks the plan and, when it proves the loss,
+  // excludes that account for the model and fails the same turn over; an
+  // unexplained rejection still fails there with typed copy.
+  if (classifyCodexEntitlementRejection(error)) return true;
   return agentRunFailurePayload(error).retryable === true;
 }
 

@@ -54,8 +54,17 @@ export function classifyCodexEntitlementRejection(
 ): CodexEntitlementRejection | null {
   if (!isCodexTransportError(error)) return null;
   if (classifyCodexEncryptedArtifactRejection(error)) return null;
+  // Quota refusals keep their path unless an exact plan code outranks them
+  // (Codex reports "usage not included in your plan" as a 429 too).
+  const usageLimit = classifyCodexUsageLimitError(error) !== null;
+  // Walk the whole cause chain. A wrapper such as the compaction request's
+  // CompactionProviderResponseError carries its own status and message; the
+  // provider's APIError (and its empty body) sits underneath it.
+  const seen = new Set<object>();
   let current: unknown = error;
-  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
     const value = current as Record<string, unknown>;
     const body =
       value.error && typeof value.error === "object"
@@ -66,27 +75,25 @@ export function classifyCodexEntitlementRejection(
       const codes = [value.code, value.type, body?.code, body?.type]
         .map((field) => stringField(field).toLowerCase())
         .filter((field) => field.length > 0);
-      // An exact plan code outranks the looser usage-limit wording: Codex
-      // reports "usage not included in your plan" as a 429 too.
       if (codes.some((code) => CODEX_PLAN_ENTITLEMENT_CODES.has(code))) {
         return { status, evidence: "plan_entitlement" };
       }
-      if (classifyCodexUsageLimitError(error)) return null;
-      const message = [stringField(value.message), stringField(body?.message)].join(" ");
-      if (status !== 429 && PLAN_ENTITLEMENT_MESSAGE.test(message)) {
-        return { status, evidence: "plan_entitlement" };
+      if (!usageLimit) {
+        const message = [stringField(value.message), stringField(body?.message)].join(" ");
+        if (status !== 429 && PLAN_ENTITLEMENT_MESSAGE.test(message)) {
+          return { status, evidence: "plan_entitlement" };
+        }
+        // The OpenAI SDK reports a response with no body as
+        // "400 status code (no body)" and leaves `error` undefined. A JSON or
+        // text body, however unhelpful, is a different failure.
+        if (
+          status === 400 &&
+          (value.error === undefined || value.error === null) &&
+          /^400(?: status code \(no body\))?\s*$/.test(stringField(value.message).trim())
+        ) {
+          return { status, evidence: "empty_body" };
+        }
       }
-      // The OpenAI SDK reports a response with no body as
-      // "400 status code (no body)" and leaves `error` undefined. A JSON or
-      // text body, however unhelpful, is a different failure.
-      if (
-        status === 400 &&
-        (value.error === undefined || value.error === null) &&
-        /^400(?: status code \(no body\))?\s*$/.test(stringField(value.message).trim())
-      ) {
-        return { status, evidence: "empty_body" };
-      }
-      return null;
     }
     current = value.cause;
   }
@@ -130,22 +137,62 @@ export function codexPlanDisplayName(planType: string | null | undefined): strin
 }
 
 /**
- * Decide whether a re-checked plan explains an entitlement rejection.
+ * Consumer ChatGPT plans in ascending order. A move up this ladder cannot
+ * remove a model; every other change (down the ladder, into or out of a
+ * workspace plan, or between unknown plans) may.
+ */
+const CODEX_CONSUMER_PLAN_LADDER = ["free", "go", "plus", "pro"] as const;
+
+/** True only for a known move up the consumer plan ladder. */
+export function codexPlanIsUpgrade(
+  fromPlanType: string | null | undefined,
+  toPlanType: string | null | undefined,
+): boolean {
+  const from = CODEX_CONSUMER_PLAN_LADDER.indexOf(
+    codexPlanKey(fromPlanType) as (typeof CODEX_CONSUMER_PLAN_LADDER)[number],
+  );
+  const to = CODEX_CONSUMER_PLAN_LADDER.indexOf(
+    codexPlanKey(toPlanType) as (typeof CODEX_CONSUMER_PLAN_LADDER)[number],
+  );
+  return from >= 0 && to >= 0 && to > from;
+}
+
+/**
+ * Decide whether a freshly re-checked plan explains an entitlement rejection.
  *
  * Explicit plan evidence from the provider is authoritative for this model.
- * An empty 400 counts only when the re-check shows the Free plan, or a plan
- * that differs from the one OpenGeni last recorded. A paid, unchanged plan
- * leaves the rejection unexplained, so the credential stays eligible.
+ * An empty 400 counts only when the re-check shows:
+ *
+ * - the Free plan;
+ * - a plan that already refused this model before (an expired exclusion kept
+ *   as evidence); or
+ * - a plan reached by the credential's most recent recorded plan change, when
+ *   that change was not a known upgrade.
+ *
+ * The recorded change (`planChangedFrom`) is written only when a provider
+ * observation reports a different plan and is never overwritten by an
+ * observation of the same plan, so a usage read or token refresh that noticed
+ * the downgrade first does not erase the evidence. A paid plan with no such
+ * history leaves the rejection unexplained, so the credential stays eligible.
  */
 export function codexPlanEntitlementLost(input: {
   evidence: CodexEntitlementRejectionEvidence;
-  previousPlanType: string | null;
+  /** Freshly observed plan; null when the provider did not report one. */
   currentPlanType: string | null;
+  /** Plan before the most recent recorded plan change, if any. */
+  planChangedFrom?: string | null;
+  /** This exact plan already refused this model (see the plan exclusion). */
+  previouslyExcluded?: boolean;
 }): boolean {
   if (input.evidence === "plan_entitlement") return true;
   const current = codexPlanKey(input.currentPlanType);
   if (current === "unknown") return false;
   if (current === "free") return true;
-  const previous = codexPlanKey(input.previousPlanType);
-  return previous !== "unknown" && previous !== current;
+  if (input.previouslyExcluded === true) return true;
+  const previous = codexPlanKey(input.planChangedFrom);
+  return (
+    previous !== "unknown" &&
+    previous !== current &&
+    !codexPlanIsUpgrade(input.planChangedFrom, input.currentPlanType)
+  );
 }

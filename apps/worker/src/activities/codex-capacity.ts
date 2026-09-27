@@ -96,7 +96,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
   context = {
     ...context,
     accounts: context.accounts.filter(
-      (account) => !context.modelId || codexAccountServesModel(account, context.modelId),
+      (account) => !context.modelId || codexAccountServesModel(account, context.modelId, now),
     ),
   };
   const selected = selectCodexCredentialLeaseForTurn({

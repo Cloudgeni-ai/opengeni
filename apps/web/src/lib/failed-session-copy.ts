@@ -150,14 +150,17 @@ export function failedSessionCopy(
   dailyLimit?: true;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
-  // Worker Codex account copy names the account and plan: keep it whole. A
-  // plan that lacks the model offers Retry again once another model is chosen.
+  // Worker Codex account copy names the account and plan and already offers
+  // the remedies (upgrade, another account, another model): keep it whole.
+  // Retry stays, because an upgrade or another account clears the condition
+  // and admission re-checks the plan without a model request.
   const code = failure.failureCode;
   if (recorded && (code === "codex_plan_entitlement" || code === "codex_request_rejected")) {
+    const detail = failure.recordedDetail?.trim();
     return {
       reason: recorded,
       unavailableModel: false,
-      ...(code === "codex_plan_entitlement" ? { retryUnhelpful: true } : {}),
+      ...(detail && detail !== recorded ? { detail } : {}),
     };
   }
   // Require an explicit claim about the model itself, not e.g. its connection

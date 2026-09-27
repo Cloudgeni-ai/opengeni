@@ -46,6 +46,7 @@ import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
 import {
   mergeCodexPlanEntitlementExclusion,
   readCodexPlanEntitlementExclusion,
+  serializeCodexPlanEntitlementExclusion,
   type CodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
@@ -23136,8 +23137,10 @@ export async function upsertCodexSubscriptionCredential(
             scopes: input.scopes,
             planType: input.planType,
             // A reconnect is a fresh plan observation; earlier model refusals
-            // belonged to the replaced token family.
+            // belonged to the replaced token family, but a plan change it
+            // reveals stays recorded as evidence.
             planCheckedAt: input.planType === null ? null : now,
+            ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
             planEntitlementExclusion: null,
             isFedramp: input.isFedramp,
             expiresAt: input.expiresAt,
@@ -23292,6 +23295,7 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           scopes: input.scopes,
           planType: input.planType,
           planCheckedAt: input.planType === null ? null : now,
+          ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
           planEntitlementExclusion: null,
           isFedramp: input.isFedramp,
           expiresAt: input.expiresAt,
@@ -24050,6 +24054,9 @@ export async function loadCodexCredentialForRun(
       chatgptAccountId: row.chatgptAccountId,
       scopes: row.scopes,
       planType: row.planType,
+      planPreviousType: row.planPreviousType,
+      planChangedAt: row.planChangedAt,
+      planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
       isFedramp: row.isFedramp,
       expiresAt: row.expiresAt,
       lastRefreshAt: row.lastRefreshAt,
@@ -24074,9 +24081,34 @@ function codexPlanObservationSet(planType: string, observedAt: Date) {
   return {
     planType,
     planCheckedAt: observedAt,
+    ...codexPlanChangeRecordSet(planType, observedAt),
     planEntitlementExclusion: sql`case
-      when ${schema.codexSubscriptionCredentials.planType} is distinct from ${planType} then null
+      when lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})
+        then null
       else ${schema.codexSubscriptionCredentials.planEntitlementExclusion}
+    end`,
+  };
+}
+
+/**
+ * Record a plan change (the plan before it, and when it was observed) only
+ * when a known plan moves to a different one. An observation of the same plan
+ * keeps the earlier record, so whichever writer notices a downgrade first
+ * (usage read, token refresh, reconnect, or a failing turn's re-check) leaves
+ * the evidence for the next ambiguous refusal. UPDATE expressions read the old
+ * row, so `plan_type` here is the plan before this observation.
+ */
+function codexPlanChangeRecordSet(planType: string, observedAt: Date) {
+  const changed = sql`${schema.codexSubscriptionCredentials.planType} is not null
+      and lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})`;
+  return {
+    planPreviousType: sql`case when ${changed}
+      then left(${schema.codexSubscriptionCredentials.planType}, 128)
+      else ${schema.codexSubscriptionCredentials.planPreviousType}
+    end`,
+    planChangedAt: sql`case when ${changed}
+      then ${observedAt.toISOString()}::timestamptz
+      else ${schema.codexSubscriptionCredentials.planChangedAt}
     end`,
   };
 }
@@ -24524,6 +24556,9 @@ export type CodexAccountStatus = {
   planType: string | null;
   /** Last provider plan observation; absent on pre-plan-tracking fixtures. */
   planCheckedAt?: Date | null;
+  /** Plan before the most recent observed plan change, and when it was seen. */
+  planPreviousType?: string | null;
+  planChangedAt?: Date | null;
   /** Models the current plan was proven not to include (see codex-plan-entitlement). */
   planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
   status: string; // active | needs_relogin | error
@@ -28186,7 +28221,14 @@ export type CodexCredentialLeaseQuarantine =
        */
       kind: "plan_entitlement";
       modelId: string;
+      /** Plan the refusal is bound to (freshly observed, or the recorded plan). */
       planType: string | null;
+      /**
+       * False when the provider did not report a current plan during the
+       * re-check. The turn receipt then names no plan, so no later plan
+       * observation can make this account eligible again for the same turn.
+       */
+      planObserved?: boolean;
     };
 
 export type CodexCredentialLeaseQuarantineResult =
@@ -28374,10 +28416,13 @@ export async function quarantineCodexCredentialForLease(
                 }
               : input.quarantine.kind === "plan_entitlement"
                 ? {
-                    planEntitlementExclusion: mergeCodexPlanEntitlementExclusion(
-                      readCodexPlanEntitlementExclusion(credential.planEntitlementExclusion),
-                      input.quarantine.planType,
-                      input.quarantine.modelId,
+                    planEntitlementExclusion: serializeCodexPlanEntitlementExclusion(
+                      mergeCodexPlanEntitlementExclusion(
+                        readCodexPlanEntitlementExclusion(credential.planEntitlementExclusion),
+                        input.quarantine.planType,
+                        input.quarantine.modelId,
+                        new Date(),
+                      ),
                     ),
                     updatedAt: new Date(),
                   }
@@ -28436,7 +28481,7 @@ export async function quarantineCodexCredentialForLease(
                       ? {
                           kind: "plan",
                           credentialVersion: credential.version,
-                          planType: planKey,
+                          planType: input.quarantine.planObserved === false ? null : planKey,
                         }
                       : {
                           kind: input.quarantine.cooldownKind,
@@ -28582,6 +28627,8 @@ export async function listCodexAccountStatuses(
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
         planCheckedAt: schema.codexSubscriptionCredentials.planCheckedAt,
+        planPreviousType: schema.codexSubscriptionCredentials.planPreviousType,
+        planChangedAt: schema.codexSubscriptionCredentials.planChangedAt,
         planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
         status: schema.codexSubscriptionCredentials.status,
         allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
@@ -28615,6 +28662,7 @@ export async function listCodexAccountStatuses(
       ...row,
       source: accountSource,
       planCheckedAt: codexMetadataDate(row.planCheckedAt),
+      planChangedAt: codexMetadataDate(row.planChangedAt),
       planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
       expiresAt: codexMetadataDate(row.expiresAt),
       lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
@@ -29815,7 +29863,7 @@ async function mutateCodexAccountUsage(
           : null;
       const planExclusionRetired =
         observedPlanType !== null &&
-        previous.planType !== observedPlanType &&
+        previous.planType?.toLowerCase() !== observedPlanType.toLowerCase() &&
         readCodexPlanEntitlementExclusion(previous.planEntitlementExclusion) !== null;
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
@@ -82070,6 +82118,29 @@ function shortHash(value: string): string {
   return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }
 
+/**
+ * A token refresh observed a different plan and retired a plan exclusion.
+ * Bump the durable capacity-waiter wake revision (delivered by the normal
+ * wake dispatcher) so a wait blocked partly by that exclusion re-evaluates,
+ * exactly as a usage observation that retires one does.
+ */
+async function wakeCodexCapacityAfterPlanChange(
+  db: Database,
+  workspaceId: string,
+  acceptedTurnId: string | undefined,
+): Promise<void> {
+  await withSessionCodexCapacityMutation(
+    db,
+    {
+      workspaceId,
+      reason: "codex_plan_changed",
+      acceptedTurnId,
+      mutationSource: "effective",
+    },
+    async () => ({ result: undefined, changed: true }),
+  );
+}
+
 // The resolver modules are cycle-free orchestration leaves. The root barrel is
 // the composition point that supplies their existing persistence accessors while
 // retaining the historical public builder/fetcher signatures.
@@ -82094,6 +82165,9 @@ function codexAuthDeps(authority?: CodexAcceptedCredentialAuthority): CodexAuthD
           authority,
         )
       ).result,
+    onPlanExclusionRetired: async (db, workspaceId) => {
+      await wakeCodexCapacityAfterPlanChange(db, workspaceId, authority?.turnId);
+    },
   };
 }
 
@@ -82134,6 +82208,8 @@ export function buildCodexTokenResolver(
         recordCodexTokenRefresh(targetDb, { ...input, authority }),
       setStatus: (targetDb, targetWorkspaceId, status, lastError, target) =>
         setCodexCredentialStatus(targetDb, targetWorkspaceId, status, lastError, target, authority),
+      onPlanExclusionRetired: (targetDb, targetWorkspaceId) =>
+        wakeCodexCapacityAfterPlanChange(targetDb, targetWorkspaceId, authority.turnId),
     };
   }
   return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);
