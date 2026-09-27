@@ -5,6 +5,8 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SegmentedControl } from "./segmented-control";
 import {
+  SettingDangerRow,
+  SettingNavRow,
   SettingRow,
   SettingRowGroup,
   SettingRowSkeleton,
@@ -189,5 +191,62 @@ describe("SettingRow", () => {
   test("the skeleton is hidden from assistive tech", () => {
     const html = renderToStaticMarkup(<SettingRowSkeleton controlWidth="select" />);
     expect(html).toContain('aria-hidden="true"');
+  });
+});
+
+describe("SettingNavRow", () => {
+  test("the whole row is one button named by its label and value", async () => {
+    let opened = 0;
+    const view = await render(
+      <SettingNavRow
+        label="Allowed models"
+        description="The models people can pick."
+        value="3 models"
+        onOpen={() => (opened += 1)}
+      />,
+    );
+    try {
+      const buttons = view.container.querySelectorAll("button");
+      expect(buttons).toHaveLength(1);
+      const row = buttons[0]!;
+      expect(textOf(row.getAttribute("aria-labelledby"))).toEqual(["Allowed models", "3 models"]);
+      expect(textOf(row.getAttribute("aria-describedby"))).toEqual(["The models people can pick."]);
+      await act(async () => row.click());
+      expect(opened).toBe(1);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("disabled shows the value without a chevron or a button", () => {
+    const html = renderToStaticMarkup(
+      <SettingNavRow label="Models it can serve" value="All models" disabled />,
+    );
+    expect(html).not.toContain("<button");
+    expect(html).toContain("All models");
+    expect(html).not.toContain("lucide-chevron-right");
+  });
+});
+
+describe("SettingDangerRow", () => {
+  test("a danger text button described by its line", async () => {
+    let clicked = 0;
+    const view = await render(
+      <SettingDangerRow
+        label="Turn off Codex"
+        description="Accounts stay connected."
+        onClick={() => (clicked += 1)}
+      />,
+    );
+    try {
+      const button = view.container.querySelector("button")!;
+      expect(button.textContent).toBe("Turn off Codex");
+      expect(button.className).toContain("text-danger");
+      expect(textOf(button.getAttribute("aria-describedby"))).toEqual(["Accounts stay connected."]);
+      await act(async () => button.click());
+      expect(clicked).toBe(1);
+    } finally {
+      await view.unmount();
+    }
   });
 });

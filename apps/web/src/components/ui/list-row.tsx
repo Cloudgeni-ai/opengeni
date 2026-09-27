@@ -144,9 +144,21 @@ export interface RowListProps {
   onSortChange?: (sort: RowListSort) => void;
   /** Rows are loading; announces it and sets aria-busy. */
   busy?: boolean;
+  /**
+   * Resource lists inside an open section or page: tiles and titles line up
+   * with the section's edge, the row hover bleeds 12px out with rounded
+   * corners, and the hairlines stay inside the content edge.
+   */
+  flush?: boolean;
   className?: string;
   children: ReactNode;
 }
+
+/* Hairlines drawn inside the row padding, so they end where the content does. */
+const FLUSH_LIST = cn(
+  "[&>li]:relative [&>li+li]:before:pointer-events-none [&>li+li]:before:absolute [&>li+li]:before:inset-x-3 [&>li+li]:before:top-0 [&>li+li]:before:h-px [&>li+li]:before:bg-border [&>li+li]:before:content-['']",
+  "[&>li>div]:rounded-[10px]",
+);
 
 export function RowList({
   variant = "resource",
@@ -157,6 +169,7 @@ export function RowList({
   sort,
   onSortChange,
   busy = false,
+  flush = false,
   className,
   children,
 }: RowListProps) {
@@ -228,7 +241,11 @@ export function RowList({
       <ul
         aria-label={label}
         aria-busy={busy || undefined}
-        className={cn("m-0 min-w-0 list-none gap-x-3 p-0", SHARED_GRID, "divide-y divide-border")}
+        className={cn(
+          "m-0 min-w-0 list-none gap-x-3 p-0",
+          SHARED_GRID,
+          flush ? FLUSH_LIST : "divide-y divide-border",
+        )}
         style={templateStyle}
       >
         {children}
@@ -242,7 +259,8 @@ export function RowList({
         <div
           data-slot="row-list"
           data-variant={variant}
-          className={cn("@container/list min-w-0", className)}
+          data-flush={flush || undefined}
+          className={cn("@container/list min-w-0", flush && "-mx-3", className)}
         >
           {busyNote}
           {body}

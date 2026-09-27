@@ -47,7 +47,7 @@ import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, FieldStack, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
-import { ListRow } from "@/components/ui/list-row";
+import { ListRow, ListRowSkeleton } from "@/components/ui/list-row";
 import { SecretInput } from "@/components/ui/secret-field";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -794,50 +794,43 @@ export function providerStatus(state: ProviderConnection): {
    The list row.
    -------------------------------------------------------------------------- */
 
+/**
+ * Whether the provider has a row in the Accounts list: a connected key, custom
+ * models waiting for one, or a read failure worth showing. Unconnected
+ * providers are choices on the Connect account page, not rows.
+ */
+export function providerListed(state: ProviderConnection): boolean {
+  if (state.hidden) return false;
+  const status = providerStatus(state).status;
+  return (
+    status === "loading" ||
+    status === "connected" ||
+    status === "unavailable" ||
+    state.customModels.length > 0
+  );
+}
+
 export function ProviderConnectionRow({
   state,
   onOpen,
-  onConnect,
 }: {
   state: ProviderConnection;
   onOpen: () => void;
-  onConnect: () => void;
 }) {
   const { config } = state;
   const status = providerStatus(state);
   const models = state.customModels.length;
   const modelsLabel =
     models === 0 ? null : models === 1 ? "1 custom model" : `${models} custom models`;
-  if (status.status === "loading") {
-    return (
-      <ListRow
-        leading={<ProviderTile provider={config.provider} />}
-        title={config.title}
-        description="Loading…"
-        indicator="loading"
-      />
-    );
-  }
-  // Nothing to open yet: one quiet row with Connect.
-  if (status.status === "not_connected" && models === 0 && state.canManageConnection) {
-    return (
-      <ListRow
-        leading={<ProviderTile provider={config.provider} />}
-        title={config.title}
-        description={config.summary}
-        control={
-          <RowButton onClick={onConnect} aria-label={`Connect ${config.title}`}>
-            Connect
-          </RowButton>
-        }
-      />
-    );
-  }
+  if (status.status === "loading") return <ListRowSkeleton count={1} />;
   return (
     <ListRow
-      leading={<ProviderTile provider={config.provider} />}
+      leading={<ProviderTile provider={config.provider} size="lg" />}
       title={config.title}
-      meta={[status.status === "connected" ? "API key" : status.label, modelsLabel]}
+      meta={[
+        status.status === "connected" ? "API key" : status.label,
+        modelsLabel ?? (status.status === "connected" ? "Pay per token" : null),
+      ]}
       indicator={
         status.status === "unavailable" ? { kind: "unavailable", label: "Couldn't load" } : "open"
       }

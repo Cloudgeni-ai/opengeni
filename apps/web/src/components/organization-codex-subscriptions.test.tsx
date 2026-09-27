@@ -200,7 +200,7 @@ describe("organization Codex subscriptions", () => {
         `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}`,
         {},
       ]);
-      expect(container.textContent).toContain("Shared model accounts");
+      expect(container.textContent).toContain("Shared with the organization's workspaces.");
     } finally {
       await act(async () => root.unmount());
       container.remove();

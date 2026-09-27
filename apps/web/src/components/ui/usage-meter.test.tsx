@@ -9,6 +9,7 @@ import {
   usageValueText,
   UsageMeter,
   UsageMeterGroup,
+  UsageReadout,
 } from "./usage-meter";
 
 describe("usage levels", () => {
@@ -140,5 +141,28 @@ describe("UsageMeter", () => {
     expect(html).toContain('aria-label="Check usage now"');
     expect(html).toContain('aria-disabled="true"');
     expect(html).toContain("Reconnect research@acme.dev to check its usage.");
+  });
+});
+
+describe("UsageReadout", () => {
+  test("reads as a sentence with a small bar, and names the reset for screen readers", () => {
+    const html = renderToStaticMarkup(
+      <UsageReadout percent={78} window="this week" resetsLabel="Sun 4 Oct, 09:57" />,
+    );
+    expect(html).toContain("78% left this week");
+    expect(html).toContain('role="meter"');
+    expect(html).toContain('aria-valuetext="78% left this week, resets Sun 4 Oct, 09:57"');
+    expect(html).toContain("w-16");
+  });
+
+  test("a missing reading says why in words, and an empty window says so", () => {
+    expect(
+      renderToStaticMarkup(
+        <UsageReadout percent={null} window="this week" fallback="Usage unavailable" />,
+      ),
+    ).toContain("Usage unavailable");
+    expect(renderToStaticMarkup(<UsageReadout percent={0} window="this week" />)).toContain(
+      "Limit reached",
+    );
   });
 });

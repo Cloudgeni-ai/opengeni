@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { CheckboxField, FieldStack } from "@/components/ui/field";
-import { SettingRow } from "@/components/ui/setting-row";
+import { SettingNavRow, SettingRow } from "@/components/ui/setting-row";
 
 /* ----------------------------------------------------------------------------
    What one model connection can serve: its models, and at organization scope
@@ -111,6 +111,17 @@ export function workspacesSummary(
   return personalSupported && policy.allowPersonalWorkspaces ? `${shared} + Personal` : shared;
 }
 
+/** The short value for the "Available in" row: "All workspaces + Personal". */
+function workspacesShort(policy: ModelConnectionAccessPolicy, personalSupported: boolean): string {
+  const shared =
+    policy.allowedWorkspaces === null
+      ? "All workspaces"
+      : policy.allowedWorkspaces.length === 1
+        ? "1 workspace"
+        : `${policy.allowedWorkspaces.length} workspaces`;
+  return personalSupported && policy.allowPersonalWorkspaces ? `${shared} + Personal` : shared;
+}
+
 /**
  * "Models it can serve" on an account's page. In a workspace it only shows
  * once the account is limited (the workspace's Allowed models covers the rest);
@@ -143,31 +154,34 @@ export function ConnectionAccessRows({
   const policy = access.data?.policy;
   if (!policy) return null;
   if (!organization && policy.allowedModels === null) return null;
-  const edit = canManage ? (
-    <RowButton
-      aria-label={organization ? "Edit where it can be used" : "Edit models it can serve"}
-      onClick={onEdit}
-    >
-      Edit
-    </RowButton>
-  ) : null;
+  const models =
+    policy.allowedModels === null
+      ? "All models"
+      : policy.allowedModels.length === 1
+        ? "1 model"
+        : `${policy.allowedModels.length} models`;
   return (
     <>
       {organization ? (
-        <SettingRow
+        <SettingNavRow
           label="Available in"
-          description={workspacesSummary(policy, access.data!.personalWorkspacesSupported)}
-          control={edit}
+          description="The shared workspaces that can use this account."
+          value={workspacesShort(policy, access.data!.personalWorkspacesSupported)}
+          disabled={!canManage}
+          onOpen={onEdit}
         />
       ) : null}
-      <SettingRow
+      <SettingNavRow
         label="Models it can serve"
         description={
           organization
-            ? modelsSummary(policy)
-            : `${modelsSummary(policy)}. Allowed models for the workspace still apply.`
+            ? "New models are included until you limit them."
+            : "The workspace's Allowed models still apply."
         }
-        control={organization ? null : edit}
+        value={models}
+        // At organization scope both rows open the same page.
+        disabled={!canManage}
+        onOpen={onEdit}
       />
     </>
   );

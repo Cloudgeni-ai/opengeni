@@ -3,6 +3,8 @@ import { toast } from "sonner";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import {
+  SettingDangerRow,
+  SettingNavRow,
   SettingRow,
   SettingRowGroup,
   SettingRowLink,
@@ -296,11 +298,38 @@ export default function SettingRowSection() {
           <SettingRowGroup>
             <SettingRow
               variant={variant}
-              label="Let Codex chats switch to another provider when the Codex plan runs out mid-session"
-              description="When on, a chat that hits its Codex usage limit continues on OpenGeni credits or AI Gateway instead of waiting for the limit to reset. Compaction works better when this is off."
+              label="Allow switching to other providers when a Codex plan runs out in the middle of a long chat"
+              description="Lets a Codex chat that hits its usage limit continue on another provider's model instead of waiting for the limit to reset. Off keeps long chats more accurate."
               control={<Switch />}
             />
             <FastCodeSearchRow variant={variant} />
+          </SettingRowGroup>
+        </StateCell>
+        <StateCell
+          label="Opens a page"
+          align="stretch"
+          note="A setting with its own page is a navigational row: the whole row opens it, the current value sits muted by the chevron. Never an Edit or Change button."
+        >
+          <SettingRowGroup>
+            <SettingNavRow
+              label="Allowed models"
+              description="The models people can pick for new chats and schedules."
+              value="3 models"
+              onOpen={() => toast("Opens Allowed models")}
+            />
+          </SettingRowGroup>
+        </StateCell>
+        <StateCell
+          label="Quiet destructive action"
+          align="stretch"
+          note="The last row of a list: danger text that confirms in a dialog. No ⋯ menu floating above the rows."
+        >
+          <SettingRowGroup>
+            <SettingDangerRow
+              label="Turn off Codex"
+              description="New chats and schedules here stop using Codex models. Accounts stay connected."
+              onClick={() => toast("Asks to confirm")}
+            />
           </SettingRowGroup>
         </StateCell>
         <StateCell
@@ -320,12 +349,16 @@ export default function SettingRowSection() {
           "Switches, segmented controls and selects in one right-hand column, so every control lines up",
           "A sub-row for a follow-up choice that only matters while the parent is on (Transcription provider under Voice input)",
           "An unavailable setting: disable the control, give the reason, and link to the fix (Connect AI Gateway)",
+          "A setting that lives on its own page: SettingNavRow, with the current value and a chevron",
+          "One control height: 32px buttons, selects and segmented controls, with the secondary button's radius and border",
         ]}
         avoid={[
           "Two controls in one row: move the second into a sub-row",
           "Resources you manage, like accounts or keys: use a list row that opens a detail sheet",
           "Forms with a Save button: use form fields and checkboxes instead of switches",
           "Nesting deeper than one sub-row",
+          "An Edit, Change or View button whose only job is to open a page",
+          'Descriptions that spell out both states ("On: ... Off: ..."): say what the setting does, and what Off keeps if it matters',
         ]}
       />
     </KitSection>

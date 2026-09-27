@@ -76,7 +76,7 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   },
   models: {
     title: "Models",
-    description: "How new work in this workspace is paid for and which models it may use.",
+    description: "Which models this workspace can use, and who pays for them.",
   },
   "api-keys": {
     title: "API keys",

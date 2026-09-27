@@ -1,43 +1,25 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import {
-  ArrowUpRightIcon,
-  MoreHorizontalIcon,
-  PlusIcon,
-  PowerIcon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowUpRightIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { DetailInline, DetailPage } from "@/components/ui/detail-sheet";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField } from "@/components/ui/field";
-import { HelpLink, HelpTip, InlineHelp } from "@/components/ui/inline-help";
-import {
-  ListRow,
-  ListRowSkeleton,
-  RowList,
-  useRowListVariant,
-  type RowListColumn,
-} from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import {
+  SettingDangerRow,
+  SettingNavRow,
   SettingRow,
   SettingRowGroup,
   SettingRowSkeleton,
   useSettingRowField,
 } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageMeter } from "@/components/ui/usage-meter";
+import { Switch } from "@/components/ui/switch";
+import { UsageReadout } from "@/components/ui/usage-meter";
 import { cn } from "@/lib/utils";
 
 import { currentWorkspace, organization } from "../../fixtures";
@@ -47,7 +29,6 @@ import {
   PrimaryChip,
   accountInUse,
   accountStatus,
-  buttonWidth,
   type AccountView,
 } from "./account-detail";
 import { AllowedModelsForm, ConnectPage, ModelsDialogs } from "./dialogs";
@@ -80,19 +61,19 @@ import {
 
 /* ----------------------------------------------------------------------------
    Settings > Models, for a workspace and for the organization, built from the
-   real primitives and driven by Bendik's picks. Rows open the account's own
+   real primitives and driven by Bendik's picks. Defaults, one flat Accounts
+   list, then the Codex section's setting rows. Rows open the account's own
    detail page (or expand in place, for question 12's other answer); Connect
-   and Edit open full-page forms; every control saves with fixtures.
+   and Allowed models are navigational rows and pages; every control saves
+   with fixtures.
    -------------------------------------------------------------------------- */
 
 const COLUMNS: RowListColumn[] = [
-  { id: "usage", label: "Usage", width: 156, hideLabel: true },
-  { id: "state", label: "Status", width: 120, hideLabel: true },
+  { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end" },
 ];
 
 const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "vercel"];
 
-const SOURCE_HELP = `Organization uses the Codex accounts ${organization.name} shares with this workspace. This workspace uses only accounts connected here. New work uses one or the other, never both.`;
 const PICK_HELP =
   "Spread work sends new work to whichever account has the most room left. Primary only uses the primary account and waits when its limit runs out.";
 
@@ -305,14 +286,26 @@ export function DetailView({
    -------------------------------------------------------------------------- */
 
 function WorkspaceModels() {
-  const { scenario, setScenario, questions, openDialog } = useModels();
+  const { data, scenario, setScenario, questions, openDialog } = useModels();
   const picks = useModelsPicks();
   const orgAdmin = scenario.viewer === "org_admin";
+  const connect = (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={() => openDialog({ kind: "connect", scope: "workspace" })}
+      className="rounded-[10px] pointer-coarse:h-11"
+    >
+      <PlusIcon aria-hidden="true" />
+      Connect account
+    </Button>
+  );
   return (
     <div className="min-w-0">
       <SettingsPageHeader
         title="Models"
-        description="How new work in this workspace is paid for and which models it may use."
+        description="Which models this workspace can use, and who pays for them."
         onScope={(scope) => setScenario({ scope })}
         actions={
           questions.q11 === "keep" ? (
@@ -338,30 +331,24 @@ function WorkspaceModels() {
       <div className="mt-8">
         <PageBody>
           <SectionStack variant={picks.section}>
-            <Section title="New work">
+            <Section title="Defaults">
               <SettingRowGroup>
                 <DefaultModelRow />
                 <AllowedModelsRow />
               </SettingRowGroup>
             </Section>
             <Section
-              title="Model accounts"
-              description="Subscriptions and API keys that pay for model use."
-              action={
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => openDialog({ kind: "connect", scope: "workspace" })}
-                  className="rounded-[10px] pointer-coarse:h-11"
-                >
-                  <PlusIcon aria-hidden="true" />
-                  Connect account
-                </Button>
-              }
+              title="Accounts"
+              description="Subscriptions and API keys that pay for models here."
+              action={connect}
             >
               <AccountsList scope="workspace" />
             </Section>
+            {codexOn(data, questions) || data.workspaceAccounts.length > 0 ? (
+              <Section title="Codex">
+                <CodexSettings />
+              </Section>
+            ) : null}
           </SectionStack>
         </PageBody>
       </div>
@@ -370,7 +357,7 @@ function WorkspaceModels() {
 }
 
 function OrganizationModels() {
-  const { setScenario, openDialog } = useModels();
+  const { data, setData, setScenario, openDialog } = useModels();
   const picks = useModelsPicks();
   return (
     <div className="min-w-0">
@@ -384,8 +371,8 @@ function OrganizationModels() {
         <PageBody>
           <SectionStack variant={picks.section}>
             <Section
-              title="Shared model accounts"
-              description="Each workspace chooses whether new work uses these or its own accounts."
+              title="Accounts"
+              description="Shared with the organization's workspaces. Each workspace chooses whether to use them or its own."
               action={
                 <Button
                   type="button"
@@ -401,6 +388,16 @@ function OrganizationModels() {
             >
               <AccountsList scope="organization" />
             </Section>
+            {data.orgAccounts.length >= 2 ? (
+              <Section title="Codex">
+                <SettingRowGroup>
+                  <RotationRow
+                    value={data.orgRotation}
+                    onChange={(value) => setData((current) => ({ ...current, orgRotation: value }))}
+                  />
+                </SettingRowGroup>
+              </Section>
+            ) : null}
           </SectionStack>
         </PageBody>
       </div>
@@ -417,14 +414,14 @@ function PageBody({ children }: { children: ReactNode }) {
     return (
       <div role="status" aria-label="Loading models" className="min-w-0">
         <SectionStack variant={picks.section}>
-          <Section title="New work">
+          <Section title="Defaults">
             <SettingRowGroup>
-              <SettingRowSkeleton controlWidth="select" />
+              <SettingRowSkeleton controlWidth="auto" />
               <SettingRowSkeleton />
             </SettingRowGroup>
           </Section>
-          <Section title="Model accounts">
-            <RowList label="Model accounts" columns={COLUMNS} busy>
+          <Section title="Accounts">
+            <RowList label="Accounts" columns={COLUMNS} flush busy>
               <ListRowSkeleton count={3} />
             </RowList>
           </Section>
@@ -468,7 +465,7 @@ function PageBody({ children }: { children: ReactNode }) {
 }
 
 /* ----------------------------------------------------------------------------
-   New work: default model and allowed models.
+   Defaults: the default model and Allowed models.
    -------------------------------------------------------------------------- */
 
 function DefaultModelSelect() {
@@ -505,6 +502,7 @@ function DefaultModelSelect() {
       aria-describedby={field?.describedBy}
       invalid={field?.invalid}
       menuClassName="w-80"
+      className="w-auto min-w-[180px]"
       onValueChange={(value) => {
         setData((current) => ({ ...current, defaultModelId: value }));
         const choice = choices.find((each) => each.id === value);
@@ -523,12 +521,12 @@ function DefaultModelRow() {
   return (
     <SettingRow
       variant={picks.settingRow}
-      controlWidth="select"
+      controlWidth="auto"
       label="Default model"
-      description="New chats and schedules start with this model unless someone picks another."
+      description="New chats and schedules start with this model."
       error={
         cantRun
-          ? `${current.label} · ${current.payer} can't run: ${current.unavailableReason ?? "it isn't available."}`
+          ? `${current.label} can't run: ${current.unavailableReason ?? "it isn't available."}`
           : undefined
       }
       control={<DefaultModelSelect />}
@@ -536,32 +534,22 @@ function DefaultModelRow() {
   );
 }
 
+/** A navigational row: the whole row opens the page, the value sits by the chevron. */
 function AllowedModelsRow() {
   const { data, openAllowed } = useModels();
-  const picks = useModelsPicks();
   return (
-    <SettingRow
-      variant={picks.settingRow}
+    <SettingNavRow
       label="Allowed models"
-      description={allowedSummary(data.allowedModels)}
-      controlWidth={buttonWidth(picks.settingRow)}
-      control={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => openAllowed({ kind: "workspace" })}
-          className="rounded-[10px] pointer-coarse:h-11"
-        >
-          Edit
-        </Button>
-      }
+      description="The models people can pick for new chats and schedules."
+      value={data.allowedModels === "all" ? "All models" : allowedSummary(data.allowedModels)}
+      onOpen={() => openAllowed({ kind: "workspace" })}
     />
   );
 }
 
 /* ----------------------------------------------------------------------------
-   Model accounts: providers as groups, one row per account.
+   Accounts: one flat list, whatever the provider. Unconnected providers are
+   choices on the Connect account page, not rows.
    -------------------------------------------------------------------------- */
 
 function AccountsList({ scope }: { scope: Scope }) {
@@ -579,158 +567,69 @@ function AccountsList({ scope }: { scope: Scope }) {
     const shared = scenario.orgAssigned ? data.orgAccounts : [];
     codexAccounts = source === "organization" ? [...shared, ...own] : [...own, ...shared];
   }
-  const gateways = data.gateways[scope];
+  const gateways = GATEWAY_ORDER.filter((id) => data.gateways[scope][id].connected);
 
   return (
-    <>
-      <RowList
-        variant={picks.list}
-        columns={COLUMNS}
-        label={scope === "organization" ? "Shared Codex accounts" : "Codex accounts"}
-      >
-        <GroupHeader
-          first
-          title="Codex"
-          subtitle="ChatGPT plan"
-          trailing={<CodexTrailing scope={scope} />}
-          controls={<CodexControls scope={scope} />}
-          note={<CodexNote scope={scope} />}
-        />
-        {on ? (
-          codexAccounts.length > 0 ? (
-            codexAccounts.map((account) => (
-              <CodexRow
-                key={`${account.scope}:${account.id}`}
-                account={account}
-                pageScope={scope}
-              />
-            ))
-          ) : (
-            <NoCodexRow scope={scope} />
-          )
-        ) : (
-          <CodexOffRow count={data.workspaceAccounts.length} />
-        )}
-      </RowList>
-      {/* API keys have no usage to line up, so their list has no fact columns and
-          the Connect button sits at the row's end. */}
-      <RowList
-        // Without fact columns a table has nothing to head; it keeps the resource rows.
-        variant={picks.list === "table" ? "resource" : picks.list}
-        label={scope === "organization" ? "Shared API keys" : "API keys"}
-        className={cn(picks.section === "open" && "mt-2 border-t border-border")}
-      >
-        <GroupHeader title="API keys" subtitle="Pay the provider per token" />
-        {[...GATEWAY_ORDER]
-          .sort((a, b) => Number(gateways[b].connected) - Number(gateways[a].connected))
-          .map((id) => (
-            <GatewayRow key={id} scope={scope} id={id} />
-          ))}
-      </RowList>
-    </>
-  );
-}
-
-function GroupHeader({
-  title,
-  subtitle,
-  trailing,
-  controls,
-  note,
-  first = false,
-}: {
-  title: string;
-  subtitle: string;
-  /** The group's one action (⋯ menu, or "Turn on Codex"), at the row's end. */
-  trailing?: ReactNode;
-  /** Pool-wide choices ("Use", "Pick"), on their own line under the title. */
-  controls?: ReactNode;
-  note?: ReactNode;
-  /** The first group in the section sits closer to the section's title. */
-  first?: boolean;
-}) {
-  const variant = useRowListVariant();
-  const picks = useModelsPicks();
-  const boxed = picks.section !== "open";
-  const content = (
-    <div
-      className={cn(
-        "min-w-0 px-3",
-        boxed ? "pt-4" : first ? "pt-1" : "pt-5",
-        variant === "catalog" ? "pb-1" : "pb-3",
-      )}
+    <RowList
+      variant={picks.list}
+      columns={COLUMNS}
+      flush={picks.list === "resource"}
+      label={scope === "organization" ? "Shared accounts" : "Accounts"}
     >
-      <div className="flex min-w-0 items-center justify-between gap-4">
-        <div className="min-w-0">
-          <h3 className="text-sm leading-5 font-semibold text-fg">{title}</h3>
-          <p className="text-xs leading-4.5 text-fg-muted">{subtitle}</p>
-        </div>
-        {trailing ? (
-          <div className="flex shrink-0 items-center empty:hidden">{trailing}</div>
-        ) : null}
-      </div>
-      {controls ? (
-        // Empty (one account, or Codex off) collapses instead of leaving a gap.
-        <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-6 gap-y-2 empty:hidden">
-          {controls}
-        </div>
-      ) : null}
-      {note ? <div className="mt-2 min-w-0 empty:hidden">{note}</div> : null}
-    </div>
-  );
-  if (variant === "table") {
-    return (
-      <div role="row" className="col-span-full min-w-0">
-        <div role="cell" className="min-w-0">
-          {content}
-        </div>
-      </div>
-    );
-  }
-  return <li className="col-span-full min-w-0 list-none">{content}</li>;
-}
-
-/** A small label, an optional help tip, and one control, as they sit in a group header. */
-function Labelled({
-  label,
-  help,
-  children,
-}: {
-  label: string;
-  help?: string;
-  children: (labelId: string) => ReactNode;
-}) {
-  const labelId = useId();
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      {/* On a phone the controls stack; a fixed label column keeps them aligned. */}
-      <span className="flex min-w-0 shrink-0 items-center gap-2 @max-[479px]/list:w-14">
-        <span id={labelId} className="text-xs leading-4.5 font-medium text-fg-muted">
-          {label}
-        </span>
-        {help ? <HelpTip label={`About ${label}`}>{help}</HelpTip> : null}
-      </span>
-      {children(labelId)}
-    </div>
+      {on ? (
+        codexAccounts.map((account) => (
+          <CodexRow key={`${account.scope}:${account.id}`} account={account} pageScope={scope} />
+        ))
+      ) : (
+        <CodexOffRow count={data.workspaceAccounts.length} />
+      )}
+      {gateways.map((id) => (
+        <GatewayRow key={id} scope={scope} id={id} />
+      ))}
+    </RowList>
   );
 }
 
-function CodexControls({ scope }: { scope: Scope }) {
-  const { data, setData, questions, scenario } = useModels();
+/* ----------------------------------------------------------------------------
+   Codex: its settings as rows, one control each, and Turn off at the end.
+   -------------------------------------------------------------------------- */
+
+function CodexSettings() {
+  const { data, setData, questions, scenario, openDialog } = useModels();
   const picks = useModelsPicks();
   const [pending, setPending] = useState<"source" | "rotation" | null>(null);
+  const [portable, setPortable] = useState(false);
 
-  if (scope === "organization") {
-    if (data.orgAccounts.length < 2) return null;
+  if (!codexOn(data, questions)) {
     return (
-      <RotationControl
-        value={data.orgRotation}
-        onChange={(value) => setData((current) => ({ ...current, orgRotation: value }))}
-      />
+      <SettingRowGroup>
+        <SettingRow
+          variant={picks.settingRow}
+          label="Codex is off in this workspace"
+          description={`New chats and schedules here can't use Codex models. ${accountsStayConnected(data.workspaceAccounts.length)}`}
+          control={
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setData((current) => ({
+                  ...current,
+                  codexEnabled: true,
+                  legacySource:
+                    current.legacySource === "disabled" ? "automatic" : current.legacySource,
+                }));
+                toast.success(`Codex is on in ${currentWorkspace.name}`);
+              }}
+              className="rounded-[10px] pointer-coarse:h-11"
+            >
+              Turn on Codex
+            </Button>
+          }
+        />
+      </SettingRowGroup>
     );
   }
-
-  if (!codexOn(data, questions)) return null;
 
   const source = effectiveSource(data, questions, scenario);
   const pool = accountsOf(data, source);
@@ -749,12 +648,15 @@ function CodexControls({ scope }: { scope: Scope }) {
   };
 
   return (
-    <>
+    <SettingRowGroup>
       {questions.q13 === "segmented" && scenario.orgAssigned ? (
-        <Labelled label="Use" help={SOURCE_HELP}>
-          {(labelId) => (
+        <SettingRow
+          variant={picks.settingRow}
+          controlWidth="auto"
+          label="Subscriptions from"
+          description={`${ORG_NAME} shares its Codex accounts with this workspace. New work uses theirs or the ones connected here, never both.`}
+          control={
             <SegmentedControl<Source>
-              aria-labelledby={labelId}
               variant={picks.segmented}
               size="sm"
               pending={pending === "source"}
@@ -765,17 +667,19 @@ function CodexControls({ scope }: { scope: Scope }) {
                 { value: "workspace", label: "This workspace" },
               ]}
             />
-          )}
-        </Labelled>
+          }
+        />
       ) : null}
       {questions.q13 === "select" ? (
-        <Labelled label="Subscription source">
-          {(labelId) => (
+        <SettingRow
+          variant={picks.settingRow}
+          controlWidth="auto"
+          label="Subscription source"
+          control={
             <SelectMenu<LegacySource>
               variant={picks.select}
               size="sm"
               align="end"
-              aria-labelledby={labelId}
               options={LEGACY_SOURCE_OPTIONS}
               value={data.legacySource}
               showSelectedDescription={false}
@@ -786,11 +690,11 @@ function CodexControls({ scope }: { scope: Scope }) {
                 toast.success("Subscription source saved");
               }}
             />
-          )}
-        </Labelled>
+          }
+        />
       ) : null}
-      {showRotation && questions.q14 === "modes" ? (
-        <RotationControl
+      {showRotation ? (
+        <RotationRow
           value={data.rotation}
           pending={pending === "rotation"}
           onChange={async (value) => {
@@ -806,75 +710,36 @@ function CodexControls({ scope }: { scope: Scope }) {
           }}
         />
       ) : null}
-      {showRotation && questions.q14 === "legacy" ? (
-        <CheckboxField
-          label="Auto-rotate subscriptions"
-          checked={data.rotation === "spread"}
-          onCheckedChange={(checked) => {
-            setData((current) => ({ ...current, rotation: checked ? "spread" : "primary" }));
-            toast.success(checked ? "Auto-rotate turned on" : "Auto-rotate turned off");
-          }}
+      <SettingRow
+        variant={picks.settingRow}
+        label="Allow switching to other providers"
+        description="Lets a Codex chat move to a model from another provider. Off keeps long chats more accurate."
+        control={
+          <Switch
+            checked={portable}
+            onCheckedChange={(next) => {
+              setPortable(next);
+              toast.success(
+                next
+                  ? "New Codex chats can switch to other providers"
+                  : "New Codex chats stay on Codex",
+              );
+            }}
+          />
+        }
+      />
+      {questions.q13 === "segmented" ? (
+        <SettingDangerRow
+          label="Turn off Codex"
+          description="New chats and schedules here stop using Codex models. Accounts stay connected."
+          onClick={() => openDialog({ kind: "turn-off-codex" })}
         />
       ) : null}
-    </>
+    </SettingRowGroup>
   );
 }
 
-/** The Codex header's one action: ⋯ with "Turn off", or "Turn on Codex" while it's off. */
-function CodexTrailing({ scope }: { scope: Scope }) {
-  const { data, setData, questions, openDialog } = useModels();
-  if (scope === "organization") return null;
-  if (!codexOn(data, questions)) {
-    return (
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => {
-          setData((current) => ({
-            ...current,
-            codexEnabled: true,
-            legacySource: current.legacySource === "disabled" ? "automatic" : current.legacySource,
-          }));
-          toast.success(`Codex is on in ${currentWorkspace.name}`);
-        }}
-        className="rounded-[10px] pointer-coarse:h-11"
-      >
-        <PowerIcon aria-hidden="true" />
-        Turn on Codex
-      </Button>
-    );
-  }
-  // Today's select (question 13's other answer) turns Codex off from inside the select.
-  if (questions.q13 !== "segmented") return null;
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="More actions for Codex"
-          // -mr-1.5 lines the dots up with the row chevrons below.
-          className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-fg pointer-coarse:size-11"
-        >
-          <MoreHorizontalIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-56">
-        <DropdownMenuItem
-          variant="destructive"
-          onSelect={() => openDialog({ kind: "turn-off-codex" })}
-        >
-          <PowerIcon />
-          Turn off Codex in this workspace
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function RotationControl({
+function RotationRow({
   value,
   pending = false,
   onChange,
@@ -885,10 +750,13 @@ function RotationControl({
 }) {
   const picks = useModelsPicks();
   return (
-    <Labelled label="Pick" help={PICK_HELP}>
-      {(labelId) => (
+    <SettingRow
+      variant={picks.settingRow}
+      controlWidth="auto"
+      label="When several accounts are connected"
+      description={PICK_HELP}
+      control={
         <SegmentedControl<Rotation>
-          aria-labelledby={labelId}
           variant={picks.segmented}
           size="sm"
           pending={pending}
@@ -899,42 +767,9 @@ function RotationControl({
             { value: "primary", label: "Primary only" },
           ]}
         />
-      )}
-    </Labelled>
+      }
+    />
   );
-}
-
-/** A quiet line under the Codex header, only where an answer needs one. */
-function CodexNote({ scope }: { scope: Scope }) {
-  const { data, questions, scenario, setScenario } = useModels();
-  if (scope !== "workspace" || !codexOn(data, questions)) return null;
-  const source = effectiveSource(data, questions, scenario);
-  const orgLink =
-    questions.q11 === "keep" && source === "organization" ? (
-      <HelpLink
-        onClick={() => {
-          if (scenario.viewer === "org_admin") setScenario({ scope: "organization" });
-          else
-            toast("Organization settings", {
-              description: `Only owners and admins of ${organization.name} can manage these.`,
-            });
-        }}
-      >
-        Manage in organization settings
-      </HelpLink>
-    ) : null;
-  if (questions.q13 === "select" && data.legacySource === "automatic") {
-    return (
-      <InlineHelp action={orgLink}>
-        {source === "workspace"
-          ? `Automatic is using this workspace's accounts because ${data.workspaceAccounts.length} are connected. Disconnecting them all switches everyone to the organization's subscriptions.`
-          : `Automatic is using subscriptions from ${ORG_NAME}. Connecting an account here switches everyone to it.`}
-      </InlineHelp>
-    );
-  }
-  return orgLink ? (
-    <InlineHelp action={orgLink}>{`Using subscriptions from ${ORG_NAME}.`}</InlineHelp>
-  ) : null;
 }
 
 function useDetailRowProps(target: DetailTarget, render: () => ReactNode) {
@@ -975,38 +810,27 @@ function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Sc
   const shared = account.scope === "organization" && pageScope === "workspace";
   return (
     <ListRow
-      leading={<ProviderTile provider="codex" />}
+      leading={<ProviderTile provider="codex" size="lg" />}
       title={account.name}
-      titleAddon={
-        <>
-          <PrimaryChip account={account} variant={picks.chip} />
-          {shared ? <MetaChip variant={picks.chip}>Organization</MetaChip> : null}
-        </>
-      }
+      titleAddon={<PrimaryChip account={account} variant={picks.chip} />}
       meta={[
         account.plan,
-        // On the workspace page the Organization badge says who manages it.
+        shared ? `Shared by ${ORG_NAME}` : null,
         pageScope === "organization"
           ? `Available in ${availabilitySummary(account.availability, true)}`
           : null,
         resetsLabel(account.resets.length),
       ]}
       cells={{
-        usage: weekly ? (
-          <UsageMeter
-            variant={picks.meter}
-            density="compact"
-            label="Weekly"
+        usage: account.needsReconnect ? null : status.status === "paused" ? (
+          <StatusBadge status="paused" variant={picks.statusRow} />
+        ) : weekly ? (
+          <UsageReadout
             percent={weekly.percentLeft}
+            window="this week"
             resetsLabel={weekly.resetsLabel}
           />
         ) : null,
-        state:
-          status.status === "connected" && !status.label ? null : account.needsReconnect ? null : (
-            <StatusBadge status={status.status} tone={status.tone} variant={picks.statusRow}>
-              {status.label}
-            </StatusBadge>
-          ),
       }}
       indicator={
         account.needsReconnect
@@ -1020,41 +844,19 @@ function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Sc
   );
 }
 
-function NoCodexRow({ scope }: { scope: Scope }) {
-  const { openDialog } = useModels();
-  return (
-    <ListRow
-      leading={<ProviderTile provider="codex" />}
-      title="No Codex accounts yet"
-      description="Pay for new work with a ChatGPT Plus or Pro plan."
-      control={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => openDialog({ kind: "connect", scope, provider: "codex" })}
-          className="rounded-[10px] pointer-coarse:h-11"
-        >
-          Connect
-        </Button>
-      }
-    />
-  );
-}
-
-/** The title says it's off; "Turn on Codex" sits in the header above. */
+/** Codex off: one quiet row; "Turn on Codex" lives in the Codex section. */
 function CodexOffRow({ count }: { count: number }) {
   return (
     <ListRow
-      leading={<ProviderTile provider="codex" />}
-      title="Codex is off in this workspace"
-      description={accountsStayConnected(count)}
+      leading={<ProviderTile provider="codex" size="lg" />}
+      title="Codex"
+      meta={["Off in this workspace", accountsStayConnected(count)]}
     />
   );
 }
 
 function GatewayRow({ scope, id }: { scope: Scope; id: GatewayId }) {
-  const { data, openDialog, openDetail } = useModels();
+  const { data, openDetail } = useModels();
   const gateway = data.gateways[scope][id];
   const target: DetailTarget = { kind: "gateway", scope, id };
   const row = useDetailRowProps(target, () => (
@@ -1064,39 +866,14 @@ function GatewayRow({ scope, id }: { scope: Scope; id: GatewayId }) {
       view={{ pageScope: scope, onClose: () => openDetail(null) }}
     />
   ));
-  if (!gateway.connected) {
-    return (
-      <ListRow
-        leading={<ProviderTile provider={id} />}
-        title={gateway.name}
-        description={gateway.summary}
-        control={
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => openDialog({ kind: "connect", scope, provider: id })}
-            aria-label={`Connect ${gateway.name}`}
-            className="rounded-[10px] pointer-coarse:h-11"
-          >
-            Connect
-          </Button>
-        }
-      />
-    );
-  }
   const models = gateway.customModels.length;
   return (
     <ListRow
-      leading={<ProviderTile provider={id} />}
+      leading={<ProviderTile provider={id} size="lg" />}
       title={gateway.name}
       meta={[
-        `Key ending ${gateway.keyHint ?? ""}`,
-        models === 0
-          ? "No custom models"
-          : models === 1
-            ? "1 custom model"
-            : `${models} custom models`,
+        `API key ending ${gateway.keyHint ?? ""}`,
+        models === 0 ? null : models === 1 ? "1 custom model" : `${models} custom models`,
       ]}
       indicator={row.expanded !== undefined ? "expand" : "open"}
       {...row}

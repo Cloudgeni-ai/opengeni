@@ -3,6 +3,7 @@ import {
   BuildingIcon,
   CheckIcon,
   CircleCheckIcon,
+  KeyRoundIcon,
   LoaderCircleIcon,
   PencilIcon,
   PlusIcon,
@@ -15,7 +16,7 @@ import {
   ProviderConnectPage,
   ProviderConnectionPage,
   ProviderConnectionRow,
-  providerStatus,
+  providerListed,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
 import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
@@ -27,10 +28,8 @@ import {
 } from "@/components/connection-access-settings";
 import { ACCOUNT_COLUMNS, PAGE_CLASS } from "@/components/models/codex-models";
 import {
-  LabelledControl,
   ModelsFormPage,
   MoreMenu,
-  ProviderGroupHeader,
   ProviderTile,
   RenameAccountDialog,
   RowButton,
@@ -39,8 +38,11 @@ import {
 import {
   SuperGrokAccessPage,
   SuperGrokAccountPage,
+  SuperGrokAccountRows,
   SuperGrokConnectPage,
-  SuperGrokGroup,
+  SuperGrokSettingRows,
+  superGrokListedCount,
+  superGrokSectionVisible,
   type SuperGrokPlaces,
 } from "@/components/models/supergrok-models";
 import { ConnectPickerPage } from "@/components/models/workspace-models-page";
@@ -75,9 +77,9 @@ import { useAppContext } from "@/context";
 import { accountKeyOf, type ModelsView } from "@/lib/models-route";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Models: the subscriptions and API keys the
-   organization pays for, and which workspaces can use them. Same rows, account
-   pages and forms as a workspace's Models page.
+   Organization settings > Models: one flat list of the subscriptions and API
+   keys the organization shares, then each provider's settings. Same rows,
+   account pages and forms as a workspace's Models page.
    -------------------------------------------------------------------------- */
 
 export function OrganizationModelsPage({
@@ -140,6 +142,7 @@ export function OrganizationModelsPage({
         scopeName={`${organizationName}'s shared workspaces`}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect:${provider}`)}
+        onOpenConnected={(provider) => nav.openAccount(`gateway:${provider}`)}
       />
     );
   } else if (view === "connect:codex") {
@@ -182,40 +185,82 @@ export function OrganizationModelsPage({
       />
     );
   } else {
+    const loadingAccounts =
+      codex.loading ||
+      (!grok.unavailable && grok.loading) ||
+      (["openrouter", "vercel"] as const).some((id) => !gateways[id].settled);
+    const listed =
+      (codex.loading ? 0 : codex.loadError || codex.pending ? 1 : codex.accounts.length) +
+      superGrokListedCount(grok) +
+      (["openrouter", "vercel"] as const).filter((id) => providerListed(gateways[id])).length;
+    const empty = !loadingAccounts && listed === 0;
+    const connect = (
+      <RowButton onClick={() => nav.openView("connect")}>
+        <PlusIcon aria-hidden="true" />
+        Connect account
+      </RowButton>
+    );
     page = (
       <SectionStack>
         <Section
-          title="Shared model accounts"
-          description="Each workspace chooses whether new work uses these or its own accounts."
-          action={
-            <RowButton onClick={() => nav.openView("connect")}>
-              <PlusIcon aria-hidden="true" />
-              Connect account
-            </RowButton>
-          }
+          title="Accounts"
+          description="Shared with the organization's workspaces. Each workspace chooses whether to use them or its own."
+          action={empty ? null : connect}
         >
-          <RowList label="Shared subscriptions" columns={ACCOUNT_COLUMNS}>
-            <OrgCodexGroup codex={codex} places={codexPlaces} />
-            <SuperGrokGroup grok={grok} places={grokPlaces} />
-          </RowList>
-          <RowList label="Shared API keys" className="mt-2 border-t border-border">
-            <ProviderGroupHeader title="API keys" subtitle="Pay the provider per token" />
-            {[...(["openrouter", "vercel"] as const)]
-              .sort(
-                (a, b) =>
-                  Number(providerStatus(gateways[b]).status === "connected") -
-                  Number(providerStatus(gateways[a]).status === "connected"),
-              )
-              .map((id) => (
-                <ProviderConnectionRow
-                  key={id}
-                  state={gateways[id]}
-                  onOpen={() => nav.openAccount(`gateway:${id}`)}
-                  onConnect={() => nav.openView(`connect:${id}`)}
-                />
-              ))}
-          </RowList>
+          {empty ? (
+            <EmptyState
+              variant="page"
+              icon={<KeyRoundIcon />}
+              title="No shared accounts"
+              description="Connect a subscription or an API key to share it with your workspaces."
+              action={connect}
+              className="pt-8 pb-6"
+            />
+          ) : (
+            <RowList label="Shared accounts" columns={ACCOUNT_COLUMNS} flush>
+              <OrgCodexRows codex={codex} places={codexPlaces} />
+              <SuperGrokAccountRows grok={grok} places={grokPlaces} />
+              {(["openrouter", "vercel"] as const)
+                .filter((id) => providerListed(gateways[id]))
+                .map((id) => (
+                  <ProviderConnectionRow
+                    key={id}
+                    state={gateways[id]}
+                    onOpen={() => nav.openAccount(`gateway:${id}`)}
+                  />
+                ))}
+            </RowList>
+          )}
         </Section>
+        {!codex.loading && codex.accounts.length >= 2 ? (
+          <Section title="Codex">
+            <SettingRowGroup>
+              <SettingRow
+                label="When several accounts are connected"
+                description="Spread work sends new work to the account with the most room left. Primary only waits for the primary account."
+                controlWidth="auto"
+                control={
+                  <SegmentedControl<"spread" | "primary">
+                    size="sm"
+                    pending={codex.working === "rotation"}
+                    disabled={codex.busy && codex.working !== "rotation"}
+                    value={codex.rotationEnabled ? "spread" : "primary"}
+                    onValueChange={(value) => void codex.setRotation(value === "spread")}
+                    options={[
+                      { value: "spread", label: "Spread work" },
+                      { value: "primary", label: "Primary only" },
+                    ]}
+                  />
+                }
+              />
+            </SettingRowGroup>
+          </Section>
+        ) : null}
+        {superGrokSectionVisible(grok) ? (
+          <Section title="SuperGrok">
+            <SuperGrokSettingRows grok={grok} />
+          </Section>
+        ) : null}
       </SectionStack>
     );
   }
@@ -252,104 +297,46 @@ interface OrgCodexPlaces {
   backToList: () => void;
 }
 
-function OrgCodexGroup({
+function OrgCodexRows({
   codex,
   places,
 }: {
   codex: OrganizationCodexSubscriptions;
   places: OrgCodexPlaces;
 }) {
-  const { accounts } = codex;
-  let rows: ReactNode;
-  if (codex.loading) {
-    rows = <ListRowSkeleton count={1} />;
-  } else if (codex.loadError) {
-    rows = (
-      <li className="list-none px-3 py-3">
+  if (codex.loading) return <ListRowSkeleton count={1} />;
+  if (codex.loadError) {
+    return (
+      <li className="col-span-full list-none px-3 py-3">
         <ErrorMessage
           variant="inline"
           title="Couldn't load the organization's Codex accounts."
-          action={
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void codex.refresh()}
-              className="rounded-[10px] pointer-coarse:h-11"
-            >
-              Try again
-            </Button>
-          }
+          action={<RowButton onClick={() => void codex.refresh()}>Try again</RowButton>}
         >
           {codex.loadError}
         </ErrorMessage>
       </li>
     );
-  } else {
-    rows = (
-      <>
-        {accounts.map((account) => (
-          <OrgCodexRow
-            key={account.id}
-            codex={codex}
-            account={account}
-            onOpen={() => places.openAccount(account.id)}
-          />
-        ))}
-        {codex.pending ? (
-          <ListRow
-            leading={<ProviderTile provider="codex" />}
-            title="Signing in to ChatGPT…"
-            description="The account appears here once you finish signing in."
-            indicator="loading"
-            control={<RowButton onClick={places.openConnect}>Show code</RowButton>}
-          />
-        ) : accounts.length === 0 ? (
-          <ListRow
-            leading={<ProviderTile provider="codex" />}
-            title="No shared Codex accounts yet"
-            description="Share a ChatGPT Plus or Pro plan with your workspaces."
-            control={
-              <RowButton onClick={places.openConnect} aria-label="Connect Codex">
-                Connect
-              </RowButton>
-            }
-          />
-        ) : null}
-      </>
-    );
   }
   return (
     <>
-      <ProviderGroupHeader
-        first
-        title="Codex"
-        subtitle="ChatGPT plan"
-        controls={
-          accounts.length >= 2 ? (
-            <LabelledControl
-              label="Pick"
-              help="Spread work sends new work to the account with the most room left. Primary only uses the primary account and waits when its limit runs out."
-            >
-              {(labelId) => (
-                <SegmentedControl<"spread" | "primary">
-                  aria-labelledby={labelId}
-                  size="sm"
-                  pending={codex.working === "rotation"}
-                  disabled={codex.busy && codex.working !== "rotation"}
-                  value={codex.rotationEnabled ? "spread" : "primary"}
-                  onValueChange={(value) => void codex.setRotation(value === "spread")}
-                  options={[
-                    { value: "spread", label: "Spread work" },
-                    { value: "primary", label: "Primary only" },
-                  ]}
-                />
-              )}
-            </LabelledControl>
-          ) : null
-        }
-      />
-      {rows}
+      {codex.accounts.map((account) => (
+        <OrgCodexRow
+          key={account.id}
+          codex={codex}
+          account={account}
+          onOpen={() => places.openAccount(account.id)}
+        />
+      ))}
+      {codex.pending ? (
+        <ListRow
+          leading={<ProviderTile provider="codex" size="lg" />}
+          title="Signing in to ChatGPT…"
+          meta={["Finish signing in to add the account"]}
+          indicator="open"
+          onOpen={places.openConnect}
+        />
+      ) : null}
     </>
   );
 }
@@ -372,7 +359,7 @@ function OrgCodexRow({
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   return (
     <ListRow
-      leading={<ProviderTile provider="codex" />}
+      leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
       titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
       meta={[

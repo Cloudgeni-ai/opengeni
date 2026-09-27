@@ -10,7 +10,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { ArrowRightIcon, CircleAlertIcon } from "lucide-react";
+import { ArrowRightIcon, ChevronRightIcon, CircleAlertIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ReasonTooltip } from "./disabled-reason";
 
@@ -332,6 +332,147 @@ export function SettingRowGroup({ className, ...props }: ComponentProps<"div">) 
       className={cn("flex min-w-0 flex-col divide-y divide-border", className)}
       {...props}
     />
+  );
+}
+
+/**
+ * A setting that lives on its own page ("Allowed models", "Models it can
+ * serve"). The whole row is the button: label and description on the left,
+ * the current value in muted text and a chevron on the right, and the row
+ * hover of a list row. Use it instead of an "Edit" or "Change" button that
+ * only opens a page.
+ */
+export function SettingNavRow({
+  label,
+  description,
+  value,
+  onOpen,
+  href,
+  disabled = false,
+  disabledReason,
+  className,
+  ...props
+}: Omit<ComponentProps<"div">, "children"> & {
+  label: ReactNode;
+  description?: ReactNode;
+  /** The current value, short: "All models", "3 models". */
+  value?: ReactNode;
+  onOpen?: () => void;
+  href?: string;
+  disabled?: boolean;
+  /** Why the page can't be opened, and who can fix it. Replaces the description. */
+  disabledReason?: ReactNode;
+}) {
+  const baseId = useId();
+  const labelId = `${baseId}-label`;
+  const descriptionId = `${baseId}-description`;
+  const valueId = `${baseId}-value`;
+  const secondary = disabled && disabledReason ? disabledReason : description;
+  const hasValue = value !== undefined && value !== null && value !== false && value !== "";
+  const inner = (
+    <>
+      <span className="min-w-0">
+        <span id={labelId} className="block text-sm font-medium text-pretty text-fg">
+          {label}
+        </span>
+        {secondary ? (
+          <span
+            id={descriptionId}
+            className="mt-0.5 block text-xs leading-4.5 text-pretty text-fg-muted"
+          >
+            {secondary}
+          </span>
+        ) : null}
+      </span>
+      <span className="flex min-w-0 shrink-0 items-center justify-end gap-2">
+        {hasValue ? (
+          <span id={valueId} className="max-w-60 min-w-0 truncate text-sm text-fg-muted">
+            {value}
+          </span>
+        ) : null}
+        {disabled ? null : (
+          <ChevronRightIcon aria-hidden="true" className="size-4 shrink-0 text-fg-subtle" />
+        )}
+      </span>
+    </>
+  );
+  const rowClass = cn(
+    "-mx-3 grid min-h-14 w-[calc(100%+1.5rem)] min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 rounded-[10px] px-3 py-3 text-left",
+    !disabled &&
+      "cursor-pointer transition-colors duration-[120ms] hover:bg-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55 pointer-coarse:min-h-14",
+  );
+  const labelledBy = joinIds(labelId, hasValue && valueId);
+  const describedBy = secondary ? descriptionId : undefined;
+  return (
+    <div data-slot="setting-nav-row" className={cn("min-w-0", className)} {...props}>
+      {disabled ? (
+        <div className={rowClass} aria-disabled="true">
+          {inner}
+        </div>
+      ) : href ? (
+        <a
+          href={href}
+          onClick={onOpen}
+          aria-labelledby={labelledBy}
+          aria-describedby={describedBy}
+          className={rowClass}
+        >
+          {inner}
+        </a>
+      ) : (
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-labelledby={labelledBy}
+          aria-describedby={describedBy}
+          className={rowClass}
+        >
+          {inner}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A quiet destructive action at the end of a settings list ("Turn off
+ * Codex"): danger text that confirms in a dialog, with one muted line under
+ * it. Not a filled button, and never a ⋯ menu floating above the rows.
+ */
+export function SettingDangerRow({
+  label,
+  description,
+  disabled = false,
+  onClick,
+  className,
+}: {
+  label: ReactNode;
+  description?: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+  className?: string;
+}) {
+  const descriptionId = useId();
+  return (
+    <div
+      data-slot="setting-danger-row"
+      className={cn("flex min-h-14 min-w-0 flex-col items-start justify-center py-3", className)}
+    >
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+        aria-describedby={description ? descriptionId : undefined}
+        className="-mx-1.5 rounded-md px-1.5 text-sm font-medium text-danger transition-colors duration-[120ms] hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+      >
+        {label}
+      </button>
+      {description ? (
+        <p id={descriptionId} className="mt-0.5 text-xs leading-4.5 text-fg-muted">
+          {description}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

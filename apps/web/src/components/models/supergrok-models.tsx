@@ -18,10 +18,8 @@ import {
   useConnectionAccess,
 } from "@/components/connection-access-settings";
 import {
-  LabelledControl,
   ModelsFormPage,
   MoreMenu,
-  ProviderGroupHeader,
   ProviderTile,
   RenameAccountDialog,
   RowButton,
@@ -60,7 +58,7 @@ import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
-import { UsageMeter, UsageMeterGroup } from "@/components/ui/usage-meter";
+import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 /* ----------------------------------------------------------------------------
@@ -101,7 +99,15 @@ function accountStatus(account: SuperGrokAccount): "connected" | "paused" | "nee
   return "connected";
 }
 
-export function SuperGrokGroup({
+/** How many rows SuperGrok adds to the Accounts list once loaded. */
+export function superGrokListedCount(grok: SuperGrokSubscriptions): number {
+  if (grok.unavailable || grok.loading) return 0;
+  if (grok.loadError || grok.pending) return 1;
+  return grok.accounts.length;
+}
+
+/** SuperGrok's rows in the Accounts list. Nothing when the deployment has it off. */
+export function SuperGrokAccountRows({
   grok,
   places,
 }: {
@@ -109,114 +115,83 @@ export function SuperGrokGroup({
   places: SuperGrokPlaces;
 }) {
   if (grok.unavailable) return null;
-  const { accounts } = grok;
-  const showPick = grok.canManageAccounts && accounts.length >= 2;
-  let rows: ReactNode;
-  if (grok.loading) {
-    rows = <ListRowSkeleton count={1} />;
-  } else if (grok.loadError) {
-    rows = (
-      <li className="list-none px-3 py-3">
+  if (grok.loading) return <ListRowSkeleton count={1} />;
+  if (grok.loadError) {
+    return (
+      <li className="col-span-full list-none px-3 py-3">
         <ErrorMessage
           variant="inline"
           title="Couldn't load SuperGrok accounts."
-          action={
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void grok.refresh()}
-              className="rounded-[10px] pointer-coarse:h-11"
-            >
-              Try again
-            </Button>
-          }
+          action={<RowButton onClick={() => void grok.refresh()}>Try again</RowButton>}
         >
           {grok.loadError}
         </ErrorMessage>
       </li>
     );
-  } else {
-    rows = (
-      <>
-        {accounts.map((account) => (
-          <SuperGrokRow
-            key={account.id}
-            grok={grok}
-            account={account}
-            onOpen={() => places.openAccount(account.id)}
-          />
-        ))}
-        {grok.pending ? (
-          <ListRow
-            leading={<ProviderTile provider="supergrok" />}
-            title="Signing in to xAI…"
-            description="The account appears here once you finish signing in."
-            indicator="loading"
-            control={<RowButton onClick={places.openConnect}>Show code</RowButton>}
-          />
-        ) : accounts.length === 0 ? (
-          <ListRow
-            leading={<ProviderTile provider="supergrok" />}
-            title="No SuperGrok accounts yet"
-            description={
-              grok.canManage
-                ? "Pay for Grok models with a SuperGrok plan."
-                : "Someone who can manage connections can add a SuperGrok plan."
-            }
-            control={
-              grok.canManage ? (
-                <RowButton onClick={places.openConnect} aria-label="Connect SuperGrok">
-                  Connect
-                </RowButton>
-              ) : null
-            }
-          />
-        ) : null}
-      </>
-    );
   }
   return (
     <>
-      <ProviderGroupHeader
-        title="SuperGrok"
-        subtitle="xAI plan"
-        controls={
-          showPick ? (
-            <LabelledControl
-              label="Pick"
-              help="Spread work sends new chats to the account with the most room left. Primary only uses the primary account."
-            >
-              {(labelId) => (
-                <SegmentedControl<"spread" | "primary">
-                  aria-labelledby={labelId}
-                  size="sm"
-                  pending={grok.working === "rotation"}
-                  disabled={grok.busy && grok.working !== "rotation"}
-                  value={grok.rotationEnabled ? "spread" : "primary"}
-                  onValueChange={(value) => void grok.setRotation(value === "spread")}
-                  options={[
-                    { value: "spread", label: "Spread work" },
-                    { value: "primary", label: "Primary only" },
-                  ]}
-                />
-              )}
-            </LabelledControl>
-          ) : null
+      {grok.accounts.map((account) => (
+        <SuperGrokRow
+          key={account.id}
+          grok={grok}
+          account={account}
+          places={places}
+          onOpen={() => places.openAccount(account.id)}
+        />
+      ))}
+      {grok.pending ? (
+        <ListRow
+          leading={<ProviderTile provider="supergrok" size="lg" />}
+          title="Signing in to xAI…"
+          meta={["Finish signing in to add the account"]}
+          indicator="open"
+          onOpen={places.openConnect}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/** "When several accounts are connected", once there are two SuperGrok accounts. */
+export function superGrokSectionVisible(grok: SuperGrokSubscriptions): boolean {
+  return !grok.unavailable && !grok.loading && grok.canManageAccounts && grok.accounts.length >= 2;
+}
+
+export function SuperGrokSettingRows({ grok }: { grok: SuperGrokSubscriptions }) {
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="When several accounts are connected"
+        description="Spread work sends new chats to the account with the most room left. Primary only uses the primary account."
+        controlWidth="auto"
+        control={
+          <SegmentedControl<"spread" | "primary">
+            size="sm"
+            pending={grok.working === "rotation"}
+            disabled={grok.busy && grok.working !== "rotation"}
+            value={grok.rotationEnabled ? "spread" : "primary"}
+            onValueChange={(value) => void grok.setRotation(value === "spread")}
+            options={[
+              { value: "spread", label: "Spread work" },
+              { value: "primary", label: "Primary only" },
+            ]}
+          />
         }
       />
-      {rows}
-    </>
+    </SettingRowGroup>
   );
 }
 
 function SuperGrokRow({
   grok,
   account,
+  places,
   onOpen,
 }: {
   grok: SuperGrokSubscriptions;
   account: SuperGrokAccount;
+  places: SuperGrokPlaces;
   onOpen: () => void;
 }) {
   const primary = grok.accounts.length > 1 && account.id === grok.activeAccountId;
@@ -224,22 +199,26 @@ function SuperGrokRow({
   const status = accountStatus(account);
   return (
     <ListRow
-      leading={<ProviderTile provider="supergrok" />}
+      leading={<ProviderTile provider="supergrok" size="lg" />}
       title={superGrokAccountName(account)}
-      titleAddon={
-        <>
-          {primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
-          {grok.inherited ? <MetaChip variant="outline">Organization</MetaChip> : null}
-          {account.scope === "user" ? <MetaChip variant="outline">Only you</MetaChip> : null}
-        </>
-      }
-      meta={[planOf(account)]}
+      titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
+      meta={[
+        planOf(account),
+        grok.inherited ? `Shared by ${places.organizationName}` : null,
+        account.scope === "user" ? "Only you" : null,
+      ]}
       cells={{
-        usage:
-          left === null || needsReconnect(account) ? null : (
-            <UsageMeter density="compact" label="This period" percent={left} />
-          ),
-        state: status === "paused" ? <StatusBadge status="paused" variant="dot" /> : null,
+        usage: needsReconnect(account) ? null : status === "paused" ? (
+          <StatusBadge status="paused" variant="dot" />
+        ) : (
+          <UsageReadout
+            percent={left}
+            window="this period"
+            {...(account.quota?.periodEnd
+              ? { resetsLabel: formatReset(account.quota.periodEnd) }
+              : {})}
+          />
+        ),
       }}
       indicator={needsReconnect(account) ? { kind: "attention", label: "Needs reconnect" } : "open"}
       onOpen={onOpen}

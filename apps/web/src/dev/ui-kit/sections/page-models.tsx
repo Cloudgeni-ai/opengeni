@@ -320,7 +320,7 @@ export default function PageModelsSection() {
       <ModelsProvider>
         <KitBlock
           title="Page"
-          description="Settings > Models inside the app, with your picks. Open a row, Connect, Edit, or the Organization link in the sub-nav. Every account and form is its own page with a back link."
+          description="Settings > Models inside the app, with your picks: Defaults, one flat Accounts list, then the Codex settings as rows. Open a row, Connect account, Allowed models, or the Organization link in the sub-nav. Every account and form is its own page with a back link."
         >
           <PreviewControls />
           <div className="mt-4 min-w-0">

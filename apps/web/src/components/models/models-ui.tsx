@@ -3,7 +3,6 @@ import { MoreHorizontalIcon, RouteIcon, SparklesIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
-  useId,
   useState,
   type ComponentProps,
   type ReactNode,
@@ -19,9 +18,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
-import { HelpTip } from "@/components/ui/inline-help";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
-import { useRowListVariant } from "@/components/ui/list-row";
 import type { ModelsView } from "@/lib/models-route";
 import { cn } from "@/lib/utils";
 
@@ -31,8 +28,8 @@ export type ModelsScope =
 
 /* ----------------------------------------------------------------------------
    Shared pieces of Settings > Models (workspace and organization): provider
-   marks, the provider group header, small menus, the flush form page and the
-   URL state that says which list, account page or form is showing.
+   marks, small menus, the flush form page and the URL state that says which
+   list, account page or form is showing.
    -------------------------------------------------------------------------- */
 
 export type ModelProviderId = "codex" | "supergrok" | "vercel" | "openrouter";
@@ -67,79 +64,6 @@ export function ProviderTile({
   size?: LogoTileSize;
 }) {
   return <LogoTile size={size} icon={<ProviderMark provider={provider} className="text-fg" />} />;
-}
-
-/** "Codex · ChatGPT plan" over a group of rows, with pool-wide controls under it. */
-export function ProviderGroupHeader({
-  title,
-  subtitle,
-  trailing,
-  controls,
-  note,
-  first = false,
-}: {
-  title: string;
-  subtitle: string;
-  /** The group's one action (⋯ menu, or "Turn on Codex"), at the row's end. */
-  trailing?: ReactNode;
-  /** Pool-wide choices ("Use", "Pick"), on their own line under the title. */
-  controls?: ReactNode;
-  note?: ReactNode;
-  /** The first group in the section sits closer to the section's title. */
-  first?: boolean;
-}) {
-  const variant = useRowListVariant();
-  return (
-    <li className="col-span-full min-w-0 list-none">
-      <div
-        className={cn(
-          "min-w-0 px-3",
-          first ? "pt-1" : "pt-5",
-          variant === "catalog" ? "pb-1" : "pb-3",
-        )}
-      >
-        <div className="flex min-w-0 items-center justify-between gap-4">
-          <div className="min-w-0">
-            <h3 className="text-sm leading-5 font-semibold text-fg">{title}</h3>
-            <p className="text-xs leading-4.5 text-fg-muted">{subtitle}</p>
-          </div>
-          {trailing ? (
-            <div className="flex shrink-0 items-center empty:hidden">{trailing}</div>
-          ) : null}
-        </div>
-        {controls ? (
-          <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-6 gap-y-2 empty:hidden">
-            {controls}
-          </div>
-        ) : null}
-        {note ? <div className="mt-2 min-w-0 empty:hidden">{note}</div> : null}
-      </div>
-    </li>
-  );
-}
-
-/** A small label, an optional help tip, and one control, as they sit in a group header. */
-export function LabelledControl({
-  label,
-  help,
-  children,
-}: {
-  label: string;
-  help?: string;
-  children: (labelId: string) => ReactNode;
-}) {
-  const labelId = useId();
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="flex min-w-0 shrink-0 items-center gap-2 @max-[479px]/list:w-14">
-        <span id={labelId} className="text-xs leading-4.5 font-medium text-fg-muted">
-          {label}
-        </span>
-        {help ? <HelpTip label={`About ${label}`}>{help}</HelpTip> : null}
-      </span>
-      {children(labelId)}
-    </div>
-  );
 }
 
 /** The ⋯ button and its menu. `quiet` sits in a group header; the default in a page header. */
@@ -194,6 +118,8 @@ const FLUSH_FORM_PAGE = [
   "[&>form>header]:mx-0 [&>form>header]:px-0 [&>form>header]:pt-0",
   "[&>form>[data-slot=form-body]]:mx-0 [&>form>[data-slot=form-body]]:px-0",
   "[&>form>footer>div]:mx-0 [&>form>footer>div]:px-0",
+  // The footer's hairline ends where the 640px column does, like the header's.
+  "[&>form>footer]:max-w-[640px]",
 ].join(" ");
 
 /** A full-page form with a back link and a sticky Cancel + primary footer. */
@@ -216,6 +142,26 @@ export function ModelsFormPage({
       {...props}
     />
   );
+}
+
+/**
+ * Who pays, in one or two words, for the muted part of a model control:
+ * "GPT-6 Astra" + "Codex". API-key models name their provider.
+ */
+export function payerShortLabel(row: { billingClass: string; providerLabel: string }): string {
+  switch (row.billingClass) {
+    case "codex_subscription":
+      return "Codex";
+    case "supergrok_subscription":
+      return "SuperGrok";
+    case "opengeni_credits":
+      return "Credits";
+    case "byok":
+    case "organization_byok":
+      return row.providerLabel;
+    default:
+      return row.providerLabel;
+  }
 }
 
 /** Who pays for a model, in product words: "Codex plan", "OpenGeni credits". */

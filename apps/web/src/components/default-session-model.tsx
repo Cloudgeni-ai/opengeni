@@ -3,10 +3,12 @@ import type { DefaultModelSelectionSource } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { payerLabel } from "@/components/models/models-ui";
+import { payerShortLabel } from "@/components/models/models-ui";
 import { ModelPicker } from "@/components/pickers";
+import { buttonVariants } from "@/components/ui/button";
 import { SettingRow } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
+import { cn } from "@/lib/utils";
 import { initialReasoningEffort } from "@/lib/session-tools";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { IntelligenceEffort } from "@/lib/session-tools";
@@ -90,9 +92,6 @@ export function DefaultSessionModelPreferenceRow(props: {
   }
 
   const selected = catalog.rows.find((row) => row.id === draft.model) ?? null;
-  const named = selected
-    ? `${selected.label} · ${payerLabel(selected.billingClass, selected.billingClassLabel)}`
-    : null;
   const cantRun =
     catalog.loading || catalog.error
       ? null
@@ -109,13 +108,11 @@ export function DefaultSessionModelPreferenceRow(props: {
   return (
     <SettingRow
       label="Default model"
-      controlWidth="select"
+      controlWidth="auto"
       description={
-        <>
-          {named ? <span className="text-fg">{named}. </span> : null}
-          New chats and schedules start with this model unless someone picks another.
-          {configured ? null : ` ${automaticDefaultNote(automatic?.source)}`}
-        </>
+        configured
+          ? "New chats and schedules start with this model."
+          : `New chats and schedules start with this model. ${automaticDefaultNote(automatic?.source)}`
       }
       error={cantRun}
       hint={saving ? "Saving…" : undefined}
@@ -130,7 +127,13 @@ export function DefaultSessionModelPreferenceRow(props: {
           loading={catalog.loading}
           error={catalog.error}
           messages={{ label: "Default model and reasoning" }}
-          className="border-border bg-surface text-fg hover:bg-surface-2"
+          triggerStyle="field"
+          triggerMeta={selected ? payerShortLabel(selected) : null}
+          // The secondary button's exact look, so every control on the row matches.
+          className={cn(
+            buttonVariants({ variant: "outline", size: "sm" }),
+            "max-w-full min-w-[180px] justify-start gap-2 rounded-[10px] px-2.5 pointer-coarse:h-11",
+          )}
           onModelChange={(model) => updateDraft({ ...draftRef.current, model })}
           onEffortChange={(effort) => void save(effort)}
           onLatencyModeChange={() => {}}

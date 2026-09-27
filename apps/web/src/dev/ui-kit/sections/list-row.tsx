@@ -782,12 +782,15 @@ export default function ListRowSection() {
           "Catalogs you browse and add from, with the catalog layout (A): Capabilities, skills, plugins.",
           "The table layout (C) once a list passes about 20 items or needs numeric columns: call log, billing.",
           "Sub-lists inside a detail sheet, like usage limit resets or what uses a variable set.",
+          "In an open section, `flush`: tiles line up with the section title, the hover bleeds out and the hairlines stay inside.",
         ]}
         avoid={[
           "A single setting with one control: use a setting row.",
           "Several buttons on a row: keep one control, move the rest into the ⋯ menu or the detail sheet.",
           "Rows inside a card, or a list nested in a row: open a sheet instead.",
           "A right chevron that expands in place. A chevron means it opens.",
+          "Group headers, pool-wide controls or a ⋯ menu inside the list. One flat list; settings go in their own section as setting rows.",
+          "Rows for things that aren't connected yet, each with a Connect button. Those are choices on the Connect page.",
         ]}
       />
     </KitSection>

@@ -244,6 +244,8 @@ beforeEach(() => {
   client.requestJson.mockImplementation(async () => ({}));
 });
 
+const ACCOUNTS_SECTION = "Subscriptions and API keys that pay for models here.";
+
 function Harness({ canManage }: { canManage: boolean }) {
   const [search, setSearch] = useState<{ account?: string; view?: ModelsView }>({});
   navigateTo = setSearch;
@@ -333,14 +335,14 @@ describe("Codex rows", () => {
     const view = await render();
     try {
       expect(view.container.textContent).toContain("Couldn't load Codex accounts.");
-      expect(view.container.textContent).not.toContain("No Codex accounts yet");
+      expect(view.container.textContent).not.toContain("No accounts connected");
       failed = false;
       await act(async () => button(view.container, "Try again")!.click());
       await flush();
       expect(client.listCodexAccounts).toHaveBeenCalledTimes(2);
       expect(view.container.textContent).not.toContain("Couldn't load Codex accounts.");
-      expect(view.container.textContent).toContain("No Codex accounts yet");
-      expect(button(view.container, "Connect Codex")).toBeDefined();
+      expect(view.container.textContent).toContain("No accounts connected");
+      expect(button(view.container, "Connect account")).toBeDefined();
     } finally {
       await cleanup(view);
     }
@@ -370,6 +372,93 @@ describe("Codex rows", () => {
     const view = await render();
     try {
       expect(view.container.textContent).toContain("Couldn't load SuperGrok accounts.");
+    } finally {
+      await cleanup(view);
+    }
+  });
+});
+
+describe("Models list", () => {
+  test("one flat Accounts list: no provider group headers, no unconnected providers", async () => {
+    const view = await render();
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Defaults");
+      expect(text).toContain(ACCOUNTS_SECTION);
+      // Unconnected API-key providers are choices on Connect account, not rows.
+      expect(text).not.toContain("OpenRouter");
+      expect(text).not.toContain("Vercel AI Gateway");
+      expect(text).not.toContain("ChatGPT plan");
+      expect(button(view.container, "More actions for Codex")).toBeUndefined();
+      expect(button(view.container, "Edit")).toBeUndefined();
+      expect(view.container.querySelectorAll("[data-slot=list-row]")).toHaveLength(1);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Allowed models is a row that opens its page, with its value", async () => {
+    const view = await render();
+    try {
+      const row = view.container.querySelector<HTMLButtonElement>(
+        "[data-slot=setting-nav-row] button",
+      )!;
+      expect(row.textContent).toContain("Allowed models");
+      expect(row.textContent).toContain("All models");
+      await act(async () => row.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Allowed models");
+      const everything = view.container.querySelector<HTMLButtonElement>('button[role="switch"]')!;
+      expect(everything.getAttribute("aria-checked")).toBe("true");
+      // Nothing to save yet: no footer.
+      expect(
+        view.container.querySelector("footer")?.closest("[data-slot=form-frame]")?.className,
+      ).toContain("[&>form>footer]:hidden");
+      await act(async () => button(view.container, "Models")!.click());
+      await flush();
+      expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("the provider switch explains itself without On:/Off: copy", async () => {
+    const view = await render();
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Allow switching to other providers");
+      expect(text).not.toMatch(/\bOn: |\bOff: /);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Turn off Codex asks first", async () => {
+    const view = await render();
+    try {
+      await act(async () => button(view.container, "Turn off Codex")!.click());
+      expect(view.container.textContent).toContain("Turn off Codex in Design preview?");
+      expect(client.requestJson).not.toHaveBeenCalled();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Connect account lists providers as rows that open their own step", async () => {
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect account/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Pay with your ChatGPT plan");
+      expect(text).toContain("Pay per token through OpenRouter");
+      const codexRow = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")]
+        .find((row) => row.textContent?.includes("Codex"))!
+        .querySelector<HTMLElement>("[data-row-action]")!;
+      await act(async () => codexRow.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
     } finally {
       await cleanup(view);
     }
@@ -461,7 +550,7 @@ describe("Codex account page", () => {
       });
       await act(async () => button(view.container, "Models")!.click());
       await flush();
-      expect(view.container.textContent).toContain("Model accounts");
+      expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
     } finally {
       await cleanup(view);
     }
@@ -485,7 +574,7 @@ describe("Codex account page", () => {
       );
       await flush();
       expect(client.disconnectCodexAccount).toHaveBeenCalledWith("workspace-a", "acct-1");
-      expect(view.container.textContent).toContain("Model accounts");
+      expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
     } finally {
       await cleanup(view);
     }

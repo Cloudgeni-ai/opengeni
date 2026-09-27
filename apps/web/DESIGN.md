@@ -18,7 +18,7 @@ code disagree, this file wins; bring the code in line when you touch it.
 2. **Pages, not panels.** Nothing slides in from the side. Opening, creating and editing all happen
    on full pages in the content area with a "← Back to list" link, like Claude's and Codex's
    settings. Small centered modals are only for short confirmations and one-field prompts
-   (section 7).
+   (section 8).
 3. **One row anatomy everywhere.** Leading tile, title (with an optional small chip), one line of
    quiet meta ("by Maja Berg · Read-only IAM credentials…", truncated), a right-aligned date and a
    ⋯ menu or chevron.
@@ -95,7 +95,15 @@ Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted tex
 - Sections: heading to description 4, to content 12. Between sections one hairline with 24 above
   and below. No boxes around sections.
 - Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 56-64px (32px
-  tile, one column, hairline dividers, for things you own).
+  tile, one column, hairline dividers, for things you own). A short list of accounts on a settings
+  page may use the 40px tile. Inside an open section a resource list is `flush`: tiles and titles
+  line up with the section title, the hover bleeds 12px out with a 10px radius, and the hairlines
+  stay inside the content edge.
+- One control height: every control at the right end of a row (button, select or picker trigger,
+  segmented control) is 32px tall (44px on coarse pointers). Buttons and triggers share the
+  secondary button's 10px radius and border; a model picker in settings uses the "field" trigger
+  (model name, then the payer in muted text, never the reasoning effort, never a pill). Switches
+  keep their own 20px size.
 - Elevation: pages and rows are flat, hover is a `surface-2` fill. Dialogs: 1px border +
   `shadow-lg`. Menus: `shadow-md`.
 - Focus: 2px ring in brand at 55%, 2px offset. Motion: 120ms, color and opacity only.
@@ -108,7 +116,7 @@ Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted tex
 
 | Control | Use when | Never |
 | --- | --- | --- |
-| Switch | One on/off setting that saves immediately | Inside a form with a Save button |
+| Switch | One on/off setting that saves immediately. One exception: the single "all or pick" switch at the top of a form page that reveals the list below it ("Allow every model"); the page's Save commits it | Inside a form with a Save button otherwise |
 | Segmented control | 2-4 mutually exclusive short options, always visible | More than 4 options, or long labels |
 | Choice cards | 2-3 options where each needs a consequence sentence | Simple filters |
 | Select (menu style) | 5+ options or a dynamic list; model and role pickers with descriptions and payment source | Actions |
@@ -116,7 +124,8 @@ Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted tex
 | Checkbox | Picking several from a set, inside a form with Save | Immediate on/off |
 | Dropdown menu | Actions on one object (row ⋯: Replace value, Delete) | Choosing a value |
 | Disclosure | Secondary options of the same object, one level ("Advanced", "Technical details") | Nested, or hiding the primary action. A right chevron means "opens", never "expands" |
-| Detail page | Anything you open: see section 7 | A side sheet |
+| Navigational row | A setting that lives on its own page (Allowed models, Models it can serve): the whole row opens it, the current value sits muted by a chevron (`SettingNavRow`) | An Edit, Change or View button whose only job is to open a page |
+| Detail page | Anything you open: see section 8 | A side sheet |
 | Form page | Every create and edit flow | A side sheet, or an inline form that pushes the list down |
 | Centered dialog | A short confirmation or a one-field prompt | Anything with two or more fields, a list, or tabs |
 
@@ -131,12 +140,36 @@ Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted tex
   the reference goes in Technical details.
 - One name per object across rail, title, back link, buttons and toasts. One noun per concept
   (schedule, not "scheduled task").
+- Descriptions say what the setting does, and what Off keeps if that matters: "Lets a Codex chat
+  move to a model from another provider. Off keeps long chats more accurate." Never spell out both
+  states as "On: ... Off: ...". Details only some people need go in a tooltip.
 - Sentence case everywhere. Plain dashes (-), never em-dashes. Dates as "Mon 28 Sep, 08:00" or
   "3 days ago" with the exact time on hover; never seconds, never ISO.
 - Back links name the list they return to: "Variable sets", "Models", "Your skills". The arrow is
   the icon, not a character in the label.
 
-## 7. Pages, not sheets
+## 7. Lists and settings on one page
+
+Learned on Settings > Models, 27 Sep 2026.
+
+- **One flat list per kind of thing.** Connected accounts of every provider are one divided list.
+  No group headers inside a list, no pool-wide controls between rows, no ⋯ menu floating above
+  them.
+- **Settings of a group get their own section, as setting rows.** "Subscriptions from", "When
+  several accounts are connected", "Allow switching to other providers": each row has exactly one
+  control. A destructive action for the group ("Turn off Codex") is the last row, as quiet danger
+  text (`SettingDangerRow`) that confirms in a dialog.
+- **Unconnected options are not rows.** A provider you haven't connected is a choice on the
+  Connect (or New) page, never a list row with its own Connect button. With nothing connected, the
+  list becomes the empty state with the one Connect action.
+- **The create/connect page is a list of rows** (logo, name, one line on how it works or who
+  pays), each opening its own step. Not choice cards with a Continue button.
+- **Navigate with the row, not with a button.** A setting that opens a page is a navigational row
+  (section 5). Buttons on rows do something (Rename, Make primary, Turn on).
+- **Edit pages for existing settings** show Cancel and Save only once something changed; until
+  then the back link is the way out.
+
+## 8. Pages, not sheets
 
 This is the one rule people most often get wrong, so it has its own section.
 
@@ -186,7 +219,7 @@ that pushes the list down, or a dialog with tabs or a list in it. `DetailSheet` 
 remain in `components/ui` only for existing call sites that have not moved yet; do not add new
 uses.
 
-## 8. Decided component picks
+## 9. Decided component picks
 
 All picks are the kit's decided versions. Build these; the alternatives in the kit are history.
 
@@ -197,24 +230,24 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | Section | Open section: 14px title, 12px description, rows below, one hairline between sections, no box. |
 | Tabs and toolbar | Underline tabs; search, filter and the primary action in a toolbar that keeps its shape. Status filters are not a second tab row. |
 | List row | Divided resource row (56-64px, 32px tile, one meta line) for things you own; the catalog row (76px, 40px tile, 2 columns) for discovery. Same tile, type and hover. |
-| Detail | **Detail page** (section 7). No side sheets. Expand in place only for one level of secondary options. |
+| Detail | **Detail page** (section 8). No side sheets. Expand in place only for one level of secondary options. |
 | Empty state | Centered: 40px icon tile, title, one sentence, one action; the header action hides while empty. Add 2-3 template cards where starting is hard (Schedules). |
-| Setting row | Label and description left, the one control in a fixed right column. |
+| Setting row | Label and description left, the one control in a fixed right column. A setting with its own page is a `SettingNavRow`; a destructive group action is a `SettingDangerRow` at the end. |
 | Switch | Brand track when on, a visible track when off in both themes. |
 | Segmented control | Filled track with the active option raised on the surface. |
 | Choice cards | Brand ring: brand border, faint brand fill, a check in the corner. The same highlight for every selected state. |
-| Select | Menu select like the composer: title, description, payment source, a check on the selected option. |
+| Select | Menu select like the composer: title, description, payment source, a check on the selected option. The settings trigger is the 32px "field" style, as wide as its content (at least 180px). |
 | Disclosure | Advanced row: full-width row, rotating chevron, title and a summary of current values. |
 | Status badge | Plain dot + label in rows; the bordered 22px pill with a 6px dot in page headers. |
-| Usage meter | A 4px bar with "22% left" and the reset time on the account page; text only in rows. |
-| Form | **Form page** (section 7) for every create and edit flow; a centered dialog only for one-field prompts. |
+| Usage meter | A 4px bar with "22% left" and the reset time on the account page. In an account row, `UsageReadout`: "78% left this week" and a 64px bar, right-aligned against the chevron (words only where the row folds on a phone). |
+| Form | **Form page** (section 8) for every create and edit flow; a centered dialog only for one-field prompts. |
 | Destructive confirm | Consequence list by default; type-to-confirm for permanent, wide-impact actions; Undo toast instead of a dialog when reversible; a blocked variant with no destructive button. |
 | Secret values | Write-only: values are never shown after saving; Replace value only. |
 | Cadence picker | Sentence builder: [Every weekday] at [08:00] [Oslo time], with a live next-run line. |
 | Access list | Inline role select that saves immediately and a ⋯ menu with Remove, the same rows in every place access is edited. |
 | Foundations | One `LogoTile` (40/32/24px), `RelativeTime` ("3 days ago", exact time on hover), `CopyField` for IDs, `DiffView` with revision history. |
 
-## 9. How to restyle
+## 10. How to restyle
 
 Colors, fonts and most sizes are tokens, so a restyle happens in two files, not in components:
 

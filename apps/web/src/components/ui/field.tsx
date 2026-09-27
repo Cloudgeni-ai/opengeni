@@ -229,6 +229,35 @@ export const TextArea = forwardRef<
 });
 
 /**
+ * The bare 16px checkbox, for rows that carry their own label (a model in
+ * Allowed models). Wrap the row in a <label> so the whole row toggles it.
+ */
+export function Checkbox({
+  onCheckedChange,
+  className,
+  ...props
+}: Omit<ComponentProps<"input">, "type" | "onChange" | "className"> & {
+  onCheckedChange?: (checked: boolean) => void;
+  className?: string;
+}) {
+  return (
+    <span className={cn("relative grid size-4 shrink-0 place-items-center", className)}>
+      <input
+        type="checkbox"
+        {...props}
+        onChange={(event) => onCheckedChange?.(event.target.checked)}
+        className="peer size-4 appearance-none rounded-[4px]! border border-border-strong bg-surface transition-colors duration-[120ms] checked:border-brand-strong checked:bg-brand-strong hover:border-fg-subtle disabled:cursor-not-allowed pointer-coarse:after:absolute pointer-coarse:after:-inset-3.5 pointer-coarse:after:content-['']"
+      />
+      <CheckIcon
+        aria-hidden="true"
+        strokeWidth={3}
+        className="pointer-events-none absolute size-3 text-brand-fg opacity-0 peer-checked:opacity-100"
+      />
+    </span>
+  );
+}
+
+/**
  * A single yes/no choice inside a form with a Save button. For on/off that
  * saves immediately, use a switch instead.
  */
@@ -262,24 +291,16 @@ export function CheckboxField({
         className,
       )}
     >
-      <span className="relative mt-0.5 grid size-4 shrink-0 place-items-center">
-        <input
-          id={id}
-          type="checkbox"
-          name={name}
-          checked={checked}
-          defaultChecked={defaultChecked}
-          disabled={disabled}
-          aria-describedby={description ? descriptionId : undefined}
-          onChange={(event) => onCheckedChange?.(event.target.checked)}
-          className="peer size-4 appearance-none rounded-[4px]! border border-border-strong bg-surface transition-colors duration-[120ms] checked:border-brand-strong checked:bg-brand-strong hover:border-fg-subtle disabled:cursor-not-allowed pointer-coarse:after:absolute pointer-coarse:after:-inset-3.5 pointer-coarse:after:content-['']"
-        />
-        <CheckIcon
-          aria-hidden="true"
-          strokeWidth={3}
-          className="pointer-events-none absolute size-3 text-brand-fg opacity-0 peer-checked:opacity-100"
-        />
-      </span>
+      <Checkbox
+        id={id}
+        name={name}
+        checked={checked}
+        defaultChecked={defaultChecked}
+        disabled={disabled}
+        aria-describedby={description ? descriptionId : undefined}
+        onCheckedChange={onCheckedChange}
+        className="mt-0.5"
+      />
       <span className="min-w-0">
         <label htmlFor={id} className="block text-sm font-medium text-fg">
           {label}

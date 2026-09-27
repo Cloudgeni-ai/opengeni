@@ -42,7 +42,7 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup } from "@/components/ui/usage-meter";
@@ -651,25 +651,21 @@ function AvailabilitySection({ account }: { account: CodexAccount }) {
 /** "Models it can serve": at organization scope always, in workspaces only for question 15's other answer. */
 function ServedRow({ kind, scope, id }: { kind: "codex" | "gateway"; scope: Scope; id: string }) {
   const { data, questions, openAllowed } = useModels();
-  const picks = useModelsPicks();
   if (scope === "workspace" && questions.q15 === "org_only") return null;
   const served =
     kind === "codex"
       ? (findAccount(data, scope, id)?.modelsServed ?? "all")
       : data.gateways[scope][id as GatewayId].modelsServed;
   return (
-    <SettingRow
-      variant={picks.settingRow}
-      controlWidth={buttonWidth(picks.settingRow)}
+    <SettingNavRow
       label="Models it can serve"
       description={
         scope === "organization"
-          ? servedSummary(served)
-          : `${servedSummary(served)}. Allowed models for the workspace still apply.`
+          ? "New models are included until you limit them."
+          : "The workspace's Allowed models still apply."
       }
-      control={
-        <RowButton onClick={() => openAllowed({ kind: "account", scope, id })}>Edit</RowButton>
-      }
+      value={served === "all" ? "All models" : servedSummary(served)}
+      onOpen={() => openAllowed({ kind: "account", scope, id })}
     />
   );
 }

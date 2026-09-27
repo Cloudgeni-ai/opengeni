@@ -1,16 +1,22 @@
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { PlusIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { ModelsFormPage, RowButton } from "@/components/models/models-ui";
 import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField, FieldStack, TextInput } from "@/components/ui/field";
+import { Checkbox, TextInput } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
-import { SettingRow, SettingRowSkeleton } from "@/components/ui/setting-row";
+import {
+  SettingNavRow,
+  SettingRow,
+  SettingRowGroup,
+  SettingRowSkeleton,
+} from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 import { useAppContext } from "@/context";
 
 /* ----------------------------------------------------------------------------
@@ -181,32 +187,27 @@ export function useModelAccessPolicy(workspaceId: string) {
 
 export type ModelAccessPolicyState = ReturnType<typeof useModelAccessPolicy>;
 
+/** The current value, short, for the Allowed models row: "All models", "3 models". */
 export function allowedModelsSummary(state: ModelAccessPolicyState): string {
   const draft = state.saved;
   if (!draft) return "";
-  if (draft.mode === "unrestricted") return "All models from connected accounts";
+  if (draft.mode === "unrestricted") return "All models";
   if (draft.mode === "provider") {
     const allowed = state.models.filter((model) => model.policyAllowed).length;
     return draft.policyVerdictComplete
-      ? `Limited by provider: ${allowed} of ${state.models.length} models`
+      ? `${allowed} of ${state.models.length} models`
       : "Limited by provider";
   }
   const count = draft.selectedModelIds.size;
-  return count === 0
-    ? "No models: new work can't run"
-    : count === 1
-      ? "1 model"
-      : `${count} models`;
+  return count === 0 ? "No models" : count === 1 ? "1 model" : `${count} models`;
 }
 
-/** The summary row on the Models page. */
+/** The Allowed models row on the Models page: opens its page. */
 export function AllowedModelsRow({
   state,
-  canManage,
   onEdit,
 }: {
   state: ModelAccessPolicyState;
-  canManage: boolean;
   onEdit: () => void;
 }) {
   if (state.loading && !state.saved) return <SettingRowSkeleton />;
@@ -215,26 +216,21 @@ export function AllowedModelsRow({
       <SettingRow
         label="Allowed models"
         error="Couldn't load Allowed models."
-        control={
-          <RowButton variant="ghost" onClick={() => void state.reload()}>
-            Try again
-          </RowButton>
-        }
+        control={<RowButton onClick={() => void state.reload()}>Try again</RowButton>}
       />
     );
   }
+  const blocked = state.saved?.mode === "selected" && state.saved.selectedModelIds.size === 0;
   return (
-    <SettingRow
+    <SettingNavRow
       label="Allowed models"
-      description={allowedModelsSummary(state)}
-      control={
-        <RowButton
-          onClick={onEdit}
-          aria-label={canManage ? "Edit allowed models" : "View allowed models"}
-        >
-          {canManage ? "Edit" : "View"}
-        </RowButton>
+      description={
+        blocked
+          ? "No model is allowed, so new work can't start."
+          : "The models people can pick for new chats and schedules."
       }
+      value={allowedModelsSummary(state)}
+      onOpen={onEdit}
     />
   );
 }
@@ -242,19 +238,16 @@ export function AllowedModelsRow({
 /** The form page. */
 export function AllowedModelsFormPage({
   workspaceId,
-  workspaceName,
   canManage,
   onClose,
 }: {
   workspaceId: string;
-  workspaceName?: string | undefined;
   canManage: boolean;
   onClose: () => void;
 }) {
   const state = useModelAccessPolicy(workspaceId);
   const { models, saved } = state;
   const [draft, setDraft] = useState<ModelAccessPolicyDraft | null>(null);
-  const [customModelId, setCustomModelId] = useState("");
   const [pendingReplacementMode, setPendingReplacementMode] = useState<
     "unrestricted" | "selected" | null
   >(null);
@@ -309,17 +302,6 @@ export function AllowedModelsFormPage({
       else next.delete(modelId);
       return { ...current, selectedModelIds: next };
     });
-  }
-
-  function addCustomModelId() {
-    const modelId = customModelId.trim();
-    if (!modelId) return;
-    if (modelId.length > 256) {
-      toast.error("That model ID is too long");
-      return;
-    }
-    setModelSelected(modelId, true);
-    setCustomModelId("");
   }
 
   const providerRestrictionActive = draft?.originalPolicy.allowedProviders !== null;
@@ -380,7 +362,7 @@ export function AllowedModelsFormPage({
     );
   } else if (draft) {
     body = (
-      <FieldStack>
+      <div className="flex min-w-0 flex-col gap-4">
         {providerRestrictionActive ? (
           <Notice
             tone="waiting"
@@ -396,124 +378,36 @@ export function AllowedModelsFormPage({
               </Button>
             }
           >
-            Check the exact models below, then save to confirm the change.
+            Check the models below, then save to confirm the change.
           </Notice>
         ) : null}
-        <ChoiceCards
-          label="New work can use"
-          value={draft.mode}
-          disabled={disabled}
-          onValueChange={(value) => setMode(value as "unrestricted" | "selected")}
-        >
-          <ChoiceCard
-            value="unrestricted"
-            title="All models from connected accounts"
-            description="Includes models from accounts connected later, once they're ready."
+        <SettingRowGroup className="-mt-3">
+          <SettingRow
+            label="Allow every model"
+            description="Includes models from accounts you connect later."
+            control={
+              <Switch
+                checked={draft.mode === "unrestricted"}
+                disabled={disabled}
+                disabledReason={
+                  disabled ? "Only workspace admins can change Allowed models." : undefined
+                }
+                onCheckedChange={(next) => setMode(next ? "unrestricted" : "selected")}
+              />
+            }
           />
-          <ChoiceCard
-            value="selected"
-            title="Only the models I choose"
-            description="New models stay off until you add them here."
-          />
-        </ChoiceCards>
+        </SettingRowGroup>
         {draft.mode === "selected" ? (
-          <div role="group" aria-label="Models" className="flex min-w-0 flex-col gap-5">
-            {groups.length === 0 ? (
-              <p className="text-sm text-fg-muted">
-                Connect a subscription or API key to choose its models.
-              </p>
-            ) : (
-              groups.map(([providerLabel, providerModels]) => (
-                <fieldset key={providerLabel} className="m-0 min-w-0 border-0 p-0">
-                  <legend className="mb-2 text-xs leading-4.5 font-medium text-fg-subtle">
-                    {providerLabel}
-                  </legend>
-                  <div className="flex min-w-0 flex-col gap-3">
-                    {providerModels.map((model) => (
-                      <CheckboxField
-                        key={model.id}
-                        label={model.label}
-                        description={<span className="font-mono">{model.id}</span>}
-                        checked={draft.selectedModelIds.has(model.id)}
-                        disabled={disabled}
-                        onCheckedChange={(checked) => setModelSelected(model.id, checked)}
-                      />
-                    ))}
-                  </div>
-                </fieldset>
-              ))
-            )}
-            {customIds.length > 0 ? (
-              <fieldset className="m-0 min-w-0 border-0 p-0">
-                <legend className="mb-2 text-xs leading-4.5 font-medium text-fg-subtle">
-                  Other model IDs
-                </legend>
-                <ul className="m-0 flex min-w-0 list-none flex-col gap-1 p-0">
-                  {customIds.map((modelId) => (
-                    <li
-                      key={modelId}
-                      className="flex min-h-9 min-w-0 items-center gap-2 rounded-[10px] bg-surface-2 pl-3"
-                    >
-                      <code className="min-w-0 flex-1 truncate font-mono text-xs text-fg">
-                        {modelId}
-                      </code>
-                      {canManage ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={`Remove ${modelId}`}
-                          onClick={() => setModelSelected(modelId, false)}
-                          className="text-fg-subtle hover:text-fg pointer-coarse:size-11"
-                        >
-                          <XIcon />
-                        </Button>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              </fieldset>
-            ) : null}
-            {canManage ? (
-              <div className="flex min-w-0 flex-col gap-1.5">
-                <label htmlFor="allowed-models-add" className="text-sm font-medium text-fg">
-                  Add a model ID
-                </label>
-                <div className="flex min-w-0 gap-2">
-                  <TextInput
-                    id="allowed-models-add"
-                    mono
-                    suppressAutofill
-                    value={customModelId}
-                    placeholder="provider/model"
-                    aria-describedby="allowed-models-add-hint"
-                    onChange={(event) => setCustomModelId(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        addCustomModelId();
-                      }
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={!customModelId.trim()}
-                    onClick={addCustomModelId}
-                    className="rounded-[10px] pointer-coarse:h-11"
-                  >
-                    <PlusIcon aria-hidden="true" />
-                    Add
-                  </Button>
-                </div>
-                <p id="allowed-models-add-hint" className="text-xs leading-4.5 text-fg-muted">
-                  For a model that isn't connected yet. It can run once an account serves it.
-                </p>
-              </div>
-            ) : null}
-          </div>
+          <ModelChecklist
+            groups={groups}
+            customIds={customIds}
+            selected={draft.selectedModelIds}
+            canManage={canManage}
+            onToggle={setModelSelected}
+            onAdd={(modelId) => setModelSelected(modelId, true)}
+          />
         ) : null}
-      </FieldStack>
+      </div>
     );
   }
 
@@ -521,21 +415,20 @@ export function AllowedModelsFormPage({
     <>
       <ModelsFormPage
         title="Allowed models"
-        description={`Which models new work in ${workspaceName ?? "this workspace"} may use, on top of what each account can serve. Work already running keeps its model.`}
+        description="Choose which models people can pick for new chats and schedules."
         onClose={onClose}
         loading={state.loading && !saved}
         submitLabel="Save"
         pendingLabel="Saving…"
         submitDisabled={!canManage || !dirty || draft?.mode === "provider"}
-        disabledReason={canManage ? undefined : "Only workspace admins can change Allowed models."}
+        // The footer shows only while there is something to save.
+        className={canManage && dirty ? undefined : "[&>form>footer]:hidden"}
         footerStart={
-          draft && draft.mode !== "provider" ? (
-            <span className="text-xs text-fg-muted">
-              {draft.mode === "unrestricted"
-                ? "All models allowed"
-                : `${draft.selectedModelIds.size} model${draft.selectedModelIds.size === 1 ? "" : "s"} allowed`}
-            </span>
-          ) : null
+          draft && draft.mode !== "provider"
+            ? draft.mode === "unrestricted"
+              ? "Every model allowed"
+              : `${draft.selectedModelIds.size} ${draft.selectedModelIds.size === 1 ? "model" : "models"} allowed`
+            : null
         }
         onSubmit={async () => {
           if (!draft || !canManage) return false;
@@ -565,5 +458,210 @@ export function AllowedModelsFormPage({
         }}
       />
     </>
+  );
+}
+
+/** At this many models the list gets a search field. */
+const SEARCH_AT = 9;
+
+/** Models grouped by provider, one row each, with a checkbox on the right. */
+function ModelChecklist({
+  groups,
+  customIds,
+  selected,
+  canManage,
+  onToggle,
+  onAdd,
+}: {
+  groups: [string, WorkspaceModelCatalogModel[]][];
+  customIds: string[];
+  selected: Set<string>;
+  canManage: boolean;
+  onToggle: (modelId: string, selected: boolean) => void;
+  onAdd: (modelId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [customModelId, setCustomModelId] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  const addInput = useRef<HTMLInputElement>(null);
+  const total = groups.reduce((count, [, models]) => count + models.length, 0);
+  const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+  const shown = groups
+    .map(
+      ([label, models]) =>
+        [
+          label,
+          models.filter((model) =>
+            words.every((word) =>
+              `${model.label} ${model.id} ${label}`.toLocaleLowerCase().includes(word),
+            ),
+          ),
+        ] as const,
+    )
+    .filter(([, models]) => models.length > 0);
+
+  useEffect(() => {
+    if (adding) addInput.current?.focus();
+  }, [adding]);
+
+  function add() {
+    const modelId = customModelId.trim();
+    if (!modelId) return;
+    if (modelId.length > 256) {
+      setAddError("Use 256 characters or fewer.");
+      return;
+    }
+    onAdd(modelId);
+    setCustomModelId("");
+    setAddError(null);
+  }
+
+  return (
+    <div role="group" aria-label="Models" className="flex min-w-0 flex-col gap-5">
+      {total >= SEARCH_AT ? (
+        <label className="relative block min-w-0">
+          <span className="sr-only">Search models</span>
+          <SearchIcon
+            aria-hidden="true"
+            className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-fg-subtle"
+          />
+          <TextInput
+            type="search"
+            value={query}
+            placeholder="Search models"
+            suppressAutofill
+            onChange={(event) => setQuery(event.target.value)}
+            className="pl-9"
+          />
+        </label>
+      ) : null}
+      {groups.length === 0 ? (
+        <p className="text-sm text-fg-muted">
+          Connect a subscription or API key to choose its models.
+        </p>
+      ) : shown.length === 0 ? (
+        <p className="text-sm text-fg-muted">No models match “{query.trim()}”.</p>
+      ) : (
+        shown.map(([providerLabel, providerModels]) => (
+          <ChecklistGroup key={providerLabel} label={providerLabel}>
+            {providerModels.map((model) => (
+              <li key={model.id} className="min-w-0">
+                <label
+                  title={model.id}
+                  className={cn(
+                    "-mx-3 flex min-h-11 min-w-0 items-center gap-3 rounded-[10px] px-3",
+                    canManage
+                      ? "cursor-pointer transition-colors duration-[120ms] hover:bg-surface-2"
+                      : "opacity-80",
+                  )}
+                >
+                  <span className="min-w-0 flex-1 truncate text-sm text-fg">{model.label}</span>
+                  <Checkbox
+                    aria-label={model.label}
+                    checked={selected.has(model.id)}
+                    disabled={!canManage}
+                    onCheckedChange={(checked) => onToggle(model.id, checked)}
+                  />
+                </label>
+              </li>
+            ))}
+          </ChecklistGroup>
+        ))
+      )}
+      {customIds.length > 0 ? (
+        <ChecklistGroup label="Added by ID">
+          {customIds.map((modelId) => (
+            <li key={modelId} className="flex min-h-11 min-w-0 items-center gap-3">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{modelId}</code>
+              {canManage ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Remove ${modelId}`}
+                  onClick={() => onToggle(modelId, false)}
+                  className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-fg pointer-coarse:size-11"
+                >
+                  <XIcon />
+                </Button>
+              ) : null}
+            </li>
+          ))}
+        </ChecklistGroup>
+      ) : null}
+      {canManage ? (
+        adding ? (
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <label htmlFor="allowed-models-add" className="text-sm font-medium text-fg">
+              Model ID
+            </label>
+            <div className="flex min-w-0 gap-2">
+              <TextInput
+                ref={addInput}
+                id="allowed-models-add"
+                mono
+                suppressAutofill
+                value={customModelId}
+                placeholder="provider/model"
+                aria-describedby="allowed-models-add-hint"
+                aria-invalid={addError ? true : undefined}
+                onChange={(event) => {
+                  setCustomModelId(event.target.value);
+                  setAddError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    add();
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    setAdding(false);
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                disabled={!customModelId.trim()}
+                onClick={add}
+                className="h-9 rounded-[10px] pointer-coarse:h-11"
+              >
+                Add
+              </Button>
+            </div>
+            <p
+              id="allowed-models-add-hint"
+              className={cn("text-xs leading-4.5", addError ? "text-danger" : "text-fg-muted")}
+            >
+              {addError ?? "For a model no account serves yet. It becomes usable once one does."}
+            </p>
+          </div>
+        ) : (
+          <div>
+            <button
+              type="button"
+              onClick={() => setAdding(true)}
+              className="-mx-1.5 inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-medium text-fg-muted transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg pointer-coarse:min-h-11"
+            >
+              <PlusIcon aria-hidden="true" className="size-4" />
+              Add a model by ID
+            </button>
+          </div>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+function ChecklistGroup({ label, children }: { label: string; children: ReactNode }) {
+  const id = useId();
+  return (
+    <section aria-labelledby={id} className="min-w-0">
+      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg-subtle">
+        {label}
+      </h3>
+      <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">{children}</ul>
+    </section>
   );
 }

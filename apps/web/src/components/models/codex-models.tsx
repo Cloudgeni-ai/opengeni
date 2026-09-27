@@ -8,7 +8,6 @@ import {
   LoaderCircleIcon,
   LockIcon,
   PencilIcon,
-  PowerIcon,
   UnplugIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -31,10 +30,8 @@ import {
   useConnectionAccess,
 } from "@/components/connection-access-settings";
 import {
-  LabelledControl,
   ModelsFormPage,
   MoreMenu,
-  ProviderGroupHeader,
   ProviderTile,
   RenameAccountDialog,
   RowButton,
@@ -61,16 +58,15 @@ import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { FieldStack } from "@/components/ui/field";
-import { InlineHelp } from "@/components/ui/inline-help";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { SettingDangerRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
-import { UsageMeter, UsageMeterGroup } from "@/components/ui/usage-meter";
+import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
 
 /* ----------------------------------------------------------------------------
    Codex on Settings > Models: the provider group (header with the pool-wide
@@ -78,10 +74,9 @@ import { UsageMeter, UsageMeterGroup } from "@/components/ui/usage-meter";
    page. All data and mutations come from useCodexSubscriptions.
    -------------------------------------------------------------------------- */
 
-/** The fact columns rows line up in: usage, then state. */
+/** The one fact column account rows line up in: the usage readout, against the chevron. */
 export const ACCOUNT_COLUMNS: RowListColumn[] = [
-  { id: "usage", label: "Usage", width: 156, hideLabel: true },
-  { id: "state", label: "Status", width: 132, hideLabel: true },
+  { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end" },
 ];
 
 export interface CodexPlaces {
@@ -122,58 +117,134 @@ function editable(codex: CodexSubscriptions, account: CodexAccount): boolean {
   return codex.canManage && codex.workspaceManaged && account.source !== "organization";
 }
 
-const SOURCE_HELP =
-  "Organization uses the Codex accounts your organization shares with this workspace. This workspace uses only accounts connected here. New work uses one or the other, never both. Work already running keeps its source.";
-const PICK_HELP =
-  "Spread work sends new work to the account with the most room left and keeps each chat on its account. Primary only uses the primary account and waits when its limit runs out.";
-
 /* ----------------------------------------------------------------------------
-   The group.
+   On the Models list: the account rows (in the one Accounts list) and the
+   Codex section's setting rows.
    -------------------------------------------------------------------------- */
 
-export function CodexGroup({
+/** How many rows Codex adds to the Accounts list once loaded. */
+export function codexListedCount(codex: CodexSubscriptions): number {
+  if (codex.loading) return 0;
+  if (codex.loadError || codex.sourceDisabled || codex.pending) return 1;
+  return codex.accounts.length;
+}
+
+/** Codex's rows in the Accounts list: one per account, or its error or sign-in row. */
+export function CodexAccountRows({
   codex,
   places,
-  first = false,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
-  first?: boolean;
+}) {
+  if (codex.loading) return <ListRowSkeleton count={1} />;
+  if (codex.loadError) {
+    return (
+      <li className="col-span-full list-none px-3 py-3">
+        <ErrorMessage
+          variant="inline"
+          title="Couldn't load Codex accounts."
+          action={<RowButton onClick={() => void codex.refreshAccounts()}>Try again</RowButton>}
+        >
+          {codex.loadError}
+        </ErrorMessage>
+      </li>
+    );
+  }
+  if (codex.sourceDisabled) {
+    return (
+      <ListRow
+        leading={<ProviderTile provider="codex" size="lg" />}
+        title="Codex"
+        meta={["Off in this workspace", "Accounts stay connected"]}
+      />
+    );
+  }
+  return (
+    <>
+      {codex.accounts.map((account) => (
+        <CodexRow
+          key={account.id}
+          codex={codex}
+          account={account}
+          places={places}
+          onOpen={() => places.openAccount(account.id)}
+        />
+      ))}
+      {codex.pending ? (
+        <ListRow
+          leading={<ProviderTile provider="codex" size="lg" />}
+          title="Signing in to ChatGPT…"
+          meta={["Finish signing in to add the account"]}
+          indicator="open"
+          onOpen={places.openConnect}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/** Codex shows its own section once there is something to set. */
+export function codexSectionVisible(codex: CodexSubscriptions): boolean {
+  if (codex.loading || codex.loadError) return false;
+  return (
+    codex.sourceDisabled ||
+    codex.accounts.length > 0 ||
+    Boolean(codex.source?.organizationAvailable)
+  );
+}
+
+/**
+ * The Codex section: where subscriptions come from, how several accounts
+ * share work, whether Codex chats may switch providers, and Turn off.
+ * Each row has one control.
+ */
+export function CodexSettingRows({
+  codex,
+  places,
+  providerSwitch,
+}: {
+  codex: CodexSubscriptions;
+  places: CodexPlaces;
+  /** The "Allow switching to other providers" row. */
+  providerSwitch: ReactNode;
 }) {
   const [turningOff, setTurningOff] = useState(false);
   const { source, accounts } = codex;
-  const showSource =
-    codex.canManage && Boolean(source?.organizationAvailable) && !codex.sourceDisabled;
-  const showPick = codex.canManage && codex.workspaceManaged && accounts.length >= 2;
-
-  const trailing =
-    !codex.canManage || codex.loading || codex.loadError ? null : codex.sourceDisabled ? (
-      <RowButton
-        disabled={codex.busy}
-        onClick={() =>
-          void codex.setSourceMode("automatic", `Codex is on in ${places.workspaceName}`)
-        }
-      >
-        <PowerIcon aria-hidden="true" />
-        Turn on Codex
-      </RowButton>
-    ) : (
-      <MoreMenu label="More actions for Codex" quiet>
-        <DropdownMenuItem variant="destructive" onSelect={() => setTurningOff(true)}>
-          <PowerIcon />
-          Turn off Codex in this workspace
-        </DropdownMenuItem>
-      </MoreMenu>
+  if (codex.sourceDisabled) {
+    return (
+      <SettingRowGroup>
+        <SettingRow
+          label="Codex is off in this workspace"
+          description="New chats and schedules here can't use Codex models. Accounts stay connected."
+          control={
+            codex.canManage ? (
+              <RowButton
+                disabled={codex.busy}
+                onClick={() =>
+                  void codex.setSourceMode("automatic", `Codex is on in ${places.workspaceName}`)
+                }
+              >
+                Turn on Codex
+              </RowButton>
+            ) : null
+          }
+        />
+      </SettingRowGroup>
     );
-
-  const controls =
-    showSource || showPick ? (
-      <>
+  }
+  const showSource = codex.canManage && Boolean(source?.organizationAvailable);
+  const showPick = codex.canManage && codex.workspaceManaged && accounts.length >= 2;
+  return (
+    <>
+      <SettingRowGroup>
         {showSource && source ? (
-          <LabelledControl label="Use" help={SOURCE_HELP}>
-            {(labelId) => (
+          <SettingRow
+            label="Subscriptions from"
+            description={`${places.organizationName} shares its Codex accounts with this workspace. New work uses theirs or the ones connected here, never both.`}
+            controlWidth="auto"
+            control={
               <SegmentedControl<"organization" | "workspace">
-                aria-labelledby={labelId}
                 size="sm"
                 pending={codex.working === "source"}
                 disabled={codex.busy && codex.working !== "source"}
@@ -191,14 +262,22 @@ export function CodexGroup({
                   { value: "workspace", label: "This workspace" },
                 ]}
               />
-            )}
-          </LabelledControl>
+            }
+          />
+        ) : !codex.canManage && source?.effectiveSource === "organization" ? (
+          <SettingRow
+            label="Subscriptions from"
+            description={`New work here uses the Codex accounts ${places.organizationName} shares.`}
+            control={<span className="text-sm text-fg-muted">{places.organizationName}</span>}
+          />
         ) : null}
         {showPick ? (
-          <LabelledControl label="Pick" help={PICK_HELP}>
-            {(labelId) => (
+          <SettingRow
+            label="When several accounts are connected"
+            description="Spread work sends new work to the account with the most room left. Primary only waits for the primary account."
+            controlWidth="auto"
+            control={
               <SegmentedControl<"spread" | "primary">
-                aria-labelledby={labelId}
                 size="sm"
                 pending={codex.working === "rotation"}
                 disabled={codex.busy && codex.working !== "rotation"}
@@ -211,102 +290,19 @@ export function CodexGroup({
                   { value: "primary", label: "Primary only" },
                 ]}
               />
-            )}
-          </LabelledControl>
-        ) : null}
-      </>
-    ) : null;
-
-  const note =
-    !codex.canManage && source?.effectiveSource === "organization" ? (
-      <InlineHelp>{`Using subscriptions from ${places.organizationName}.`}</InlineHelp>
-    ) : null;
-
-  let rows: ReactNode;
-  if (codex.loading) {
-    rows = <ListRowSkeleton count={1} />;
-  } else if (codex.loadError) {
-    rows = (
-      <li className="list-none px-3 py-3">
-        <ErrorMessage
-          variant="inline"
-          title="Couldn't load Codex accounts."
-          action={
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void codex.refreshAccounts()}
-              className="rounded-[10px] pointer-coarse:h-11"
-            >
-              Try again
-            </Button>
-          }
-        >
-          {codex.loadError}
-        </ErrorMessage>
-      </li>
-    );
-  } else if (codex.sourceDisabled) {
-    rows = (
-      <ListRow
-        leading={<ProviderTile provider="codex" />}
-        title="Codex is off in this workspace"
-        description="New chats and schedules here can't use Codex models. Accounts stay connected."
-      />
-    );
-  } else {
-    rows = (
-      <>
-        {accounts.map((account) => (
-          <CodexRow
-            key={account.id}
-            codex={codex}
-            account={account}
-            onOpen={() => places.openAccount(account.id)}
-          />
-        ))}
-        {codex.pending ? (
-          <ListRow
-            leading={<ProviderTile provider="codex" />}
-            title="Signing in to ChatGPT…"
-            description="The account appears here once you finish signing in."
-            indicator="loading"
-            control={<RowButton onClick={places.openConnect}>Show code</RowButton>}
-          />
-        ) : accounts.length === 0 ? (
-          <ListRow
-            leading={<ProviderTile provider="codex" />}
-            title="No Codex accounts yet"
-            description={
-              codex.canManage
-                ? "Pay for new work with a ChatGPT Plus or Pro plan."
-                : "A workspace admin can connect a ChatGPT plan to pay for new work."
-            }
-            control={
-              codex.canManage ? (
-                <RowButton onClick={places.openConnect} aria-label="Connect Codex">
-                  Connect
-                </RowButton>
-              ) : null
             }
           />
         ) : null}
-      </>
-    );
-  }
-
-  return (
-    <>
-      <ProviderGroupHeader
-        first={first}
-        title="Codex"
-        subtitle="ChatGPT plan"
-        trailing={trailing}
-        controls={controls}
-        note={note}
-      />
-      {rows}
+        {providerSwitch}
+        {codex.canManage ? (
+          <SettingDangerRow
+            label="Turn off Codex"
+            description="New chats and schedules here stop using Codex models. Accounts stay connected."
+            disabled={codex.busy}
+            onClick={() => setTurningOff(true)}
+          />
+        ) : null}
+      </SettingRowGroup>
       <DestructiveConfirm
         open={turningOff}
         onOpenChange={setTurningOff}
@@ -333,10 +329,12 @@ export function CodexGroup({
 function CodexRow({
   codex,
   account,
+  places,
   onOpen,
 }: {
   codex: CodexSubscriptions;
   account: CodexAccount;
+  places: CodexPlaces;
   onOpen: () => void;
 }) {
   const live = codex.usageMap[account.id];
@@ -345,47 +343,37 @@ function CodexRow({
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const resets = codex.overviewMap[account.id]?.resetCredits.availableCount;
   const loadingUsage = codex.refreshingUsage && !live;
+  const organizationAccount = account.source === "organization";
   return (
     <ListRow
-      leading={<ProviderTile provider="codex" />}
+      leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
-      titleAddon={
-        <>
-          {primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
-          {account.source === "organization" ? (
-            <MetaChip variant="outline">Organization</MetaChip>
-          ) : null}
-        </>
-      }
+      titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
       meta={[
         planLabel(account.plan, "ChatGPT"),
+        organizationAccount ? `Shared by ${places.organizationName}` : null,
         account.appsDesignated ? "Codex Apps" : null,
         // Resets can only be redeemed on the account's own page, which org accounts don't have here.
-        account.source === "organization" ? null : resetsLabel(resets),
+        organizationAccount ? null : resetsLabel(resets),
       ]}
       cells={{
-        usage: needsReconnect(account) ? null : loadingUsage ? (
-          <UsageMeter density="compact" label="Weekly" percent={null} loading />
-        ) : weekly.percent !== null ? (
-          <UsageMeter
-            density="compact"
-            label="Weekly"
-            percent={weekly.percent}
-            resetsLabel={weekly.resetsLabel}
-          />
+        usage: needsReconnect(account) ? null : status.status === "paused" ? (
+          <StatusBadge status="paused" variant="dot" />
+        ) : status.label === "Limit reached" ? (
+          <span className="text-xs font-medium text-danger">Limit reached</span>
         ) : (
-          <span className="text-xs text-fg-subtle">
-            {live?.status === "error" || (!live && codex.usageError)
-              ? "Usage unavailable"
-              : "No usage yet"}
-          </span>
+          <UsageReadout
+            percent={loadingUsage ? null : weekly.percent}
+            loading={loadingUsage}
+            window="this week"
+            resetsLabel={weekly.resetsLabel}
+            fallback={
+              live?.status === "error" || (!live && codex.usageError)
+                ? "Usage unavailable"
+                : "No usage yet"
+            }
+          />
         ),
-        state:
-          needsReconnect(account) || (status.status === "connected" && !status.label) ? null : (
-            <StatusBadge status={status.status} tone={status.tone} variant="dot">
-              {status.label}
-            </StatusBadge>
-          ),
       }}
       indicator={needsReconnect(account) ? { kind: "attention", label: "Needs reconnect" } : "open"}
       onOpen={onOpen}

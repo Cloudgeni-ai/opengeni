@@ -779,7 +779,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     key: "page-models",
     group: "Pages",
     title: "Models",
-    purpose: "How new work is paid for and which models it may use, with the account page.",
+    purpose: "Which models a workspace can use and who pays for them, with the account page.",
     usedOn: "Workspace settings, Organization settings",
     load: () => import("./page-models"),
   },

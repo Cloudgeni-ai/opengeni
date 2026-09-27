@@ -10,12 +10,17 @@ import {
   showUndoToast,
   type ConfirmDependency,
 } from "@/components/ui/destructive-confirm";
-import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
+import { Checkbox, Field, FieldStack, TextInput } from "@/components/ui/field";
+import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
+import { ListRow, RowList } from "@/components/ui/list-row";
+import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
 import { SecretInput } from "@/components/ui/secret-field";
 
 import { KIT_NOW, currentWorkspace, you } from "../../fixtures";
-import { ProviderMark, ProviderTile } from "./marks";
+import { ProviderTile } from "./marks";
 import { useModelsPicks } from "./picks";
 import {
   ORG_NAME,
@@ -90,6 +95,7 @@ type ConnectStep = "provider" | "codex" | "key";
 function ModelsFormPage({
   onClose,
   backLabel = "Models",
+  className,
   ...props
 }: Omit<FormFrameProps, "variant" | "back" | "onCancel"> & {
   onClose: () => void;
@@ -101,7 +107,7 @@ function ModelsFormPage({
       onCancel={onClose}
       // The settings content column already has its gutter: start the form
       // where a detail page starts instead of centring it again.
-      className={FLUSH_FORM_PAGE}
+      className={cn(FLUSH_FORM_PAGE, className)}
       {...props}
     />
   );
@@ -111,6 +117,8 @@ const FLUSH_FORM_PAGE = [
   "[&>form>header]:mx-0 [&>form>header]:px-0 [&>form>header]:pt-0",
   "[&>form>[data-slot=form-body]]:mx-0 [&>form>[data-slot=form-body]]:px-0",
   "[&>form>footer>div]:mx-0 [&>form>footer>div]:px-0",
+  // The footer's hairline ends where the 640px column does, like the header's.
+  "[&>form>footer]:max-w-[640px]",
 ].join(" ");
 
 export function ConnectPage({
@@ -129,7 +137,6 @@ export function ConnectPage({
     initialProvider ? (initialProvider === "codex" ? "codex" : "key") : "provider",
   );
   const [provider, setProvider] = useState<string>(initialProvider ?? "");
-  const [providerError, setProviderError] = useState<string | null>(null);
   const [signin, setSignin] = useState<"waiting" | "checking" | "done">("waiting");
   const [useChoice, setUseChoice] = useState("");
   const [useError, setUseError] = useState<string | null>(null);
@@ -168,56 +175,54 @@ export function ConnectPage({
   }
 
   if (step === "provider") {
+    // Every provider as a row that opens its own step. A connected API key
+    // opens its page instead: there is nothing left to connect.
+    const choices = [
+      { id: "codex" as const, title: "Codex", summary: "Pay with your ChatGPT plan" },
+      ...(["openrouter", "vercel"] as const).map((id) => ({
+        id,
+        title: gateways[id].name,
+        summary:
+          id === "openrouter" ? "Pay per token through OpenRouter" : "Pay per token through Vercel",
+      })),
+    ];
     return (
-      <ModelsFormPage
-        onClose={onClose}
-        title="Connect a model account"
-        description={`Pick what pays for new work in ${scopeName(scope)}.`}
-        submitLabel="Continue"
-        onSubmit={() => {
-          if (!provider) {
-            setProviderError("Choose a provider to connect.");
-            return false;
-          }
-          setStep(provider === "codex" ? "codex" : "key");
-          return false;
-        }}
+      <DetailPage
+        back={{ label: "Models", onClick: onClose }}
+        className="max-w-none px-0 pt-0 pb-0 max-sm:px-0"
       >
-        <ChoiceCards
-          aria-label="Provider"
-          variant={picks.choice}
-          value={provider}
-          onValueChange={(value) => {
-            setProvider(value);
-            setProviderError(null);
-          }}
-          error={providerError}
-        >
-          <ChoiceCard
-            value="codex"
-            icon={<ProviderMark provider="codex" className="size-4" />}
-            title="Codex"
-            meta="ChatGPT plan"
-            description="Pay with a ChatGPT Plus or Pro plan. You sign in with OpenAI; OpenGeni never sees your password."
-          />
-          {(["vercel", "openrouter"] as const).map((id) => (
-            <ChoiceCard
-              key={id}
-              value={id}
-              icon={<ProviderMark provider={id} className="size-4" />}
-              title={gateways[id].name}
-              meta="API key"
-              description={gateways[id].description}
-              disabled={gateways[id].connected}
-              disabledReason={
-                gateways[id].connected
-                  ? `Already connected. To change its key, open ${gateways[id].name} in Model accounts.`
-                  : undefined
-              }
-            />
-          ))}
-        </ChoiceCards>
-      </ModelsFormPage>
+        <DetailPageHeader
+          title="Connect account"
+          meta={
+            <p className="m-0 text-sm text-fg-muted">{`Choose what pays for models in ${scopeName(scope)}.`}</p>
+          }
+        />
+        <div className="mt-6 min-w-0">
+          <RowList label="Providers" flush>
+            {choices.map((choice) => {
+              const connected = choice.id !== "codex" && gateways[choice.id].connected;
+              return (
+                <ListRow
+                  key={choice.id}
+                  leading={<ProviderTile provider={choice.id} size="lg" />}
+                  title={choice.title}
+                  meta={[connected ? "Connected" : choice.summary]}
+                  indicator="open"
+                  onOpen={() => {
+                    if (choice.id !== "codex" && connected) {
+                      onClose();
+                      openDetail({ kind: "gateway", scope, id: choice.id });
+                      return;
+                    }
+                    setProvider(choice.id);
+                    setStep(choice.id === "codex" ? "codex" : "key");
+                  }}
+                />
+              );
+            })}
+          </RowList>
+        </div>
+      </DetailPage>
     );
   }
 
@@ -889,7 +894,6 @@ export function AllowedModelsForm({
   backLabel?: string;
   onClose: () => void;
 }) {
-  const picks = useModelsPicks();
   const form = useAllowedForm(target);
   const [mode, setMode] = useState<"all" | "only">(form.current === "all" ? "all" : "only");
   const [selected, setSelected] = useState<string[]>(
@@ -921,76 +925,75 @@ export function AllowedModelsForm({
     toast.success(workspace ? "Allowed models saved" : "Models saved");
   };
 
+  const dirty =
+    mode !== (form.current === "all" ? "all" : "only") ||
+    (mode === "only" &&
+      (form.current === "all" ||
+        selected.length !== form.current.length ||
+        selected.some((id) => !form.current.includes(id))));
+
   const body = (
-    <FieldStack>
-      <ChoiceCards
-        variant={picks.choice}
-        label={workspace ? "New work can use" : "This account can serve"}
-        value={mode}
-        onValueChange={(value) => {
-          setMode(value as "all" | "only");
-          setError(null);
-        }}
-      >
-        <ChoiceCard
-          value="all"
-          title={workspace ? "All models from connected accounts" : "All models"}
+    <div className="flex min-w-0 flex-col gap-4">
+      <SettingRowGroup className="-mt-3">
+        <SettingRow
+          label={workspace ? "Allow every model" : "Serve every model"}
           description={
             workspace
-              ? "Includes models from accounts connected later."
+              ? "Includes models from accounts you connect later."
               : "Includes models the provider adds later."
           }
+          control={
+            <Switch
+              checked={mode === "all"}
+              onCheckedChange={(next) => {
+                setMode(next ? "all" : "only");
+                setError(null);
+              }}
+            />
+          }
         />
-        <ChoiceCard
-          value="only"
-          title="Only the models I choose"
-          description="New models stay off until you add them here."
-        />
-      </ChoiceCards>
+      </SettingRowGroup>
       {mode === "only" ? (
         <div role="group" aria-label="Models" className="flex min-w-0 flex-col gap-5">
           {groups.map((group) => (
-            <fieldset key={group} className="m-0 min-w-0 border-0 p-0">
-              <legend className="mb-2 text-xs leading-4.5 font-medium text-fg-subtle">
-                {group}
-              </legend>
-              <div className="flex min-w-0 flex-col gap-3">
+            <section key={group} className="min-w-0">
+              <h3 className="pb-1 text-xs leading-4.5 font-medium text-fg-subtle">{group}</h3>
+              <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">
                 {form.options
                   .filter((option) => option.group === group)
                   .map((option) => (
-                    <CheckboxField
-                      key={option.id}
-                      label={
-                        // Custom models are provider/model IDs: mono, like every ID.
-                        option.label.includes("/") ? (
-                          <span className="font-mono text-xs">{option.label}</span>
-                        ) : (
-                          option.label
-                        )
-                      }
-                      description={
-                        option.available
-                          ? option.description
-                          : [
-                              option.description,
-                              `Can't run right now: ${option.unavailableReason ?? "unavailable"}`,
-                            ]
-                              .filter(Boolean)
-                              .join(" ")
-                      }
-                      checked={selected.includes(option.id)}
-                      onCheckedChange={(checked) => {
-                        setError(null);
-                        setSelected((value) =>
-                          checked
-                            ? [...value, option.id]
-                            : value.filter((each) => each !== option.id),
-                        );
-                      }}
-                    />
+                    <li key={option.id} className="min-w-0">
+                      <label
+                        title={option.id}
+                        className="-mx-3 flex min-h-11 min-w-0 cursor-pointer items-center gap-3 rounded-[10px] px-3 transition-colors duration-[120ms] hover:bg-surface-2"
+                      >
+                        <span className="min-w-0 flex-1 truncate text-sm text-fg">
+                          {option.label.includes("/") ? (
+                            <span className="font-mono text-xs">{option.label}</span>
+                          ) : (
+                            option.label
+                          )}
+                        </span>
+                        {option.available ? null : (
+                          <span className="shrink-0 text-xs text-fg-subtle">Can't run now</span>
+                        )}
+                        <Checkbox
+                          aria-label={option.label}
+                          checked={selected.includes(option.id)}
+                          onCheckedChange={(checked) => {
+                            setError(null);
+                            setSelected((value) =>
+                              checked
+                                ? [...value, option.id]
+                                : value.filter((each) => each !== option.id),
+                            );
+                          }}
+                        />
+                      </label>
+                    </li>
                   ))}
-              </div>
-            </fieldset>
+              </ul>
+            </section>
           ))}
           {form.options.length === 0 ? (
             <p className="text-sm text-fg-muted">
@@ -999,13 +1002,13 @@ export function AllowedModelsForm({
           ) : null}
         </div>
       ) : null}
-    </FieldStack>
+    </div>
   );
 
   const common = {
     title: targetTitle(target, form.name),
     description: workspace
-      ? `Which models new work in ${currentWorkspace.name} may use. People can still pick any allowed model.`
+      ? "Choose which models people can pick for new chats and schedules."
       : `Workspaces in ${ORG_NAME} can only use it for these models.`,
     submitLabel: "Save",
     pendingLabel: "Saving…",
@@ -1015,6 +1018,13 @@ export function AllowedModelsForm({
   };
 
   return (
-    <ModelsFormPage {...common} backLabel={backLabel} onClose={onClose} onSubmitted={onClose} />
+    <ModelsFormPage
+      {...common}
+      backLabel={backLabel}
+      onClose={onClose}
+      onSubmitted={onClose}
+      // Cancel and Save show only while there is something to save.
+      className={dirty ? undefined : "[&>form>footer]:hidden"}
+    />
   );
 }

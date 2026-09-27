@@ -201,6 +201,85 @@ export function UsageMeter({
   );
 }
 
+/**
+ * The usage readout at the end of an account row: "78% left this week" and a
+ * 64px bar, right-aligned so it sits against the row's chevron. Without a
+ * reading it says why in words ("No usage yet"). Where the row folds its
+ * facts into the meta line (narrow lists), only the words stay.
+ */
+export function UsageReadout({
+  percent,
+  window: windowLabel,
+  resetsLabel,
+  loading = false,
+  fallback = "No usage yet",
+  className,
+}: {
+  /** Share left, 0-100, or null when there is no reading. */
+  percent: number | null;
+  /** How the window reads after "left": "this week", "this period". */
+  window: string;
+  resetsLabel?: string;
+  loading?: boolean;
+  /** Words for a missing reading: "No usage yet", "Usage unavailable". */
+  fallback?: string;
+  className?: string;
+}) {
+  const level = usageLevel(percent);
+  if (loading) {
+    return (
+      <span
+        data-slot="usage-readout"
+        aria-busy="true"
+        className={cn("inline-flex items-center justify-end gap-3", className)}
+      >
+        <ValueSkeleton className="w-24" />
+        <span
+          aria-hidden="true"
+          className="block h-1 w-16 rounded-full bg-surface-3 motion-safe:animate-pulse @max-[639px]/list:hidden"
+        />
+      </span>
+    );
+  }
+  if (level === "unknown") {
+    return (
+      <span data-slot="usage-readout" className={cn("text-xs text-fg-subtle", className)}>
+        {fallback}
+      </span>
+    );
+  }
+  const shown = clampPercent(percent as number);
+  const text = level === "exhausted" ? "Limit reached" : `${shown}% left ${windowLabel}`;
+  return (
+    <span
+      data-slot="usage-readout"
+      role="meter"
+      aria-label={`Usage ${windowLabel}`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={shown}
+      aria-valuetext={`${text}${resetsLabel ? `, resets ${resetPhrase(resetsLabel)}` : ""}`}
+      title={resetsLabel ? `Resets ${resetPhrase(resetsLabel)}` : undefined}
+      className={cn("inline-flex min-w-0 items-center justify-end gap-3", className)}
+    >
+      <span
+        className={cn(
+          "min-w-0 truncate text-xs whitespace-nowrap tabular-nums",
+          LEVEL_VALUE_TEXT[level],
+          level !== "healthy" && "font-medium",
+        )}
+      >
+        {text}
+      </span>
+      <Track
+        level={level}
+        fill={level === "exhausted" ? 0 : shown}
+        className="w-16 shrink-0 @max-[639px]/list:hidden"
+      />
+    </span>
+  );
+}
+
 interface Parts {
   label: string;
   value: string;

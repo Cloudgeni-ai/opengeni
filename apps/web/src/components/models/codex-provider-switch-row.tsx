@@ -6,9 +6,10 @@ import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
 
 /**
- * "Let Codex chats switch providers": the default for NEW Codex chats. Off
- * (`remote_v2`) keeps ChatGPT's compaction, so long chats stay sharp but can
- * only use Codex models. On (`portable`) lets a chat switch to other providers.
+ * "Allow switching to other providers": the default for NEW Codex chats. Off
+ * (`remote_v2`) keeps ChatGPT's compaction, so long chats stay accurate but
+ * can only use Codex models. On (`portable`) lets a chat switch to other
+ * providers. Chats already started keep the setting they started with.
  */
 export function CodexProviderSwitchRow({
   workspaceId,
@@ -44,8 +45,8 @@ export function CodexProviderSwitchRow({
 
   return (
     <SettingRow
-      label="Let Codex chats switch providers"
-      description="On: a new Codex chat can switch to another provider's model later. Off: it stays on Codex and keeps long chats sharper. Existing chats keep their setting."
+      label="Allow switching to other providers"
+      description="Lets a Codex chat move to a model from another provider. Off keeps long chats more accurate."
       control={
         <Switch
           checked={portable}

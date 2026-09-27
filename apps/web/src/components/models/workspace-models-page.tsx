@@ -1,4 +1,4 @@
-import { PlusIcon } from "lucide-react";
+import { KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import {
@@ -7,7 +7,7 @@ import {
   ProviderConnectPage,
   ProviderConnectionPage,
   ProviderConnectionRow,
-  providerStatus,
+  providerListed,
   useProviderConnection,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
@@ -22,37 +22,39 @@ import {
   ACCOUNT_COLUMNS,
   CodexAccessPage,
   CodexAccountPage,
+  CodexAccountRows,
   CodexConnectPage,
-  CodexGroup,
+  CodexSettingRows,
+  PAGE_CLASS,
+  codexListedCount,
+  codexSectionVisible,
   type CodexPlaces,
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
-import {
-  ModelsFormPage,
-  ProviderGroupHeader,
-  ProviderMark,
-  RowButton,
-  useModelsNavigation,
-} from "@/components/models/models-ui";
+import { ProviderTile, RowButton, useModelsNavigation } from "@/components/models/models-ui";
 import {
   SuperGrokAccessPage,
   SuperGrokAccountPage,
+  SuperGrokAccountRows,
   SuperGrokConnectPage,
-  SuperGrokGroup,
+  SuperGrokSettingRows,
+  superGrokListedCount,
+  superGrokSectionVisible,
   type SuperGrokPlaces,
 } from "@/components/models/supergrok-models";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { RowList } from "@/components/ui/list-row";
+import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ListRow, RowList } from "@/components/ui/list-row";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import { accountKeyOf, type ModelsView } from "@/lib/models-route";
 
 /* ----------------------------------------------------------------------------
-   Workspace Settings > Models: what pays for new work here and which models it
-   may use. One list of accounts grouped by provider; each account opens its
-   own page; Connect, Allowed models and "Models it can serve" are form pages.
+   Workspace Settings > Models: the defaults, one flat list of the accounts
+   that pay (each opens its own page), then each provider's settings.
+   Connect, Allowed models and "Models it can serve" are their own pages.
    All provider data lives here so moving between these pages never re-reads
    a provider or drops a sign-in that is still going.
    -------------------------------------------------------------------------- */
@@ -149,6 +151,7 @@ export function WorkspaceModelsPage({
         scopeName={workspaceName}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect:${provider}`)}
+        onOpenConnected={(provider) => nav.openAccount(`gateway:${provider}`)}
       />
     );
   } else if (view === "connect:codex") {
@@ -169,7 +172,6 @@ export function WorkspaceModelsPage({
       <AllowedModelsFormPage
         key={`allowed:${revision}`}
         workspaceId={workspaceId}
-        workspaceName={workspaceName}
         canManage={canManageSettings}
         onClose={backToList}
       />
@@ -201,25 +203,65 @@ export function WorkspaceModelsPage({
       />
     );
   } else {
+    const listed = [
+      codexListedCount(codex),
+      superGrokListedCount(grok),
+      ...(["openrouter", "vercel"] as const).map((id) => (providerListed(gateways[id]) ? 1 : 0)),
+    ];
+    const loadingAccounts =
+      codex.loading ||
+      (!grok.unavailable && grok.loading) ||
+      (["openrouter", "vercel"] as const).some(
+        (id) => !gateways[id].hidden && !gateways[id].settled,
+      );
     page = (
       <ModelsList
         workspaceId={workspaceId}
         revision={revision}
         canManageSettings={canManageSettings}
         canManageConnections={canManageConnections}
+        empty={!loadingAccounts && listed.every((count) => count === 0)}
         onEditAllowed={() => nav.openView("allowed-models")}
         onConnect={() => nav.openView("connect")}
-      >
-        <RowList label="Subscriptions" columns={ACCOUNT_COLUMNS}>
-          <CodexGroup codex={codex} places={codexPlaces} first />
-          <SuperGrokGroup grok={grok} places={grokPlaces} />
-        </RowList>
-        <ApiKeyRows
-          gateways={gateways}
-          onOpen={(id) => nav.openAccount(`gateway:${id}`)}
-          onConnect={(id) => nav.openView(`connect:${id}`)}
-        />
-      </ModelsList>
+        accounts={
+          <RowList label="Accounts" columns={ACCOUNT_COLUMNS} flush>
+            <CodexAccountRows codex={codex} places={codexPlaces} />
+            <SuperGrokAccountRows grok={grok} places={grokPlaces} />
+            {(["openrouter", "vercel"] as const)
+              .filter((id) => providerListed(gateways[id]))
+              .map((id) => (
+                <ProviderConnectionRow
+                  key={id}
+                  state={gateways[id]}
+                  onOpen={() => nav.openAccount(`gateway:${id}`)}
+                />
+              ))}
+          </RowList>
+        }
+        providerSections={
+          <>
+            {codexSectionVisible(codex) ? (
+              <Section title="Codex">
+                <CodexSettingRows
+                  codex={codex}
+                  places={codexPlaces}
+                  providerSwitch={
+                    <CodexProviderSwitchRow
+                      workspaceId={workspaceId}
+                      canManage={canManageSettings}
+                    />
+                  }
+                />
+              </Section>
+            ) : null}
+            {superGrokSectionVisible(grok) ? (
+              <Section title="SuperGrok">
+                <SuperGrokSettingRows grok={grok} />
+              </Section>
+            ) : null}
+          </>
+        }
+      />
     );
   }
 
@@ -235,17 +277,22 @@ function ModelsList({
   revision,
   canManageSettings,
   canManageConnections,
+  empty,
   onEditAllowed,
   onConnect,
-  children,
+  accounts,
+  providerSections,
 }: {
   workspaceId: string;
   revision: number;
   canManageSettings: boolean;
   canManageConnections: boolean;
+  /** Nothing is connected (and nothing is still loading). */
+  empty: boolean;
   onEditAllowed: () => void;
   onConnect: () => void;
-  children: ReactNode;
+  accounts: ReactNode;
+  providerSections: ReactNode;
 }) {
   const policy = useModelAccessPolicy(workspaceId);
   const firstRevision = useRef(revision);
@@ -255,22 +302,21 @@ function ModelsList({
   }, [revision]);
   return (
     <SectionStack>
-      <Section title="New work">
+      <Section title="Defaults">
         <SettingRowGroup>
           <DefaultSessionModelPreferenceRow
             key={`default-model:${workspaceId}:${revision}`}
             workspaceId={workspaceId}
             canManage={canManageSettings}
           />
-          <AllowedModelsRow state={policy} canManage={canManageSettings} onEdit={onEditAllowed} />
-          <CodexProviderSwitchRow workspaceId={workspaceId} canManage={canManageSettings} />
+          <AllowedModelsRow state={policy} onEdit={onEditAllowed} />
         </SettingRowGroup>
       </Section>
       <Section
-        title="Model accounts"
-        description="Subscriptions and API keys that pay for model use."
+        title="Accounts"
+        description="Subscriptions and API keys that pay for models here."
         action={
-          canManageConnections ? (
+          canManageConnections && !empty ? (
             <RowButton onClick={onConnect}>
               <PlusIcon aria-hidden="true" />
               Connect account
@@ -278,46 +324,42 @@ function ModelsList({
           ) : null
         }
       >
-        {children}
+        {empty ? (
+          <EmptyState
+            variant="page"
+            icon={<KeyRoundIcon />}
+            title="No accounts connected"
+            description={
+              canManageConnections
+                ? "Connect a subscription or an API key to pay for models here."
+                : "Someone who can manage connections can add a subscription or an API key."
+            }
+            action={
+              canManageConnections ? (
+                <RowButton onClick={onConnect}>
+                  <PlusIcon aria-hidden="true" />
+                  Connect account
+                </RowButton>
+              ) : null
+            }
+            className="pt-8 pb-6"
+          />
+        ) : (
+          accounts
+        )}
       </Section>
+      {providerSections}
     </SectionStack>
   );
 }
 
-function ApiKeyRows({
-  gateways,
-  onOpen,
-  onConnect,
-}: {
-  gateways: Record<"vercel" | "openrouter", ProviderConnection>;
-  onOpen: (id: "vercel" | "openrouter") => void;
-  onConnect: (id: "vercel" | "openrouter") => void;
-}) {
-  // Connected providers first.
-  const order = (["openrouter", "vercel"] as const)
-    .filter((id) => !gateways[id].hidden)
-    .sort(
-      (a, b) =>
-        Number(providerStatus(gateways[b]).status === "connected") -
-        Number(providerStatus(gateways[a]).status === "connected"),
-    );
-  if (order.length === 0) return null;
-  return (
-    <RowList label="API keys" className="mt-2 border-t border-border">
-      <ProviderGroupHeader title="API keys" subtitle="Pay the provider per token" />
-      {order.map((id) => (
-        <ProviderConnectionRow
-          key={id}
-          state={gateways[id]}
-          onOpen={() => onOpen(id)}
-          onConnect={() => onConnect(id)}
-        />
-      ))}
-    </RowList>
-  );
-}
+type ConnectChoice = "codex" | "supergrok" | "vercel" | "openrouter";
 
-/** Connect a model account: pick the provider, then its own step. */
+/**
+ * Connect account: every provider as a row (logo, name, how you pay). A row
+ * opens that provider's own connect step; a provider that is already
+ * connected opens its page instead.
+ */
 export function ConnectPickerPage({
   codexAvailable,
   grokAvailable,
@@ -325,82 +367,79 @@ export function ConnectPickerPage({
   scopeName,
   onClose,
   onPick,
+  onOpenConnected,
 }: {
   codexAvailable: boolean;
   grokAvailable: boolean;
   gateways?: Record<"vercel" | "openrouter", ProviderConnection> | undefined;
+  /** Where the account pays: the workspace's name, or the organization's shared workspaces. */
   scopeName: string;
   onClose: () => void;
-  onPick: (provider: "codex" | "supergrok" | "vercel" | "openrouter") => void;
+  onPick: (provider: ConnectChoice) => void;
+  /** Opens a provider that is already connected. */
+  onOpenConnected?: ((provider: "vercel" | "openrouter") => void) | undefined;
 }) {
-  const [provider, setProvider] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const choices: {
+    id: ConnectChoice;
+    title: string;
+    summary: string;
+    connected?: boolean;
+  }[] = [
+    ...(codexAvailable
+      ? [{ id: "codex" as const, title: "Codex", summary: "Pay with your ChatGPT plan" }]
+      : []),
+    ...(grokAvailable
+      ? [{ id: "supergrok" as const, title: "SuperGrok", summary: "Pay with your SuperGrok plan" }]
+      : []),
+    ...(gateways
+      ? (["openrouter", "vercel"] as const)
+          .filter((id) => gateways[id].canManageConnection)
+          .map((id) => ({
+            id,
+            title: gateways[id].config.title,
+            summary:
+              id === "openrouter"
+                ? "Pay per token through OpenRouter"
+                : "Pay per token through Vercel",
+            connected: gateways[id].connected,
+          }))
+      : []),
+  ];
   return (
-    <ModelsFormPage
-      title="Connect a model account"
-      description={`Pick what pays for new work in ${scopeName}.`}
-      onClose={onClose}
-      submitLabel="Continue"
-      onSubmit={() => {
-        if (!provider) {
-          setError("Choose a provider to connect.");
-          return false;
+    <DetailPage back={{ label: "Models", onClick: onClose }} className={PAGE_CLASS}>
+      <DetailPageHeader
+        title="Connect account"
+        meta={
+          <p className="m-0 text-sm text-fg-muted">{`Choose what pays for models in ${scopeName}.`}</p>
         }
-        onPick(provider as "codex" | "supergrok" | "vercel" | "openrouter");
-        return false;
-      }}
-    >
-      <ChoiceCards
-        aria-label="Provider"
-        value={provider}
-        onValueChange={(value) => {
-          setProvider(value);
-          setError(null);
-        }}
-        error={error}
-      >
-        {codexAvailable ? (
-          <ChoiceCard
-            value="codex"
-            icon={<ProviderMark provider="codex" className="size-4" />}
-            title="Codex"
-            meta="ChatGPT plan"
-            description="Pay with a ChatGPT Plus or Pro plan. You sign in with OpenAI; OpenGeni never sees your password."
+      />
+      <div className="mt-6 min-w-0">
+        {choices.length === 0 ? (
+          <EmptyState
+            variant="inline"
+            title="Nothing to connect."
+            description="Only people who can manage connections can add an account."
           />
-        ) : null}
-        {grokAvailable ? (
-          <ChoiceCard
-            value="supergrok"
-            icon={<ProviderMark provider="supergrok" className="size-4" />}
-            title="SuperGrok"
-            meta="xAI plan"
-            description="Pay for Grok models with a SuperGrok plan. You sign in with xAI."
-          />
-        ) : null}
-        {gateways
-          ? (["vercel", "openrouter"] as const).map((id) => {
-              const state = gateways[id];
-              if (!state.canManageConnection) return null;
-              return (
-                <ChoiceCard
-                  key={id}
-                  value={id}
-                  icon={<ProviderMark provider={id} className="size-4" />}
-                  title={state.config.title}
-                  meta="API key"
-                  description={state.config.summary}
-                  disabled={state.connected}
-                  disabledReason={
-                    state.connected
-                      ? `Already connected. To change its key, open ${state.config.title} in Model accounts.`
-                      : undefined
-                  }
-                />
-              );
-            })
-          : null}
-      </ChoiceCards>
-    </ModelsFormPage>
+        ) : (
+          <RowList label="Providers" flush>
+            {choices.map((choice) => (
+              <ListRow
+                key={choice.id}
+                leading={<ProviderTile provider={choice.id} size="lg" />}
+                title={choice.title}
+                meta={[choice.connected ? "Connected" : choice.summary]}
+                indicator="open"
+                onOpen={() =>
+                  choice.connected && (choice.id === "vercel" || choice.id === "openrouter")
+                    ? onOpenConnected?.(choice.id)
+                    : onPick(choice.id)
+                }
+              />
+            ))}
+          </RowList>
+        )}
+      </div>
+    </DetailPage>
   );
 }
 
