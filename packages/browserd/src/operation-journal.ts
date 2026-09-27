@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 
 const DEFAULT_MAX_ENTRIES = 10_000;
 const DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_RECEIPT_BYTES = 256 * 1024 * 1024;
 const terminalStates = new Set<InteractionOperationState>([
   "completed",
   "failed",
@@ -46,6 +47,7 @@ export type SqliteInteractionOperationJournalOptions<TReceipt extends JournalRec
   ): InteractionJournalRecord<TReceipt>;
   maxEntries?: number;
   maxRecordBytes?: number;
+  maxTotalReceiptBytes?: number;
 };
 
 /** Resource-neutral, crash-safe placement operation authority. It persists
@@ -65,6 +67,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
   ) => InteractionJournalRecord<TReceipt>;
   private readonly maxEntries: number;
   private readonly maxRecordBytes: number;
+  private readonly maxTotalReceiptBytes: number;
   private readonly database: Database;
   private closed = false;
 
@@ -89,6 +92,10 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       "maxRecordBytes",
     );
     this.database = database;
+    this.maxTotalReceiptBytes = boundedPositiveInteger(
+      options.maxTotalReceiptBytes ?? DEFAULT_MAX_TOTAL_RECEIPT_BYTES,
+      "maxTotalReceiptBytes",
+    );
   }
 
   static async open<TReceipt extends JournalReceipt>(
@@ -126,6 +133,10 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
             resource_id,
             controller_generation,
             sequence
+          );
+        CREATE INDEX IF NOT EXISTS interaction_operation_journal_authority_bytes
+          ON interaction_operation_journal (
+            resource_kind, resource_id, controller_generation, receipt_bytes
           );
       `);
       await chmod(path, 0o600);
@@ -205,7 +216,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       throw new Error(`${this.resourceLabel} operation record is outside journal authority`);
     }
     const receiptJson = JSON.stringify(receipt);
-    if (Buffer.byteLength(receiptJson) > this.maxRecordBytes) {
+    if (Buffer.byteLength(receiptJson) > Math.min(this.maxRecordBytes, this.maxTotalReceiptBytes)) {
       throw new Error(`${this.resourceLabel} operation receipt exceeds its durable byte envelope`);
     }
     return { operationId: record.operationId, commandDigest: record.commandDigest, receipt };
@@ -227,6 +238,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
         throw new Error(`new ${this.resourceLabel} operation journal records must begin prepared`);
       }
       this.makeSpaceForInsert();
+      this.makeByteSpace(receiptBytes);
       this.database
         .query<unknown, [string, string, string, string, string, string, string, number, string]>(
           `INSERT INTO interaction_operation_journal (
@@ -265,6 +277,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
         `invalid ${this.resourceLabel} operation transition: ${existing.state} -> ${record.receipt.state}`,
       );
     }
+    this.makeByteSpace(receiptBytes - existing.receipt_bytes);
     this.database
       .query<unknown, [string, string, number, string, number]>(
         `UPDATE interaction_operation_journal
@@ -297,13 +310,38 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       }
       this.deleteSequence(terminal.sequence);
     }
+    this.makeByteSpace(0);
   }
 
-  private oldestTerminal(): { sequence: number } | null {
+  private makeByteSpace(additionalBytes: number): void {
+    // A covering index keeps accounting independent of large observation JSON.
+    // This runs inside the write transaction: capacity refusal rolls back all
+    // tentative evictions, and nonterminal operations are never evictable.
+    let bytes =
+      this.database
+        .query<{ bytes: number }, [string, string, string]>(
+          `SELECT coalesce(sum(receipt_bytes), 0) AS bytes
+           FROM interaction_operation_journal
+          WHERE resource_kind = ? AND resource_id = ? AND controller_generation = ?`,
+        )
+        .get(this.resourceKind, this.resourceId, this.controllerGeneration)?.bytes ?? 0;
+    while (bytes + additionalBytes > this.maxTotalReceiptBytes) {
+      const terminal = this.oldestTerminal();
+      if (!terminal) {
+        throw new Error(
+          `${this.resourceLabel} operation journal has no safely evictable record within its byte budget`,
+        );
+      }
+      this.deleteSequence(terminal.sequence);
+      bytes -= terminal.receipt_bytes;
+    }
+  }
+
+  private oldestTerminal(): { sequence: number; receipt_bytes: number } | null {
     return (
       this.database
-        .query<{ sequence: number }, [string, string, string]>(
-          `SELECT sequence
+        .query<{ sequence: number; receipt_bytes: number }, [string, string, string]>(
+          `SELECT sequence, receipt_bytes
              FROM interaction_operation_journal
             WHERE resource_kind = ? AND resource_id = ? AND controller_generation = ?
               AND state IN ('completed', 'failed', 'outcome_unknown')

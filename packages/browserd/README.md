@@ -19,8 +19,16 @@ operation as `outcome_unknown`, without replaying either command. Session state 
 retained for restore unless its lifecycle owner explicitly ends and removes it.
 Recovery scans receipts with bounded keyset reads inside one atomic transaction,
 avoiding simultaneous raw-row and duplicate observation collections. Corruption
-in a later receipt rolls back earlier recovery changes; validation, ordering,
-retention limits and the on-disk format remain unchanged.
+in a later receipt rolls back earlier recovery changes.
+
+Each Browser/Computer journal authority retains at most 10,000 operations and
+256 MiB of serialized receipts (64 MiB per receipt). Inserts and settlements
+evict the oldest terminal receipts until both limits fit; in-flight records
+are never evicted. If they prevent a write, the transaction fails without
+partial eviction. These are receipt-retention limits, not changes to model
+history. SQLite files may retain previously allocated free pages, so lowering
+a limit does not immediately shrink an existing file. End/remove reclaims the
+session directory. The SQLite receipt format remains compatible.
 
 Settled interaction receipts use the same authority-scoped SQLite journal for
 on-demand replay. Controllers retain a content digest rather than a second full
