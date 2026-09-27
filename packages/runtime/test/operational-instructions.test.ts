@@ -347,6 +347,9 @@ describe("proportional effort", () => {
     expect(guidance).toContain("A simple question or lookup gets a direct answer");
     expect(guidance).toContain("do not verify beyond what the question needs");
     expect(guidance).toContain("Waiting is the user's main cost");
+    expect(guidance).toContain(
+      "research or comparison questions, still get the full effort they need: cover every part of the question and link the sources you rely on",
+    );
     expect(guidance).toContain('"check again"');
     expect(guidance).toContain("reuse the approach");
     expect(guidance).toContain("instead of rediscovering");
