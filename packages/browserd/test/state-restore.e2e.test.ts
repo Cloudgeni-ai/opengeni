@@ -76,6 +76,24 @@ e2e.each(["restart", "stop"] as const)(
       );
       expect(semanticNames(ready)).toContain("cookie=present local=present idb=present");
 
+      const preview = await supervisor.action(
+        command(ready, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Open temporary preview" },
+        }),
+      );
+      expect(preview.state).toBe("completed");
+      const previewDeadline = Date.now() + 5_000;
+      while (
+        !(await supervisor.listTargets(source)).some((target) => target.url.startsWith("blob:")) &&
+        Date.now() < previewDeadline
+      )
+        await Bun.sleep(50);
+      expect(
+        (await supervisor.listTargets(source)).some((target) => target.url.startsWith("blob:")),
+      ).toBe(true);
+      await supervisor.selectTarget(source, created.observation.target.id);
+
       const operationId = randomUUID();
       const objectKey = `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/revisions/${operationId}/chromium-profile.ogbs`;
       const captured = await supervisor.captureState({
@@ -94,6 +112,7 @@ e2e.each(["restart", "stop"] as const)(
         },
       });
       expect(uploaded).not.toBeNull();
+      expect(captured.manifest.tabs.some((tab) => tab.url.startsWith("blob:"))).toBe(true);
       await supervisor.endSession(source, { removeState: true });
 
       const restored = await supervisor.createSession({
@@ -140,6 +159,15 @@ e2e.each(["restart", "stop"] as const)(
       }
       expect(observed.target.url).toBe(`${origin}/account`);
       expect(semanticNames(observed)).toContain("cookie=present local=present idb=present");
+      const restoredTargets = await supervisor.listTargets(target);
+      expect(restoredTargets).toHaveLength(2);
+      const unavailablePreview = restoredTargets.find(
+        (tab) => tab.title === "Tab could not be restored",
+      );
+      expect(unavailablePreview).toBeDefined();
+      const notice = await supervisor.observe(target, unavailablePreview!.id);
+      expect(semanticNames(notice)).toContain("Tab could not be restored");
+      expect(restoredTargets.find((tab) => tab.selected)?.url).toBe(`${origin}/account`);
     } finally {
       await supervisor.close().catch(() => undefined);
       web.stop(true);
@@ -251,8 +279,10 @@ function identityFixture(): string {
   return `<!doctype html>
     <title>Identity fixture</title>
     <button id="initialize">Initialize identity</button>
+    <button id="preview">Open temporary preview</button>
     <p id="status">loading</p>
     <script>
+      document.getElementById('preview').onclick = () => window.open(URL.createObjectURL(new Blob(['<!doctype html><title>Temporary preview</title><p>Preview bytes</p>'], {type:'text/html'})));
       const status = document.getElementById('status');
       const readIndexedDb = () => new Promise((resolve, reject) => {
         const request = indexedDB.open('opengeni-identity', 1);
