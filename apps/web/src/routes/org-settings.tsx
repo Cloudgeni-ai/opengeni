@@ -288,11 +288,11 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "models" ? (
-          <OrganizationModelsPage
+          <OrganizationModelsSection
             key={`${identityKey}:models`}
             workspaceId={workspaceId}
             organizationId={accountId}
-            organizationName={fallbackLabel}
+            fallbackLabel={fallbackLabel}
             account={modelsAccount}
             view={modelsView}
           />
@@ -405,5 +405,25 @@ function OrganizationSettingsFrame({
     >
       <div className="grid min-w-0 gap-8 text-left">{children}</div>
     </OrganizationSettingsShell>
+  );
+}
+
+/** Models, named with the organization's real name once it has loaded. */
+function OrganizationModelsSection({
+  fallbackLabel,
+  ...props
+}: {
+  workspaceId: string;
+  organizationId: string;
+  fallbackLabel: string;
+  account: string | undefined;
+  view: ModelsView | undefined;
+}) {
+  const directory = useOptionalOrganizationDirectory();
+  return (
+    <OrganizationModelsPage
+      {...props}
+      organizationName={directory?.overview.value?.organization.name ?? fallbackLabel}
+    />
   );
 }
