@@ -2269,6 +2269,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expectedEpoch: old.lease.leaseEpoch,
       instanceId: "old-provider-local",
       resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "old-provider-local" } },
+      },
       leaseTtlMs: 45_000,
       warmingLeaseTtlMs: 600_000,
     });
@@ -2318,6 +2322,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expectedEpoch: old.lease.leaseEpoch,
       instanceId: "old-provider-global",
       resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "old-provider-global" } },
+      },
       leaseTtlMs: 45_000,
       warmingLeaseTtlMs: 600_000,
     });

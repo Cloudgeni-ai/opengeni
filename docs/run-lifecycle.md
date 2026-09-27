@@ -1741,6 +1741,13 @@ Every fresh claim gets a new provider request ID; replacement attempts of an
 uninterrupted claim retain its stored ID. A workflow retry after release and
 intervening writes therefore cannot adopt an older snapshot as a newer generation.
 
+Re-arming a draining lease preserves its recorded workspace readiness. A provider
+address published during creation does not prove that workspace setup or restore
+verification completed. Both holder admission and explicit re-arm keep such a
+lease fenced until recovery settles it; they cannot promote recorded `not_ready`
+state to warm. Legacy envelopes without a recovery record retain the existing
+exact-provider-identity checks.
+
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
 recovery. Each ambiguous operation is invoked at most once and is never replayed

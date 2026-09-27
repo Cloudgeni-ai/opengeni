@@ -44989,6 +44989,20 @@ function leaseBackendRequiresResumableInstance(row: LeaseRow): boolean {
   return fields === undefined || fields.length > 0;
 }
 
+function hasRearmableWorkspace(row: LeaseRow): boolean {
+  // Pre-recovery envelopes retain their existing provider-identity checks.
+  // Once readiness is recorded, an address alone cannot override that state:
+  // a creator may have died after attribution but before workspace verification.
+  if (row.resume_state?.opengeniRecovery === undefined) return true;
+  const recovery = recoveryStateFromLeaseRow(row);
+  return (
+    recovery.provider.status === "exists" &&
+    recovery.provider.instanceId === row.instance_id &&
+    recovery.workspace.status === "ready" &&
+    (recovery.restore.status === "not_required" || recovery.restore.status === "ready")
+  );
+}
+
 function archiveCaptureRemainingMs(
   row: Pick<LeaseRow, "archive_capture_remaining_ms">,
 ): number | null {
@@ -45675,16 +45689,16 @@ async function acquireLeaseOnce(
           };
         }
 
-        // A creator died after publishing an instance id but before publishing
-        // its resumable envelope. The attributed provider may still be live,
-        // but an arrival has no safe SDK state with which to attach. Keep this
+        // A creator died before publishing its resumable envelope or verifying
+        // the workspace. The attributed provider may still be live,
+        // but an arrival has no verified state with which to attach. Keep this
         // exceptional row transiently fenced until the reaper captures/settles
         // it; unlike an ordinary expired drain, re-arming it cannot restore
         // service and would strand an unmanageable provider.
         if (
           liveness === "draining" &&
-          leaseBackendRequiresResumableInstance(row) &&
-          !hasResumableLeaseInstance(row)
+          (!hasRearmableWorkspace(row) ||
+            (leaseBackendRequiresResumableInstance(row) && !hasResumableLeaseInstance(row)))
         ) {
           return {
             role: "fenced" as const,
@@ -51215,7 +51229,9 @@ export async function reArmDrainingLease(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
         for update
       `);
-        if (!lease || lease.liveness !== "draining") return { rearmed: false };
+        if (!lease || lease.liveness !== "draining" || !hasRearmableWorkspace(lease)) {
+          return { rearmed: false };
+        }
         const snapshot = warmBillingSnapshot(lease);
         if (lease.resume_state?.opengeniWarmBilling && !snapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
