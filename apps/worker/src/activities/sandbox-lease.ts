@@ -1301,14 +1301,12 @@ export async function replayConnectedCommandOutput(
   let capturedThrough = 0n;
   while (true) {
     const before = capturedThrough;
-    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, async (frames) => {
-      await capture(frames);
-      for (const frame of frames) {
-        const sequence = BigInt(frame.sequence);
-        if (sequence > capturedThrough) capturedThrough = sequence;
-      }
-    });
+    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
     if (!terminalKnown || replay.status === "completed" || replay.terminal) return;
+    // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
+    // chunk). These are real replay progress even when capture receives no
+    // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
+    capturedThrough = BigInt(replay.replaySequence);
     // This is a finite terminal drain, not a poller for a running command.
     // Failed persistence, transport/integrity errors, and no-progress reads
     // return control to normal reconciliation without licensing settlement.
