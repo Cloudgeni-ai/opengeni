@@ -37,6 +37,7 @@ import {
   SessionEventType,
   stableJson,
   compactSessionEventResult,
+  turnCompletedReply,
   sessionEventLatestClassToSemanticClass,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
@@ -300,6 +301,7 @@ import {
   SESSION_WAIT_EVENTS_PER_TARGET,
   SESSION_WAIT_MAX_SECONDS,
   SESSION_WAIT_MAX_TARGETS,
+  sessionWaitChangeEventMatches,
   sessionWaitCompletionEventMatches,
   waitForSessionChanges,
   withOwnPendingUpdateKinds,
@@ -4821,9 +4823,14 @@ function registerWorkspaceOrchestrationTools(
                 ),
               )
             : null;
+          // The compact text of a turn that ended waiting for input is its
+          // empty output, never the reply its human's message received, so
+          // returning it is not proof of reading that reply.
           if (
             result &&
+            event &&
             ["turn.completed", "agent.message.completed"].includes(result.type) &&
+            turnCompletedReply(event.payload) === null &&
             !result.truncation.truncated &&
             dbPage.fullPayloadsExact
           ) {
@@ -4859,7 +4866,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, completed messages, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence; a session_get snapshot between waits is not new evidence. For long or uncertain waits, including a child that needs minutes, call wait_for_input once and end the turn: the child's terminal result wakes you and carries its final answer (payload.finalAnswer).`,
+        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, settled answers, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas, progress commentary, or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence; a session_get snapshot between waits is not new evidence. For long or uncertain waits, including a child that needs minutes, call wait_for_input once and end the turn: the child's terminal result wakes you and carries its final answer (payload.finalAnswer).`,
         inputSchema: {
           targets: z4
             .array(
@@ -4917,7 +4924,9 @@ function registerWorkspaceOrchestrationTools(
           maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
           targetEventTypes,
           targetEventMatches:
-            waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
+            waitFor === "completion"
+              ? sessionWaitCompletionEventMatches
+              : sessionWaitChangeEventMatches,
           signal,
           source: {
             reauthorizeTargets: async (sessionIds) => {
@@ -4937,6 +4946,8 @@ function registerWorkspaceOrchestrationTools(
                 limit: SESSION_WAIT_EVENTS_PER_TARGET,
                 payloadMode: "full",
                 includeTypes: targetEventTypes,
+                // Progress notes must not fill the page ahead of the outcome.
+                excludeStreamedAssistantMessages: waitFor !== "completion",
                 maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
               });
               if (!page.fullPayloadsExact) {

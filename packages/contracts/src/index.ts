@@ -12961,6 +12961,63 @@ export const SessionEventType = z.enum([
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
 /**
+ * The assistant channel on `agent.message.delta` / `agent.message.completed`:
+ * the provider-declared Responses phase, or else the Agents SDK's own rule once
+ * the response is known: `commentary` when the same response asks for tool work
+ * or ends with a later message (the SDK never returns it as the final output),
+ * `final_answer` for the message it returns. Deltas carry only a declared
+ * phase. Absent on legacy events and on the settlement copy.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer";
+
+function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
+  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : null;
+}
+
+export function assistantMessagePhase(payload: unknown): AssistantMessagePhase | null {
+  const phase = sessionEventPayloadRecord(payload)?.phase;
+  return phase === "commentary" || phase === "final_answer" ? phase : null;
+}
+
+/**
+ * The reply a human or API message received from a turn that ended waiting for
+ * input. Such a turn settles with an empty `output` (the wait, not an answer,
+ * ended it), and its answer shares a model response with the `wait_for_input`
+ * call, so it streams as commentary. Settlement records that latest assistant
+ * message on `turn.completed` as `reply` so unread attention and Slack treat it
+ * as the answer (SDK chat and the timeline already show a wait-ended turn's
+ * latest message). It is not a result: a parent joining a child result still
+ * reads `output`. Machine-started turns never carry one.
+ */
+export function turnCompletedReply(payload: unknown): string | null {
+  const reply = sessionEventPayloadRecord(payload)?.reply;
+  return typeof reply === "string" && reply.trim().length > 0 ? reply : null;
+}
+
+/**
+ * A completion the worker streamed for one provider message: it always carries
+ * a `phase`, and the provider `messageId` when the provider sent one. The
+ * phase-less, id-less shape is the settlement copy published with
+ * `turn.completed` by older workers, or when a stream did not complete the
+ * final text itself. A streamed final message is followed by its
+ * `turn.completed` with the same output, so consumers that act on settled
+ * answers (Slack, `session_wait` change mode) wait for that instead.
+ */
+export function isStreamedAssistantMessageCompletion(event: {
+  type: string;
+  payload: unknown;
+}): boolean {
+  if (event.type !== "agent.message.completed") return false;
+  const payload = sessionEventPayloadRecord(event.payload);
+  return (
+    (typeof payload?.messageId === "string" && payload.messageId.length > 0) ||
+    assistantMessagePhase(payload) !== null
+  );
+}
+
+/**
  * Stable semantic groups for bounded session monitoring. These are a read
  * projection only: an event keeps its canonical durable `type`, and callers
  * can always combine a class with explicit type include/exclude filters.

@@ -106,9 +106,13 @@ describe("session event content views", () => {
     expect(page.sourceExact).toBe(false);
     expect(page.events.map((e) => e.text)).toEqual(["retained projected text"]);
   });
-  test("default returns ten complete messages, including commentary, without audit scaffolding", async () => {
+  test("default returns ten complete messages, including labelled commentary, without audit scaffolding", async () => {
     const rows = Array.from({ length: 22 }, (_, n) =>
-      event(n + 1, "agent.message.completed", { text: `complete ${n}`, phase: "commentary" }),
+      event(n + 1, "agent.message.completed", {
+        text: `complete ${n}`,
+        messageId: `msg_${n}`,
+        phase: "commentary",
+      }),
     );
     rows.push(
       event(23, "agent.message.delta", { text: "partial" }),
@@ -116,10 +120,13 @@ describe("session event content views", () => {
     );
     const page = await readSessionEventView({ sessionId }, reader(rows));
     expect(page.events).toHaveLength(10);
+    // The provider message id is identity, not conversation; the phase tells a
+    // reader which messages are progress notes.
     expect(page.events[0]).toEqual({
       sequence: 13,
       turnId: "turn-1",
       role: "assistant",
+      phase: "commentary",
       text: "complete 12",
     });
     expect(page.hasMore).toBe(true);

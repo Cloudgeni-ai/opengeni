@@ -1,5 +1,9 @@
 import { z } from "zod";
-import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
+import {
+  assistantMessagePhase,
+  type SessionEvent,
+  type SessionEventType,
+} from "@opengeni/contracts";
 import type {
   SessionEventSliceOptions,
   SessionEventSlicePage,
@@ -127,8 +131,16 @@ function project(event: SessionEvent, selection: Selection): Item | null {
   const p = record(event.payload);
   const base = { sequence: event.sequence, ...(event.turnId ? { turnId: event.turnId } : {}) };
   if (selection.view === "conversation") {
+    // Commentary stays in the conversation, labelled so a reader can tell a
+    // progress note from an answer.
+    const phase = event.type === "agent.message.completed" ? assistantMessagePhase(p) : null;
     return typeof p.text === "string" && p.text.length > 0
-      ? { ...base, role: event.type === "user.message" ? "user" : "assistant", text: p.text }
+      ? {
+          ...base,
+          role: event.type === "user.message" ? "user" : "assistant",
+          ...(phase ? { phase } : {}),
+          text: p.text,
+        }
       : null;
   }
   if (selection.view === "results") {
