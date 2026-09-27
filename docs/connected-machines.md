@@ -606,7 +606,12 @@ death; a successor connection is never queried on the predecessor's behalf.
 Completed operations may need multiple retained-output batches. Reconciliation
 keeps one reader and its integrity checkpoint while captured sequence progress
 continues, and settles only after the terminal output frontier is verified.
-Empty or repeated batches defer recovery; they never license a success result.
+Terminal replay measures progress by the verified contiguous frame sequence,
+including heartbeat frames and undecoded UTF-8 prefixes. A quiet command can
+therefore drain successive retained batches without restarting from frame zero
+merely because a batch contains no printable stdout or stderr. Failed output
+persistence or a stalled frame frontier still prevents settlement.
+Stalled or repeated frame frontiers defer recovery; they never license a success result.
 Adoption takes the canonical workspace-control and exact turn-attempt fence, so
 it has a total order with Steer, Pause, terminal Cancel, and session deletion.
 Before that transaction starts, the op-stream yield path takes exact
