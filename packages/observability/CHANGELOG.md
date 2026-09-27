@@ -1,5 +1,18 @@
 # @opengeni/observability
 
+## 0.8.34
+
+### Patch Changes
+
+- b9482ea: Include the configured deployment revision and an opaque runtime instance ID in
+  OTLP trace and protected-diagnostic resources without adding metric labels or
+  exposing host or user identities.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+
 ## 0.8.33
 
 ### Patch Changes
