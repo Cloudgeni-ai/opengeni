@@ -541,6 +541,12 @@ workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
 
+A managed browser's attachment authority error keeps a same-browser **Reconnect**
+action available. It obtains a fresh server-authorized attachment without creating
+a replacement browser or replaying input. The fresh Connected Chrome instruction
+is reserved for the selected extension-attached browser's generation loss; a
+different lost browser in the workspace cannot change that recovery path.
+
 The browser viewer negotiates bounded typing batches from the active controller's
 short-lived attachment. Supporting helpers recheck the original controller,
 target, document and frame fence before every action; old helpers retain one
