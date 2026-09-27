@@ -59,6 +59,50 @@ const HUMAN_INPUT_EXPIRY_STALE_RETRY_MS = 1_000;
 const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
 
 /**
+ * Provider capacity waits are shared: every waiter of one exhausted pool learns
+ * the same authoritative reset time, and one capacity mutation (for example the
+ * bounded refresh that verifies a quota reset) wakes every waiter at once, both
+ * as the typed capacity signal and as the generic durable workflow wake. Without
+ * spread, a reset resumes the whole backlog in the same few seconds and its
+ * turns stampede sandbox creation and the provider. Each workflow therefore
+ * delays its reconciliation by a bounded, replay-deterministic (Temporal-seeded
+ * `Math.random`) jitter: up to one minute past a scheduled reset timer and up to
+ * 30 seconds after a capacity or queue wake or an already-due waiter. A wake
+ * that lands inside a waiter's timer spread does not shorten it. The Postgres
+ * waiter stays authoritative; jitter only delays the same reconciliation
+ * activity and never creates queue rows, input, or inference. Interruptions are
+ * never delayed.
+ *
+ * The patch marker is not understood by workers built before it: rolling the
+ * worker image back past this change while a session has recorded the marker
+ * (it waited on capacity in its current run) fails that workflow's tasks as
+ * nondeterministic until a patched worker returns.
+ */
+export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
+export const CAPACITY_TIMER_WAKE_JITTER_MAX_MS = 60_000;
+export const CAPACITY_WAKE_JITTER_MAX_MS = 30_000;
+
+/**
+ * Pure + exported so the bound is unit-testable without a workflow environment.
+ * `overrideMaxMs` is the test-only SessionWorkflowInput ceiling; it can only
+ * narrow the production bound.
+ */
+export function capacityWakeJitterMs(
+  kind: "timer" | "wake",
+  sample: number,
+  overrideMaxMs?: number,
+): number {
+  const productionMax =
+    kind === "timer" ? CAPACITY_TIMER_WAKE_JITTER_MAX_MS : CAPACITY_WAKE_JITTER_MAX_MS;
+  const max =
+    overrideMaxMs !== undefined && Number.isFinite(overrideMaxMs)
+      ? Math.min(productionMax, Math.max(0, Math.trunc(overrideMaxMs)))
+      : productionMax;
+  const unit = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1 - Number.EPSILON) : 0;
+  return Math.floor(unit * max);
+}
+
+/**
  * How long the continuation loop must hold before re-admitting the next turn. 0 ⇒ no
  * hold (re-dispatch immediately — a rotation candidate is ready, or no idle delay was
  * requested). A rotation all-capped idle (`idleUntilReset`) ALWAYS holds at least
@@ -369,6 +413,9 @@ export type SessionWorkflowInput = {
   // Test-only override for the durable capacity-wait continue-as-new
   // backstop. Production uses CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP.
   maxCapacityChecksPerRun?: number;
+  // Test-only ceiling for capacity-wake jitter (0 disables it) so real-server
+  // workflow tests stay fast. Production omits it and uses the bounds above.
+  capacityWakeJitterMaxMs?: number;
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
@@ -476,7 +523,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const timerMs = Number.isFinite(parsedDeadline)
         ? Math.max(0, parsedDeadline - Date.now())
         : 0;
+      const observedCause = (): activities.ReconcileCodexCapacityWaitInput["cause"] =>
+        wakeups !== seenWakeups
+          ? "queue"
+          : capacityWakeups !== seenCapacityWakeups
+            ? "signal"
+            : "timer";
       let cause: activities.ReconcileCodexCapacityWaitInput["cause"] = "timer";
+      let spread = false;
       if (wakeups !== seenWakeups) {
         cause = "queue";
       } else if (capacityWakeups !== seenCapacityWakeups) {
@@ -492,12 +546,48 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         if (interruptionWakeups !== seenInterruptionWakeups) {
           return;
         }
-        cause =
-          wakeups !== seenWakeups
-            ? "queue"
-            : capacityWakeups !== seenCapacityWakeups
-              ? "signal"
-              : "timer";
+        cause = observedCause();
+        // Histories recorded before the jitter replay without the marker and
+        // reconcile right at the deadline, exactly as they did.
+        if (cause === "timer" && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+          // The shared reset deadline itself fired. The first waiter to
+          // reconcile usually refreshes usage and wakes every other waiter; a
+          // waiter already inside its own spread keeps it instead of starting a
+          // second, shorter one, so the backlog resumes across the whole window.
+          spread = true;
+          const timerJitterMs = capacityWakeJitterMs(
+            "timer",
+            Math.random(),
+            input.capacityWakeJitterMaxMs,
+          );
+          if (timerJitterMs > 0) {
+            await condition(() => interruptionWakeups !== seenInterruptionWakeups, timerJitterMs);
+            if (interruptionWakeups !== seenInterruptionWakeups) {
+              return;
+            }
+          }
+          cause = observedCause();
+        }
+      }
+      if (!spread && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+        // One capacity mutation wakes every waiter of the pool at once (the typed
+        // capacity signal and the generic durable wake), and a fresh run after
+        // continue-as-new, restart, or Resume sees every unobserved wake as an
+        // already-due waiter. Spread those reconciliations too. A later wake
+        // does not cut the pause short (that would re-synchronize the herd); a
+        // queued prompt stays behind the blocked turn either way, so only an
+        // interruption (Pause/Steer/Cancel) wins immediately.
+        const wakeJitterMs = capacityWakeJitterMs(
+          "wake",
+          Math.random(),
+          input.capacityWakeJitterMaxMs,
+        );
+        if (wakeJitterMs > 0) {
+          await condition(() => interruptionWakeups !== seenInterruptionWakeups, wakeJitterMs);
+          if (interruptionWakeups !== seenInterruptionWakeups) {
+            return;
+          }
+        }
       }
       const reconcileInput = {
         accountId: input.accountId,
@@ -535,6 +625,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           ...(input.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: input.maxTurnsPerRun } : {}),
           ...(input.maxCapacityChecksPerRun !== undefined
             ? { maxCapacityChecksPerRun: input.maxCapacityChecksPerRun }
+            : {}),
+          ...(input.capacityWakeJitterMaxMs !== undefined
+            ? { capacityWakeJitterMaxMs: input.capacityWakeJitterMaxMs }
             : {}),
         });
       }
@@ -581,6 +674,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           ...(input.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: input.maxTurnsPerRun } : {}),
           ...(input.maxCapacityChecksPerRun !== undefined
             ? { maxCapacityChecksPerRun: input.maxCapacityChecksPerRun }
+            : {}),
+          ...(input.capacityWakeJitterMaxMs !== undefined
+            ? { capacityWakeJitterMaxMs: input.capacityWakeJitterMaxMs }
             : {}),
         });
       }

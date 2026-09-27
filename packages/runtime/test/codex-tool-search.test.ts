@@ -10,7 +10,7 @@ import {
   type Tool,
 } from "@openai/agents";
 import { testSettings } from "@opengeni/testing";
-import { bm25RankTools, searchToolPool } from "../src/codex-tool-search";
+import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
 import {
   buildOpenGeniAgent,
   prepareRunInput,
@@ -94,6 +94,64 @@ describe("bm25RankTools", () => {
 
   test("empty pool → empty result", () => {
     expect(bm25RankTools([], "anything", 5)).toEqual([]);
+  });
+});
+
+describe("searchToolPool named tools", () => {
+  function opengeniTool(name: string, description: string): Tool {
+    return {
+      type: "function",
+      name: `opengeni__${name}`,
+      description,
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+  }
+  const GOALS: Tool[] = [
+    opengeniTool(
+      "goal_set",
+      "Set the goal; a goal stays active until complete. Complete goal tracking.",
+    ),
+    opengeniTool(
+      "goal_complete",
+      "Finish the current objective after verifying every requirement, recording evidence, summarizing outcomes and notifying the requester about what changed in the workspace",
+    ),
+    opengeniTool("session_send_message", "Send a message to another session"),
+    opengeniTool("session_events", "Read events"),
+  ];
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+
+  test("puts a tool named by its short name first", () => {
+    // BM25 alone prefers goal_set: its short description repeats "goal" and "complete".
+    expect(names(bm25RankTools(GOALS, "goal_complete", 1))).toEqual(["opengeni__goal_set"]);
+    expect(names(searchToolPool(GOALS, { query: "goal_complete", limit: 1 }))).toEqual([
+      "opengeni__goal_complete",
+    ]);
+  });
+
+  test("matches full model names and ignores case and punctuation", () => {
+    expect(names(searchToolPool(GOALS, { query: "+OpenGeni__Session_Events", limit: 1 }))).toEqual([
+      "opengeni__session_events",
+    ]);
+  });
+
+  test("returns every named tool even beyond the limit, then fills with BM25", () => {
+    expect(
+      names(searchToolPool(GOALS, { query: "session_events goal_complete", limit: 1 })),
+    ).toEqual(["opengeni__session_events", "opengeni__goal_complete"]);
+    expect(names(searchToolPool(GOALS, { query: "goal_complete tracking", limit: 2 }))).toEqual([
+      "opengeni__goal_complete",
+      "opengeni__goal_set",
+    ]);
+  });
+
+  test("single words are not treated as tool names", () => {
+    const pool = [opengeniTool("read", "Open a file"), opengeniTool("fetch_page", "Read a page")];
+    const typed = pool as Array<Tool & { name: string }>;
+    expect(toolsNamedInQuery(typed, "read the file")).toEqual([]);
+    expect(names(toolsNamedInQuery(typed, "read with fetch_page"))).toEqual([
+      "opengeni__fetch_page",
+    ]);
   });
 });
 

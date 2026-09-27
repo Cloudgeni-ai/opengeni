@@ -37,6 +37,8 @@ import {
   SESSION_EVENT_SEMANTIC_CLASS_TYPES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   compactSessionEventResult,
+  isStreamedAssistantMessageCompletion,
+  turnCompletedReply,
   type SessionSystemUpdateKind,
 } from "@opengeni/contracts";
 import { SESSION_EVENT_MCP_MAX_BYTES, capPayloadValue } from "./session-view";
@@ -52,6 +54,8 @@ export const SESSION_WAIT_EVENTS_PER_TARGET = 20;
  * agent messages, blocking failures, goal facts, and session status/control
  * changes. Raw deltas, tool receipts, sandbox/machine diagnostics, and PTY
  * noise never wake a waiter; `session_events` remains the drill-down for them.
+ * The change mode further drops per-message completions: see
+ * {@link sessionWaitChangeEventMatches}.
  */
 export const SESSION_WAIT_EVENT_TYPES = [
   "turn.started",
@@ -128,6 +132,18 @@ export function sessionWaitCompletionEventMatches(event: SessionEvent): boolean 
     !Object.prototype.hasOwnProperty.call(payload, "segmentLimit") &&
     !Object.prototype.hasOwnProperty.call(payload, "maintenance")
   );
+}
+
+/**
+ * `waitFor=change` wakes on settled changes. A per-message assistant completion
+ * (commentary, or a final message the turn is about to settle) is not one: the
+ * `turn.completed` that follows carries the answer. Waking on every progress
+ * note would only buy the waiter another poll. The phase-less, id-less
+ * completion older workers publish with `turn.completed` still matches.
+ * Readers pair this with `excludeStreamedAssistantMessages` in SQL.
+ */
+export function sessionWaitChangeEventMatches(event: SessionEvent): boolean {
+  return !isStreamedAssistantMessageCompletion(event);
 }
 
 /** The self-session event that announces a newly pending machine input. */
@@ -525,8 +541,11 @@ export function summarizeSessionWaitEvent(
   }
   // Other wait summaries may omit actionable fields (e.g. human-input
   // questions); absence of a truncation marker is not proof of full content.
+  // Neither is the empty output of a turn that ended waiting for input while
+  // it records the reply a human's message received.
   summary.contentComplete =
     ["turn.completed", "agent.message.completed"].includes(event.type) &&
+    turnCompletedReply(event.payload) === null &&
     !compact.truncation.truncated &&
     text === compact.text &&
     JSON.stringify(failure) === JSON.stringify(compact.failure) &&

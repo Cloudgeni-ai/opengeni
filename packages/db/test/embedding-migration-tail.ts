@@ -53,4 +53,6 @@ export const embeddingMigrationTail = [
   "0511_knowledge_visible_index_status.sql",
   // Patches learning resolvers introduced by the withheld 0461 migration.
   "0515_autonomous_learning_defaults.sql",
+  // Patches the 0509 trial grant trigger; replay after it.
+  "0521_verified_signup_trial_runtime_switch.sql",
 ];

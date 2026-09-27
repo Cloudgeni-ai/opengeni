@@ -6,9 +6,14 @@ import {
 import {
   ClientModel,
   WorkspaceModelCatalogResponse,
+  type DefaultModelSelection,
   type WorkspaceModelCatalogResponse as WorkspaceModelCatalogResponseType,
 } from "@opengeni/contracts";
-import { resolveWorkspaceModelSelection, type WorkspaceModelSelectionInput } from "@opengeni/core";
+import {
+  resolveWorkspaceModelSelection,
+  type WorkspaceModelSelection,
+  type WorkspaceModelSelectionInput,
+} from "@opengeni/core";
 
 export {
   MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS,
@@ -81,12 +86,34 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
  */
 export function buildWorkspaceModelCatalog(
   input: WorkspaceModelSelectionInput,
+  defaults?: WorkspaceModelCatalogDefaults,
 ): WorkspaceModelCatalogResponseType {
-  const models = resolveWorkspaceModelSelection(input).map((selection) => ({
+  return projectWorkspaceModelCatalog(resolveWorkspaceModelSelection(input), defaults);
+}
+
+/** Resolved new-chat defaults published beside the catalog rows. */
+export type WorkspaceModelCatalogDefaults = {
+  defaultSelection: DefaultModelSelection;
+  creditsSelection: DefaultModelSelection | null;
+};
+
+export function projectWorkspaceModelCatalog(
+  selections: readonly WorkspaceModelSelection[],
+  defaults?: WorkspaceModelCatalogDefaults,
+): WorkspaceModelCatalogResponseType {
+  const models = selections.map((selection) => ({
     ...projectClientModel(selection.model),
     credentialReadiness: selection.credentialReadiness,
     policyAllowed: selection.policyAllowed,
     availability: selection.availability,
   }));
-  return WorkspaceModelCatalogResponse.parse({ models });
+  return WorkspaceModelCatalogResponse.parse({
+    models,
+    ...(defaults
+      ? {
+          defaultSelection: defaults.defaultSelection,
+          creditsSelection: defaults.creditsSelection,
+        }
+      : {}),
+  });
 }

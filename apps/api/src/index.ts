@@ -43,7 +43,7 @@ import {
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
-import { observabilityEventLogger } from "./observability";
+import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
@@ -58,6 +58,9 @@ import {
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
+import { startApiMetricsListener } from "./http/metrics-listener";
+import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
+import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
@@ -383,7 +386,7 @@ export async function startApi(
           controlPlaneAuth
             ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
             : undefined,
-          { logger: observabilityEventLogger(observability) },
+          observabilityEventBusOptions(observability),
         ),
       {
         ...retryOptions,
@@ -450,17 +453,25 @@ export async function startApi(
   const interactionFrameProxies = new InteractionFrameProxyTransport(
     resolveFirstPartyDelegationSecret(settings),
   );
+  // WebSocket upgrades bypass the Hono app, so the local-mode browser boundary
+  // (http/local-browser-boundary.ts) is applied to them in the dispatcher;
+  // every other request meets it in the Hono middleware.
+  const localBrowserBoundary = createLocalBrowserBoundary(settings, {
+    warn: (message, attributes) => observability.warn(message, attributes),
+  });
+  const webSocketUpgrades = [interactionFrameProxies, artifactWebSockets];
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: 255,
     fetch: (request, bunServer) => {
-      if (interactionFrameProxies.handles(request)) {
-        return interactionFrameProxies.upgrade(request, bunServer);
-      }
-      if (artifactWebSockets.handles(request)) {
-        return artifactWebSockets.upgrade(request, bunServer);
-      }
+      const upgrade = dispatchApiWebSocketUpgrade(
+        request,
+        bunServer,
+        webSocketUpgrades,
+        localBrowserBoundary,
+      );
+      if (upgrade.handled) return upgrade.response;
       return app.fetch(
         request,
         apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
@@ -475,6 +486,7 @@ export async function startApi(
       close: (socket) => socket.data.transportClosed(),
     },
   });
+  const metricsServer = startApiMetricsListener(settings, observability);
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
@@ -546,11 +558,13 @@ export async function startApi(
   observability.info("OpenGeni API listening", {
     host: settings.apiHost,
     port: settings.apiPort,
+    ...(metricsServer ? { metricsPort: settings.apiMetricsPort } : {}),
   });
   return {
     server,
     close: async () => {
       server.stop(true);
+      metricsServer?.stop(true);
       stopSlackInteractionPump?.();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();

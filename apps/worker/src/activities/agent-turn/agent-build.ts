@@ -57,6 +57,7 @@ import {
   structuredToolTransportForTurn,
   hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
+  textVerbosityForTurn,
 } from "./tool-policy";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -131,6 +132,8 @@ export type BuildTurnAgentDeps = {
   connectorActionPolicy: ConnectorActionPolicyHooks;
   trigger: ClaimTurnOk["trigger"];
   preparationIndependentToolNames: readonly string[];
+  /** The attempt's tool catalog includes the Jev-backed code_search tool. */
+  codeSearchAvailable: boolean;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -189,6 +192,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     connectorActionPolicy,
     trigger,
     preparationIndependentToolNames,
+    codeSearchAvailable,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -567,6 +571,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
   );
+  const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
@@ -648,6 +653,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         reasoningEffort: requestReasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
+        ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
         missingSessionTitleHint,
@@ -676,6 +682,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
         ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        ...(codeSearchAvailable ? { codeSearchAvailable: true } : {}),
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
         // so they must not run the file-seeding lifecycle hook.

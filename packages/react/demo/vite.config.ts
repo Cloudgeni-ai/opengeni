@@ -7,6 +7,7 @@ const demoApiTarget = process.env.OPENGENI_REACT_DEMO_API_TARGET ?? "http://127.
 const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD === "1";
 const demoInputs = {
   genieLoading: resolve(__dirname, "genie-loading.html"),
+  exchangeFold: resolve(__dirname, "exchange-fold.html"),
   main: resolve(__dirname, "index.html"),
   timeline: resolve(__dirname, "timeline.html"),
   fleetPolicy: resolve(__dirname, "fleet-policy.html"),

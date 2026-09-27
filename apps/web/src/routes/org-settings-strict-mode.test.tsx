@@ -9,6 +9,7 @@ import * as SonnerPackage from "sonner";
 import * as ReactPackage from "@opengeni/react";
 import * as RouterPackage from "@tanstack/react-router";
 import * as ContextModule from "@/context";
+import * as AnalyticsModule from "@/lib/analytics";
 import type { CompanyProfileAgentPolicy } from "@/types";
 
 const accountId = "account-strict";
@@ -17,6 +18,9 @@ const otherAccountId = "account-other";
 const otherWorkspaceId = "workspace-other";
 const timestamp = "2026-08-20T10:00:00.000Z";
 const toastError = mock((_message: string) => undefined);
+const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
+const navigate = mock(async (_options: unknown) => undefined);
+const captureAnalyticsEvent = mock((_name: string) => true);
 let accountRole: "owner" | "admin" = "owner";
 
 const getBilling = mock(async () => ({
@@ -187,14 +191,16 @@ mock.module("@opengeni/react", () => ({
 mock.module("@tanstack/react-router", () => ({
   ...RouterPackage,
   Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
+  useNavigate: () => navigate,
 }));
+mock.module("@/lib/analytics", () => ({ ...AnalyticsModule, captureAnalyticsEvent }));
 mock.module("sonner", () => ({
   ...SonnerPackage,
   toast: Object.assign(
     mock((_message: string) => undefined),
     {
       error: toastError,
-      success: mock((_message: string) => undefined),
+      success: toastSuccess,
     },
   ),
 }));
@@ -251,6 +257,38 @@ afterAll(() => {
 });
 
 describe("organization billing StrictMode ownership", () => {
+  test("treats a Stripe checkout outcome as one-shot and drops it from the URL", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} checkout="success" />),
+      );
+      await flush();
+      expect(toastSuccess).toHaveBeenCalledTimes(1);
+      expect(captureAnalyticsEvent).toHaveBeenCalledTimes(1);
+      expect(captureAnalyticsEvent).toHaveBeenCalledWith("checkout_completed");
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId },
+        search: {},
+        replace: true,
+      });
+      // Once the router has dropped the outcome, re-rendering counts nothing.
+      await act(async () => root.render(<OrgSettingsRoute workspaceId={workspaceId} />));
+      await flush();
+      expect(toastSuccess).toHaveBeenCalledTimes(1);
+      expect(captureAnalyticsEvent).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      navigate.mockClear();
+      toastSuccess.mockClear();
+      captureAnalyticsEvent.mockClear();
+    }
+  });
+
   test("shows a negative balance as prior usage rather than available credits", async () => {
     getBilling.mockImplementation(async () => ({
       mode: "stripe",
@@ -301,6 +339,10 @@ describe("organization billing StrictMode ownership", () => {
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
+    expect(container.querySelector('section[aria-label="Credits and payments"]')).not.toBeNull();
+    expect(
+      container.querySelector('input[name="credit-amount"]')?.closest("label")?.textContent,
+    ).toContain("Amount to add (USD)");
     expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
       accountId,
       period: "month",
@@ -446,6 +488,15 @@ describe("organization billing StrictMode ownership", () => {
     await flush();
 
     expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      container.querySelector('section[aria-labelledby="organization-identity-heading"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('section[aria-labelledby="organization-documents-heading"]'),
+    ).not.toBeNull();
+    expect(
+      Array.from(container.querySelectorAll("h2")).map((heading) => heading.textContent?.trim()),
+    ).toEqual(expect.arrayContaining(["Organization identity", "Organization documents"]));
     expect(container.textContent).toContain("Agent-managed organization identity");
     expect(container.textContent).toContain("Require approval");
     expect(container.textContent).not.toContain("Review first");
@@ -580,6 +631,31 @@ describe("organization billing StrictMode ownership", () => {
       expect(container.textContent).toContain("Agent-managed organization identity is owner-only");
     } finally {
       accountRole = "owner";
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps model connections unavailable outside an organization administrator session", async () => {
+    const priorMode = context.clientConfig.auth.mode;
+    context.clientConfig.auth.mode = "apiKey";
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
+      );
+      expect(container.textContent).toContain(
+        "Organization model subscriptions can be managed only by organization owners and admins",
+      );
+      expect(container.querySelector("#organization-model-connections-heading")).toBeNull();
+      expect(
+        container.querySelector('nav[aria-label="Organization settings"] a[aria-current="page"]'),
+      ).toBeNull();
+    } finally {
+      context.clientConfig.auth.mode = priorMode;
       await act(async () => root.unmount());
       container.remove();
     }

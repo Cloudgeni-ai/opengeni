@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { FileAsset } from "@opengeni/contracts";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
 
-import { sniffSlackReactionImageMime } from "../src/integrations/slack-bot";
+import { sniffSlackReactionImageMime, validateSlackMcpImage } from "../src/integrations/slack-bot";
 import {
   importSlackReactionImage,
   safeSlackImageFilename,
@@ -165,6 +165,19 @@ describe("Slack reaction image magic sniffing", () => {
       sniffSlackReactionImageMime(concat(completePng(), new TextEncoder().encode("<html>"))),
     ).toBeNull();
   });
+});
+
+test("on-demand Slack MCP images must fully decode before reaching the model", async () => {
+  const valid = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",
+    "base64",
+  );
+  await expect(validateSlackMcpImage(valid)).resolves.toBeUndefined();
+  // The lightweight structural sniffer accepts this header-only PNG; libvips
+  // must reject it before it can be returned to a vision model.
+  const missingPixels = completePng();
+  expect(sniffSlackReactionImageMime(missingPixels)).toBe("image/png");
+  await expect(validateSlackMcpImage(missingPixels)).rejects.toThrow("invalid_file_content");
 });
 
 function fakeStorage(

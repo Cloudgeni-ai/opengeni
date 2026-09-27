@@ -160,9 +160,10 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       expect(await search.locator('svg[aria-hidden="true"]').count()).toBe(1);
 
       const header = search.locator("..");
-      const title = header.getByText("Browse sessions", { exact: true });
+      // The default view is not a customized/filtered view.
+      const title = header.getByText("Sessions", { exact: true });
       const project = header.getByRole("button", { name: "New project", exact: true });
-      const filter = header.getByRole("button", { name: "Session view, customized", exact: true });
+      const filter = header.getByRole("button", { name: "Session view", exact: true });
       await project.waitFor();
       const searchBox = (await search.boundingBox())!;
       for (const control of [title, project, filter]) {

@@ -6,7 +6,7 @@ import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permi
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import { composerConnectorOptions } from "@/lib/composer-connectors";
 import { capabilityReconnectPlan, connectionHealth } from "@/lib/capabilities";
-import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 
 export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: string }) {
   const context = useAppContext();
@@ -175,7 +175,8 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     const params = new URLSearchParams(window.location.search);
     if (!params.has("composer_connector") || !params.has("integration_oauth")) return;
     const outcome = params.get("integration_oauth");
-    const message = mcpOAuthCallbackFailureMessage(params.get("stage"), params.get("reason"));
+    const stage = params.get("stage");
+    const reason = params.get("reason");
     for (const key of [
       "composer_connector",
       "integration_oauth",
@@ -196,8 +197,12 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       void reload();
       toast.success("Authorization completed. Connection status is being refreshed.");
     } else {
-      setError(message);
-      toast.error(message);
+      // The failure copy loads only on this path, keeping it out of the session route.
+      void import("@/lib/oauth-callback-messages").then(({ mcpOAuthCallbackFailureMessage }) => {
+        const message = mcpOAuthCallbackFailureMessage(stage, reason);
+        setError(message);
+        toast.error(message);
+      });
     }
   }, [reload, workspaceId]);
   const manage = (serverId: string) => {

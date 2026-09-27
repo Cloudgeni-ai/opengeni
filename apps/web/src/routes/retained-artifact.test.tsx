@@ -28,6 +28,10 @@ const context = {
   accessKeyVersion: 0,
   client: {
     createVideoArtifactPlaybackSource: playback,
+    createRetainedArtifactDownloadUrl: async () => ({
+      url: "https://media.example/image.png",
+      expiresAt: "2099-01-01T00:00:00Z",
+    }),
     downloadRetainedArtifact: genericDownload,
     getRetainedArtifact: async () => {
       if (loadError) throw loadError;
@@ -36,6 +40,17 @@ const context = {
         artifactId,
         kind: artifactKind,
         contentType: artifactKind === "generated_video" ? "video/mp4" : "image/png",
+        originalBytes: 4,
+        sha256: "a".repeat(64),
+        retainedAt: "2026-09-01T00:00:00Z",
+        dimensions: { width: 1, height: 1 },
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: `/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes",
+          maxRangeBytes: 1048576,
+        },
       };
     },
     getFile: async () => null,
@@ -128,6 +143,12 @@ for (const state of ["loading", "loaded", "error"] as const) {
             ? "Artifact unavailable"
             : "Download",
       );
+      if (state === "loaded") {
+        expect(rendered.container.querySelector("[data-chat-media]")).toBeNull();
+        expect(rendered.container.querySelector("img")?.getAttribute("src")).toBe(
+          "https://media.example/image.png",
+        );
+      }
     } finally {
       await rendered.unmount();
       context.client.getRetainedArtifact = originalLoad;

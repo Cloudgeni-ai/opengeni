@@ -1,9 +1,15 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import type { GeneratedSessionTitle } from "@opengeni/runtime";
+import { isManagedOpenRouterFreeRoute, type ModelCapabilitiesV1 } from "@opengeni/config";
+import type {
+  GeneratedSessionTitle,
+  GenerateSessionTitleOptions,
+  OpenGeniRuntime,
+} from "@opengeni/runtime";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  ReasoningEffort,
   type FirstPartyMcpToolName,
   type Permission,
   type ToolRef,
@@ -29,11 +35,26 @@ export function shouldRequestMissingSessionTitle(input: {
   return hasPermission([...permissions], "sessions:control");
 }
 
+/**
+ * Whether the turn's route can afford a model request spent only on a title.
+ * The managed OpenRouter free route draws on one deployment-wide per-minute
+ * and per-day request quota that users' turns need, so an untitled session on
+ * it gets no title sidecar and no title tool (whose call would cost a
+ * follow-up request). Clients keep showing the prompt preview, and a later
+ * turn on another route titles the session.
+ */
+export function routeAllowsSessionTitleRequests(
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>,
+): boolean {
+  return !resolvedModel || !isManagedOpenRouterFreeRoute(resolvedModel);
+}
+
 export function sessionTitleToolPlan(input: {
   tools: readonly ToolRef[];
   selectedFirstPartyMcpTools: readonly FirstPartyMcpToolName[];
   shouldRequestTitle: boolean;
   parallelGenerationAvailable: boolean;
+  routeAllowsTitleRequests: boolean;
 }): {
   promoteTitleTool: boolean;
   generateTitleInParallel: boolean;
@@ -43,8 +64,9 @@ export function sessionTitleToolPlan(input: {
   const titleToolAvailable =
     input.shouldRequestTitle &&
     input.tools.some((tool) => tool.kind === "mcp" && tool.id === "opengeni");
-  const generateTitleInParallel = titleToolAvailable && input.parallelGenerationAvailable;
-  const promoteTitleTool = titleToolAvailable && !generateTitleInParallel;
+  const titleRequestAllowed = titleToolAvailable && input.routeAllowsTitleRequests;
+  const generateTitleInParallel = titleRequestAllowed && input.parallelGenerationAvailable;
+  const promoteTitleTool = titleRequestAllowed && !generateTitleInParallel;
   return {
     promoteTitleTool,
     generateTitleInParallel,
@@ -56,6 +78,54 @@ export function sessionTitleToolPlan(input: {
 }
 
 export const PARALLEL_SESSION_TITLE_TIMEOUT_MS = 15_000;
+
+/**
+ * The lowest reasoning effort the resolved model can run, for the auxiliary
+ * title request only. A title needs no deliberation, and a provider default
+ * effort can use most of the output budget before any visible text. Returns
+ * undefined when the model declares no runnable reasoning control, so the
+ * request carries no reasoning parameter.
+ */
+export function sessionTitleReasoningEffort(
+  capabilities: Pick<ModelCapabilitiesV1, "reasoning"> | undefined,
+): ReasoningEffort | undefined {
+  const reasoning = capabilities?.reasoning;
+  if (!reasoning?.runnable) return undefined;
+  const order = ReasoningEffort.options;
+  let lowest: ReasoningEffort | undefined;
+  for (const effort of reasoning.efforts) {
+    if (!lowest || order.indexOf(effort) < order.indexOf(lowest)) lowest = effort;
+  }
+  return lowest;
+}
+
+/**
+ * Options for the parallel title request. It uses the turn's resolved
+ * provider and credential authority, but its own lowest runnable reasoning
+ * effort rather than the turn's effort.
+ */
+export function sessionTitleGenerationOptions(input: {
+  resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
+  modelName: string;
+  serviceTier: GenerateSessionTitleOptions["serviceTier"] | null | undefined;
+  signal: AbortSignal;
+}): GenerateSessionTitleOptions {
+  const { resolvedModel, serviceTier } = input;
+  const reasoningEffort = sessionTitleReasoningEffort(resolvedModel?.configured.capabilities);
+  return {
+    ...(resolvedModel
+      ? {
+          client: resolvedModel.client,
+          provider: resolvedModel.provider,
+          model: resolvedModel.model,
+        }
+      : {}),
+    modelName: input.modelName,
+    ...(serviceTier ? { serviceTier } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    signal: input.signal,
+  };
+}
 
 export type ParallelSessionTitleGeneration = {
   finish: () => Promise<GeneratedSessionTitle | null>;

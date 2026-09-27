@@ -161,6 +161,11 @@ export type ProviderTurnState = {
   effectiveCodexCredentialVersion: number | null;
   /** Frozen alternate-account ceiling observed by the fenced allocator. */
   codexCredentialFailoverLimit: number;
+  /**
+   * Accepted product model id (`codex/<slug>`) the Codex allocator filtered
+   * for. Failure settlement scopes plan entitlement and failover to it.
+   */
+  codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
   effectiveXaiCredentialId: string | null;

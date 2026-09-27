@@ -12,7 +12,7 @@ import type { ClientConfig } from "@/types";
 import { journeyAction, journeyPage } from "@/lib/analytics-journey";
 
 const BUTTON_CLASS =
-  "inline-flex h-11 cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
+  "inline-flex h-9 pointer-coarse:h-11 cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
 
 export function AnalyticsManager({
   config,
@@ -134,42 +134,58 @@ export function AnalyticsManager({
 
   if (!showPreferences || isPublicAuthRoute || !editing) return null;
 
+  // Docked in normal flow at the bottom of the fixed app canvas (the parent is
+  // a flex column): the banner takes its own space instead of floating over
+  // sign-in, onboarding, or the composer, so every control stays reachable.
   return (
     <section
       aria-label="Analytics preferences"
-      className="fixed inset-x-4 bottom-4 z-50 mx-auto max-w-2xl rounded-xl border border-border bg-surface p-4 shadow-2xl"
+      className="order-last shrink-0 border-t border-border bg-surface px-4 py-2.5"
     >
-      <p className="text-sm font-medium text-fg">Help us improve OpenGeni</p>
-      <p data-contrast-audited className="mt-1 text-sm text-fg-muted">
-        We use optional performance analytics, including first-party cookies, to understand
-        adoption. When you sign in, consented events use internal user and account IDs. Copy
-        tracking is disabled; we do not send names, email addresses, prompts, source code,
-        repository content, tool arguments, or secrets.
-      </p>
-      <div className="mt-3 flex justify-end gap-2">
-        {choice !== null ? (
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
+        <div className="min-w-0 flex-1">
+          <p data-contrast-audited className="text-xs leading-relaxed text-fg-muted">
+            <span className="text-sm font-medium text-fg">Help us improve OpenGeni.</span> Optional
+            analytics with first-party cookies. We never send prompts, code, names, emails, or
+            secrets.
+          </p>
+          <details className="mt-0.5 text-xs text-fg-muted">
+            <summary className="w-fit cursor-pointer rounded-sm text-fg underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+              What we collect
+            </summary>
+            <p data-contrast-audited className="mt-1 max-w-3xl leading-relaxed">
+              We use optional performance analytics, including first-party cookies, to understand
+              adoption. When you sign in, consented events use internal user and account IDs. Copy
+              tracking is disabled; we do not send names, email addresses, prompts, source code,
+              repository content, tool arguments, or secrets.
+            </p>
+          </details>
+        </div>
+        <div className="flex shrink-0 justify-end gap-2">
+          {choice !== null ? (
+            <button
+              type="button"
+              className={`${BUTTON_CLASS} hover:bg-accent hover:text-accent-foreground`}
+              onClick={() => setEditing(false)}
+            >
+              Cancel
+            </button>
+          ) : null}
           <button
             type="button"
-            className={`${BUTTON_CLASS} hover:bg-accent hover:text-accent-foreground`}
-            onClick={() => setEditing(false)}
+            className={`${BUTTON_CLASS} bg-secondary text-secondary-foreground hover:bg-secondary/80`}
+            onClick={() => choose("denied")}
           >
-            Cancel
+            Decline
           </button>
-        ) : null}
-        <button
-          type="button"
-          className={`${BUTTON_CLASS} bg-secondary text-secondary-foreground hover:bg-secondary/80`}
-          onClick={() => choose("denied")}
-        >
-          Decline
-        </button>
-        <button
-          type="button"
-          className={`${BUTTON_CLASS} bg-primary text-primary-foreground hover:bg-primary/90`}
-          onClick={() => choose("granted")}
-        >
-          Allow analytics
-        </button>
+          <button
+            type="button"
+            className={`${BUTTON_CLASS} bg-primary text-primary-foreground hover:bg-primary/90`}
+            onClick={() => choose("granted")}
+          >
+            Allow analytics
+          </button>
+        </div>
       </div>
     </section>
   );

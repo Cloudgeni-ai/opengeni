@@ -54,7 +54,14 @@ import {
   sanitizeRaceRequest,
   sanitizeRaceResult,
 } from "./browser-account-race-diagnostics";
+import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
+// The model-access step leads with credits the organization already holds, or
+// the included default model when the deployment provides one, otherwise it
+// asks how to power chats.
+const MODEL_ACCESS_HEADING =
+  /^(Choose how to power your chats|Start chatting for free|Start chatting with OpenGeni credits|You’re ready to chat)$/;
+const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
 const PASSWORD = "Browser-accounts-password-1234";
@@ -1642,32 +1649,6 @@ function logoutAllActorFenceResponseProblem(
     : `unexpected logout-all actor fence: ${JSON.stringify({ input, response })}`;
 }
 
-function exactLogoutAllSessionListSearch(search: string): boolean {
-  // Retain the pre-page API shape during a rolling upgrade. The current rail
-  // owns exactly three finite session pages: active roots, archived roots, and
-  // the complete pins projection. Reject cursors, searches, duplicate keys,
-  // and every other query rather than treating any session-list 401 as benign.
-  if (search === "") return true;
-  const params = new URLSearchParams(search);
-  const keys = [...params.keys()];
-  if (new Set(keys).size !== keys.length) return false;
-  const exactSingleton = (name: string, value: string): boolean => {
-    const values = params.getAll(name);
-    return values.length === 1 && values[0] === value;
-  };
-  if (!exactSingleton("view", "page")) return false;
-  const isActiveRoots =
-    keys.length === 3 && exactSingleton("limit", "50") && exactSingleton("parentSessionId", "null");
-  const isArchivedRoots =
-    keys.length === 4 &&
-    exactSingleton("limit", "50") &&
-    exactSingleton("parentSessionId", "null") &&
-    exactSingleton("archivedOnly", "true");
-  const isPins =
-    keys.length === 3 && exactSingleton("limit", "1") && exactSingleton("pinsOnly", "true");
-  return isActiveRoots || isArchivedRoots || isPins;
-}
-
 function exactBoundedWorkspaceLiveStreamSearch(search: string): boolean {
   const params = new URLSearchParams(search);
   const exactSingleton = (name: string, value: string): boolean => {
@@ -2073,8 +2054,8 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
     }
     await page.getByLabel("Organization name").fill(account.organizationName);
     await page.getByRole("button", { name: "Create organization" }).click();
-    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
-    await page.getByRole("button", { name: "Skip for now" }).click();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
       { timeout: 30_000 },

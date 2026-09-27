@@ -3,10 +3,22 @@ import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
 } from "@opengeni/contracts";
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  withOrganizationOpenRouterCredential,
+  withWorkspaceOpenRouterCredential,
+} from "@opengeni/config";
+import { resolveTurnModel } from "@opengeni/runtime";
+import { testSettings } from "@opengeni/testing";
 
 import {
   createSessionTitleAttemptToolDefinition,
+  routeAllowsSessionTitleRequests,
   SESSION_TITLE_MODEL_TOOL_NAME,
+  sessionTitleGenerationOptions,
+  sessionTitleReasoningEffort,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
   startParallelSessionTitleGeneration,
@@ -28,6 +40,7 @@ describe("shouldRequestMissingSessionTitle", () => {
           selectedFirstPartyMcpTools: ["set_session_title"],
           shouldRequestTitle,
           parallelGenerationAvailable,
+          routeAllowsTitleRequests: true,
         }),
       ).toMatchObject({ promoteTitleTool: false, generateTitleInParallel: false });
     }
@@ -107,6 +120,7 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
         parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: true,
       }),
     ).toEqual({
       promoteTitleTool: false,
@@ -127,6 +141,7 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
         parallelGenerationAvailable: false,
+        routeAllowsTitleRequests: true,
       }),
     ).toEqual({
       promoteTitleTool: true,
@@ -143,6 +158,7 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: true,
         parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: true,
       }),
     ).toEqual({
       promoteTitleTool: false,
@@ -157,6 +173,90 @@ describe("sessionTitleToolPlan", () => {
         selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
         shouldRequestTitle: false,
         parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: true,
+      }),
+    ).toEqual({
+      promoteTitleTool: false,
+      generateTitleInParallel: false,
+      remoteFirstPartyMcpTools: ["set_session_title", "goal_set"],
+      preparationIndependentToolNames: [],
+    });
+  });
+});
+
+describe("managed OpenRouter free route", () => {
+  const freeUpstreamModelId = DEFAULT_OPENROUTER_MODEL_ID.slice("openrouter/".length);
+  const settings = testSettings({
+    sandboxBackend: "none",
+    openrouterApiKey: "deployment-openrouter-key",
+    modelProvidersJson: "[]",
+    resolvedOpenRouterModelsJson: undefined,
+  });
+
+  test("skips title requests only on the deployment-funded free route", () => {
+    const managedFree = resolveTurnModel(settings, DEFAULT_OPENROUTER_MODEL_ID)!;
+    expect(managedFree.provider.kind).toBe("openrouter-managed");
+    expect(managedFree.configured.credentialSource.kind).toBe("deployment");
+    expect(routeAllowsSessionTitleRequests(managedFree)).toBe(false);
+
+    const workspaceFree = resolveTurnModel(
+      withWorkspaceOpenRouterCredential(settings, "workspace-openrouter-key"),
+      `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${freeUpstreamModelId}`,
+    )!;
+    expect(workspaceFree.configured.upstreamModelId).toBe(freeUpstreamModelId);
+    expect(workspaceFree.provider.kind).toBe("openrouter-workspace");
+    expect(routeAllowsSessionTitleRequests(workspaceFree)).toBe(true);
+
+    const organizationFree = resolveTurnModel(
+      withOrganizationOpenRouterCredential(settings, "organization-openrouter-key", [
+        { upstreamModelId: freeUpstreamModelId },
+      ]),
+      `${ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX}${freeUpstreamModelId}`,
+    )!;
+    expect(organizationFree.configured.upstreamModelId).toBe(freeUpstreamModelId);
+    expect(organizationFree.provider.kind).toBe("openrouter-organization");
+    expect(routeAllowsSessionTitleRequests(organizationFree)).toBe(true);
+
+    expect(routeAllowsSessionTitleRequests(resolveTurnModel(settings, "gpt-5.6-sol")!)).toBe(true);
+    expect(routeAllowsSessionTitleRequests(null)).toBe(true);
+  });
+
+  test("an untitled session gets no title sidecar and no title tool", () => {
+    const plan = sessionTitleToolPlan({
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+      shouldRequestTitle: true,
+      parallelGenerationAvailable: true,
+      routeAllowsTitleRequests: routeAllowsSessionTitleRequests(
+        resolveTurnModel(settings, DEFAULT_OPENROUTER_MODEL_ID),
+      ),
+    });
+    expect(plan).toEqual({
+      promoteTitleTool: false,
+      generateTitleInParallel: false,
+      remoteFirstPartyMcpTools: ["goal_set"],
+      preparationIndependentToolNames: [],
+    });
+
+    expect(
+      sessionTitleToolPlan({
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: true,
+        parallelGenerationAvailable: false,
+        routeAllowsTitleRequests: false,
+      }),
+    ).toEqual(plan);
+  });
+
+  test("a titled session keeps ordinary title-tool disclosure", () => {
+    expect(
+      sessionTitleToolPlan({
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: false,
+        parallelGenerationAvailable: true,
+        routeAllowsTitleRequests: false,
       }),
     ).toEqual({
       promoteTitleTool: false,
@@ -252,5 +352,93 @@ describe("createSessionTitleAttemptToolDefinition", () => {
       updated: true,
       title: "Normalized topic",
     });
+  });
+});
+
+describe("sessionTitleReasoningEffort", () => {
+  const reasoning = (
+    runnable: boolean,
+    efforts: Array<"none" | "minimal" | "low" | "medium" | "high" | "xhigh">,
+  ) => ({
+    reasoning: {
+      upstream: "supported" as const,
+      runnable,
+      efforts,
+      defaultEffort: efforts.at(-1) ?? null,
+      required: false,
+    },
+  });
+
+  test("uses the lowest runnable effort regardless of declaration order", () => {
+    expect(sessionTitleReasoningEffort(reasoning(true, ["medium", "low"]))).toBe("low");
+    expect(sessionTitleReasoningEffort(reasoning(true, ["high", "minimal", "low"]))).toBe(
+      "minimal",
+    );
+    expect(sessionTitleReasoningEffort(reasoning(true, ["xhigh", "none", "medium"]))).toBe("none");
+  });
+
+  test("sends no reasoning parameter without a runnable reasoning control", () => {
+    expect(sessionTitleReasoningEffort(undefined)).toBeUndefined();
+    expect(sessionTitleReasoningEffort(reasoning(false, ["low", "medium"]))).toBeUndefined();
+    expect(sessionTitleReasoningEffort(reasoning(true, []))).toBeUndefined();
+  });
+});
+
+describe("sessionTitleGenerationOptions", () => {
+  const resolvedModel = resolveTurnModel(testSettings({ sandboxBackend: "none" }), "gpt-5.6-sol")!;
+  const signal = new AbortController().signal;
+
+  test("binds the resolved provider and the model's lowest runnable effort, not the turn's", () => {
+    expect(resolvedModel.configured.capabilities?.reasoning).toMatchObject({
+      runnable: true,
+      defaultEffort: "high",
+    });
+
+    const options = sessionTitleGenerationOptions({
+      resolvedModel,
+      modelName: "gpt-5.6-sol",
+      serviceTier: "priority",
+      signal,
+    });
+
+    expect(options.client).toBe(resolvedModel.client);
+    expect(options.provider).toBe(resolvedModel.provider);
+    expect(options.model).toBe(resolvedModel.model);
+    expect(options.modelName).toBe("gpt-5.6-sol");
+    expect(options.serviceTier).toBe("priority");
+    expect(options.reasoningEffort).toBe(
+      sessionTitleReasoningEffort(resolvedModel.configured.capabilities)!,
+    );
+    expect(options.reasoningEffort).toBe("low");
+    expect(options.signal).toBe(signal);
+  });
+
+  test("omits reasoning effort without a runnable reasoning control or a resolved model", () => {
+    const capabilities = resolvedModel.configured.capabilities!;
+    const withoutRunnableReasoning = sessionTitleGenerationOptions({
+      resolvedModel: {
+        ...resolvedModel,
+        configured: {
+          ...resolvedModel.configured,
+          capabilities: {
+            ...capabilities,
+            reasoning: { ...capabilities.reasoning, runnable: false },
+          },
+        },
+      },
+      modelName: "gpt-5.6-sol",
+      serviceTier: undefined,
+      signal,
+    });
+    expect("reasoningEffort" in withoutRunnableReasoning).toBe(false);
+    expect("serviceTier" in withoutRunnableReasoning).toBe(false);
+
+    const unresolved = sessionTitleGenerationOptions({
+      resolvedModel: null,
+      modelName: "scripted-model",
+      serviceTier: null,
+      signal,
+    });
+    expect(unresolved).toEqual({ modelName: "scripted-model", signal });
   });
 });

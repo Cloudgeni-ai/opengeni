@@ -7,7 +7,18 @@ import {
 } from "@/lib/analytics-consent";
 import type { AnalyticsConsent } from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
-import { journeyOperation, journeyOutcome, journeyPage } from "./analytics-journey";
+import {
+  journeyMilestone,
+  journeyOperation,
+  journeyOutcome,
+  journeyPage,
+} from "./analytics-journey";
+import {
+  isSignupAttributionValue,
+  signupAttributionAnalyticsProperties,
+  takePendingAuthReturn,
+  type AuthReturnEvent,
+} from "./signup-attribution";
 
 export type AnalyticsEventName =
   | "signup_submitted"
@@ -27,7 +38,13 @@ export type AnalyticsEventName =
   | "session_command_finished"
   | "model_connection_attempted"
   | "model_connection_finished"
-  | "model_connection_resolved";
+  | "model_connection_resolved"
+  | "signup_completed"
+  | "email_verified"
+  | "organization_setup_completed"
+  | "checkout_started"
+  | "checkout_completed"
+  | "first_turn_completed";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 export type AnalyticsProperty = boolean | number | string;
@@ -62,6 +79,9 @@ let activeIdentity: AnalyticsIdentity | null = null;
 let identifiedUserId: string | null = null;
 let identifiedAccountId: string | null = null;
 let suspended = false;
+/** Sessions this page started, awaiting their first completed turn (bounded). */
+const pendingFirstTurns = new Map<string, AnalyticsProperties>();
+const PENDING_FIRST_TURN_LIMIT = 20;
 
 declare global {
   interface Window {
@@ -148,6 +168,7 @@ export function captureAnalyticsEvent(
   properties: AnalyticsProperties = {},
 ): boolean {
   if (!analyticsCollectionAllowed()) return false;
+  if (name === "session_started") rememberStartedSession(properties);
   const acceptedIdentity = identityGeneration;
   const acceptedGeneration = initializationGeneration;
   const context = latestPathname ? journeyPage(latestPathname, latestSearch) : {};
@@ -190,6 +211,7 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
       providersReady = true;
       applyActiveIdentity();
       dispatchPageView(latestPathname);
+      captureAuthReturn(takePendingAuthReturn());
       window.dispatchEvent?.(new Event(ANALYTICS_COLLECTION_ENABLED_EVENT));
     }
   });
@@ -285,14 +307,26 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
             properties: safePosthogProperties(event.properties),
           }
         : null,
-    save_campaign_params: false,
-    save_referrer: false,
+    // Consented visitors keep closed campaign tokens and the referring domain;
+    // the outbound projection below still removes URLs and click identifiers.
+    save_campaign_params: true,
+    save_referrer: true,
     capture_pageview: false,
     capture_pageleave: false,
     disable_session_recording: true,
     person_profiles: "identified_only",
   });
   posthogClient = posthog;
+  // The landing URL may be gone after an in-app navigation; keep first-touch
+  // campaign tokens captured in memory as first-wins super properties.
+  const attribution = signupAttributionAnalyticsProperties();
+  if (attribution) {
+    try {
+      posthog.register_once(attribution);
+    } catch {
+      /* Optional provider API. */
+    }
+  }
 }
 
 function applyActiveIdentity(): void {
@@ -321,6 +355,13 @@ function applyActiveIdentity(): void {
     captureAnalyticsEvent("login_completed", { method: login.method, $insert_id: login.eventId });
 }
 
+const CAMPAIGN_TOKEN_KEY = /^(\$initial_)?utm_(source|medium|campaign|content|term)$/;
+const REFERRING_DOMAIN_KEY = /^\$(initial_)?referring_domain$/;
+const REFERRING_DOMAIN_VALUE = /^(\$direct|[a-z0-9-]+(\.[a-z0-9-]+)*)$/i;
+// PostHog's default campaign parameters beyond utm_*: ad/click identifiers.
+const CLICK_IDENTIFIER_KEY =
+  /(^|[_$])(gad_source|mc_cid|gclid|gclsrc|dclid|gbraid|wbraid|fbclid|msclkid|twclid|li_fat_id|igshid|ttclid|rdt_cid|epik|qclid|sccid|irclid|_kx|ph_keyword|search_engine)$/i;
+
 /** A third-party sink projection only; never modifies application data. */
 function safePosthogProperties(properties: Record<string, unknown>): Record<string, unknown> {
   const safe: Record<string, unknown> = { ...properties, $geoip_disable: true };
@@ -330,13 +371,64 @@ function safePosthogProperties(properties: Record<string, unknown>): Record<stri
       if (safe[key] && typeof safe[key] === "object" && !Array.isArray(safe[key])) {
         safe[key] = safePosthogProperties(safe[key] as Record<string, unknown>);
       }
-    } else if (/url|referrer|pathname|title|utm_|gclid|fbclid|msclkid/i.test(key)) {
+    } else if (CAMPAIGN_TOKEN_KEY.test(key)) {
+      if (!isSignupAttributionValue(safe[key])) delete safe[key];
+    } else if (REFERRING_DOMAIN_KEY.test(key)) {
+      if (typeof safe[key] !== "string" || !REFERRING_DOMAIN_VALUE.test(safe[key])) {
+        delete safe[key];
+      }
+    } else if (/url|referr|pathname|title|utm_/i.test(key) || CLICK_IDENTIFIER_KEY.test(key)) {
       delete safe[key];
     }
   }
   // Product navigation is represented by page/section/UUID properties, never
-  // by the ambient URL, page title, referral, or campaign query values.
+  // by the ambient URL, page title, referrer URL, or click identifiers. The
+  // only campaign facts kept are closed-charset utm tokens and the referring
+  // domain, for visitors who consented.
   return safe;
+}
+
+/** Report a consumed Better Auth return marker once collection is active. */
+function captureAuthReturn(marker: AuthReturnEvent | null): void {
+  if (!marker) return;
+  if (marker === "email_verified") {
+    captureAnalyticsEvent("email_verified", { method: "email" });
+    captureAnalyticsEvent("signup_completed", { method: "email", is_new_user: true });
+    return;
+  }
+  const [method, outcome] = marker.split("_") as ["google" | "github", "signup" | "signin"];
+  captureAnalyticsEvent("signup_completed", { method, is_new_user: outcome === "signup" });
+}
+
+function rememberStartedSession(properties: AnalyticsProperties): void {
+  const sessionId = properties.session_id;
+  if (typeof sessionId !== "string") return;
+  if (pendingFirstTurns.size >= PENDING_FIRST_TURN_LIMIT) {
+    const oldest = pendingFirstTurns.keys().next().value;
+    if (oldest !== undefined) pendingFirstTurns.delete(oldest);
+  }
+  const facts: AnalyticsProperties = { session_id: sessionId };
+  for (const key of ["workspace_id", "account_id"] as const) {
+    if (typeof properties[key] === "string") facts[key] = properties[key];
+  }
+  pendingFirstTurns.set(sessionId, facts);
+}
+
+/**
+ * The first agent turn of a session this page started completed while its
+ * view was open. Only the event type is inspected, never event content.
+ */
+export function observeSessionTurnEvents(
+  sessionId: string,
+  events: readonly { type: string }[],
+): void {
+  const facts = pendingFirstTurns.get(sessionId);
+  if (!facts || !events.some((event) => event.type === "turn.completed")) return;
+  pendingFirstTurns.delete(sessionId);
+  captureAnalyticsEvent("first_turn_completed", {
+    ...facts,
+    $insert_id: `first_turn_completed:${sessionId}`,
+  });
 }
 
 /** Request telemetry is observational: no request/response content or auth material. */
@@ -345,6 +437,8 @@ export function beginAnalyticsRequest(
   method: string,
 ): (status: number | null) => void {
   try {
+    const milestone = journeyMilestone(pathname, method);
+    if (milestone) return milestoneFinisher(milestone);
     const operation = journeyOperation(pathname, method);
     if (!operation || !analyticsCollectionAllowed()) return () => {};
     const generation = identityGeneration;
@@ -368,6 +462,22 @@ export function beginAnalyticsRequest(
   } catch {
     return () => {};
   }
+}
+
+/** A funnel milestone is reported only when its request was accepted. */
+function milestoneFinisher(
+  name: "checkout_started" | "organization_setup_completed",
+): (status: number | null) => void {
+  if (!analyticsCollectionAllowed()) return () => {};
+  const generation = identityGeneration;
+  const consentGeneration = initializationGeneration;
+  let finished = false;
+  return (status) => {
+    if (finished) return;
+    finished = true;
+    if (generation !== identityGeneration || consentGeneration !== initializationGeneration) return;
+    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name);
+  };
 }
 
 /** Bind asynchronous provider results to the initiating identity and consent. */
@@ -402,6 +512,7 @@ function resetProviderIdentity(force = false): void {
   }
   identifiedUserId = null;
   identifiedAccountId = null;
+  pendingFirstTurns.clear();
 }
 
 async function initializeGa4(measurementId: string): Promise<void> {
@@ -491,4 +602,5 @@ installAnalyticsObserver({
   capture: captureAnalyticsEvent,
   request: beginAnalyticsRequest,
   connection: trackModelConnection,
+  sessionEvents: observeSessionTurnEvents,
 });

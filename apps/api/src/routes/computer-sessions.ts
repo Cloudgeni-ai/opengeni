@@ -117,6 +117,7 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -176,6 +177,23 @@ export async function captureModelComputerFrame(
     );
   }
   return captured;
+}
+
+/** One validated screen frame, served as sandboxed, non-embeddable user content. */
+export function computerScreenshotResponse(
+  frame: Pick<ComputerControlFrame, "data" | "mediaType" | "metadataHeader">,
+): Response {
+  // Copy exactly the image bytes: a Node Buffer view may share a larger
+  // backing allocation, which `.slice().buffer` would expose whole.
+  return new Response(Uint8Array.from(frame.data).buffer, {
+    status: 200,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": frame.mediaType,
+      "x-opengeni-computer-frame": frame.metadataHeader,
+      ...USER_CONTENT_SECURITY_HEADERS,
+    },
+  });
 }
 
 /** Public ComputerSession resource surface. Physical app/window authority stays
@@ -488,14 +506,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           }
         },
       );
-      return new Response(frame.data.slice().buffer, {
-        status: 200,
-        headers: {
-          "cache-control": "no-store",
-          "content-type": frame.mediaType,
-          "x-opengeni-computer-frame": frame.metadataHeader,
-        },
-      });
+      return computerScreenshotResponse(frame);
     },
   );
 

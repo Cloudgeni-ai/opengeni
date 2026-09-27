@@ -143,18 +143,61 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0519_workspace_integration_primitives.sql",
+          (migration) => migration.path === "0528_workspace_integration_primitives.sql",
         )
-          ? "0519_workspace_integration_primitives.sql"
+          ? "0528_workspace_integration_primitives.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+                (migration) => migration.path === "0527_session_attention_excludes_commentary.sql",
               )
-            ? "0518_member_connection_read_backfill.sql"
+            ? "0527_session_attention_excludes_commentary.sql"
             : sourceContract.migrations.some(
-                  (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+                  (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
                 )
-              ? "0515_autonomous_learning_defaults.sql"
-              : "0514_failed_session_variable_set_attach.sql",
+              ? "0526_automatic_checkpoint_discontinuity.sql"
+              : sourceContract.migrations.some(
+                    (migration) =>
+                      migration.path === "0525_attached_browser_opaque_generations.sql",
+                  )
+                ? "0525_attached_browser_opaque_generations.sql"
+                : sourceContract.migrations.some(
+                      (migration) => migration.path === "0524_codex_plan_entitlement.sql",
+                    )
+                  ? "0524_codex_plan_entitlement.sql"
+                  : sourceContract.migrations.some(
+                        (migration) => migration.path === "0523_modal_provider_create_fence.sql",
+                      )
+                    ? "0523_modal_provider_create_fence.sql"
+                    : sourceContract.migrations.some(
+                          (migration) => migration.path === "0522_scoped_machine_update_status.sql",
+                        )
+                      ? "0522_scoped_machine_update_status.sql"
+                      : sourceContract.migrations.some(
+                            (migration) =>
+                              migration.path === "0521_verified_signup_trial_runtime_switch.sql",
+                          )
+                        ? "0521_verified_signup_trial_runtime_switch.sql"
+                        : sourceContract.migrations.some(
+                              (migration) =>
+                                migration.path === "0520_session_code_search_frozen.sql",
+                            )
+                          ? "0520_session_code_search_frozen.sql"
+                          : sourceContract.migrations.some(
+                                (migration) =>
+                                  migration.path ===
+                                  "0519_session_recovery_backlog_excludes_paused.sql",
+                              )
+                            ? "0519_session_recovery_backlog_excludes_paused.sql"
+                            : sourceContract.migrations.some(
+                                  (migration) =>
+                                    migration.path === "0518_member_connection_read_backfill.sql",
+                                )
+                              ? "0518_member_connection_read_backfill.sql"
+                              : sourceContract.migrations.some(
+                                    (migration) =>
+                                      migration.path === "0515_autonomous_learning_defaults.sql",
+                                  )
+                                ? "0515_autonomous_learning_defaults.sql"
+                                : "0514_failed_session_variable_set_attach.sql",
       );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
@@ -173,6 +216,14 @@ describe("release schema contract", () => {
           ),
         }
       : sourceContract;
+    const automaticCheckpointDiscontinuityMigration = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
+    );
+    if (automaticCheckpointDiscontinuityMigration)
+      expect(automaticCheckpointDiscontinuityMigration.deploymentMode).toBe("maintenance");
+    const automaticCheckpointDiscontinuity = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
+    );
     const autonomousLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
     );
@@ -185,8 +236,32 @@ describe("release schema contract", () => {
     const memberConnectionReadBackfill = completeSourceContract.migrations.some(
       (migration) => migration.path === "0518_member_connection_read_backfill.sql",
     );
+    const sessionRecoveryBacklogExcludesPaused = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
+    );
+    const sessionCodeSearchFrozen = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0520_session_code_search_frozen.sql",
+    );
+    const modalProviderCreateFence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0523_modal_provider_create_fence.sql",
+    );
+    const attachedBrowserOpaqueGenerations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0525_attached_browser_opaque_generations.sql",
+    );
+    const codexPlanEntitlement = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0524_codex_plan_entitlement.sql",
+    );
+    const scopedMachineUpdateStatus = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0522_scoped_machine_update_status.sql",
+    );
+    const verifiedSignupTrialRuntimeSwitch = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0521_verified_signup_trial_runtime_switch.sql",
+    );
+    const sessionAttentionExcludesCommentary = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0527_session_attention_excludes_commentary.sql",
+    );
     const workspaceIntegrationPrimitives = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0519_workspace_integration_primitives.sql",
+      (migration) => migration.path === "0528_workspace_integration_primitives.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -445,7 +520,16 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionAttentionExcludesCommentary ? 1 : 0) +
         (workspaceIntegrationPrimitives ? 1 : 0) +
+        (automaticCheckpointDiscontinuity ? 1 : 0) +
+        (attachedBrowserOpaqueGenerations ? 1 : 0) +
+        (codexPlanEntitlement ? 1 : 0) +
+        (modalProviderCreateFence ? 1 : 0) +
+        (scopedMachineUpdateStatus ? 1 : 0) +
+        (verifiedSignupTrialRuntimeSwitch ? 1 : 0) +
+        (sessionCodeSearchFrozen ? 1 : 0) +
+        (sessionRecoveryBacklogExcludesPaused ? 1 : 0) +
         (memberConnectionRead ? 1 : 0) +
         (memberConnectionReadBackfillIndex ? 1 : 0) +
         (memberConnectionReadBackfill ? 1 : 0) +
@@ -747,8 +831,35 @@ describe("release schema contract", () => {
       ...(memberConnectionReadBackfill
         ? { latestMigration: "0518_member_connection_read_backfill.sql" }
         : {}),
+      ...(sessionRecoveryBacklogExcludesPaused
+        ? {
+            latestMigration: "0519_session_recovery_backlog_excludes_paused.sql",
+          }
+        : {}),
+      ...(sessionCodeSearchFrozen
+        ? { latestMigration: "0520_session_code_search_frozen.sql" }
+        : {}),
+      ...(verifiedSignupTrialRuntimeSwitch
+        ? { latestMigration: "0521_verified_signup_trial_runtime_switch.sql" }
+        : {}),
+      ...(scopedMachineUpdateStatus
+        ? { latestMigration: "0522_scoped_machine_update_status.sql" }
+        : {}),
+      ...(modalProviderCreateFence
+        ? { latestMigration: "0523_modal_provider_create_fence.sql" }
+        : {}),
+      ...(codexPlanEntitlement ? { latestMigration: "0524_codex_plan_entitlement.sql" } : {}),
+      ...(attachedBrowserOpaqueGenerations
+        ? { latestMigration: "0525_attached_browser_opaque_generations.sql" }
+        : {}),
+      ...(automaticCheckpointDiscontinuity
+        ? { latestMigration: "0526_automatic_checkpoint_discontinuity.sql" }
+        : {}),
+      ...(sessionAttentionExcludesCommentary
+        ? { latestMigration: "0527_session_attention_excludes_commentary.sql" }
+        : {}),
       ...(workspaceIntegrationPrimitives
-        ? { latestMigration: "0519_workspace_integration_primitives.sql" }
+        ? { latestMigration: "0528_workspace_integration_primitives.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -761,7 +872,16 @@ describe("release schema contract", () => {
             "0516_member_connection_read.sql",
             "0517_member_connection_read_backfill_index.sql",
             "0518_member_connection_read_backfill.sql",
-            "0519_workspace_integration_primitives.sql",
+            "0519_session_recovery_backlog_excludes_paused.sql",
+            "0520_session_code_search_frozen.sql",
+            "0521_verified_signup_trial_runtime_switch.sql",
+            "0522_scoped_machine_update_status.sql",
+            "0523_modal_provider_create_fence.sql",
+            "0524_codex_plan_entitlement.sql",
+            "0525_attached_browser_opaque_generations.sql",
+            "0526_automatic_checkpoint_discontinuity.sql",
+            "0527_session_attention_excludes_commentary.sql",
+            "0528_workspace_integration_primitives.sql",
           ].includes(migration.path),
       ),
     };
@@ -2229,7 +2349,16 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
-      "0519_workspace_integration_primitives.sql",
+      "0528_workspace_integration_primitives.sql",
+      "0525_attached_browser_opaque_generations.sql",
+      "0527_session_attention_excludes_commentary.sql",
+      "0521_verified_signup_trial_runtime_switch.sql",
+      "0522_scoped_machine_update_status.sql",
+      "0523_modal_provider_create_fence.sql",
+      "0524_codex_plan_entitlement.sql",
+      "0526_automatic_checkpoint_discontinuity.sql",
+      "0520_session_code_search_frozen.sql",
+      "0519_session_recovery_backlog_excludes_paused.sql",
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
@@ -2735,7 +2864,16 @@ describe("release schema contract", () => {
       "0516_member_connection_read.sql",
       "0517_member_connection_read_backfill_index.sql",
       "0518_member_connection_read_backfill.sql",
-      "0519_workspace_integration_primitives.sql",
+      "0519_session_recovery_backlog_excludes_paused.sql",
+      "0520_session_code_search_frozen.sql",
+      "0521_verified_signup_trial_runtime_switch.sql",
+      "0522_scoped_machine_update_status.sql",
+      "0523_modal_provider_create_fence.sql",
+      "0524_codex_plan_entitlement.sql",
+      "0525_attached_browser_opaque_generations.sql",
+      "0526_automatic_checkpoint_discontinuity.sql",
+      "0527_session_attention_excludes_commentary.sql",
+      "0528_workspace_integration_primitives.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

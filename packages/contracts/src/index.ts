@@ -74,6 +74,7 @@ export * from "./video-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
+export * from "./signup-attribution";
 export * from "./tool-catalog";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
@@ -2328,6 +2329,9 @@ export const WorkspaceSettingsSchema = z
     // Whether agents may expose and invoke the built-in structured human-input
     // tool. Absent preserves the historical enabled behavior.
     agentHumanInputEnabled: z.boolean().optional(),
+    // Whether agents get the Jev-backed `code_search` tool. Absent or null
+    // follows the deployment default; the deployment can always keep it off.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
@@ -2488,6 +2492,8 @@ export const UpdateWorkspaceSettingsRequest = z
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
+    // null returns the workspace to the deployment default.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
@@ -7401,6 +7407,37 @@ export const MODEL_CONTEXT_LABEL = "[Application context attached to this user m
 export const SESSION_GOAL_CONTEXT_LABEL =
   "[Session goal frozen when this turn was accepted]" as const;
 
+const MODEL_CONTEXT_WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+] as const;
+
+/**
+ * Wall-clock time as the model sees it, for example
+ * `Saturday 2026-09-26 07:51 UTC`. Minute precision gives the model the current
+ * date and time without prompting sub-second answers. Callers pass a durable
+ * timestamp (message acceptance, update creation or delivery), never the
+ * inference-time clock, so persisted history renders once and replays exactly.
+ */
+export function formatModelContextTimestamp(value: Date | string): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+  if (Number.isNaN(date.getTime())) {
+    throw new RangeError("Model context timestamp is not a valid date");
+  }
+  const iso = date.toISOString();
+  return `${MODEL_CONTEXT_WEEKDAYS[date.getUTCDay()]} ${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/** The time part of one accepted user-role message, from its acceptance time. */
+export function renderMessageSentAtForModel(sentAt: Date | string): string {
+  return `[Message sent ${formatModelContextTimestamp(sentAt)}]`;
+}
+
 /**
  * Render the exact goal authority frozen with one accepted logical turn. Goal
  * state belongs at the chronological input boundary, not in the mutable
@@ -7427,19 +7464,22 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
 /**
  * Build one canonical user-role message body. `modelContext` is ordinary
  * message content, while `goalSnapshot` is the exact goal authority frozen at
- * turn acceptance. Both remain in the visible message's chronological
- * position, and presentation layers may omit their leading parts.
+ * turn acceptance. `sentAt` is the message's durable acceptance time, so the
+ * model knows the current date without spending a tool call on it. All of them
+ * remain in the visible message's chronological position, and presentation
+ * layers may omit their leading parts.
  */
 export function renderUserMessageContentForModel(
   text: string,
   annotations: readonly TimelineAnnotation[],
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
+  sentAt?: Date | string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
   const goalContext = renderSessionGoalContext(goalSnapshot);
-  if (!context && !goalContext) return visibleContent;
+  if (!context && !goalContext && sentAt == null) return visibleContent;
   return [
     ...(goalContext
       ? [
@@ -7456,6 +7496,9 @@ export function renderUserMessageContentForModel(
             text: `${MODEL_CONTEXT_LABEL}\n${context}`,
           },
         ]
+      : []),
+    ...(sentAt != null
+      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt) }]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -7737,6 +7780,14 @@ export const NewSessionDraft = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
+  /**
+   * True when the person chose this model policy (model, reasoning, latency).
+   * False means it follows the resolved default for new chats, so a later
+   * subscription or credit purchase can replace it. Absent on a save from an
+   * older client; the server then treats a draft that names the deployment
+   * default as following the default and any other model as chosen.
+   */
+  modelProvided: z.boolean().optional(),
   /** Absent on legacy drafts; null is explicit provenance for the Default project. */
   selectedProjectChannelId: z.string().uuid().nullable().optional(),
   options: NewSessionDraftOptions,
@@ -7753,6 +7804,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
+  modelProvided: true,
   selectedProjectChannelId: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -8328,18 +8380,38 @@ export const SessionQueueSnapshot = z.object({
 });
 export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
+type RenderableSessionSystemUpdate = Pick<
+  SessionSystemUpdate,
+  "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+> &
+  Partial<Pick<SessionSystemUpdate, "createdAt">>;
+
+/**
+ * Durable delivery time of one claimed batch: the `deliveredAt` written to
+ * every member in the same claim transaction. Rendering it tells the model the
+ * current time on turns that no human message started.
+ */
+export type SessionSystemUpdateBatchRenderOptions = {
+  deliveredAt?: Date | string | null;
+};
+
+function renderSessionSystemUpdateDeliveredAt(
+  options: SessionSystemUpdateBatchRenderOptions,
+): string[] {
+  return options.deliveredAt == null
+    ? []
+    : [`Delivered: ${formatModelContextTimestamp(options.deliveredAt)}`];
+}
+
 /**
  * Deterministic, protocol-safe model representation of one claimed machine
  * input batch. This exact string is persisted before inference and replayed on
  * every later turn; callers must not synthesize an equivalent transient copy.
+ * Times come from the durable update rows, never from the rendering clock.
  */
 export function renderSessionSystemUpdateBatch(
-  updates: ReadonlyArray<
-    Pick<
-      SessionSystemUpdate,
-      "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
-    >
-  >,
+  updates: ReadonlyArray<RenderableSessionSystemUpdate>,
+  options: SessionSystemUpdateBatchRenderOptions = {},
 ): string {
   if (updates.length === 0) {
     throw new TypeError("A durable machine-input batch requires at least one update");
@@ -8347,12 +8419,14 @@ export function renderSessionSystemUpdateBatch(
   return [
     "[OpenGeni internal updates]",
     "These platform updates were delivered together for this inference.",
+    ...renderSessionSystemUpdateDeliveredAt(options),
     JSON.stringify({
       updates: updates.map((update) => ({
         id: update.id,
         kind: update.kind,
         classification: update.classification,
         sourceId: update.sourceId,
+        ...(update.createdAt ? { createdAt: formatModelContextTimestamp(update.createdAt) } : {}),
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
@@ -8374,6 +8448,7 @@ export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurre
  */
 function renderScheduledOccurrenceTaskBatch(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+  options: SessionSystemUpdateBatchRenderOptions,
 ): string | null {
   if (updates.length === 0 || updates.some((update) => update.kind !== "scheduled_occurrence")) {
     return null;
@@ -8398,6 +8473,7 @@ function renderScheduledOccurrenceTaskBatch(
   return [
     SCHEDULED_OCCURRENCE_TASK_LABEL,
     introduction,
+    ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
@@ -8407,6 +8483,9 @@ function renderScheduledOccurrenceTaskBatch(
         `Scheduled task ID: ${occurrence.payload.scheduledTaskId}`,
         `Scheduled task run ID: ${occurrence.payload.scheduledTaskRunId}`,
         `Update ID: ${occurrence.update.id}`,
+        ...(occurrence.update.createdAt
+          ? [`Created: ${formatModelContextTimestamp(occurrence.update.createdAt)}`]
+          : []),
         "Instructions:",
         occurrence.payload.text,
       ];
@@ -8417,18 +8496,20 @@ function renderScheduledOccurrenceTaskBatch(
 export function sessionSystemUpdateBatchHistoryItem(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
   goalSnapshot?: SessionGoalSnapshot,
-  options: { promoteScheduledOccurrenceToUser?: boolean } = {},
+  options: SessionSystemUpdateBatchRenderOptions & {
+    promoteScheduledOccurrenceToUser?: boolean;
+  } = {},
 ): { type: "message"; role: "system" | "user"; content: string } {
   const goalContext = renderSessionGoalContext(goalSnapshot);
   const scheduledTask = options.promoteScheduledOccurrenceToUser
-    ? renderScheduledOccurrenceTaskBatch(updates)
+    ? renderScheduledOccurrenceTaskBatch(updates, options)
     : null;
   return {
     type: "message",
     role: scheduledTask ? "user" : "system",
     content: [
       ...(goalContext ? [`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`] : []),
-      scheduledTask ?? renderSessionSystemUpdateBatch(updates),
+      scheduledTask ?? renderSessionSystemUpdateBatch(updates, options),
     ].join("\n\n"),
   };
 }
@@ -12335,6 +12416,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // model admission for the life of the session; portable ⇒ plaintext compaction
     // and free mid-session provider switching (today's behavior).
     codexCompactionMode: CodexCompactionMode,
+    /**
+     * The `code_search` decision frozen at create. A turn gets the tool only when
+     * this is true, the deployment still offers it, the workspace is not Off, and
+     * the turn has POSIX compute.
+     */
+    codeSearchEnabled: z.boolean().default(false),
     /** Personal (authenticated subject) workspace pin state, never workspace-global. */
     pinned: z.boolean().default(false),
     /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -12703,6 +12790,63 @@ export const SessionEventType = z.enum([
   "machine.runner.restarted",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
+
+/**
+ * The assistant channel on `agent.message.delta` / `agent.message.completed`:
+ * the provider-declared Responses phase, or else the Agents SDK's own rule once
+ * the response is known: `commentary` when the same response asks for tool work
+ * or ends with a later message (the SDK never returns it as the final output),
+ * `final_answer` for the message it returns. Deltas carry only a declared
+ * phase. Absent on legacy events and on the settlement copy.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer";
+
+function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
+  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : null;
+}
+
+export function assistantMessagePhase(payload: unknown): AssistantMessagePhase | null {
+  const phase = sessionEventPayloadRecord(payload)?.phase;
+  return phase === "commentary" || phase === "final_answer" ? phase : null;
+}
+
+/**
+ * The reply a human or API message received from a turn that ended waiting for
+ * input. Such a turn settles with an empty `output` (the wait, not an answer,
+ * ended it), and its answer shares a model response with the `wait_for_input`
+ * call, so it streams as commentary. Settlement records that latest assistant
+ * message on `turn.completed` as `reply` so unread attention and Slack treat it
+ * as the answer (SDK chat and the timeline already show a wait-ended turn's
+ * latest message). It is not a result: a parent joining a child result still
+ * reads `output`. Machine-started turns never carry one.
+ */
+export function turnCompletedReply(payload: unknown): string | null {
+  const reply = sessionEventPayloadRecord(payload)?.reply;
+  return typeof reply === "string" && reply.trim().length > 0 ? reply : null;
+}
+
+/**
+ * A completion the worker streamed for one provider message: it always carries
+ * a `phase`, and the provider `messageId` when the provider sent one. The
+ * phase-less, id-less shape is the settlement copy published with
+ * `turn.completed` by older workers, or when a stream did not complete the
+ * final text itself. A streamed final message is followed by its
+ * `turn.completed` with the same output, so consumers that act on settled
+ * answers (Slack, `session_wait` change mode) wait for that instead.
+ */
+export function isStreamedAssistantMessageCompletion(event: {
+  type: string;
+  payload: unknown;
+}): boolean {
+  if (event.type !== "agent.message.completed") return false;
+  const payload = sessionEventPayloadRecord(event.payload);
+  return (
+    (typeof payload?.messageId === "string" && payload.messageId.length > 0) ||
+    assistantMessagePhase(payload) !== null
+  );
+}
 
 /**
  * Stable semantic groups for bounded session monitoring. These are a read
@@ -16141,6 +16285,7 @@ export const MachineRuntime = z.object({
   updateChannel: z.enum(["stable", "beta"]).nullable(),
   desiredVersion: z.string().nullable(),
   versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  updateBlockedReason: z.string().nullable().optional(),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
 });
@@ -16823,10 +16968,38 @@ export const WorkspaceModelCatalogModel =
   );
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
+/**
+ * Why a new chat or scheduled task without an explicit model gets its default:
+ * a saved workspace default, the first usable connected subscription model, the
+ * configured OpenGeni credits model while the organization holds a credit
+ * balance, or the deployment default.
+ */
+export const DefaultModelSelectionSource = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["workspace", "subscription", "credits", "deployment"]),
+);
+export type DefaultModelSelectionSource = z.infer<typeof DefaultModelSelectionSource>;
+
+export const DefaultModelSelection = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    model: z.string().min(1),
+    reasoningEffort: ReasoningEffort,
+    source: DefaultModelSelectionSource,
+  }),
+);
+export type DefaultModelSelection = z.infer<typeof DefaultModelSelection>;
+
 export const WorkspaceModelCatalogResponse =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z.object({
       models: z.array(WorkspaceModelCatalogModel),
+      /** Default for new chats and scheduled tasks that name no model. */
+      defaultSelection: DefaultModelSelection.optional(),
+      /**
+       * The default this workspace would use once its organization holds an
+       * OpenGeni credit balance. Null when this deployment does not bill
+       * credits.
+       */
+      creditsSelection: DefaultModelSelection.nullable().optional(),
     }),
   );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
@@ -16843,6 +17016,9 @@ export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
+
+/** Public OpenGeni documentation linked from the web console's Help menu by default. */
+export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
@@ -16891,12 +17067,26 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
+    // Whether this deployment offers the Jev-backed code_search agent tool and
+    // whether workspaces without their own setting get it.
+    codeSearch: z
+      .object({ available: z.boolean(), workspaceDefault: z.enum(["off", "on", "split"]) })
+      .default({ available: false, workspaceDefault: "off" }),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
+    // Product documentation the console links from its Help menu. The API
+    // always sends it: DEFAULT_OPENGENI_DOCUMENTATION_URL unless operators
+    // point it elsewhere or hide it (null) with OPENGENI_DOCUMENTATION_URL.
+    // Parsing adds no default, so an absent field still means a server that
+    // predates it and clients show no link rather than guessing.
+    documentationUrl: z
+      .url({ protocol: /^https?$/u })
+      .nullable()
+      .optional(),
     analytics: z
       .object({
         consentRequired: z.boolean(),
@@ -17047,5 +17237,6 @@ export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discover
 export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
+export * from "./mcp-catalog-limits";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";

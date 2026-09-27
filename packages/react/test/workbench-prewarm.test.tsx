@@ -1706,6 +1706,50 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     );
   }
 
+  test.each([
+    { tab: WORKBENCH_TAB_BROWSER, label: "Browser" },
+    { tab: WORKBENCH_TAB_DESKTOP, label: "Desktop" },
+  ])(
+    "agent machine status does not describe the independent $label resource",
+    async ({ tab, label }) => {
+      const { client, spy } = coldClient({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+        listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+        listAttachedBrowsers: async () => ({ revision: 1, devices: [], bridges: [] }),
+        listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+      });
+      const rendered = await renderComponent(
+        withProvider(
+          client,
+          <SandboxWorkspace
+            sessionId={SESSION_ID}
+            events={[]}
+            primary={<div>chat</div>}
+            surfaces={[WORKBENCH_TAB_FILES, tab]}
+            initialTab={WORKBENCH_TAB_FILES}
+          />,
+        ),
+      );
+      const machineChip = () =>
+        rendered.container.querySelector('[role="status"][aria-label^="Machine:"]');
+      try {
+        await flush();
+        expect(machineChip()?.textContent).toContain("Sleeping");
+        await act(async () => findTab(rendered.container, label)!.click());
+        expect(selectedTabName(rendered.container)).toBe(label);
+        expect(machineChip() === null).toBe(true);
+        // The independent viewer remains the selected surface; hiding an unrelated
+        // chip must not hide that resource or attach a viewer to the agent's box.
+        expect(rendered.container.querySelector('[role="tabpanel"]:not([hidden])')).not.toBeNull();
+        expect(spy.attachCalls).toBe(0);
+        await act(async () => findTab(rendered.container, "Files")!.click());
+        expect(machineChip()?.textContent).toContain("Sleeping");
+      } finally {
+        await rendered.unmount();
+      }
+    },
+  );
+
   test("host tab requests open artifacts once per request without warming compute", async () => {
     const { client, spy } = coldClient();
     const selected: string[] = [];

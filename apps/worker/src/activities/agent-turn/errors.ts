@@ -22,6 +22,11 @@ import {
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
+  PROVIDER_QUOTA_EXHAUSTED_CODE,
+  type ProviderQuotaExhaustion,
+  type ProviderQuotaScope,
+  classifyProviderQuotaError,
+  providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
@@ -34,12 +39,19 @@ import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
 import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
+  CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
+  classifyCodexEntitlementRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   isCodexTransportError,
 } from "@opengeni/codex";
+import {
+  CodexPlanEntitlementError,
+  codexPlanEntitlementFailurePayload,
+  codexRequestRejectedFailurePayload,
+} from "./codex-plan-entitlement";
 import {
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
@@ -614,6 +626,14 @@ export function compactionFailureReasonFromError(error: unknown): string {
       `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
     );
   }
+  // An exhausted provider quota is not retried (see agentRunFailurePayload),
+  // so name the refusal plainly instead of the raw diagnostic envelope.
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return compactionFailureReason(
+      `${providerQuotaExhaustedMessage(quota.scope)} Active history was preserved.`,
+    );
+  }
   if (
     error instanceof CompactionProviderResponseError ||
     error instanceof EmptyCompactionSummaryError
@@ -640,8 +660,12 @@ export function compactionFailureTurnEventPayload(
   recovery: "user_message";
   compacted: false;
   providerRejection?: CompactionProviderRejection;
+  quotaScope?: ProviderQuotaScope;
 } {
   const rejection = compactionProviderRejection(error);
+  // The same closed marker as a `provider_quota_exhausted` turn failure, so
+  // clients can name the exhausted limit and offer another model here too.
+  const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
     code: "context_compaction_failed",
@@ -649,6 +673,7 @@ export function compactionFailureTurnEventPayload(
     recovery: "user_message",
     compacted: false,
     ...(rejection ? { providerRejection: rejection } : {}),
+    ...(quota ? { quotaScope: quota.scope } : {}),
   };
 }
 
@@ -666,6 +691,12 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   // invalidates only the exact participating artifacts and recovers the same
   // logical turn; when nothing can be invalidated it fails closed there.
   if (classifyCodexEncryptedArtifactRejection(error)) return true;
+  // A ChatGPT plan that no longer includes the model refuses the compaction
+  // request exactly as it refuses an ordinary one (often with an empty 400).
+  // Failure settlement re-checks the plan and, when it proves the loss,
+  // excludes that account for the model and fails the same turn over; an
+  // unexplained rejection still fails there with typed copy.
+  if (classifyCodexEntitlementRejection(error)) return true;
   return agentRunFailurePayload(error).retryable === true;
 }
 
@@ -846,6 +877,27 @@ export function isTransientProviderError(error: unknown): boolean {
   );
 }
 
+/** An explicit `usage_limit_reached` type or code string anywhere on the error chain. */
+function hasCodexUsageLimitType(error: unknown): boolean {
+  return collectErrorStrings(error).some((value) => value.includes(CODEX_USAGE_LIMIT_ERROR_TYPE));
+}
+
+/**
+ * Recognize an exhausted API-key provider quota (a daily or monthly allowance,
+ * a free-tier day cap, or an account out of credits) as distinct from an
+ * ordinary per-minute rate limit. Retrying within the bounded same-turn budget
+ * cannot succeed, so the turn fails promptly instead. Subscription transports
+ * own their quota semantics through credential rotation and durable capacity
+ * waits, so a Codex or SuperGrok transport error never classifies here.
+ */
+export function classifyProviderQuotaExhaustionError(
+  error: unknown,
+): ProviderQuotaExhaustion | null {
+  if (isCodexTransportError(error) || isXaiSubscriptionTransportError(error)) return null;
+  // The same reader the OpenAI SDK retry veto uses, so the two never disagree.
+  return classifyProviderQuotaError(error);
+}
+
 export type XaiCredentialFailure = {
   kind: "auth" | "forbidden" | "rate_limit";
   cooldownMs: number | null;
@@ -952,6 +1004,11 @@ function baseAgentRunFailurePayload(
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
+  quotaScope?: ProviderQuotaScope;
+  /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
+  planType?: string | null;
+  /** Product model id a `codex_plan_entitlement` failure refers to. */
+  model?: string | null;
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
@@ -1094,6 +1151,29 @@ function baseAgentRunFailurePayload(
       ...(Object.keys(details.database).length > 0 ? { database: details.database } : {}),
     };
   }
+  // Codex plan entitlement: the settlement path normally re-checks the plan
+  // and records a precise payload. These branches keep any other path from
+  // surfacing the SDK's raw "400 status code (no body)" text.
+  if (error instanceof CodexPlanEntitlementError) {
+    return error.payload;
+  }
+  const entitlementRejection = classifyCodexEntitlementRejection(error);
+  if (entitlementRejection) {
+    return entitlementRejection.evidence === "plan_entitlement"
+      ? codexPlanEntitlementFailurePayload({
+          accountLabel: null,
+          planType: null,
+          planChanged: false,
+          modelId: null,
+          rejection: entitlementRejection,
+        })
+      : codexRequestRejectedFailurePayload({
+          accountLabel: null,
+          planType: null,
+          rejection: entitlementRejection,
+          planChecked: false,
+        });
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with
@@ -1104,8 +1184,11 @@ function baseAgentRunFailurePayload(
   // `usage_limit_reached` shape must still outrank generic 429 retryability.
   // Credential quarantine/failover remains separately provenance-gated by
   // `isCodexTransportError`; this branch only chooses the truthful user payload.
+  // The looser "429 ... usage limit" wording counts only on a Codex transport
+  // error: an API-key provider's 429 that says "usage limit" is provider quota
+  // evidence, not a ChatGPT/Codex subscription cap.
   const usageLimit = classifyCodexUsageLimitError(error);
-  if (usageLimit) {
+  if (usageLimit && (isCodexTransportError(error) || hasCodexUsageLimitType(error))) {
     return codexUsageLimitFailurePayload(usageLimit, message);
   }
   const codexTimeout = classifyCodexResponseTimeoutError(error, {
@@ -1157,6 +1240,20 @@ function baseAgentRunFailurePayload(
       retryable: true,
     };
   }
+  // An exhausted quota also arrives as HTTP 429 (or 402), but no retry within
+  // the finite same-turn budget can succeed. Fail the turn promptly with a
+  // distinct code so the client can offer another model; ordinary short rate
+  // limits fall through to the retryable branch below.
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return {
+      error: providerQuotaExhaustedMessage(quota.scope),
+      code: PROVIDER_QUOTA_EXHAUSTED_CODE,
+      retryable: false,
+      quotaScope: quota.scope,
+      ...(message ? { detail: message } : {}),
+    };
+  }
   if (
     status === 429 ||
     code === "rate_limit_exceeded" ||
@@ -1200,7 +1297,11 @@ function baseAgentRunFailurePayload(
 }
 
 export type CodexCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit" | "quota";
+  /**
+   * `plan_entitlement` is produced only after a plan re-check proves the
+   * serving account's current plan does not include the requested model.
+   */
+  kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
 };
 
@@ -1221,7 +1322,11 @@ export function codexCredentialCooldownUntil(
   > | null,
   now: Date,
 ): Date | null {
-  if (failure.kind === "auth" || failure.kind === "forbidden") {
+  if (
+    failure.kind === "auth" ||
+    failure.kind === "forbidden" ||
+    failure.kind === "plan_entitlement"
+  ) {
     return null;
   }
   const providerReset =
@@ -1279,6 +1384,12 @@ export function classifyCodexCredentialFailure(error: unknown): CodexCredentialF
   // Their HTTP status codes are not Codex account state and must never walk the
   // subscription pool or replay a tool on another credential.
   if (!isCodexTransportError(error)) {
+    return null;
+  }
+  // Plan/model entitlement evidence (an explicit plan refusal, or an empty
+  // HTTP 400) is not account health or quota. The worker re-checks the plan
+  // first; only a proven entitlement loss walks the pool, as `plan_entitlement`.
+  if (classifyCodexEntitlementRejection(error)) {
     return null;
   }
   const usageLimit = classifyCodexUsageLimitError(error);

@@ -23,7 +23,13 @@ import {
   getLogger,
   invalidateServerToolsCache,
 } from "@openai/agents";
-import { RunToolApprovalItem, Usage } from "@openai/agents-core";
+import {
+  Agent,
+  RunItemStreamEvent,
+  RunMessageOutputItem,
+  RunToolApprovalItem,
+  Usage,
+} from "@openai/agents-core";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import {
@@ -167,6 +173,7 @@ import {
   CODEX_APPS_MCP_URL,
   type CodexTokenSnapshot,
 } from "@opengeni/codex";
+import { hostShellSession } from "./isolated-git-home-fixture";
 
 function makeCodexAppsAuth(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): {
   clientVersion: string;
@@ -882,32 +889,37 @@ describe("runtime event normalization", () => {
   });
 
   test("preserves the assistant message phase on completed events", () => {
-    const [commentary] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: {
-        type: "message_output_item",
-        text: "Waiting for the child run to finish.",
-        rawItem: {
-          role: "assistant",
-          status: "completed",
-          phase: "commentary",
-          content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
-        },
-      },
-    } as any);
-    const [finalAnswer] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: {
-        type: "message_output_item",
-        text: "All checks passed.",
-        rawItem: {
-          role: "assistant",
-          status: "completed",
-          phase: "final_answer",
-          content: [{ type: "output_text", text: "All checks passed." }],
-        },
-      },
-    } as any);
+    const agent = new Agent({ name: "phase-test" });
+    const [commentary] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            phase: "commentary",
+            content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
+          } as never,
+          agent,
+        ),
+      ),
+    );
+    const [finalAnswer] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            phase: "final_answer",
+            content: [{ type: "output_text", text: "All checks passed." }],
+          } as never,
+          agent,
+        ),
+      ),
+    );
 
     expect(commentary).toEqual({
       type: "agent.message.completed",
@@ -927,10 +939,21 @@ describe("runtime event normalization", () => {
         itemId: "message-a",
       } as any),
     );
-    const [completed] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: { type: "message_output_item", text: "partial answer", rawItem: { id: "message-a" } },
-    } as any);
+    const [completed] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            id: "message-a",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "partial answer" }],
+          } as never,
+          new Agent({ name: "identity-test" }),
+        ),
+      ),
+    );
     expect(delta?.payload).toEqual({ text: "partial", messageId: "message-a" });
     expect(completed?.payload).toEqual({ text: "partial answer", messageId: "message-a" });
   });
@@ -5089,19 +5112,7 @@ describe("runtime event normalization", () => {
     const events: string[] = [];
     const session = {
       state: { manifest: new Manifest({ root: "/workspace" }) },
-      exec: async ({ cmd }: { cmd: string }) => {
-        const process = Bun.spawn(["/bin/sh", "-c", cmd], {
-          cwd: workspace,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const [stdout, stderr, exitCode] = await Promise.all([
-          new Response(process.stdout).text(),
-          new Response(process.stderr).text(),
-          process.exited,
-        ]);
-        return { stdout, stderr, output: `${stdout}${stderr}`, exitCode };
-      },
+      ...hostShellSession(join(root, "home"), { cwd: workspace }),
     };
     const download = {
       fileId: "file-1",
@@ -5996,12 +6007,24 @@ describe("runtime event normalization", () => {
 
     expect(created[0]!.diff).toBe("+oggh1.renewed-secret-bearer");
     expect(commands).toHaveLength(1);
+    expect(commands[0]!.startsWith("set +x\nOPENGENI_GIT_PROVISIONING_TARGET=sandbox\n")).toBe(
+      true,
+    );
     expect(commands[0]).not.toContain("oggh1.renewed-secret-bearer");
     expect(commands[0]).toContain(created[0]!.path);
   });
 
-  test("TOKEN-BROKER (B1): with NO seed the clone hook command is byte-for-byte the un-prefixed clone (no-op on selfhosted)", async () => {
+  test("TOKEN-BROKER (B1): with NO seed the clone hook command is the clone script behind only the sandbox provisioning target", async () => {
     const calls: Array<Record<string, unknown>> = [];
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ];
     await runRepositoryCloneHook(
       {
         exec: async (args: Record<string, unknown>) => {
@@ -6015,15 +6038,7 @@ describe("runtime event normalization", () => {
           };
         },
       } as any,
-      [
-        {
-          kind: "repository",
-          uri: "https://github.com/acme/private.git",
-          ref: "main",
-          githubInstallationId: 123,
-          githubRepositoryId: 456,
-        },
-      ],
+      resources,
       {
         environment: { HOME: "/workspace" },
       },
@@ -6031,7 +6046,17 @@ describe("runtime event normalization", () => {
 
     expect(calls).toHaveLength(1);
     expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
-    expect(String(calls[0]?.cmd).startsWith("set +x\nset -eu")).toBe(true);
+    // The only prefix is the sandbox target that admits the provisioning guard;
+    // the exported builder alone refuses to run on a host.
+    expect(String(calls[0]?.cmd)).toBe(
+      `set +x\nOPENGENI_GIT_PROVISIONING_TARGET=sandbox\n${repositoryCloneCommand(resources)}`,
+    );
+    expect(repositoryCloneCommand(resources)).not.toContain(
+      "OPENGENI_GIT_PROVISIONING_TARGET=sandbox\n",
+    );
+    expect(repositoryCloneCommand(resources)).toContain(
+      'if [ "${OPENGENI_GIT_PROVISIONING_TARGET:-}" != sandbox ]; then',
+    );
   });
 
   test("CODEMODE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
@@ -6086,27 +6111,9 @@ describe("runtime event normalization", () => {
   test("CODEMODE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
     const home = mkdtempSync(join(tmpdir(), "opengeni-codemode-refresh-"));
     try {
-      const session = {
-        exec: async (args: { cmd: string }) => {
-          const proc = Bun.spawn(["sh", "-lc", args.cmd], {
-            cwd: home,
-            env: {
-              ...process.env,
-              HOME: home,
-              // Never let the fixture refresh the invoking agent's credential.
-              OPENGENI_CODEMODE_TOKEN_FILE: undefined,
-            },
-            stdout: "pipe",
-            stderr: "pipe",
-          });
-          const [stdout, stderr, exitCode] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-            proc.exited,
-          ]);
-          return { exitCode, stdout, stderr };
-        },
-      };
+      // The fixture session also drops the invoking agent's OPENGENI_CODEMODE_TOKEN_FILE,
+      // so the refresh can never target that agent's own credential.
+      const session = hostShellSession(home);
 
       await refreshCodemodeTokenFile(session as never, "ogd_renewed");
       const tokenDir = join(home, ".opengeni");
@@ -10945,6 +10952,27 @@ describe("runtime event normalization", () => {
       console.warn = originalWarn;
       expired.close();
       healthy.close();
+    }
+  });
+
+  test("best-effort discovery preserves a bounded catalog with more than 1000 tools", async () => {
+    const names = Array.from({ length: 1_100 }, (_, index) => `catalog_tool_${index}`);
+    const provider = startTestMcpServer({ toolsForAuthorization: () => names });
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({ mcpServers: [{ id: "catalog", url: provider.url }] }),
+        [{ kind: "mcp", id: "catalog", optional: true }],
+      );
+      try {
+        const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        const exposed = new Set(tools.map((tool) => tool.name));
+        for (const name of names) expect(exposed.has(`catalog__${name}`)).toBe(true);
+        expect(provider.calls).toEqual([]);
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      provider.close();
     }
   });
 

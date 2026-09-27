@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "1a532e5004b6a09bafb34d77e83d67619470585718a70858778596ef21f28319"
+      "sha256": "dad9af393c6b793005a2911395f925669a29cc8c4347d7a234cb5cd31ca40006"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "f0f8def1e225efb37e50e7b6890905e9004590ce2d12c2b0e321a30cc788fdc7"
+      "sha256": "d8d70a2655d7439f3335a208c773dd40f533f1d73a5dd4455ebfa73a8fd67999"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -317,7 +317,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "publish",
       "step": "Build and sign the stable update manifest",
-      "sha256": "5ab7a487c5f60332081350a17b61bf22edfb12172c1dbb0f7197b4168d896b54"
+      "sha256": "b7d30577e17094d0ea6011f9821ed2f123d7cf7f6715bb58a0de159319e62a33"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -569,7 +569,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "browser-acceptance",
       "step": "Timeline pagination and tip-follow browser regressions",
-      "sha256": "010c7a4b7d04eb1940dbfc2c7e4c27db4f711a1217a5dca52c70da65e61c676f"
+      "sha256": "254ad9bb6b4dd8aa90e9383780dd1b4af7efd08d6851af7cc66cb4b0c85f9965"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -582,6 +582,12 @@
       "job": "deployment",
       "step": "Install dependencies",
       "sha256": "c002a6d527c30937cac224d77e729583974d8a4fba6e2e515a2b56231aa499a4"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "deployment",
+      "step": "Run deployment tests",
+      "sha256": "5bac221388baf52eb50e5863cf586318021c041939697f8f683533f9d6b4f1b1"
     },
     {
       "workflow": ".github/workflows/ci.yml",

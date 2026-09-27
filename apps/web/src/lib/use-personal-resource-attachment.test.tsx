@@ -372,96 +372,109 @@ describe("usePersonalResourceAttachment", () => {
     await hook.unmount();
   });
 
-  test("a stale-authority denial stays fenced until the reloaded session projection arrives", async () => {
-    let sessionReloads = 0;
-    let resolveSessionReload!: () => void;
-    const sessionReload = new Promise<void>((resolve) => {
-      resolveSessionReload = resolve;
-    });
-    let variableSetLoads = 0;
-    let resolveUpdatedCatalog!: (resources: ReturnType<typeof variableSet>[]) => void;
-    const updatedCatalog = new Promise<ReturnType<typeof variableSet>[]>((resolve) => {
-      resolveUpdatedCatalog = resolve;
-    });
-    const client = {
-      listVariableSets: async () => {
-        variableSetLoads += 1;
-        return variableSetLoads >= 3 ? await updatedCatalog : [variableSet()];
-      },
-      listRigs: async () => [],
-      listUserResourceAuthorities: async (
-        _workspaceId: string,
-        options: { resourceKind: string },
-      ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
-    } as unknown as OpenGeniBrowserClient;
-    const current = identity("owner");
-    const hook = await renderHook(
-      ({ authorityEpoch }: { authorityEpoch: number }) =>
-        usePersonalResourceAttachment({
-          client,
-          authMode: "managedSession",
-          authSession: current.authSession,
-          accessSubjectId: "user:owner",
-          managedSelfContext: current.managedSelfContext,
-          workspace,
-          session: {
-            id: "66666666-6666-4666-8666-666666666666",
-            tenancy: {
-              visibility: "workspace",
-              authorityEpoch,
-              ownedByCurrentUser: true,
-              fork: null,
+  test.each([
+    ["immediate", false],
+    ["delayed", true],
+  ] as const)(
+    "a stale-authority denial stays fenced across %s projection timing",
+    async (_label, delayProjection) => {
+      let sessionReloads = 0;
+      let resolveSessionReload!: () => void;
+      const sessionReload = new Promise<void>((resolve) => {
+        resolveSessionReload = resolve;
+      });
+      let variableSetLoads = 0;
+      let resolveUpdatedCatalog!: (resources: ReturnType<typeof variableSet>[]) => void;
+      const updatedCatalog = new Promise<ReturnType<typeof variableSet>[]>((resolve) => {
+        resolveUpdatedCatalog = resolve;
+      });
+      const client = {
+        listVariableSets: async () => {
+          variableSetLoads += 1;
+          return variableSetLoads >= 3 ? await updatedCatalog : [variableSet()];
+        },
+        listRigs: async () => [],
+        listUserResourceAuthorities: async (
+          _workspaceId: string,
+          options: { resourceKind: string },
+        ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+      } as unknown as OpenGeniBrowserClient;
+      const current = identity("owner");
+      const hook = await renderHook(
+        ({ authorityEpoch }: { authorityEpoch: number }) =>
+          usePersonalResourceAttachment({
+            client,
+            authMode: "managedSession",
+            authSession: current.authSession,
+            accessSubjectId: "user:owner",
+            managedSelfContext: current.managedSelfContext,
+            workspace,
+            session: {
+              id: "66666666-6666-4666-8666-666666666666",
+              tenancy: {
+                visibility: "workspace",
+                authorityEpoch,
+                ownedByCurrentUser: true,
+                fork: null,
+              },
             },
-          },
-          fixed: { variableSetId, rigId: null, connectedMachine: null },
-          personalWorkspaceTarget: false,
-          onReloadSession: async () => {
-            sessionReloads += 1;
-            await sessionReload;
-          },
-        }),
-      { authorityEpoch: 3 },
-    );
-    await flush();
-    const attempted = {
-      text: "Deploy",
-      personalResourceAttachment: hook.result.current.intent,
-    };
-    expect(attempted.personalResourceAttachment?.expectedAuthorityEpoch).toBe(3);
+            fixed: { variableSetId, rigId: null, connectedMachine: null },
+            personalWorkspaceTarget: false,
+            onReloadSession: async () => {
+              sessionReloads += 1;
+              await sessionReload;
+            },
+          }),
+        { authorityEpoch: 3 },
+      );
+      await flush();
+      const attempted = {
+        text: "Deploy",
+        personalResourceAttachment: hook.result.current.intent,
+      };
+      expect(attempted.personalResourceAttachment?.expectedAuthorityEpoch).toBe(3);
 
-    await actRun(() =>
-      hook.result.current.onDeliveryError(
-        new OpenGeniApiError(403, "forbidden", { mutation: true }),
-        attempted,
-        "send",
-      ),
-    );
-    await flush();
-    expect(sessionReloads).toBe(1);
-    expect(hook.result.current.mode).toBe("session");
-    expect(hook.result.current.intent).toBeUndefined();
-    expect(hook.result.current.refreshing).toBe(true);
-    expect(hook.result.current.requiresDecision).toBe(true);
+      await actRun(() =>
+        hook.result.current.onDeliveryError(
+          new OpenGeniApiError(403, "forbidden", { mutation: true }),
+          attempted,
+          "send",
+        ),
+      );
+      await flush();
+      expect(sessionReloads).toBe(1);
+      expect(hook.result.current.mode).toBe("session");
+      expect(hook.result.current.intent).toBeUndefined();
+      expect(hook.result.current.refreshing).toBe(true);
+      expect(hook.result.current.requiresDecision).toBe(true);
 
-    await actRun(() => resolveSessionReload());
-    await hook.rerender({ authorityEpoch: 4 });
-    await flush();
-    expect(hook.result.current.intent).toBeUndefined();
-    expect(hook.result.current.refreshing).toBe(true);
-    expect(hook.result.current.requiresDecision).toBe(true);
+      await actRun(() => resolveSessionReload());
+      if (delayProjection) {
+        await flush(10);
+        expect(hook.result.current.notice).toBe("reload_failed");
+      }
+      await hook.rerender({ authorityEpoch: 4 });
+      await flush();
+      expect(hook.result.current.intent).toBeUndefined();
+      // The new authority epoch starts catalog discovery. The prior recovery
+      // timer may already have settled; loading must fence either ordering.
+      expect(variableSetLoads).toBe(3);
+      expect(hook.result.current.loading).toBe(true);
+      expect(hook.result.current.requiresDecision).toBe(true);
 
-    await actRun(() => resolveUpdatedCatalog([variableSet()]));
-    await flush();
-    expect(hook.result.current.mode).toBe("session");
-    expect(hook.result.current.intent).toMatchObject({
-      mode: "session",
-      expectedAuthorityEpoch: 4,
-    });
-    expect(hook.result.current.refreshing).toBe(false);
-    expect(hook.result.current.requiresDecision).toBe(false);
-    expect(hook.result.current.notice).toBe("reloaded");
-    await hook.unmount();
-  });
+      await actRun(() => resolveUpdatedCatalog([variableSet()]));
+      await flush();
+      expect(hook.result.current.mode).toBe("session");
+      expect(hook.result.current.intent).toMatchObject({
+        mode: "session",
+        expectedAuthorityEpoch: 4,
+      });
+      expect(hook.result.current.refreshing).toBe(false);
+      expect(hook.result.current.requiresDecision).toBe(false);
+      expect(hook.result.current.notice).toBe("reloaded");
+      await hook.unmount();
+    },
+  );
 
   test("an authority-epoch reload fences a personal resource missing from the replacement catalog", async () => {
     let resolveSessionReload!: () => void;

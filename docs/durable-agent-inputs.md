@@ -15,7 +15,11 @@ message.
 3. A turn claim locks and selects a bounded group, assigns the receiving turn,
    serializes one deterministic system message, and inserts that exact message
    into `session_history_items` in the same transaction that marks every member
-   `delivered`.
+   `delivered`. The message states the batch's `deliveredAt` and each member's
+   `createdAt` as minute-precision UTC with the weekday (a scheduled occurrence
+   promoted to a user-role task carries the same `Delivered:` and `Created:`
+   lines), so a turn that no human message started still knows the current
+   time. Both values are the durable row timestamps, never the rendering clock.
    A `requires_action` resume is the one two-phase form of that boundary: the
    resumed attempt first persists the interrupted call/result pair, then
    idempotently re-enters its exact claim to attach only machine inputs whose
@@ -53,7 +57,16 @@ current workflow-wake revision stays retryable while an eligible immediate input
 remains pending, or an idle session still owns an expired input wait. Future holds acknowledge
 the early signal so settlement can re-arm their deadline without retaining an
 earlier retry time. A closing
-workflow cannot acknowledge away that obligation. Claim, supersession, and
+workflow cannot acknowledge away that obligation.
+An immediate update that reaches an idle session whose wake is still
+undelivered joins that revision instead of opening another one. The row is
+often future-dated (the `wait_for_input` deadline or goal idle backoff), so the
+update pulls it to now and its producer still signals after commit; without
+that signal the input would wait for the periodic dispatcher tick. The extra
+signal is a hint only: one claim consumes the whole pending batch, and the
+acknowledgement rules above keep the revision open until it does. Terminal
+background-command settlement registers the same wake but does not signal from
+its settlement callers, so the dispatcher delivers it. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 without ongoing intent do not create new work.
 
@@ -105,6 +118,16 @@ pending one, and the parent timeline records `system.update.cancelled` with
 results, an immediate child notice may autonomously wake a parent with either
 an active goal or a current session-level wait. Without either durable
 obligation, child lifecycle notices remain pending until new intent arrives.
+
+A failed or cancelled child reports from its settlement transaction, but an
+idle child reports only when its workflow closes. After the terminal turn
+settles, the child's `sessionWorkflow` idle branch waits the bounded 5 s signal
+race window, re-peeks PostgreSQL, and only then runs `markSessionIdle`, which
+commits the `child_terminal_result` outbox row and delivers it to the parent.
+That window therefore adds about 5 s to every idle handoff. Notifying the
+parent when the terminal turn settles, while keeping the window only for
+closing the run, changes the workflow's command sequence and needs a Temporal
+`patched()` gate plus a decision on what a notified-but-open `idle` child means.
 
 Terminal background-command settlement follows the same proof-first rule as
 the command lifecycle. The transaction that changes the exact command row from

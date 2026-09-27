@@ -642,6 +642,38 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
     expect(create.status).toBe(403);
   });
 
+  test("the local dev API serves the proxy on the Docker sandbox route", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const attempt = await seedRunningAttempt(grant, ["sessions_list"]);
+    const authorization = await codemodeBearer(grant, attempt);
+    const app = createApp({
+      settings: settings({
+        productAccessMode: "local",
+        environment: "local",
+        sandboxBackend: "docker",
+        opengeniMcpUrl: "http://172.18.0.1:8000/v1/workspaces/{workspaceId}/mcp",
+        webBaseUrl: "http://127.0.0.1:3000",
+        publicBaseUrl: undefined,
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as SessionWorkflowClient,
+    });
+    const proxied = `http://172.18.0.1:8000/v1/workspaces/${grant.workspaceId}/codemode/sdk/v1/workspaces/site-host/sessions`;
+    // The proxy re-dispatches without the sandbox's Host, to a session path
+    // outside the sandbox routes; the local browser boundary still admits it.
+    const list = await app.request(proxied, {
+      headers: { authorization, host: "172.18.0.1:8000" },
+    });
+    expect(list.status).toBe(200);
+    // A browser request on the sandbox address is refused before the proxy runs.
+    const browser = await app.request(proxied, {
+      headers: { authorization, host: "172.18.0.1:8000", origin: "http://172.18.0.1:8000" },
+    });
+    expect(browser.status).toBe(403);
+  });
+
   test("configuration and control routes retain normal permission checks behind the proxy", async () => {
     if (!available) return;
     const grant = await fixture();

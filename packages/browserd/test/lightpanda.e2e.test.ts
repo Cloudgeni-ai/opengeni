@@ -47,9 +47,9 @@ e2e("runs Lightpanda as an exact capability-scoped managed browser", async () =>
       transport: { kind: "managed", engine: "lightpanda" },
     });
     expect(semanticNames(created.observation)).toContain("Lightpanda fixture");
-    expect((await supervisor.screenshot(reference, created.observation.target.id)).mediaType).toBe(
-      "image/png",
-    );
+    await expect(
+      supervisor.screenshot(reference, created.observation.target.id),
+    ).rejects.toMatchObject({ code: "unsupported" });
 
     const receipt = await supervisor.action(
       navigateCommand(created.observation, `http://127.0.0.1:${page.port}/next`),
@@ -126,6 +126,12 @@ e2e("recovers a lost Lightpanda process without replaying mutations", async () =
     expect(targets).toHaveLength(1);
     expect(targets[0]!.id).toBe(oldTargetId);
     expect(targets[0]!.targetGeneration).not.toBe(created.observation.target.targetGeneration);
+    const stale = await supervisor.action(
+      navigateCommand(created.observation, `http://127.0.0.1:${page.port}/must-not-dispatch`),
+    );
+    expect(stale.state).toBe("failed");
+    expect(stale.error?.code).toBe("target_stale");
+    expect((await supervisor.listTargets(reference))[0]!.url).toBe(created.observation.target.url);
     expect(semanticNames(await supervisor.observe(reference, targets[0]!.id))).toContain(
       "Recovery page",
     );

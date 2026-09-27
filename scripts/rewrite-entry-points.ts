@@ -26,6 +26,7 @@
  *   module  ./src/index.ts        -> ./dist/index.js
  *   types   ./src/index.ts        -> ./dist/index.d.ts
  *   exports["."]                   -> { types: ./dist/index.d.ts, import: ./dist/index.js }
+ * A `.tsx` source entry maps the same way (tsup emits `.js` and `.d.ts` for it).
  *
  * Any OTHER exports subpaths (e.g. @opengeni/react's CSS entries, which ship
  * straight from styles/) are left untouched.
@@ -41,7 +42,7 @@
  *   bun scripts/rewrite-entry-points.ts            # src -> dist (pre-publish)
  *   bun scripts/rewrite-entry-points.ts --restore  # dist -> src (local proving)
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { publishableWorkspacePackages, repoRoot, type PackageJson } from "./publishable-workspaces";
 
@@ -55,11 +56,16 @@ export function srcToDist(value: string, kind: "runtime" | "types"): string {
   }
   const withoutSourceRoot = value
     .slice("./src/".length)
-    .replace(/\.ts$/, kind === "types" ? ".d.ts" : ".js");
+    .replace(/\.tsx?$/, kind === "types" ? ".d.ts" : ".js");
   return `./dist/${withoutSourceRoot}`;
 }
 
-export function distToSrc(value: string): string {
+/**
+ * The dist form does not record whether its source was `.ts` or `.tsx`.
+ * `sourceExists` (a package-relative `./src/...` path check) picks the `.tsx`
+ * source when only that one exists; without it the `.ts` form is assumed.
+ */
+export function distToSrc(value: string, sourceExists?: (path: string) => boolean): string {
   if (!value.startsWith("./dist/")) {
     return value;
   }
@@ -67,7 +73,12 @@ export function distToSrc(value: string): string {
     .slice("./dist/".length)
     .replace(/\.d\.ts$/, ".ts")
     .replace(/\.js$/, ".ts");
-  return `./src/${withoutDistRoot}`;
+  const source = `./src/${withoutDistRoot}`;
+  if (sourceExists && source.endsWith(".ts") && !sourceExists(source)) {
+    const tsx = `${source}x`;
+    if (sourceExists(tsx)) return tsx;
+  }
+  return source;
 }
 
 function entryToDist(entry: ExportsEntry): ExportsEntry {
@@ -93,16 +104,16 @@ function entryToDist(entry: ExportsEntry): ExportsEntry {
   return next;
 }
 
-function entryToSrc(entry: ExportsEntry): ExportsEntry {
+function entryToSrc(entry: ExportsEntry, sourceExists?: (path: string) => boolean): ExportsEntry {
   if (typeof entry === "string") {
-    return distToSrc(entry);
+    return distToSrc(entry, sourceExists);
   }
   const next = { ...entry };
   if (entry.types?.startsWith("./dist/")) {
-    next.types = distToSrc(entry.types);
+    next.types = distToSrc(entry.types, sourceExists);
   }
   if (entry.import?.startsWith("./dist/")) {
-    const runtime = distToSrc(entry.import);
+    const runtime = distToSrc(entry.import, sourceExists);
     if (entry.default === undefined) {
       next.default = runtime;
       delete next.import;
@@ -111,7 +122,7 @@ function entryToSrc(entry: ExportsEntry): ExportsEntry {
     }
   }
   if (entry.default?.startsWith("./dist/")) {
-    next.default = distToSrc(entry.default);
+    next.default = distToSrc(entry.default, sourceExists);
   }
   return next;
 }
@@ -159,23 +170,26 @@ export function rewriteEntryPointsToDist(pkg: PackageJson): boolean {
 }
 
 /** Entry points in the src form (internal workspace resolution; committed tree). */
-export function rewriteEntryPointsToSrc(pkg: PackageJson): boolean {
+export function rewriteEntryPointsToSrc(
+  pkg: PackageJson,
+  sourceExists?: (path: string) => boolean,
+): boolean {
   let changed = false;
-  if (typeof pkg.main === "string" && pkg.main !== distToSrc(pkg.main)) {
-    pkg.main = distToSrc(pkg.main);
+  if (typeof pkg.main === "string" && pkg.main !== distToSrc(pkg.main, sourceExists)) {
+    pkg.main = distToSrc(pkg.main, sourceExists);
     changed = true;
   }
-  if (typeof pkg.module === "string" && pkg.module !== distToSrc(pkg.module)) {
-    pkg.module = distToSrc(pkg.module);
+  if (typeof pkg.module === "string" && pkg.module !== distToSrc(pkg.module, sourceExists)) {
+    pkg.module = distToSrc(pkg.module, sourceExists);
     changed = true;
   }
-  if (typeof pkg.types === "string" && pkg.types !== distToSrc(pkg.types)) {
-    pkg.types = distToSrc(pkg.types);
+  if (typeof pkg.types === "string" && pkg.types !== distToSrc(pkg.types, sourceExists)) {
+    pkg.types = distToSrc(pkg.types, sourceExists);
     changed = true;
   }
   if (pkg.exports && typeof pkg.exports === "object") {
     for (const [subpath, entry] of Object.entries(pkg.exports as Record<string, ExportsEntry>)) {
-      const next = entryToSrc(entry);
+      const next = entryToSrc(entry, sourceExists);
       if (JSON.stringify(entry) !== JSON.stringify(next)) {
         (pkg.exports as Record<string, ExportsEntry>)[subpath] = next;
         changed = true;
@@ -183,14 +197,14 @@ export function rewriteEntryPointsToSrc(pkg: PackageJson): boolean {
     }
   }
   if (typeof pkg.bin === "string") {
-    const next = distToSrc(pkg.bin);
+    const next = distToSrc(pkg.bin, sourceExists);
     if (pkg.bin !== next) {
       pkg.bin = next;
       changed = true;
     }
   } else if (pkg.bin && typeof pkg.bin === "object") {
     for (const [name, entry] of Object.entries(pkg.bin)) {
-      const next = distToSrc(entry);
+      const next = distToSrc(entry, sourceExists);
       if (entry !== next) {
         pkg.bin[name] = next;
         changed = true;
@@ -209,7 +223,9 @@ if (import.meta.main) {
     const raw = readFileSync(pkgPath, "utf8");
     const pkg = JSON.parse(raw) as PackageJson;
 
-    const pkgChanged = restore ? rewriteEntryPointsToSrc(pkg) : rewriteEntryPointsToDist(pkg);
+    const pkgChanged = restore
+      ? rewriteEntryPointsToSrc(pkg, (path) => existsSync(join(repoRoot, pkgDir, path)))
+      : rewriteEntryPointsToDist(pkg);
 
     if (pkgChanged) {
       changed += 1;

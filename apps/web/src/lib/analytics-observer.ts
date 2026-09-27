@@ -7,6 +7,7 @@ type Observer = {
     provider: "codex" | "supergrok" | "ai-gateway" | "openrouter",
     workspaceId: string,
   ) => (outcome: "connected" | "expired" | "denied" | "outcome_unknown") => void;
+  sessionEvents: (sessionId: string, events: readonly { type: string }[]) => void;
 };
 let observer: Observer | null = null;
 const ignore = () => {};
@@ -20,3 +21,5 @@ export const beginAnalyticsRequest: Observer["request"] = (pathname, method) =>
   observer?.request(pathname, method) ?? ignore;
 export const trackModelConnection: Observer["connection"] = (provider, workspaceId) =>
   observer?.connection(provider, workspaceId) ?? ignore;
+export const observeSessionTurnEvents: Observer["sessionEvents"] = (sessionId, events) =>
+  observer?.sessionEvents(sessionId, events);

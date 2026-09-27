@@ -58,7 +58,7 @@ use std::time::Duration;
 
 use opengeni_agent_engine::flow::{AckOutcome, AttachOutcome, CreditFlow};
 use opengeni_agent_engine::retention::{
-    GlobalSpoolBudget, RetentionConfig, RetentionError, RetentionLog,
+    GlobalMemoryBudget, GlobalSpoolBudget, RetentionConfig, RetentionError, RetentionLog,
 };
 use opengeni_agent_engine::{Channel, Frame, FrameBody};
 use opengeni_agent_platform::ContainedExec;
@@ -149,6 +149,8 @@ pub struct JobParams {
     pub retention: RetentionConfig,
     /// Machine-wide actual-byte disk-spool ledger (ruling M2).
     pub spool_budget: Arc<GlobalSpoolBudget>,
+    /// Shared record-cost budget for memory-backed retained frames.
+    pub memory_budget: Arc<GlobalMemoryBudget>,
     /// The op-private spool directory (created lazily on first spill; removed
     /// when the job task ends).
     pub spool_dir: PathBuf,
@@ -318,6 +320,7 @@ pub async fn run_job(
         stdin,
         retention,
         spool_budget,
+        memory_budget,
         spool_dir,
         deadline,
         config,
@@ -330,9 +333,10 @@ pub async fn run_job(
     spawn_stdin_writer(child.stdin.take(), stdin);
 
     let pump = Pump {
-        retention: RetentionLog::with_spool_budget(
+        retention: RetentionLog::with_budgets(
             retention.clone(),
             spool_dir.clone(),
+            memory_budget,
             spool_budget,
         ),
         retention_config: retention,
@@ -514,6 +518,11 @@ impl Pump {
             }
         }
 
+        // Collection can linger for the registry TTL. Replay reads retention,
+        // never these transport-sized scratch buffers: release them before
+        // publishing completion, not after the eventual final acknowledgement.
+        drop(stdout_buf);
+        drop(stderr_buf);
         self.finish().await
     }
 
@@ -1002,6 +1011,7 @@ mod tests {
                 stdin: self.stdin,
                 retention: self.retention,
                 spool_budget: Arc::new(GlobalSpoolBudget::unlimited()),
+                memory_budget: Arc::new(GlobalMemoryBudget::unlimited()),
                 spool_dir: dir.path().join("spool"),
                 deadline: self.deadline_after.map(|after| Instant::now() + after),
                 config: self.config,

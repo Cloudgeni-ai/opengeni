@@ -12,12 +12,14 @@ To add agent capabilities to your own app, start with [Integrate your product](/
   <Step title="Create an account and organization">
     Sign up with email and password. After sign-in, name your organization. OpenGeni creates it with you as owner, along with a Personal workspace for you. Team members join by invitation.
   </Step>
-  <Step title="Connect a model">
-    Sessions need inference. Organization owners choose one of:
+  <Step title="Choose a model">
+    app.opengeni.ai includes a free default model, so you can start chatting right away. For more capable models, connect one of:
 
-    - a ChatGPT/Codex or SuperGrok subscription, connected through a device-code login;
+    - a ChatGPT/Codex or SuperGrok subscription, connected through a device-code login (for ChatGPT, first turn on device code login under Settings → Security; on Business or Enterprise plans a workspace admin must allow it);
     - a provider key such as OpenRouter or Vercel AI Gateway; or
     - prepaid OpenGeni credits.
+
+    The model you connect or pay for is selected for your next chat. After that, new chats and scheduled tasks default to your connected subscription, or to a stronger credits model while you have credits, instead of the free model. Trial credits count too: if your new organization starts with some, setup shows the balance and the model your chats will use, and new chats use the free model once the credits run out. A model you pick yourself, or a default a workspace admin saves, always wins.
 
     In organization **Models** settings, choose which workspaces can use each subscription or gateway and which models it enables.
 
@@ -28,7 +30,7 @@ To add agent capabilities to your own app, start with [Integrate your product](/
     Describe the task. Optionally attach a repository, upload files, or pick the tools the agent may use. The session starts on a managed sandbox by default.
   </Step>
   <Step title="Follow and steer">
-    The timeline streams the agent's messages, tool calls, and commands live. Messages you send while a turn is running queue behind it. Steer interrupts the running turn and delivers your message now. Pause holds the session, and Cancel ends it.
+    While the agent works, one status row shows how long it has been working, how many steps it has taken, its latest progress note, and the current step. Open the row to see every message, tool call, and command. The answer appears below it. Messages you send while a turn is running queue behind it. Steer interrupts the running turn and delivers your message now. Pause holds the session, and Cancel ends it.
   </Step>
   <Step title="Answer the agent">
     When a tool needs approval, the session waits until you approve or reject it. When the agent asks a structured question, answer it in place and the same turn continues.

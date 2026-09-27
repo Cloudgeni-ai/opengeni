@@ -185,6 +185,19 @@ export function xaiSubscriptionMetadataFromRow(
   };
 }
 
+/**
+ * A frozen user-scope SuperGrok authority whose pool no longer resolves: the
+ * owner disconnected it, reconnected under a new authority generation, or left
+ * the organization. Callers that only ask whether SuperGrok is ready may treat
+ * it as "not ready"; execution paths keep failing closed.
+ */
+export class XaiAuthorityPoolInactiveError extends Error {
+  constructor() {
+    super("xAI user authority pool is no longer active");
+    this.name = "XaiAuthorityPoolInactiveError";
+  }
+}
+
 async function resolveXaiPoolOwnerMembershipId(
   db: Database,
   input: {
@@ -206,7 +219,7 @@ async function resolveXaiPoolOwnerMembershipId(
   );
   const ownerMembershipId = rows[0]?.membership_id ?? null;
   if (!ownerMembershipId) {
-    throw new Error("xAI user authority pool is no longer active");
+    throw new XaiAuthorityPoolInactiveError();
   }
   return ownerMembershipId;
 }

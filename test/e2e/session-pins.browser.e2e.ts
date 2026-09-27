@@ -181,7 +181,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         "Movable session",
       );
-      await page.reload();
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
       const row = page.locator(`a[data-session-row="${session.id}"]`);
       // macOS Control-click reaches the same native contextmenu event. Do not
       // turn ordinary modified link clicks into synthetic menu gestures.
@@ -205,7 +205,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // A PUT response precedes the rail's post-write verification and list
       // refresh. Reload to prove persistence and avoid racing its in-flight
       // duplicate-move guard with the next gesture.
-      await page.reload();
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
       const projectGroup = page.getByRole("group", { name: project.name, exact: true });
       await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
       // Even after the last unfiled session leaves, Default remains a target.
@@ -224,10 +224,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         }
       };
       await Promise.all([persistedMove(null), dragToGroup(defaultGroup)]);
-      await page.reload();
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
       await defaultGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
       await Promise.all([persistedMove(project.id), dragToGroup(projectGroup)]);
-      await page.reload();
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
       await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
     } finally {
       await context.close();
@@ -489,7 +489,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("loads older workspace sessions once without pagination on empty projects", async () => {
+  test("loads project pages independently without pagination on empty projects", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -544,19 +544,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         });
       }
 
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
-      const projectAGroup = page.getByRole("group", { name: projectA.name });
-      const projectBGroup = page.getByRole("group", { name: projectB.name });
-      await projectAGroup.waitFor();
-      await projectBGroup.waitFor();
-      const projectARows = projectAGroup.locator("a[data-session-row]");
-      const projectBRows = projectBGroup.locator("a[data-session-row]");
-      const initialProjectACount = await projectARows.count();
-      const initialProjectBCount = await projectBRows.count();
-      expect(initialProjectACount).toBeGreaterThan(0);
-      expect(initialProjectBCount).toBeGreaterThan(0);
-      expect(initialProjectACount + initialProjectBCount).toBe(50);
-
       const paginationRequests: URL[] = [];
       page.on("request", (request) => {
         const url = new URL(request.url());
@@ -568,31 +555,72 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           paginationRequests.push(url);
         }
       });
-      expect(await projectAGroup.getByRole("button", { name: /Load older/ }).count()).toBe(0);
-      expect(await projectBGroup.getByRole("button", { name: /Load older/ }).count()).toBe(0);
+      const projectPage = (channelId: string, cursor: string | null) =>
+        page.waitForResponse(
+          (response) =>
+            successfulSessionPageResponse(response, workspaceId, { cursor }) &&
+            new URL(response.url()).searchParams.get("channelId") === channelId,
+        );
+      const [projectAResponse, projectBResponse, emptyProjectResponse] = await Promise.all([
+        projectPage(projectA.id, null),
+        projectPage(projectB.id, null),
+        projectPage(emptyProject.id, null),
+        page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`),
+      ]);
+      const projectAPage = (await projectAResponse.json()) as BrowserSessionPage;
+      const projectBPage = (await projectBResponse.json()) as BrowserSessionPage;
+      const emptyProjectPage = (await emptyProjectResponse.json()) as BrowserSessionPage;
+      expect(projectAPage.sessions).toHaveLength(50);
+      expect(projectBPage.sessions).toHaveLength(50);
+      expect(projectAPage.nextCursor).toEqual(expect.any(String));
+      expect(projectBPage.nextCursor).toEqual(expect.any(String));
+      expect(projectAPage.nextCursor).not.toBe(projectBPage.nextCursor);
+      expect(emptyProjectPage.sessions).toHaveLength(0);
+      expect(emptyProjectPage.nextCursor).toBeNull();
+      for (const project of [projectA, projectB, emptyProject]) {
+        expect(
+          paginationRequests.some(
+            (request) =>
+              request.searchParams.get("channelId") === project.id &&
+              request.searchParams.get("limit") === "50" &&
+              !request.searchParams.has("cursor"),
+          ),
+        ).toBe(true);
+      }
+      const projectAGroup = page.getByRole("group", { name: projectA.name });
+      const projectBGroup = page.getByRole("group", { name: projectB.name });
+      const projectARows = projectAGroup.locator("a[data-session-row]");
+      const projectBRows = projectBGroup.locator("a[data-session-row]");
+      await waitFor(async () => (await projectARows.count()) === 50, { timeoutMs: 30_000 });
+      await waitFor(async () => (await projectBRows.count()) === 50, { timeoutMs: 30_000 });
+      const loadProjectA = projectAGroup.getByRole("button", {
+        name: `Load older sessions in ${projectA.name}`,
+      });
+      const loadProjectB = projectBGroup.getByRole("button", {
+        name: `Load older sessions in ${projectB.name}`,
+      });
+      await loadProjectA.waitFor();
+      await loadProjectB.waitFor();
       expect(
         await page
           .getByRole("group", { name: emptyProject.name })
           .getByRole("button", { name: /Load older/ })
           .count(),
       ).toBe(0);
-      const loadWorkspace = page.getByRole("button", {
-        name: "Load older sessions in this workspace",
-      });
-      await loadWorkspace.waitFor();
+      expect(
+        await page.getByRole("button", { name: "Load older sessions in this workspace" }).count(),
+      ).toBe(0);
       const footerBefore = await page
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
-      await loadWorkspace.scrollIntoViewIfNeeded();
+      await loadProjectA.scrollIntoViewIfNeeded();
       // Scrolling through folders must not grow the rail and hide Archived.
       await page.waitForTimeout(500);
-      expect(paginationRequests).toHaveLength(0);
-      expect(await projectARows.count()).toBe(initialProjectACount);
-      await loadWorkspace.click();
-      await waitFor(async () => (await projectARows.count()) > initialProjectACount, {
-        timeoutMs: 30_000,
-      });
-
+      const continuationRequests = () =>
+        paginationRequests.filter((request) => request.searchParams.has("cursor"));
+      expect(continuationRequests()).toHaveLength(0);
+      expect(await projectARows.count()).toBe(50);
+      expect(await projectBRows.count()).toBe(50);
       const scroll = await page.locator("[data-rail-scroll-viewport]").evaluate((element) => ({
         top: element.scrollTop,
         height: element.clientHeight,
@@ -603,18 +631,39 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(scroll.top).toBeGreaterThan(0);
       expect(scroll.total).toBeGreaterThan(scroll.height);
       expect(scroll.listOverflow).toBe("visible");
+      const [projectAOlderResponse] = await Promise.all([
+        projectPage(projectA.id, projectAPage.nextCursor),
+        loadProjectA.click(),
+      ]);
+      const projectAOlderPage = (await projectAOlderResponse.json()) as BrowserSessionPage;
+      expect(projectAOlderPage.sessions).toHaveLength(6);
+      expect(projectAOlderPage.nextCursor).toBeNull();
+      await waitFor(async () => (await projectARows.count()) === 56, { timeoutMs: 30_000 });
+      expect(await projectBRows.count()).toBe(50);
+      expect(continuationRequests()).toHaveLength(1);
+      expect(continuationRequests()[0]!.searchParams.get("channelId")).toBe(projectA.id);
+      expect(continuationRequests()[0]!.searchParams.get("cursor")).toBe(projectAPage.nextCursor);
+      expect(continuationRequests()[0]!.searchParams.get("limit")).toBe("50");
+
       const footerAfter = await page
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
       expect(footerAfter?.y).toBe(footerBefore?.y);
-      expect(await projectBRows.count()).toBeGreaterThan(initialProjectBCount);
-      expect(paginationRequests.length).toBeGreaterThan(0);
-      expect(paginationRequests.every((request) => !request.searchParams.has("channelId"))).toBe(
-        true,
-      );
-      expect(
-        paginationRequests.some((request) => request.searchParams.get("channelId") === projectB.id),
-      ).toBe(false);
+      const [projectBOlderResponse] = await Promise.all([
+        projectPage(projectB.id, projectBPage.nextCursor),
+        loadProjectB.click(),
+      ]);
+      const projectBOlderPage = (await projectBOlderResponse.json()) as BrowserSessionPage;
+      expect(projectBOlderPage.sessions).toHaveLength(6);
+      expect(projectBOlderPage.nextCursor).toBeNull();
+      await waitFor(async () => (await projectBRows.count()) === 56, { timeoutMs: 30_000 });
+      expect(await projectARows.count()).toBe(56);
+      expect(continuationRequests()).toHaveLength(2);
+      expect(continuationRequests()[1]!.searchParams.get("channelId")).toBe(projectB.id);
+      expect(continuationRequests()[1]!.searchParams.get("cursor")).toBe(projectBPage.nextCursor);
+      expect(continuationRequests()[1]!.searchParams.get("limit")).toBe("50");
+      expect(await loadProjectA.count()).toBe(0);
+      expect(await loadProjectB.count()).toBe(0);
     } finally {
       await context.close();
     }
@@ -659,7 +708,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         },
       });
 
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      await navigateWithProjectPages(page, workspaceId, () =>
+        page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`),
+      );
       const rail = page.locator("[data-sessionpin-session-list]");
       const managerRow = rail.locator(`a[data-session-row="${manager.id}"]`);
       await managerRow.waitFor();
@@ -3464,6 +3515,46 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 });
+
+async function navigateWithProjectPages(
+  page: Page,
+  workspaceId: string,
+  navigate: () => Promise<unknown>,
+) {
+  // Workspace rows can paint before independent folder reads finish. Wait for
+  // every first page and its loading state before dragging or snapshotting rows.
+  const firstPages = new Map<string, Promise<unknown>>();
+  const observePage = (response: PlaywrightResponse) => {
+    if (!successfulSessionPageResponse(response, workspaceId, { cursor: null })) return;
+    const channelId = new URL(response.url()).searchParams.get("channelId");
+    if (channelId !== null) firstPages.set(channelId, response.json());
+  };
+  page.on("response", observePage);
+  try {
+    const [channelsResponse] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.ok() &&
+          response.request().method() === "GET" &&
+          new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
+      ),
+      navigate(),
+    ]);
+    const channels = (await channelsResponse.json()) as BrowserChannel[];
+    const channelIds = ["null", ...channels.map((channel) => channel.id)];
+    await waitFor(() => channelIds.every((channelId) => firstPages.has(channelId)), {
+      timeoutMs: 30_000,
+    });
+    await Promise.all(channelIds.map((channelId) => firstPages.get(channelId)!));
+    await waitFor(
+      async () =>
+        (await page.getByRole("button", { name: /^Loading older sessions in / }).count()) === 0,
+      { timeoutMs: 30_000 },
+    );
+  } finally {
+    page.off("response", observePage);
+  }
+}
 
 async function openWorkspaceSearch(page: Page, query: string) {
   await page.getByRole("button", { name: "Search sessions", exact: true }).first().click();

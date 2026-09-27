@@ -4,6 +4,7 @@ import {
   useBrowserAccounts,
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
+import type { ClientModel } from "@opengeni/sdk";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Loader2Icon, UserRoundPlusIcon } from "lucide-react";
@@ -20,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
+import { managedAuthModeFromSearch } from "@/lib/managed-auth-url";
 import {
   browserAccountBridgeBlockersSnapshot,
   installBrowserAccountBridgeOperations,
@@ -120,11 +122,15 @@ export function BrowserAccountsSignedOutPanel(props: {
   presentation?: "card" | "embedded";
   emptySetRegistrationPanel?: ReactNode;
   invitation?: OrganizationInvitationContinuation | null;
+  /** The page query string; `?mode=signup` opens account creation when it is offered. */
+  search?: string;
 }) {
   const Heading = props.presentation === "embedded" ? "h2" : "h1";
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
-  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(
+    () => props.search !== undefined && managedAuthModeFromSearch(props.search) === "signup",
+  );
   const [invitationDismissed, setInvitationDismissed] = useState(false);
   const busy = accounts.phase === "committing" || accounts.phase === "loading";
   const slots = accounts.projection?.slots ?? [];
@@ -302,6 +308,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
+  modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   activeEmail: string | null;
   invitation: OrganizationInvitationContinuation | null;
   onComplete: () => void;
@@ -335,15 +342,28 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
       .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
   }
 
+  async function signOutSelectedAccount(): Promise<void> {
+    const projection = accounts.projection;
+    const selectedSlotId = projection?.selectedSlotId;
+    if (!selectedSlotId) return;
+    const replacement =
+      projection.slots.find((slot) => slot.id !== selectedSlotId && slot.state === "active")?.id ??
+      null;
+    await accounts.logoutSlot(selectedSlotId, replacement);
+  }
+
   return (
     <OrganizationOnboardingPanel
       client={props.client}
       billingMode={props.billingMode}
       codexEnabled={props.codexEnabled}
       supergrokEnabled={props.supergrokEnabled}
+      modelDefaults={props.modelDefaults ?? null}
       activeEmail={props.activeEmail}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}
+      onUseAnotherAccount={() => authenticate("add")}
+      onSignOut={signOutSelectedAccount}
       onComplete={props.onComplete}
     />
   );

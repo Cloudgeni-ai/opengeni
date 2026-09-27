@@ -94,6 +94,7 @@ import { cn } from "@/lib/utils";
 import { findPickerRow, payerSummaryForModel, type PickerModelRow } from "@/lib/model-policy";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { ScheduledTask, ScheduledTaskRun, Session } from "@/types";
+import type { DefaultModelSelection } from "@opengeni/sdk";
 
 /**
  * Per-card run-history state. Loading, failure, and "loaded and genuinely
@@ -167,6 +168,14 @@ export function SchedulesRoute({
   const navigate = useNavigate();
   const client = context.client;
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
+  // New schedules follow the workspace's resolved default model (saved default,
+  // connected subscription, credits, deployment default) until someone picks a
+  // model, and are then saved without one so each run resolves it afresh.
+  const scheduleModelDefaults = {
+    model: modelCatalog.defaultSelection?.model ?? context.model,
+    reasoningEffort: modelCatalog.defaultSelection?.reasoningEffort ?? context.reasoningEffort,
+    modelFollowsDefault: true,
+  };
   const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -677,8 +686,7 @@ export function SchedulesRoute({
                 taskId={task.id}
                 key={task.id}
                 initialState={formStateFromScheduledTask(task, {
-                  model: context.model,
-                  reasoningEffort: context.reasoningEffort,
+                  ...scheduleModelDefaults,
                   defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
                   defaultMachineSandboxId,
                 })}
@@ -692,6 +700,7 @@ export function SchedulesRoute({
                 machinesError={fleet.error}
                 defaultSandboxBackend={context.clientConfig.defaultSandboxBackend ?? "modal"}
                 modelRows={modelCatalog.rows}
+                defaultModelSelection={modelCatalog.defaultSelection}
                 modelsLoading={modelCatalog.loading}
                 modelsError={modelCatalog.error}
                 onSubmit={(form) => void saveTask(task, form)}
@@ -741,14 +750,12 @@ export function SchedulesRoute({
             initialState={
               recurringSourceSessionId
                 ? recurringSessionTaskFormState(recurringSourceSessionId, canAttachOpenGeniTool, {
-                    model: context.model,
-                    reasoningEffort: context.reasoningEffort,
+                    ...scheduleModelDefaults,
                     defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
                     defaultMachineSandboxId,
                   })
                 : newScheduledTaskFormState(canAttachOpenGeniTool, [], {
-                    model: context.model,
-                    reasoningEffort: context.reasoningEffort,
+                    ...scheduleModelDefaults,
                     defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
                     defaultMachineSandboxId,
                   })
@@ -763,6 +770,7 @@ export function SchedulesRoute({
             machinesError={fleet.error}
             defaultSandboxBackend={context.clientConfig.defaultSandboxBackend ?? "modal"}
             modelRows={modelCatalog.rows}
+            defaultModelSelection={modelCatalog.defaultSelection}
             modelsLoading={modelCatalog.loading}
             modelsError={modelCatalog.error}
             onSubmit={(form) => void createTask(form)}
@@ -770,7 +778,7 @@ export function SchedulesRoute({
         </>
       ) : null}
 
-      <div className="mt-4 grid gap-2">
+      <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-2">
         {tasksView === "loading" ? (
           <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-4 text-sm text-fg-muted">
             <Loader2Icon className="size-4 animate-spin" />
@@ -833,7 +841,7 @@ export function SchedulesRoute({
             </CollapsibleTrigger>
           </div>
           <CollapsibleContent>
-            <div className="mt-2 grid gap-2">
+            <div className="mt-2 grid grid-cols-[minmax(0,1fr)] gap-2">
               {groups.paused.map((task) => renderTaskCard(task, "paused"))}
             </div>
           </CollapsibleContent>
@@ -1332,6 +1340,8 @@ function ScheduledTaskForm(props: {
   machinesError: Error | null;
   defaultSandboxBackend: NonNullable<ScheduledTask["agentConfig"]["sandboxBackend"]>;
   modelRows: PickerModelRow[];
+  /** Server-resolved default shown while the form follows it. */
+  defaultModelSelection: DefaultModelSelection | null;
   modelsLoading: boolean;
   modelsError: string | null;
   onSubmit: (form: ScheduledTaskFormState) => void;
@@ -1454,7 +1464,22 @@ function ScheduledTaskForm(props: {
         : "Continue an existing chat";
   const modelLabel = props.modelsLoading
     ? "Loading model"
-    : (selectedModel?.label ?? form.model ?? "Default model");
+    : `${selectedModel?.label ?? form.model ?? "Default model"}${form.modelFollowsDefault ? " (default)" : ""}`;
+  const followedDefault = form.modelFollowsDefault ? props.defaultModelSelection : null;
+  useEffect(() => {
+    if (!followedDefault) return;
+    setForm((current) =>
+      current.modelFollowsDefault &&
+      (current.model !== followedDefault.model ||
+        current.reasoningEffort !== followedDefault.reasoningEffort)
+        ? {
+            ...current,
+            model: followedDefault.model,
+            reasoningEffort: followedDefault.reasoningEffort,
+          }
+        : current,
+    );
+  }, [followedDefault]);
   const billingLabel = selectedModel
     ? payerSummaryForModel(selectedModel.catalog)
     : "Payment source unavailable";
@@ -1464,7 +1489,7 @@ function ScheduledTaskForm(props: {
   };
 
   return (
-    <div className="mt-4 grid gap-5 border-t border-border pt-4">
+    <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-5 border-t border-border pt-4">
       <div className="grid gap-1.5">
         <Label>Name</Label>
         <Input
@@ -1512,8 +1537,12 @@ function ScheduledTaskForm(props: {
             disabled={props.busy}
             loading={props.modelsLoading}
             error={props.modelsError}
-            onModelChange={(model) => update("model", model)}
-            onEffortChange={(effort) => update("reasoningEffort", effort)}
+            onModelChange={(model) =>
+              setForm((current) => ({ ...current, model, modelFollowsDefault: false }))
+            }
+            onEffortChange={(reasoningEffort) =>
+              setForm((current) => ({ ...current, reasoningEffort, modelFollowsDefault: false }))
+            }
             onLatencyModeChange={() => {}}
           />
         </div>

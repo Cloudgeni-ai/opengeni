@@ -423,6 +423,16 @@ describe("session control surface architecture", () => {
     expect(paginationKey).not.toContain("serverSessions");
   });
 
+  test("loads the first page and older sessions independently in each project", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
+    expect(list).toContain('limit: group.kind === "channel" ? 50 : 100');
+    expect(list).toContain("if (!channelMode || search) return;");
+    expect(list).toContain("void loadMoreInGroup(group);");
+    expect(list).toContain("sessionPaginationProjectGroup(section.channelId, section.name)");
+    expect(list).toContain("(!channelMode || search) && workspacePagination");
+  });
+
   test("hands keyboard focus across optimistic project-move remounts", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
@@ -537,6 +547,21 @@ describe("session control surface architecture", () => {
     expect(rail).toContain("workspaceId={workspaceId}");
     expect(rail).toContain("open={searchOpen}");
     expect(rail).toContain("onOpenChange={setSearchOpen}");
+  });
+
+  test("the established-session Variable Set editor stays behind its lazy panel", async () => {
+    // A direct session load must not carry the editor: the "+" menu mounts it
+    // on demand (see test/e2e/session-lazy-panels.browser.e2e.ts).
+    const route = await source("routes/session.tsx");
+    expect(route).toContain('from "@/components/session/session-variable-set-picker-panel"');
+    expect(route).not.toContain('from "@/components/session/session-variable-set-picker"');
+    const panel = await source("components/session/session-variable-set-picker-panel.tsx");
+    expect(panel).toContain('import("@/components/session/session-variable-set-picker")');
+    // Only a type-only import of the implementation module is allowed.
+    expect(panel).not.toMatch(
+      /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
+    );
+    expect(panel).toContain(".catch(() => ({ default: SessionVariableSetPickerLoadFailed }))");
   });
 
   test("the retired client-side queue model is gone", async () => {

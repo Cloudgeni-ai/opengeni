@@ -1,6 +1,10 @@
 import { seedSenderConnections } from "./sender-connection-fixture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { MODEL_CONTEXT_LABEL, type McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import {
+  MODEL_CONTEXT_LABEL,
+  renderMessageSentAtForModel,
+  type McpPersonalConnectionDelegation,
+} from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -867,6 +871,7 @@ describe("attempt-fenced Agent session commands", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${instructions}` },
+        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
         { type: "input_text", text: "Use the selected record" },
       ],
     });

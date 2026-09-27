@@ -131,6 +131,54 @@ describe("signed-out browser account recovery", () => {
     }
   });
 
+  test("a ?mode=signup link opens account creation on an empty account set", async () => {
+    const current = emptyBrokerProjection();
+    const client: BrowserAccountsClientLike = {
+      getSessionSet: async () => current,
+      reconcileSessionSetAuthority: async () => current,
+      bootstrapSessionSet: async () => current,
+      beginLoginTransaction: async () => {
+        throw new Error("not used");
+      },
+      completeEmailPasswordTransaction: async () => {
+        throw new Error("not used");
+      },
+      cancelLoginTransaction: async () => current,
+      selectLoginSlot: async () => current,
+      logoutLoginSlot: async () => current,
+      logoutSessionSet: async () => ({ generation: "2", actorEpoch: "2", state: "logged_out" }),
+      resolveDeepLink: async () => ({ kind: "unavailable" }),
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <BrowserAccountsProvider
+            client={client}
+            broadcastChannelName={null}
+            onActorTransition={async () => undefined}
+          >
+            <BrowserAccountsSignedOutPanel
+              presentation="embedded"
+              search="?mode=signup&utm_source=opengeni.ai&utm_medium=website&utm_campaign=hero"
+              emptySetRegistrationPanel={<div data-registration="true">Sign up and resend</div>}
+            />
+          </BrowserAccountsProvider>,
+        ),
+      );
+      await flush();
+
+      expect(container.querySelector('[data-registration="true"]')).not.toBeNull();
+      expect(container.textContent).toContain("Back to sign in");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("requires an explicit slot choice after add leaves the sole slot unselected", async () => {
     let current = projection(false);
     const selections: SelectManagedAuthLoginSlotRequest[] = [];

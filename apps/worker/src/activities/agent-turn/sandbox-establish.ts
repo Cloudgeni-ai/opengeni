@@ -1,4 +1,5 @@
 import {
+  authorizeAutomaticSandboxCheckpointRecovery,
   getEnrollment,
   getSandbox,
   readActiveSandbox,
@@ -35,7 +36,11 @@ import {
 import { rigProviderImageSourceImage } from "../sandbox-images";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import type { currentActivityContext } from "../streaming";
-import { resumeBoxForTurn, type ResumedTurnSandbox } from "../../sandbox-resume";
+import {
+  createFreshSandboxReadinessReplacementBudget,
+  resumeBoxForTurn,
+  type ResumedTurnSandbox,
+} from "../../sandbox-resume";
 import {
   wrapTurnBoxWithRouting,
   wrapLazyTurnBoxWithRouting,
@@ -298,6 +303,9 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
 }
 
 export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Promise<void> {
+  // One fresh-box readiness replacement per turn attempt, shared by the eager
+  // establish and every lazy provisioner retry of this attempt.
+  const freshSandboxReadinessReplacementBudget = createFreshSandboxReadinessReplacementBudget();
   const {
     input,
     settings,
@@ -372,6 +380,35 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     const sandboxEstablishStartedAt = performance.now();
     let sandboxEstablishOutcome: "completed" | "failed" = "completed";
     try {
+      if (!machinePrimary && groupBoxBackend === "modal" && activeSandboxBackend !== "selfhosted") {
+        // This happens before buildTurnAgent reads the durable instruction
+        // tail, even for an on-demand sandbox. The DB admits only a verified,
+        // provider-lost singleton with no unresolved workspace writers.
+        const fallback = await authorizeAutomaticSandboxCheckpointRecovery(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: input.attemptId,
+        });
+        if (fallback.status === "authorized") {
+          try {
+            observability.incrementCounter({
+              name: "opengeni_sandbox_checkpoint_fallback_total",
+              help: "System-selected verified historical checkpoints after managed provider loss.",
+              labels: { backend: "modal", outcome: "selected" },
+            });
+          } catch {
+            // Telemetry must not turn a committed recovery into another failure.
+          }
+          observability.warn("managed sandbox selected an older verified checkpoint", {
+            backend: "modal",
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            archiveGeneration: fallback.selection.archiveGeneration,
+            workspaceGeneration: fallback.selection.workspaceGeneration,
+          });
+        }
+      }
       const managedOwnership = managedSandboxOwnershipForTurn(
         machinePrimary,
         input.attemptId,
@@ -592,6 +629,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                observability,
+                freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
               },
@@ -667,6 +706,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                observability,
+                freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
               },

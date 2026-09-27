@@ -46,8 +46,10 @@ import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
   integrationBaseUrl,
+  oauthStateFailureReturn,
   oauthStateTtlMs,
   requireIntegrationsStateSecret,
+  workspaceIntegrationsPath,
 } from "./oauth-client";
 
 const FIKEN_API_BASE = "https://api.fiken.no/api/v2";
@@ -1123,7 +1125,7 @@ export async function startFikenOAuth(
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     returnPath: safeReturnPath(
-      input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
+      input.payload.returnPath ?? workspaceIntegrationsPath(input.workspaceId),
     ),
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
     ...(input.externalContinuation
@@ -1363,12 +1365,16 @@ export async function completeFikenOAuthCallback(
     };
   } catch (error) {
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
+    // Reading the state is the first step, so no state means the link itself
+    // was unusable: say whether it expired instead of suggesting a token.
+    const failure = state ? null : oauthStateFailureReturn(deps.settings, input.state);
     return {
       redirectTo: fikenReturnUrl(
         returnBaseUrl,
-        state?.returnPath ?? "/integrations",
+        state?.returnPath ?? failure!.returnPath,
         "error",
-        error instanceof FikenOAuthCallbackError ? error.reason : "callback_failed",
+        failure?.reason ??
+          (error instanceof FikenOAuthCallbackError ? error.reason : "callback_failed"),
       ),
     };
   }

@@ -37,6 +37,7 @@ import {
   SessionEventType,
   stableJson,
   compactSessionEventResult,
+  turnCompletedReply,
   sessionEventLatestClassToSemanticClass,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
@@ -187,7 +188,12 @@ import {
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit, workflowIdForSession } from "@opengeni/core";
+import {
+  recordWorkspaceUsage,
+  requireLimit,
+  resolveScheduledTaskPreflightModel,
+  workflowIdForSession,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   githubBindingStatus,
@@ -290,6 +296,7 @@ import {
   SESSION_WAIT_EVENTS_PER_TARGET,
   SESSION_WAIT_MAX_SECONDS,
   SESSION_WAIT_MAX_TARGETS,
+  sessionWaitChangeEventMatches,
   sessionWaitCompletionEventMatches,
   waitForSessionChanges,
 } from "./session-wait";
@@ -307,6 +314,7 @@ import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../san
 import {
   createOpenGeniSlackBotClient,
   resolveSlackBotConnectionForTool,
+  type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
@@ -572,6 +580,51 @@ class PolicyMcpServer extends McpServer {
       )
       .disable();
   }
+}
+
+export function slackBotFileContentResult(
+  result: Awaited<ReturnType<OpenGeniSlackBotClient["fileContent"]>>,
+) {
+  if (!("image" in result)) {
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      structuredContent: {
+        kind: "text" as const,
+        fileId: result.file.id,
+        contentType: result.contentType,
+        content: result.content,
+        sizeBytes: null,
+        nextOffset: result.nextOffset,
+      },
+    };
+  }
+  return {
+    structuredContent: {
+      kind: "image" as const,
+      fileId: result.file.id,
+      contentType: result.image.contentType,
+      content: null,
+      sizeBytes: result.image.bytes.byteLength,
+      nextOffset: null,
+    },
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          channel: result.channel,
+          file: result.file,
+          contentType: result.image.contentType,
+          sizeBytes: result.image.bytes.byteLength,
+          receipt: result.receipt,
+        }),
+      },
+      {
+        type: "image" as const,
+        mimeType: result.image.contentType,
+        data: Buffer.from(result.image.bytes).toString("base64"),
+      },
+    ],
+  };
 }
 
 export function buildOpenGeniMcpServer(
@@ -1598,7 +1651,7 @@ export function buildOpenGeniMcpServer(
             workspaceId: grant.workspaceId,
             action: "agent_run:create",
             quantity: 1,
-            model: task.agentConfig.model ?? deps.settings.openaiModel,
+            model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
           });
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
@@ -1944,7 +1997,7 @@ function registerSlackBotTools(
     "slack_bot_file_content",
     {
       description:
-        "Read a bounded page of UTF-8 text from a Slack file or canvas shared with a channel where the workspace-shared OpenGeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset when truncated is true.",
+        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared OpenGeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -1952,18 +2005,26 @@ function registerSlackBotTools(
         parentFileId: z4.string().min(1).max(64).optional(),
         offset: z4.number().int().min(0).max(4_000_000).optional(),
       },
+      outputSchema: {
+        kind: z4.enum(["text", "image"]),
+        fileId: z4.string(),
+        contentType: z4.string(),
+        content: z4.string().nullable(),
+        sizeBytes: z4.number().int().nullable(),
+        nextOffset: z4.number().int().nullable(),
+      },
     },
-    async ({ connectionId, channelId, fileId, parentFileId, offset }) =>
-      json(
-        await (
-          await clientFor(connectionId)
-        ).fileContent({
-          channelId,
-          fileId,
-          ...(parentFileId ? { parentFileId } : {}),
-          ...(offset !== undefined ? { offset } : {}),
-        }),
-      ),
+    async ({ connectionId, channelId, fileId, parentFileId, offset }) => {
+      const result = await (
+        await clientFor(connectionId)
+      ).fileContent({
+        channelId,
+        fileId,
+        ...(parentFileId ? { parentFileId } : {}),
+        ...(offset !== undefined ? { offset } : {}),
+      });
+      return slackBotFileContentResult(result);
+    },
   );
 
   server.registerTool(
@@ -4702,9 +4763,14 @@ function registerWorkspaceOrchestrationTools(
                 ),
               )
             : null;
+          // The compact text of a turn that ended waiting for input is its
+          // empty output, never the reply its human's message received, so
+          // returning it is not proof of reading that reply.
           if (
             result &&
+            event &&
             ["turn.completed", "agent.message.completed"].includes(result.type) &&
+            turnCompletedReply(event.payload) === null &&
             !result.truncation.truncated &&
             dbPage.fullPayloadsExact
           ) {
@@ -4738,7 +4804,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, completed messages, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence. For long or uncertain waits call wait_for_input once and end the turn.`,
+        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, settled answers, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas, progress commentary, or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence. For long or uncertain waits call wait_for_input once and end the turn.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4796,7 +4862,9 @@ function registerWorkspaceOrchestrationTools(
           maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
           targetEventTypes,
           targetEventMatches:
-            waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
+            waitFor === "completion"
+              ? sessionWaitCompletionEventMatches
+              : sessionWaitChangeEventMatches,
           signal,
           source: {
             reauthorizeTargets: async (sessionIds) => {
@@ -4816,6 +4884,8 @@ function registerWorkspaceOrchestrationTools(
                 limit: SESSION_WAIT_EVENTS_PER_TARGET,
                 payloadMode: "full",
                 includeTypes: targetEventTypes,
+                // Progress notes must not fill the page ahead of the outcome.
+                excludeStreamedAssistantMessages: waitFor !== "completion",
                 maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
               });
               if (!page.fullPayloadsExact) {

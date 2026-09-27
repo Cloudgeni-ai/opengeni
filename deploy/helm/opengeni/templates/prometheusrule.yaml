@@ -60,6 +60,13 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"} < {{ $inventoryFreshnessSeconds }})
             )
+        - record: opengeni:sandbox_recovery_observations_recent:fresh_max
+          expr: |
+            max by (kind) (
+              opengeni_sandbox_recovery_observations_recent{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="recovery_observations"} < {{ $inventoryFreshnessSeconds }})
+            )
         - record: opengeni:sandbox_rotation_backlog:fresh_max
           expr: |
             max by (kind) (
@@ -183,7 +190,7 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has a durable recovering session with no active attempt for more than 10 minutes
-            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction.
+            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
         - alert: OpenGeniSessionRecoveryMonitorStale
           expr: |
             absent(opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}) == 1
@@ -644,6 +651,61 @@ spec:
           annotations:
             summary: OpenGeni has a sandbox past its provider deadline
             description: A finite-lifetime sandbox has remained past its precomputed provider deadline for 10m. Check turn, direct-operation, and retained-process blockers, checkpoint capture, reaper health, and Modal API errors before the provider kills it.
+        - alert: OpenGeniSandboxDeadlineProcessBlocked
+          expr: opengeni:sandbox_rotation_backlog:fresh_max{kind="process_blocked"} > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A retained command is delaying sandbox deadline rotation
+            description: A provider-deadline rotation has been process-blocked for 10m. Inspect the current process, owner settlement, deadline cancellation and checkpoint capture while the provider is still available.
+        - alert: OpenGeniModalProviderMissingBeforeCapture
+          # A newly created counter may have only one sample after its first
+          # loss, so increase() alone would miss that first observation. The
+          # offset arm catches a new positive series for the same 30m window.
+          expr: |
+            (
+              (sum(
+                increase(opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}[30m]) > 0
+                or
+                (
+                  opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}
+                  unless
+                  opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"} offset 30m
+                )
+              ) or vector(0))
+              +
+              (sum(opengeni:sandbox_recovery_observations_recent:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="provider_missing_before_capture"}) or vector(0))
+            ) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: A Modal sandbox disappeared before its workspace could be captured
+            description: The exact draining-to-cold commit recorded providerMissingBeforeCapture. Inspect the sandbox.box.terminated event and the current archive/recovery state; a prior checkpoint may still be restorable. This is observed loss, independent of overdue rotation backlog.
+        - alert: OpenGeniModalCheckpointFallbackSelected
+          # A newly created counter may have only one scrape sample. The offset
+          # arm retains that first positive observation for the alert window.
+          expr: |
+            (
+              (sum(
+                increase(opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}[30m]) > 0
+                or
+                (
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}
+                  unless
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"} offset 30m
+                )
+              ) or vector(0))
+              +
+              (sum(opengeni:sandbox_recovery_observations_recent:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="checkpoint_fallback_selected"}) or vector(0))
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: Modal workspace recovery selected a fallback checkpoint
+            description: A prior checkpoint was selected after a durable authorization receipt. This is an operator signal even if the session later continues successfully; inspect archive selection and restore state. Selection does not prove restoration succeeded.
         - alert: OpenGeniSandboxCheckpointDeletionFailed
           expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{state="delete_failed"} > 0
           for: 15m
@@ -866,6 +928,15 @@ spec:
           annotations:
             summary: OpenGeni live-publish p99 exceeds 500ms (delivery path)
             description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
+        - alert: OpenGeniNatsSubscriptionTerminated
+          expr: |
+            sum by (kind, recovery) (increase(opengeni_nats_subscription_terminations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni NATS {{ "{{ $labels.kind }}" }} subscription ended while still held
+            description: The broker ended a live subscription, for example with a permissions violation. SSE consumers fail retryably and replay from Postgres; the auth-callout, Codemode request, and agent-event responders resubscribe with bounded backoff (at most about 31s apart). A counter that keeps rising means resubscribes keep failing; for kind auth_callout every Connected Machine connect is denied until it recovers. Inspect the api/worker "NATS subscription ended" warnings and the NATS server permissions for that account.
         # ── Context / compaction ─────────────────────────────────────────────
         - alert: OpenGeniCompactionNotFiring
           # The control worker projects the latest exact-attempt compaction

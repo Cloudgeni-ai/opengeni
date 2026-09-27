@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   BrowserSession,
+  EPHEMERAL_CHROMIUM_DRIVER_ID,
   BrowserSessionCapabilities,
   BrowserSessionListResponse,
   BrowserSessionMutationResponse,
@@ -66,6 +67,13 @@ export const MANAGED_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.p
   parallelTargets: true,
 });
 
+export const EPHEMERAL_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
+  ...MANAGED_BROWSER_SESSION_CAPABILITIES,
+  privateCheckpoint: false,
+  identityPublication: false,
+  linkedComputer: false,
+});
+
 export const ATTACHED_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
   semanticObservation: true,
   screenshots: true,
@@ -108,7 +116,7 @@ export const EXTERNAL_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.
  * remain false instead of being emulated or silently routed elsewhere. */
 export const LIGHTPANDA_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
   semanticObservation: true,
-  screenshots: true,
+  screenshots: false,
   liveFrames: false,
   humanInput: false,
   tabs: false,
@@ -273,8 +281,11 @@ function associationFromRow(row: BrowserAssociationRow) {
 }
 
 /** Legacy resources predate permission control; absence must never advertise support. */
-export function readStoredBrowserCapabilities(value: Record<string, unknown>) {
-  return BrowserSessionCapabilities.parse({ permissions: false, ...value });
+export function readStoredBrowserCapabilities(value: Record<string, unknown>, engine?: string) {
+  const capabilities = BrowserSessionCapabilities.parse({ permissions: false, ...value });
+  // Correct existing sessions too: the pinned engine's static placeholder is
+  // not a screenshot, even if an older controller advertised it as one.
+  return engine === "lightpanda" ? { ...capabilities, screenshots: false } : capabilities;
 }
 
 function browserSessionFromRows(
@@ -297,7 +308,7 @@ function browserSessionFromRows(
     baseRevisionId: row.baseRevisionId,
     networkRouteId: row.networkRouteId,
     linkedComputerSessionId: row.linkedComputerSessionId,
-    capabilities: readStoredBrowserCapabilities(row.capabilities),
+    capabilities: readStoredBrowserCapabilities(row.capabilities, row.engine),
     associations: associations.map(associationFromRow),
     createdBySubjectId: row.createdBySubjectId,
     createdAt: iso(row.createdAt),
@@ -396,6 +407,7 @@ function requestDigest(value: Record<string, unknown>): string {
 }
 
 export function browserSessionCreateRequestDigest(input: PrepareBrowserSessionCreateInput): string {
+  const capabilities = normalizedBrowserCapabilities(input);
   const revisionSelection = input.identityId
     ? input.resolveDefaultRevision
       ? { kind: "identity_default" as const }
@@ -416,7 +428,11 @@ export function browserSessionCreateRequestDigest(input: PrepareBrowserSessionCr
     networkRouteId: input.networkRouteId ?? null,
     linkedComputerSessionId: input.linkedComputerSessionId ?? null,
     revisionSelection,
-    capabilities: normalizedBrowserCapabilities(input),
+    // Version 4 included the engine-derived screenshot bit. Preserve its
+    // original Lightpanda value only in the digest so an existing create
+    // operation remains replayable after correcting advertised capabilities.
+    capabilities:
+      input.engine === "lightpanda" ? { ...capabilities, screenshots: true } : capabilities,
     actorSubjectId: input.actorSubjectId,
   });
 }
@@ -690,6 +706,20 @@ export async function prepareBrowserSessionCreate(
   db: Database,
   input: PrepareBrowserSessionCreateInput,
 ): Promise<BrowserSessionMutationResponseValue> {
+  if (
+    input.driverId === EPHEMERAL_CHROMIUM_DRIVER_ID &&
+    (input.placement.kind !== "sandbox_group" ||
+      input.engine !== "chromium" ||
+      !input.headless ||
+      input.identityId ||
+      input.baseRevisionId ||
+      input.networkRouteId ||
+      input.linkedComputerSessionId)
+  ) {
+    throw new BrowserSessionStateError(
+      "Ephemeral contexts require headless sandbox Chromium without durable identity, route or desktop",
+    );
+  }
   const digest = browserSessionCreateRequestDigest(input);
   const browserSessionId = randomUUID();
   const capabilities = normalizedBrowserCapabilities(input);
@@ -930,7 +960,9 @@ function normalizedBrowserCapabilities(
   input: PrepareBrowserSessionCreateInput,
 ): BrowserSessionCapabilitiesValue {
   return BrowserSessionCapabilities.parse({
-    ...(input.capabilities ?? MANAGED_BROWSER_SESSION_CAPABILITIES),
+    ...(input.driverId === EPHEMERAL_CHROMIUM_DRIVER_ID
+      ? EPHEMERAL_BROWSER_SESSION_CAPABILITIES
+      : (input.capabilities ?? MANAGED_BROWSER_SESSION_CAPABILITIES)),
     linkedComputer: input.linkedComputerSessionId != null,
   });
 }
@@ -1613,6 +1645,8 @@ export async function prepareBrowserSessionResume(
     terminalLifecycle: "active",
     targetLifecycle: "restoring",
     assertReady: (row) => {
+      if (row.driverId === EPHEMERAL_CHROMIUM_DRIVER_ID)
+        throw new BrowserSessionStateError("Ephemeral contexts cannot be resumed");
       if (row.lifecycle !== "suspended") {
         throw new BrowserSessionStateError("Only a suspended BrowserSession can be resumed");
       }
@@ -2456,4 +2490,50 @@ function assertOperationResource(
 
 function postgresConstraint(error: unknown): string | null {
   return safeDatabaseErrorFacts(error).constraint ?? null;
+}
+
+/** Retire only the exact ephemeral generation proven absent by its authenticated
+ * controller. No profile restore, replacement creation or operation replay. */
+export async function markEphemeralBrowserSessionLost(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+        const rows = await tx
+          .update(schema.browserSessions)
+          .set({
+            lifecycle: "lost",
+            failureCode: "ephemeral_context_lost",
+            controllerId: null,
+            controllerGeneration: null,
+            placementInstanceId: null,
+            controllerHeartbeatAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.browserSessions.id, input.browserSessionId),
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              eq(schema.browserSessions.driverId, EPHEMERAL_CHROMIUM_DRIVER_ID),
+              eq(schema.browserSessions.controllerGeneration, input.controllerGeneration),
+              eq(schema.browserSessions.lifecycle, "active"),
+            ),
+          )
+          .returning({ id: schema.browserSessions.id });
+        if (rows.length)
+          await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+        return rows.length > 0;
+      }),
+  );
 }

@@ -47,13 +47,25 @@ export type SandboxRecoveryState = {
   request: SandboxRecoveryRequest | null;
   uncertain: boolean;
   error: string | null;
+  /**
+   * The API refused the read with 403 and no consent request is retained:
+   * recovery requires the canonical managed-human cookie session plus session
+   * control, so it cannot apply to this viewer (local mode, API keys, delegated
+   * or read-only principals).
+   */
+  notApplicable: boolean;
 };
+
+/** A read-only 403 means this viewer can never consent, not that the check failed. */
+export function isRecoveryNotApplicableError(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.status === 403;
+}
 
 /** Public blocker codes are stable; UI copy must not expose persistence jargon. */
 export function sandboxRecoveryBlocker(reason: string): string {
   const messages: Record<string, string> = {
     recovery_not_enabled: "Checkpoint recovery has not been enabled by your operator.",
-    managed_modal_home_required: "Recovery supports only this session's managed Modal home.",
+    managed_modal_home_required: "Recovery supports only this session's managed cloud sandbox.",
     connected_machine_selected:
       "This session now uses a Connected Machine. Check prior execution outcomes before retrying.",
     singleton_required: "This sandbox is shared with another session and cannot be recovered here.",
@@ -92,6 +104,7 @@ export function createSandboxRecoveryController(
     request: null,
     uncertain: false,
     error: null,
+    notApplicable: false,
   };
   const listeners = new Set<() => void>();
   let read: Promise<SandboxRecoveryProjection | null> | null = null;
@@ -117,15 +130,22 @@ export function createSandboxRecoveryController(
         update({
           projection,
           error: null,
+          notApplicable: false,
           ...(observedRequest ? { uncertain: false } : {}),
         });
         return projection;
-      } catch {
+      } catch (error) {
         if (revision === startedRevision) {
           // Never leave an old eligible action live after an unavailable read.
+          // A retained consent request stays fail-closed: losing read access
+          // after consent is not evidence the lane stopped applying.
+          const notApplicable = isRecoveryNotApplicableError(error) && !state.request;
           update({
             projection: null,
-            error: "Could not check checkpoint recovery. No new recovery request was sent.",
+            notApplicable,
+            error: notApplicable
+              ? null
+              : "Could not check checkpoint recovery. No new recovery request was sent.",
           });
         }
         return null;

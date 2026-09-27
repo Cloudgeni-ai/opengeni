@@ -4,7 +4,16 @@
 
 Unread is based on completed assistant messages, substantive final answers,
 and actionable failures/input/goal facts, not the raw event cursor. The same
-predicate drives child rows and ancestor counts. Raw deltas, status snapshots,
+predicate drives child rows and ancestor counts. Completed commentary
+(`phase: "commentary"`) is progress, so it never creates a dot on its own; the
+answer or outcome that follows does. A turn that a human or API message started
+and that ended waiting for input (`wait_for_input`) has no output, but the
+`reply` its `turn.completed` records answers that message, so it does create a
+dot. Migration 0527 indexes exactly that predicate; the 0503 index only serves
+older API processes during the rollout. A `session_wait` summary or a compact
+`session_events` `latest: "terminal"` result of such a `turn.completed` shows
+only the empty output, so neither counts as consuming the reply.
+Raw deltas, status snapshots,
 `sandbox.box.terminated`, `workspace.revision.captured`, rejected late events,
 duplicates and maintenance/continuation completion markers do not create dots.
 The public `lastSequence` and replay/pagination cursors still include all events.
@@ -76,7 +85,8 @@ content are unsupported and remain unread. No child is blanket-marked read.
 ## Conversation and execution history
 
 `session_events` defaults to a conversation projection: actual user text and
-completed assistant messages, including completed progress messages. It excludes
+completed assistant messages, including completed progress messages, which carry
+`phase: "commentary"`. It excludes
 raw deltas, tool bodies, and lifecycle diagnostics. Pagination never implicitly
 changes view or payload detail. Normal pages default to ten messages within a
 16 KiB response budget, preferring fewer complete messages; oversized messages
@@ -215,7 +225,12 @@ already-settled child, retrieve its result-bearing completion with
 `session_events` with `view: "results"` or join from the last consumed cursor.
 The results projection omits maintenance/segment settlements. Use the default
 conversation view for completed progress messages and explicit diagnostic views
-for exact retained execution evidence.
+for exact retained execution evidence. `waitFor: "change"` wakes on settled
+facts, not on each streamed assistant message: a completion that carries a
+provider `messageId` or a `phase` is excluded in SQL, so a long run of progress
+notes can neither wake the waiter nor fill its page ahead of the outcome, and
+the turn's `turn.completed` carries the answer. A `latest: "terminal"` lookup
+likewise skips commentary.
 Do not use `session_get` on your own current session to reconstruct conversation
 context.
 

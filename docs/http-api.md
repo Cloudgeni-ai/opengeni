@@ -16,6 +16,8 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 
 - `GET /healthz`
 - `GET /v1/config/client`
+- `POST /v1/client-errors` (public, content-free web client error beacon; see
+  [`application-observability.md`](application-observability.md#web-client-errors))
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)

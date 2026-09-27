@@ -995,6 +995,7 @@ describe("generic lazy tool dispatch", () => {
       "Pause this turn and request structured human input",
     );
     const models = firstPartyTool("list_models", "List selectable workspace models");
+    const codeSearch = firstPartyTool("code_search", "Find where code is implemented");
     const browser = firstPartyTool(
       "interaction__browser_act",
       "Click, type, and interact with the current browser page",
@@ -1013,6 +1014,7 @@ describe("generic lazy tool dispatch", () => {
         skillSave,
         human,
         models,
+        codeSearch,
         browser,
       ],
     });
@@ -1032,6 +1034,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "code_search",
       "tool_search",
       "tool_invoke",
       "tool_list",
@@ -1045,6 +1048,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "code_search",
     ]) {
       expect(
         runtime.search({ query: name.replaceAll("_", " ") }).map((candidate) => candidate.name),

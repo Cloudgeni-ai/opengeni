@@ -25,6 +25,8 @@ import {
 import { Hono } from "hono";
 import postgres from "postgres";
 
+import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
+import { registerCompanyBrainRoutes } from "../src/routes/company-brain";
 import { registerWorkspaceStateRoutes } from "../src/routes/workspace-state";
 
 const DELEGATION_SIGNING_FIXTURE = ["workspace", "state", "test", "signing", "fixture"].join("-");
@@ -72,13 +74,15 @@ beforeAll(async () => {
     agentInstructions: "PRIVATE LEGACY WORKSPACE INSTRUCTIONS",
   });
   app = new Hono();
-  registerWorkspaceStateRoutes(app, {
+  const routeDeps = {
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret: DELEGATION_SIGNING_FIXTURE,
     }),
     db: client.db,
-  } as ApiRouteDeps);
+  } as ApiRouteDeps;
+  registerWorkspaceStateRoutes(app, routeDeps);
+  registerCompanyBrainRoutes(app, routeDeps);
 }, 180_000);
 
 afterAll(async () => {
@@ -90,7 +94,7 @@ afterAll(async () => {
 async function request(
   permissions: Permission[],
   attemptId?: string,
-  mode: "state" | "export" = "state",
+  mode: "state" | "export" | "company-brain-export" = "state",
 ): Promise<Response> {
   const bearer = await signDelegatedAccessToken(DELEGATION_SIGNING_FIXTURE, {
     accountId: grant.accountId,
@@ -103,11 +107,15 @@ async function request(
   const headers = new Headers();
   headers.set("authorization", ["Bearer", bearer].join(" "));
   const query = attemptId ? `?attemptId=${encodeURIComponent(attemptId)}` : "";
-  const suffix = mode === "export" ? "/export" : "";
-  return await app.request(
-    `http://x/v1/workspaces/${grant.workspaceId}/workspace-state${suffix}${query}`,
-    { headers },
-  );
+  const path =
+    mode === "company-brain-export"
+      ? "company-brain/export"
+      : mode === "export"
+        ? "workspace-state/export"
+        : "workspace-state";
+  return await app.request(`http://x/v1/workspaces/${grant.workspaceId}/${path}${query}`, {
+    headers,
+  });
 }
 
 describe("workspace state API authorization", () => {
@@ -137,12 +145,28 @@ describe("workspace state API authorization", () => {
     expect(JSON.stringify(body)).not.toContain("PRIVATE LEGACY WORKSPACE INSTRUCTIONS");
   });
 
+  test("serves the Company Brain export as a sandboxed, non-embeddable attachment", async () => {
+    const response = await request(["workspace:read"], undefined, "company-brain-export");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/markdown");
+    expect(response.headers.get("content-disposition")).toBe(
+      `attachment; filename="company-brain-${grant.workspaceId}.okf.md"`,
+    );
+    expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect((await response.text()).length).toBeGreaterThan(0);
+  });
+
   test("filters knowledge before producing the canonical sanitized export", async () => {
     const response = await request(["workspace:read"], undefined, "export");
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("content-type")).toContain("application/json");
     expect(response.headers.get("content-disposition")).toContain("sanitized.json");
+    expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const serialized = await response.text();
     const exported = WorkspaceStateExportResponse.parse(JSON.parse(serialized));
     expect(exported.state.knowledge).toEqual({

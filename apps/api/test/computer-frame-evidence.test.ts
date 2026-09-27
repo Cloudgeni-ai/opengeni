@@ -27,8 +27,10 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { createInteractionAttemptToolDefinitions } from "@opengeni/runtime";
 import { OpenGeniApiError, OpenGeniClient, type InteractionTransport } from "@opengeni/sdk";
+import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import {
   captureModelComputerFrame,
+  computerScreenshotResponse,
   validateComputerFrameForApi,
 } from "../src/routes/computer-sessions";
 
@@ -40,6 +42,24 @@ const controlToken = `control.${"c".repeat(48)}`;
 const viewToken = `view.${"v".repeat(48)}`;
 
 describe("Computer frame evidence pipeline", () => {
+  test("serves a screen frame as exact, sandboxed, non-embeddable user content", async () => {
+    const image = Buffer.from([99, 0xff, 0xd8, 0xff, 0xd9, 88]).subarray(1, 5);
+    const response = computerScreenshotResponse({
+      data: image,
+      mediaType: "image/jpeg",
+      metadataHeader: "frame-metadata",
+    });
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(
+      Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+    );
+    expect(response.headers.get("content-type")).toBe("image/jpeg");
+    expect(response.headers.get("x-opengeni-computer-frame")).toBe("frame-metadata");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
   test.each([
     ["frame_session_mismatch", { computerSessionId: "00000000-0000-4000-8000-000000000099" }],
     ["frame_target_mismatch", { targetId: "screen:1" }],

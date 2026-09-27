@@ -23,7 +23,11 @@ data:
               metrics_path: {{ ((.Values.observability).metrics).path }}
               static_configs:
                 - targets:
+                    {{- if .Values.api.metricsPort }}
+                    - {{ include "opengeni.fullname" . }}-api-metrics:{{ .Values.api.metricsPort }}
+                    {{- else }}
                     - {{ include "opengeni.fullname" . }}-api:{{ .Values.api.service.port }}
+                    {{- end }}
     processors:
       batch: {}
       memory_limiter:

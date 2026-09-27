@@ -7,6 +7,7 @@ import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   createDb,
+  createConnection,
   createOrganizationApiKey,
   createScheduledTask,
   getScheduledTask,
@@ -128,6 +129,93 @@ function resultText(result: unknown): string {
 }
 
 describe("first-party MCP scheduled task connectionAccounts", () => {
+  test.each([false, true])(
+    "removing an MCP tool preserves explicit-account validation (%s)",
+    async (explicit) => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      const [sharedWorkspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${workspace.accountId}, 'Shared tool selection workspace') returning id`;
+      workspace.workspaceId = sharedWorkspace!.id;
+      await admin`insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace.workspaceId}, ${workspace.accountId})`;
+      await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId})`;
+      const retained = await createConnection(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: null,
+        providerDomain: "retained.example.com",
+        kind: "oauth2",
+        credentialEncrypted: "not-read-by-metadata-selection",
+      });
+      const retainedTool = { kind: "mcp" as const, id: "retained-integration", optional: true };
+      const retainedAccount = { serverId: retainedTool.id, connectionId: retained.id };
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "remove selected integration",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          connectionAccounts: [
+            { serverId: "removed-integration", connectionId: crypto.randomUUID() },
+            retainedAccount,
+          ],
+          connectionAccountsFrozen: true,
+          prompt: "scheduled prompt",
+          resources: [],
+          tools: [{ kind: "mcp", id: "removed-integration", optional: true }, retainedTool],
+          metadata: {},
+        },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      const dependencies = deps(client.db);
+      dependencies.settings.mcpServers.push({
+        id: retainedTool.id,
+        url: "https://retained.example.com/mcp",
+        cacheToolsList: false,
+        connectionRef: {
+          providerDomain: "retained.example.com",
+          kind: "oauth2",
+          subjectScope: "workspace",
+        },
+      });
+      const connected = await connectedClient(
+        buildOpenGeniMcpServer(dependencies, grantFor(workspace)),
+      );
+      try {
+        const result = await connected.client.callTool({
+          name: "scheduled_tasks_update",
+          arguments: {
+            id: task.id,
+            agentConfig: { prompt: "scheduled prompt", resources: [], tools: [retainedTool] },
+            ...(explicit ? { connectionAccounts: task.agentConfig.connectionAccounts } : {}),
+          },
+        });
+        if (explicit) {
+          expect(result).toMatchObject({ isError: true });
+          expect(resultText(result)).toContain("did not match a selected MCP server");
+          expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+          return;
+        }
+        expect(resultText(result)).not.toContain("did not match a selected MCP server");
+        expect(result, resultText(result)).not.toMatchObject({ isError: true });
+      } finally {
+        await connected.close();
+      }
+      const after = await getScheduledTask(client.db, workspace.workspaceId, task.id);
+      expect(after?.agentConfig.tools).toEqual([retainedTool]);
+      expect(after?.agentConfig.connectionAccounts).toEqual([retainedAccount]);
+      expect(after?.agentConfig.connectionAccountsFrozen).toBe(true);
+      expect(after?.ownerSubjectId).toBe(workspace.subjectId);
+    },
+  );
+
   test("declares connectionAccounts on create/update and rejects a malformed selection before storage", async () => {
     if (!available) return;
     let databaseTouches = 0;

@@ -330,6 +330,82 @@ variable "observability" {
   }
 }
 
+variable "aks_container_insights" {
+  description = "Optional AKS Container Insights collection of container stdout/stderr (ContainerLogV2) and Kubernetes events/pod inventory into the observability Log Analytics workspace. Collection is limited to the listed namespaces and the workspace receives a mandatory daily ingestion cap. container_log_transform_kql optionally applies an ingestion-time KQL transformation to ContainerLogV2 only, for example to redact request query strings."
+  type = object({
+    enabled                     = optional(bool, false)
+    namespaces                  = optional(list(string), [])
+    streams                     = optional(list(string), ["Microsoft-ContainerLogV2", "Microsoft-KubeEvents", "Microsoft-KubePodInventory"])
+    data_collection_interval    = optional(string, "5m")
+    workspace_daily_quota_gb    = optional(number)
+    container_log_transform_kql = optional(string)
+  })
+  default = {}
+
+  validation {
+    condition     = !var.aks_container_insights.enabled || try(var.observability.enabled, false)
+    error_message = "aks_container_insights.enabled requires observability.enabled so the Log Analytics workspace exists."
+  }
+
+  validation {
+    condition = !var.aks_container_insights.enabled || (
+      length(var.aks_container_insights.namespaces) > 0 &&
+      length(var.aks_container_insights.namespaces) == length(distinct(var.aks_container_insights.namespaces)) &&
+      alltrue([
+        for namespace in var.aks_container_insights.namespaces :
+        can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", namespace))
+      ])
+    )
+    error_message = "aks_container_insights.namespaces must list at least one distinct Kubernetes namespace when enabled; collection is namespace-scoped by design."
+  }
+
+  validation {
+    condition = (
+      length(var.aks_container_insights.streams) > 0 &&
+      contains(var.aks_container_insights.streams, "Microsoft-ContainerLogV2") &&
+      length(var.aks_container_insights.streams) == length(distinct(var.aks_container_insights.streams)) &&
+      alltrue([
+        for stream in var.aks_container_insights.streams : contains([
+          "Microsoft-ContainerLogV2",
+          "Microsoft-KubeEvents",
+          "Microsoft-KubePodInventory",
+          "Microsoft-KubeNodeInventory",
+          "Microsoft-KubeServices",
+          "Microsoft-KubePVInventory",
+          "Microsoft-KubeMonAgentEvents",
+          "Microsoft-ContainerInventory",
+          "Microsoft-ContainerNodeInventory",
+          "Microsoft-InsightsMetrics",
+          "Microsoft-Perf",
+        ], stream)
+      ])
+    )
+    error_message = "aks_container_insights.streams must include Microsoft-ContainerLogV2 and contain only distinct Container Insights streams; the legacy ContainerLog stream is not supported."
+  }
+
+  validation {
+    condition     = can(regex("^([1-9]|[12][0-9]|30)m$", var.aks_container_insights.data_collection_interval))
+    error_message = "aks_container_insights.data_collection_interval must be a whole number of minutes between 1m and 30m."
+  }
+
+  validation {
+    condition = !var.aks_container_insights.enabled || try(
+      var.aks_container_insights.workspace_daily_quota_gb >= 0.1 &&
+      var.aks_container_insights.workspace_daily_quota_gb <= 100,
+      false
+    )
+    error_message = "aks_container_insights.workspace_daily_quota_gb is required when enabled and must be between 0.1 and 100 GB so container log cost stays bounded."
+  }
+
+  validation {
+    condition = (
+      var.aks_container_insights.container_log_transform_kql == null ||
+      can(regex("^source(\\s|$)", trimspace(var.aks_container_insights.container_log_transform_kql)))
+    )
+    error_message = "aks_container_insights.container_log_transform_kql must be null or a KQL transformation that starts with `source`."
+  }
+}
+
 variable "postgres" {
   description = "Postgres mode. Use managed to create Azure Database for PostgreSQL Flexible Server or external to connect an existing compatible server."
   type = object({
@@ -370,12 +446,13 @@ variable "postgres" {
 }
 
 variable "managed_postgres_capacity" {
-  description = "Optional non-secret capacity policy for managed PostgreSQL. Keep this separate from the credential-bearing postgres object so production automation can pin compute and storage without duplicating secrets."
+  description = "Optional non-secret capacity policy for managed PostgreSQL. Keep this separate from the credential-bearing postgres object so production automation can pin compute and storage without duplicating secrets. max_connections is optional: when set, Terraform manages the static max_connections server parameter, and the provider restarts the server whenever that value is first adopted or changed."
   type = object({
     sku_name          = string
     storage_mb        = number
     storage_tier      = string
     auto_grow_enabled = bool
+    max_connections   = optional(number)
   })
   default  = null
   nullable = true
@@ -387,6 +464,105 @@ variable "managed_postgres_capacity" {
       contains(["P4", "P6", "P10", "P15", "P20", "P30", "P40", "P50", "P60", "P70", "P80"], var.managed_postgres_capacity.storage_tier)
     )
     error_message = "managed_postgres_capacity must use a valid Azure PostgreSQL SKU, supported storage size, and supported storage tier."
+  }
+
+  validation {
+    condition = try(var.managed_postgres_capacity.max_connections, null) == null ? true : (
+      var.managed_postgres_capacity.max_connections >= 25 &&
+      var.managed_postgres_capacity.max_connections <= 5000 &&
+      floor(var.managed_postgres_capacity.max_connections) == var.managed_postgres_capacity.max_connections
+    )
+    error_message = "managed_postgres_capacity.max_connections must be a whole number between 25 and 5000."
+  }
+}
+
+variable "managed_postgres_availability" {
+  description = "Optional non-secret availability policy for managed PostgreSQL: a high-availability standby, a custom planned-maintenance window, and the Terraform update timeout for the server. Null (the default) keeps high availability disabled, lets Azure choose the maintenance window, and keeps the provider's 60-minute update timeout. Maintenance window times are UTC and day_of_week counts from 0 = Sunday. high_availability.standby_availability_zone is used only when HA is first enabled: Terraform ignores later edits because failover swaps the zones, so move the standby with a planned failover or by disabling and re-enabling HA. update_timeout is a Go duration such as \"120m\" or \"2h\"; enabling HA provisions and seeds a standby, which can outlast the provider default."
+  type = object({
+    high_availability = optional(object({
+      mode                      = string
+      standby_availability_zone = optional(string)
+    }))
+    maintenance_window = optional(object({
+      day_of_week  = number
+      start_hour   = number
+      start_minute = optional(number, 0)
+    }))
+    update_timeout = optional(string)
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = try(var.managed_postgres_availability.high_availability, null) == null ? true : (
+      contains(["ZoneRedundant", "SameZone"], var.managed_postgres_availability.high_availability.mode) &&
+      (
+        var.managed_postgres_availability.high_availability.standby_availability_zone == null ||
+        contains(["1", "2", "3"], coalesce(var.managed_postgres_availability.high_availability.standby_availability_zone, "none"))
+      )
+    )
+    error_message = "managed_postgres_availability.high_availability.mode must be ZoneRedundant or SameZone, and standby_availability_zone may only be Azure availability zone 1, 2, or 3."
+  }
+
+  validation {
+    condition = try(var.managed_postgres_availability.maintenance_window, null) == null ? true : (
+      contains([0, 1, 2, 3, 4, 5, 6], var.managed_postgres_availability.maintenance_window.day_of_week) &&
+      var.managed_postgres_availability.maintenance_window.start_hour >= 0 &&
+      var.managed_postgres_availability.maintenance_window.start_hour <= 23 &&
+      floor(var.managed_postgres_availability.maintenance_window.start_hour) == var.managed_postgres_availability.maintenance_window.start_hour &&
+      var.managed_postgres_availability.maintenance_window.start_minute >= 0 &&
+      var.managed_postgres_availability.maintenance_window.start_minute <= 59 &&
+      floor(var.managed_postgres_availability.maintenance_window.start_minute) == var.managed_postgres_availability.maintenance_window.start_minute
+    )
+    error_message = "managed_postgres_availability.maintenance_window needs day_of_week 0-6 (0 = Sunday), start_hour 0-23, and start_minute 0-59 as whole numbers (UTC)."
+  }
+
+  validation {
+    condition = try(var.managed_postgres_availability.update_timeout, null) == null ? true : (
+      can(regex("^[1-9][0-9]*[mh]$", var.managed_postgres_availability.update_timeout))
+    )
+    error_message = "managed_postgres_availability.update_timeout must be a whole number of minutes or hours, such as \"120m\" or \"2h\"."
+  }
+}
+
+variable "managed_postgres_alerts" {
+  description = "Optional Azure Monitor metric alerts for managed PostgreSQL saturation, routed to the observability action group. Requires postgres.mode = managed and observability.enabled. Azure reports connections only as an absolute count, so the connection alert threshold is connections_percent of max_connections; max_connections defaults to managed_postgres_capacity.max_connections and must match the server's effective max_connections parameter."
+  type = object({
+    max_connections     = optional(number)
+    cpu_percent         = optional(number, 80)
+    connections_percent = optional(number, 80)
+    severity            = optional(number, 2)
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = var.managed_postgres_alerts == null ? true : (
+      var.postgres.mode == "managed" &&
+      try(var.observability.enabled, false)
+    )
+    error_message = "managed_postgres_alerts requires postgres.mode = managed and observability.enabled = true, because the alerts use the observability action group."
+  }
+
+  validation {
+    condition = var.managed_postgres_alerts == null ? true : try(
+      coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null)) >= 25 &&
+      coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null)) <= 5000 &&
+      floor(coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null))) == coalesce(var.managed_postgres_alerts.max_connections, try(var.managed_postgres_capacity.max_connections, null)),
+      false
+    )
+    error_message = "managed_postgres_alerts needs max_connections (or managed_postgres_capacity.max_connections) as a whole number between 25 and 5000."
+  }
+
+  validation {
+    condition = var.managed_postgres_alerts == null ? true : (
+      var.managed_postgres_alerts.cpu_percent > 0 &&
+      var.managed_postgres_alerts.cpu_percent <= 100 &&
+      var.managed_postgres_alerts.connections_percent > 0 &&
+      var.managed_postgres_alerts.connections_percent <= 100 &&
+      contains([0, 1, 2, 3, 4], var.managed_postgres_alerts.severity)
+    )
+    error_message = "managed_postgres_alerts percentages must be within (0, 100] and severity must be 0-4."
   }
 }
 

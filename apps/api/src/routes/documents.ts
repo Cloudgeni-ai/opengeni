@@ -61,6 +61,7 @@ import {
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
 import { sanitizeFilename } from "./files";
+import { userContentSignedGetUrlOptions } from "../http/user-content";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage, documentIndexer, getDocumentServices } = deps;
@@ -435,7 +436,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (file.status !== "ready") {
         throw new HTTPException(409, { message: `file is ${file.status}` });
       }
-      const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+      const signed = await objectStorage.createGetUrl({
+        key: file.objectKey,
+        ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+      });
       await recordAuditEvent(db, {
         accountId: grant.accountId,
         workspaceId,

@@ -3552,7 +3552,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(1);
   });
 
-  test("command-readiness timeout creates at most one sandbox for the turn", async () => {
+  // resumeBoxForTurn owns the single proven fresh-box replacement internally
+  // (see sandbox-resume.test.ts). A readiness timeout that reaches the
+  // provisioner is terminal for the turn and must not start another establish.
+  test("a terminal command-readiness timeout is never re-provisioned by the turn", async () => {
     let establishes = 0;
     let failures = 0;
     const timeout = new SandboxExecReadinessTimeoutError("modal", 60_000, {

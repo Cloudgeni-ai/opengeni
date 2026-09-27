@@ -8,7 +8,8 @@ import {
 } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { z } from "zod";
-import { buildWorkspaceModelCatalog } from "../src/model-catalog";
+import { buildWorkspaceModelCatalog, projectWorkspaceModelCatalog } from "../src/model-catalog";
+import { resolveWorkspaceModelSelection } from "@opengeni/core";
 
 const previousClientModelSchema = z
   .object({
@@ -815,6 +816,42 @@ describe("workspace model catalog availability", () => {
   });
 });
 
+describe("workspace model catalog defaults", () => {
+  test("publishes the resolved new-chat default and the credits default beside the rows", () => {
+    const settings = testSettings({
+      openrouterApiKey: "openrouter-key",
+      openaiModel: DEFAULT_OPENROUTER_MODEL_ID,
+      openaiAllowedModels: "gpt-6-astra,gpt-6-sol,gpt-6-luna",
+    });
+    const selections = resolveWorkspaceModelSelection({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+    });
+    const catalog = projectWorkspaceModelCatalog(selections, {
+      defaultSelection: {
+        model: DEFAULT_OPENROUTER_MODEL_ID,
+        reasoningEffort: "low",
+        source: "deployment",
+      },
+      creditsSelection: { model: "gpt-6-luna", reasoningEffort: "xhigh", source: "credits" },
+    });
+    expect(catalog.defaultSelection).toEqual({
+      model: DEFAULT_OPENROUTER_MODEL_ID,
+      reasoningEffort: "low",
+      source: "deployment",
+    });
+    expect(catalog.creditsSelection).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      source: "credits",
+    });
+    expect(catalog.models.map((model) => model.id)).toContain("gpt-6-luna");
+    // A caller without resolved defaults keeps the historical response shape.
+    expect(projectWorkspaceModelCatalog(selections)).not.toHaveProperty("defaultSelection");
+  });
+});
+
 describe("workspace model catalog route discipline", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const source = readFileSync(resolve(here, "..", "src", "routes", "workspaces.ts"), "utf8");
@@ -832,5 +869,9 @@ describe("workspace model catalog route discipline", () => {
     expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
     expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');
+    // The published default uses the same selection and the caller's own
+    // subscription authority, resolved only after the grant check.
+    expect(handler.indexOf("resolveDefaultSessionModelForSelections")).toBeGreaterThan(grant);
+    expect(handler).toContain("creditsDefaultSessionModel");
   });
 });

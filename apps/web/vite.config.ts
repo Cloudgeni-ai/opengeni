@@ -59,6 +59,17 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // Zod is a dependency-free runtime shared by the contracts schemas
+              // and app modules. Keep it in its own chunk: entry-aware merging
+              // can otherwise co-locate app code that reads contracts constants
+              // at module scope with Zod, creating a chunk cycle in which that
+              // code evaluates before the contracts chunk has initialized.
+              name: "zod-runtime",
+              test: /(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Keep context and its virtual reader in the lazy debug inspector.
               name: "context-inspector",
               test: /(?:components[\\/]session[\\/](?:model-context-inspector|context-text-reader)\.tsx$|@tanstack[\\+/]virtual-core|@tanstack[\\+/]react-virtual)/,
@@ -156,6 +167,17 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // The Agent learning editor is reached only from lazy surfaces:
+              // the schedules route, learning administration, and the mobile
+              // composer's on-demand learning sheet. Entry-aware settings
+              // grouping otherwise folds it into a shared chunk that a direct
+              // session load imports, so pin it to its own lazy unit.
+              name: "agent-learning-settings",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]knowledge[\\/]agent-learning-settings\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
@@ -241,7 +263,9 @@ export default defineConfig({
     },
   },
   server: {
-    host: "127.0.0.1",
+    // Loopback unless the local stack deliberately opts in to its network
+    // (`OPENGENI_DEV_BIND_HOST=0.0.0.0`, written to .env.runtime by `bun run dev`).
+    host: process.env.OPENGENI_DEV_BIND_HOST === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1",
     port: 3000,
     // OAuth providers return to the public web origin. Match production's /v1
     // ingress routing so these callbacks reach the API instead of the SPA.

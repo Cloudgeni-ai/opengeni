@@ -777,10 +777,54 @@ describe("connections routes", () => {
       { headers: { "x-opengeni-access-key": "deployment-key" } },
     );
     expect(refused.status).toBe(302);
-    expect(refused.headers.get("location")).toContain("atlassian=error");
-    // http_400 is the state parser refusing a foreign flow kind, before any
+    // state_invalid is the state parser refusing a foreign flow kind, before any
     // provider settings are consulted (which previously surfaced as http_503).
-    expect(refused.headers.get("location")).toContain("reason=http_400");
+    // The state is correctly signed, so it may name its own workspace page.
+    expect(refused.headers.get("location")).toBe(
+      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/plugins?atlassian=error&reason=state_invalid`,
+    );
+    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
+      [],
+    );
+  });
+
+  test("the Atlassian callback explains an expired or tampered link", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const payload = {
+      kind: "atlassian_oauth",
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      personalOwnerVerified: true,
+      returnPath: `/workspaces/${workspace.workspaceId}/capabilities`,
+      encryptedPkceVerifier: "unused",
+    };
+    const callback = (state: string) =>
+      publicApp(client.db, { webBaseUrl: "http://127.0.0.1:3000" }).request(
+        `/v1/integrations/atlassian/callback?code=abc&state=${encodeURIComponent(state)}`,
+        { headers: { "x-opengeni-access-key": "deployment-key" } },
+      );
+    // Authentic but aged: back to its own workspace, reported as expired rather
+    // than as an OAuth configuration fault.
+    const expired = await callback(
+      createSignedState(STATE_SECRET, payload, Math.floor(Date.now() / 1000) - 601),
+    );
+    expect(expired.status).toBe(302);
+    expect(expired.headers.get("location")).toBe(
+      `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/plugins?atlassian=error&reason=state_expired`,
+    );
+    // Tampered or signed elsewhere: it names no trustworthy workspace.
+    const signed = createSignedState(STATE_SECRET, payload);
+    for (const state of [
+      `${signed.slice(0, -1)}${signed.endsWith("a") ? "b" : "a"}`,
+      createSignedState("another-deployment-secret", payload),
+    ]) {
+      const refused = await callback(state);
+      expect(refused.headers.get("location")).toBe(
+        "http://127.0.0.1:3000/integrations?atlassian=error&reason=state_invalid",
+      );
+    }
     expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
       [],
     );
@@ -3279,6 +3323,7 @@ describe("connections routes", () => {
     const observability = {
       startSpan: () => ({ end: () => undefined }),
       recordHttpRequest: () => undefined,
+      incrementCounter: () => undefined,
       debug: () => undefined,
       info: () => undefined,
       warn: () => undefined,
@@ -4405,7 +4450,7 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth callback rejects replayed and expired state", async () => {
+  test("oauth callback rejects replayed and expired state and reports provider denial", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer();
@@ -4479,6 +4524,26 @@ describe("connections routes", () => {
       expect(expiredReferenceCallback.headers.get("location")).toContain("reason=state_invalid");
       expect(as.tokenRequests).toHaveLength(0);
 
+      // Cancel at the provider is a refusal, not an expired attempt. It lands on
+      // the workspace integrations page (the default return path) and leaves the
+      // single-use state unconsumed so the same attempt can still complete.
+      const denied = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?error=access_denied&error_description=${encodeURIComponent("<b>nope</b>")}&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(denied.status).toBe(302);
+      const deniedLocation = new URL(denied.headers.get("location")!, "https://web.test");
+      expect(deniedLocation.pathname).toBe(`/workspaces/${workspace.workspaceId}/plugins`);
+      expect(Object.fromEntries(deniedLocation.searchParams)).toEqual({
+        integration_oauth: "error",
+        stage: "authorize",
+        reason: "access_denied",
+      });
+      const providerError = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?error=server_error&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(providerError.headers.get("location")).toContain("reason=provider_error");
+      expect(as.tokenRequests).toHaveLength(0);
+
       const first = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -4514,7 +4579,19 @@ describe("connections routes", () => {
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(expiredState)}`,
       );
       expect(expired.status).toBe(302);
-      expect(expired.headers.get("location")).toContain("reason=state_invalid");
+      // An authentic but aged state still names its workspace: return there and
+      // say it expired, instead of the workspace-less fallback.
+      const expiredLocation = new URL(expired.headers.get("location")!, "https://web.test");
+      expect(expiredLocation.pathname).toBe(`/workspaces/${workspace.workspaceId}/plugins`);
+      expect(expiredLocation.searchParams.get("reason")).toBe("state_expired");
+
+      const unsigned = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(`${expiredState}x`)}`,
+      );
+      const unsignedLocation = new URL(unsigned.headers.get("location")!, "https://web.test");
+      expect(unsignedLocation.pathname).toBe("/integrations");
+      expect(unsignedLocation.searchParams.get("reason")).toBe("state_invalid");
+      expect(as.tokenRequests).toHaveLength(1);
     } finally {
       mcp.close();
       as.close();

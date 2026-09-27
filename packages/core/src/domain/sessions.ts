@@ -25,8 +25,10 @@ import {
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
+  codeSearchDeploymentPolicy,
   type Settings,
 } from "@opengeni/config";
+import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   CreateSessionRequest,
@@ -181,6 +183,7 @@ import {
   resolveWorkspaceCatalogSettings,
   workspaceCustomModelReference,
 } from "../model-catalog";
+import { resolveDefaultSessionModel } from "../default-session-model";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   resolveSessionToolPolicy,
@@ -874,6 +877,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
   parentSessionId?: string | null;
+  // Deployment code_search policy for freezing a new root session's decision.
+  // Omitted falls back to the policy the process installed at boot.
+  codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
   // Workspace-scoped CREATE idempotency key. When present, a double-fire with
   // the same key (sequential retry OR concurrent race) collapses to a single
   // session. Every caller repairs or re-delivers the winner's one atomic start;
@@ -1181,6 +1187,9 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
       ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       parentSessionId: input.parentSessionId ?? null,
+      ...(input.codeSearchDeploymentPolicy
+        ? { codeSearchDeploymentPolicy: input.codeSearchDeploymentPolicy }
+        : {}),
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
@@ -1409,8 +1418,9 @@ export function workflowIdForSession(sessionId: string): string {
  * the API edge with 422 rather than enqueuing a turn the worker can't honor.
  *
  * `model` is the effective value selected by the caller's boundary. Top-level
- * omission defaults to `settings.openaiModel`; child-session omission inherits
- * the worker-signed calling turn before reaching this helper. Centralized here
+ * omission resolves the new-chat default (`resolveDefaultSessionModel`);
+ * child-session omission inherits the worker-signed calling turn before
+ * reaching this helper. Centralized here
  * so every model-carrying choke point
  * (create-session, user-message/turn-accept, queued-turn update, and
  * scheduled-task agentConfig — a scheduled task is a session the worker runs
@@ -1502,10 +1512,10 @@ export function assertSessionAllowsProductModel(
  * worker's authoritative post-resolution gate would fail. `model` is the
  * EFFECTIVE value the caller is about to persist: pass the explicit value at
  * message/turn-update/scheduled-task edges (omitted inherits an
- * already-validated stored default), but at session CREATION pass
- * `payload.model ?? settings.openaiModel` — an omitted model stamps the
- * deployment default onto the session, and under a restricted policy that
- * default may be exactly the provider the policy exists to block.
+ * already-validated stored default), but at session CREATION pass the
+ * effective model: an omitted model stamps the resolved default onto the
+ * session, and under a restricted policy that default may be exactly the
+ * provider the policy exists to block.
  */
 export async function assertWorkspaceModelPolicyAllows(
   db: Database,
@@ -2316,6 +2326,7 @@ async function createSessionForRequestInFileScope(
       ? grant.subjectId
       : null;
   let retainedKeyedShellModel: string | null = null;
+  let retainedKeyedShellReasoningEffort: Session["reasoningEffort"] | null = null;
   if (
     payload.idempotencyKey &&
     (effectiveVisibility !== "user_private" || replayManagedHumanSubjectId !== null)
@@ -2346,6 +2357,7 @@ async function createSessionForRequestInFileScope(
         }
         if (initializedReplay.outcome === "pending") {
           retainedKeyedShellModel = initializedReplay.session.model;
+          retainedKeyedShellReasoningEffort = initializedReplay.session.reasoningEffort;
         } else {
           if (initializedReplay.workflowWakeRevision !== null) {
             await unresolvedDeps.workflowClient.wakeSessionWorkflow({
@@ -2406,7 +2418,28 @@ async function createSessionForRequestInFileScope(
     payload.personalResourceAttachment,
     false,
   );
-  const inheritedModel = parentCallingTurn?.model ?? parentSession?.model ?? settings.openaiModel;
+  // A top-level create that names no model gets the resolved new-chat default
+  // (saved workspace default, then a usable connected subscription, then the
+  // credits default while the organization holds credits, then the deployment
+  // default). Children still inherit their calling turn, never this default.
+  // A keyed retry of a still-uninitialized shell keeps the default that shell
+  // already persisted instead of resolving again.
+  const resolvedDefault =
+    parentSession || payload.model !== undefined
+      ? null
+      : retainedKeyedShellModel !== null && retainedKeyedShellReasoningEffort !== null
+        ? { model: retainedKeyedShellModel, reasoningEffort: retainedKeyedShellReasoningEffort }
+        : await resolveDefaultSessionModel(db, settings, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            workspaceSettings: workspace.settings,
+          });
+  const inheritedModel =
+    parentCallingTurn?.model ??
+    parentSession?.model ??
+    resolvedDefault?.model ??
+    settings.openaiModel;
   const effectiveModelId = payload.model ?? inheritedModel;
   const effectiveCatalogSettings = await resolveWorkspaceModelBoundarySettings(
     deps,
@@ -2737,6 +2770,7 @@ async function createSessionForRequestInFileScope(
   const inheritedReasoningEffort =
     parentCallingTurn?.reasoningEffort ??
     parentSession?.reasoningEffort ??
+    resolvedDefault?.reasoningEffort ??
     settings.openaiReasoningEffort;
   const inheritedLatencyMode =
     parentCallingTurn?.latencyMode ?? parentSession?.latencyMode ?? "standard";
@@ -3268,6 +3302,7 @@ async function createSessionForRequestInFileScope(
       db,
       bus,
       workflowClient,
+      codeSearchDeploymentPolicy: codeSearchDeploymentPolicy(deps.settings),
       accountId: grant.accountId,
       workspaceId,
       visibility: effectiveVisibility,

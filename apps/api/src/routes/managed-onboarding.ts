@@ -24,7 +24,9 @@ import {
   organizationUserSetupTokenDigest,
   selfServiceOrganizationSetupRequestFingerprint,
 } from "../auth/organization-user-setup";
+import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -59,6 +61,7 @@ export function registerManagedOnboardingRoutes(
       await context.req.json().catch(() => null),
     );
     if (!parsed.success) {
+      recordOrganizationSetupOutcome(deps.observability, "failed");
       throw new HTTPException(422, {
         message: "invalid organization setup request",
       });
@@ -69,21 +72,24 @@ export function registerManagedOnboardingRoutes(
         authUserId: session.user.id,
         organizationName,
       });
-      return context.json(
-        CompleteSelfServiceOrganizationSetupResponse.parse(
-          await completeSelfServiceOrganizationSetup(deps.db, {
-            authUserId: session.user.id,
-            actorSubjectId: `user:${session.user.id}`,
-            organizationName,
-            operationId: parsed.data.operationId,
-            requestFingerprint,
-            trialCreditsEnabled:
-              deps.settings.productAccessMode === "managed" &&
-              deps.settings.verifiedSignupTrialCreditsEnabled,
-          }),
-        ),
+      const completed = CompleteSelfServiceOrganizationSetupResponse.parse(
+        await completeSelfServiceOrganizationSetup(deps.db, {
+          authUserId: session.user.id,
+          actorSubjectId: `user:${session.user.id}`,
+          organizationName,
+          operationId: parsed.data.operationId,
+          requestFingerprint,
+          trialCreditsEnabled:
+            deps.settings.productAccessMode === "managed" &&
+            deps.settings.verifiedSignupTrialCreditsEnabled,
+        }),
       );
+      // An idempotent replay of the same operation returns the same committed
+      // setup and is counted again; clients retry only on an ambiguous response.
+      recordOrganizationSetupOutcome(deps.observability, "created");
+      return context.json(completed);
     } catch (error) {
+      recordOrganizationSetupOutcome(deps.observability, "failed");
       const sqlState = nestedPostgresSqlState(error);
       if (sqlState === "22023") {
         throw new HTTPException(422, {
@@ -108,7 +114,7 @@ export function registerManagedOnboardingRoutes(
     if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth) {
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
-    enforceAccountSetupRateLimit(context, accountSetupLimiter);
+    enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
     const parsed = PreviewOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
@@ -129,7 +135,7 @@ export function registerManagedOnboardingRoutes(
     if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth) {
       throw new HTTPException(404, { message: "account setup is unavailable" });
     }
-    enforceAccountSetupRateLimit(context, accountSetupLimiter);
+    enforceAccountSetupRateLimit(context, deps, accountSetupLimiter);
     const parsed = CompleteOrganizationUserSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
@@ -192,11 +198,12 @@ export function registerManagedOnboardingRoutes(
 
 function enforceAccountSetupRateLimit(
   context: Context,
+  deps: ApiRouteDeps,
   limiter: { take(key: string): boolean },
 ): void {
   let allowed = false;
   try {
-    allowed = limiter.take(accountSetupClientKey(context));
+    allowed = limiter.take(trustedRequestSourceRateLimitKey(context, deps.settings));
   } catch {
     // A public credential-setting endpoint must fail closed if its abuse gate
     // cannot make a decision.
@@ -204,12 +211,6 @@ function enforceAccountSetupRateLimit(
   if (!allowed) {
     throw new HTTPException(429, { message: "too many account setup requests; slow down" });
   }
-}
-
-function accountSetupClientKey(context: Context): string {
-  const forwarded = context.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || context.req.header("x-real-ip")?.trim() || "unknown";
-  return address.slice(0, 128);
 }
 
 /**

@@ -25,6 +25,7 @@ import {
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { apiRequestBindingsForTransportPeer } from "../../apps/api/src/http/request-source";
 import {
   InMemoryManagedEmailTransport,
   type CapturedManagedEmail,
@@ -36,6 +37,12 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
+// The model-access step leads with credits the organization already holds, or
+// the included default model when the deployment provides one, otherwise it
+// asks how to power chats.
+const MODEL_ACCESS_HEADING =
+  /^(Choose how to power your chats|Start chatting for free|Start chatting with OpenGeni credits|You’re ready to chat)$/;
+const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";
 const PASSWORD = "Onboarding-password-1234";
@@ -398,6 +405,9 @@ beforeAll(async () => {
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
+    // The local edge below forwards like ingress-nginx: one trusted hop whose
+    // X-Forwarded-For names the client, so per-client limits stay per client.
+    apiTrustedProxyHops: 1,
     organizationUserSetupEmailTokenTransport: "query",
     organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
@@ -442,10 +452,13 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     port: Number(new URL(publicOrigin).port),
     idleTimeout: 60,
-    fetch: async (request) => {
+    fetch: async (request, server) => {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/v1/") || url.pathname === "/healthz") {
-        return await api.fetch(request);
+        return await api.fetch(
+          request,
+          apiRequestBindingsForTransportPeer(server.requestIP(request)?.address),
+        );
       }
       const safePath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
       const requested = safePath.includes("..") ? null : Bun.file(`${webDist}/${safePath}`);
@@ -492,9 +505,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await page.getByRole("button", { name: "Create organization" }).click();
     expect((await setupSettled).ok()).toBe(true);
-    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
-    await page.getByRole("button", { name: "Skip for now" }).click();
+    await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
 
     const ownerCookie = await cookieHeader(context);
     const owner = sdk(ownerCookie);
@@ -1145,7 +1158,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
       .waitFor();
     await settleDocumentAnimations(alternatePage);
-    await expectNoAxeViolations(alternatePage, "body");
+    // Audit the modal invitation dialog, not the new-session page it covers.
+    // That page keeps loading behind the modal: its composer and starter
+    // suggestions stay disabled (and exempt) until the new-session draft
+    // resolves, then fade from 50% to full opacity. axe does not treat a
+    // Radix modal's aria-hidden background as inactive, and it drops fixed
+    // layers such as the 50% backdrop from its contrast stack, so a scan that
+    // overlaps that fade reports covered, unreachable text as low contrast.
+    await expectNoAxeViolations(alternatePage, '[role="dialog"][data-slot="dialog-content"]');
     await alternatePage.screenshot({
       path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
       fullPage: true,
@@ -1234,6 +1254,34 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         })}`,
       );
     }
+    // The post-reset landing is the new-session page. Its starter suggestions
+    // mount disabled while the new-session draft loads and then fade from 50%
+    // to full opacity, so audit the settled page rather than a scan that
+    // overlaps that fade.
+    const postResetStarters = registeredPage.locator(
+      'section[aria-label="Starter suggestions"] button',
+    );
+    let postResetStarterStates: boolean[] = [];
+    await waitFor(
+      async () => {
+        postResetStarterStates = await postResetStarters.evaluateAll((buttons) =>
+          buttons.map((button) => (button as HTMLButtonElement).disabled),
+        );
+        return (
+          postResetStarterStates.length > 0 && postResetStarterStates.every((disabled) => !disabled)
+        );
+      },
+      {
+        timeoutMs: 20_000,
+        intervalMs: 50,
+        describe: () =>
+          JSON.stringify({
+            starterDisabledStates: postResetStarterStates,
+            url: registeredPage.url(),
+          }),
+      },
+    );
+    await settleDocumentAnimations(registeredPage);
     expect(
       await registeredPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);

@@ -448,17 +448,28 @@ export async function sseSessionStream(
   stopReconnectObservation = durableFanout.subscribeRecovery(scheduleReconnectReconciliation);
 
   void (async () => {
-    const release = await bus.subscribe(workspaceId, sessionId, (events) => {
-      if (bootstrapping) {
-        for (const event of events) {
-          if (!newestBuffered || event.sequence > newestBuffered.sequence) {
-            newestBuffered = event;
+    const release = await bus.subscribe(
+      workspaceId,
+      sessionId,
+      (events) => {
+        if (bootstrapping) {
+          for (const event of events) {
+            if (!newestBuffered || event.sequence > newestBuffered.sequence) {
+              newestBuffered = event;
+            }
           }
+        } else {
+          delivery?.publish(events);
         }
-      } else {
-        delivery?.publish(events);
-      }
-    });
+      },
+      {
+        // Live fanout stopped while this stream still held it. Heartbeats alone
+        // would keep a silently stale timeline open; fail retryably so the
+        // client reconnects and replays from the durable Postgres cursor.
+        onTerminated: (error) =>
+          fail(retryableSseFailure("session live fanout subscription ended", error)),
+      },
+    );
     if (channel.stopped()) {
       release();
       return;
@@ -632,13 +643,22 @@ export async function sseWorkspaceControlStream(
   delivery = createLatestWinsDelivery(send, fail);
 
   void (async () => {
-    const release = await bus.subscribeWorkspaceControl(workspaceId, (event) => {
-      if (bootstrapping) {
-        if (!newestBuffered || event.sequence > newestBuffered.sequence) newestBuffered = event;
-      } else {
-        delivery?.publish([event]);
-      }
-    });
+    const release = await bus.subscribeWorkspaceControl(
+      workspaceId,
+      (event) => {
+        if (bootstrapping) {
+          if (!newestBuffered || event.sequence > newestBuffered.sequence) newestBuffered = event;
+        } else {
+          delivery?.publish([event]);
+        }
+      },
+      {
+        // Same contract as session SSE: a dead live subscription must reconnect
+        // and replay the durable control cursor, not idle on heartbeats.
+        onTerminated: (error) =>
+          fail(retryableSseFailure("workspace control live subscription ended", error)),
+      },
+    );
     if (channel.stopped()) {
       release();
       return;

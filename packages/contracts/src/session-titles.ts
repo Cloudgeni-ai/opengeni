@@ -254,6 +254,45 @@ function stripAutomaticTitleBoilerplate(value: string): string {
   return title;
 }
 
+const AUTOMATIC_TITLE_TRAILING_PUNCTUATION = /[\s.!?,;:\-–—]+$/u;
+
+// Closing quote and markdown marks, mapped to the distinct opening mark that
+// would pair with them inside the title.
+const TRAILING_WRAPPER_MARKS = new Map<string, string | null>([
+  ['"', null],
+  ["'", null],
+  ["`", null],
+  ["*", null],
+  ["”", "“"],
+  ["’", "‘"],
+  ["»", "«"],
+]);
+
+/**
+ * Remove trailing punctuation and a closing quote or markdown mark whose
+ * opening counterpart was already stripped as a leading wrapper, so
+ * `"Pod Crash Debugging"` and `**Pod Crash Debugging**` do not keep a dangling
+ * closing mark. A mark that still pairs with one inside the title stays.
+ */
+function trimAutomaticTitleEnd(value: string): string {
+  let title = value;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const before = title;
+    title = title.replace(AUTOMATIC_TITLE_TRAILING_PUNCTUATION, "");
+    const last = title.at(-1);
+    const opening = last === undefined ? undefined : TRAILING_WRAPPER_MARKS.get(last);
+    if (last !== undefined && opening !== undefined) {
+      let rest = title;
+      while (rest.endsWith(last)) rest = rest.slice(0, -last.length);
+      if (!rest.includes(last) && (opening === null || !rest.includes(opening))) {
+        title = rest;
+      }
+    }
+    if (title === before) break;
+  }
+  return title.trim();
+}
+
 function automaticTitleGraphemes(value: string): string[] {
   if (titleSegmenter === undefined) {
     titleSegmenter =
@@ -319,10 +358,9 @@ export function normalizeAutomaticSessionTitle(value: string): string | null {
     return null;
   }
 
-  let title = stripAutomaticTitleBoilerplate(firstLine)
-    .replace(/\s+/gu, " ")
-    .replace(/[\s.!?,;:\-–—]+$/u, "")
-    .trim();
+  let title = trimAutomaticTitleEnd(
+    stripAutomaticTitleBoilerplate(firstLine).replace(/\s+/gu, " "),
+  );
   if (
     !title ||
     !hasVisibleAutomaticTitleContent(title) ||
@@ -331,9 +369,7 @@ export function normalizeAutomaticSessionTitle(value: string): string | null {
     return null;
   }
 
-  title = boundAutomaticSessionTitle(title)
-    .replace(/[\s.!?,;:\-–—]+$/u, "")
-    .trim();
+  title = trimAutomaticTitleEnd(boundAutomaticSessionTitle(title));
   if (!title || !hasVisibleAutomaticTitleContent(title)) return null;
   return title;
 }

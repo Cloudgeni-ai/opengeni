@@ -73,6 +73,21 @@ never durable execution truth or proof an admission did not happen.
 
 ## Bounded export
 
+OTLP trace and protected-diagnostic resources share `service.name`,
+`deployment.environment`, `opengeni.component`, and an opaque UUID
+`service.instance.id`. The instance ID is generated once when the observability
+module loads, reused by observers in that runtime, and regenerated in a new
+process. It contains no host, pod, user, session, or workspace identity and is
+not a metric label. Call-site span attributes cannot override resource identity.
+
+When configured and nonempty, `opengeni.deployment_revision` carries the existing
+deployment revision setting on both resources. It is a bounded operator-supplied
+label, not independently attested binary provenance or `service.version`.
+Missing or empty revisions are omitted rather than invented by the exporter.
+Consumers must retain resource attributes to distinguish rollouts and runtime
+instances; the Collector must not stamp old queued spans with the current
+deployment's revision.
+
 Public traces use OTLP HTTP JSON at the existing endpoint plus `/v1/traces`.
 Each observer batches up to 32 spans, with eight queued batches and one active
 request; one additional partial batch can be held. Excess batches are dropped.
@@ -84,6 +99,41 @@ holds one active slot; it does not cause detached overlapping retries.
 five-second caller-configurable maximum. It cannot guarantee delivery on process
 kill or exporter outage. `opengeni_telemetry_exports_total{outcome}` records
 exported, retried, failed and dropped **batches**. No IDs become metric labels.
+
+## Web client errors
+
+The public, anonymous `POST /v1/client-errors` route counts browser failures in
+`opengeni_client_errors_total{kind}` (`route_error`, `unhandled_rejection`,
+`window_error`, `chunk_load`) and refusals in
+`opengeni_client_error_reports_rejected_total{reason,kind}`; both are published
+at zero on API start. `reason` is `invalid`, `too_large`, `origin` or
+`rate_limited`. A `rate_limited` refusal keeps the report's `kind`, so accepted
+plus rate-limited is the true per-kind arrival rate while a bucket is empty; the
+other reasons use `kind="unknown"` because the report was not read or not valid.
+The strict body is the kind, a route pattern and a bundle revision, under 512
+bytes; the limit is enforced on the streamed body, so a chunked request is
+refused after 512 bytes instead of being buffered, and the generic request-body
+ceiling does not apply to this exact route. The wire grammar is shared by the
+browser, the route and the log projection through
+`@opengeni/contracts/client-error-report`.
+
+A request whose `Origin` header is present but is not one of the deployment's
+own web origins (the CORS allowlist, `OPENGENI_PUBLIC_BASE_URL` or
+`OPENGENI_WEB_BASE_URL`) is refused as `origin`, so a foreign page cannot spend
+the budget through its visitors' browsers. Admission is a per-kind token bucket
+in each API process (burst 30, then one every two seconds), so a hostile or
+looping client cannot inflate the counter or the log without bound. Each
+accepted report writes one `Web client error reported` warning whose public
+fields are `surface`, `reason` (the kind), and the grammar-validated opaque
+`clientRoute` and `clientRevision`. No message, stack or URL is accepted.
+
+The route is anonymous and a non-browser client can omit or forge `Origin`, so
+the counter can be spoofed up to the admission ceiling (about 43,000 reports per
+kind per API process per day). Alert on rates and on ratios such as
+`route_error` against HTTP request volume, not on absolute counts, and read a
+rising `rate_limited` series as either a real incident or abuse. See
+`apps/web/docs/browser-analytics.md` for the browser side, the `chunk_load`
+semantics and the coverage limits.
 
 ## Protected diagnostics
 
