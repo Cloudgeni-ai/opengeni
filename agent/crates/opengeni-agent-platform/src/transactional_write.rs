@@ -186,8 +186,8 @@ mod unix {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn preserve_provenance(base: &File, staged: &File) -> PlatformResult<()> {
-        #[cfg(target_os = "macos")]
         if base.get_xattr("com.apple.provenance").map_err(io)?
             != staged.get_xattr("com.apple.provenance").map_err(io)?
         {
@@ -195,8 +195,6 @@ mod unix {
                 "replacement cannot preserve macOS provenance metadata",
             ));
         }
-        #[cfg(target_os = "linux")]
-        let _ = (base, staged);
         Ok(())
     }
 
@@ -368,14 +366,16 @@ mod unix {
             published: false,
         };
         let new_meta = regular(&staged.content)?;
-        if let Some((base, meta)) = &staged.base {
+        if let Some(base) = &staged.base {
+            let meta = &base.1;
             if meta.uid() != new_meta.uid() || meta.gid() != new_meta.gid() {
                 return Err(unsupported(
                     "replacement cannot preserve destination ownership",
                 ));
             }
             fs::fchmod(&staged.content, ordinary_mode(meta.mode() & 0o777)?).map_err(io)?;
-            preserve_provenance(base, &staged.content)?;
+            #[cfg(target_os = "macos")]
+            preserve_provenance(&base.0, &staged.content)?;
         }
         Ok(Box::new(staged))
     }
@@ -419,6 +419,7 @@ mod unix {
                 return Err(failure("WRITE_CONFLICT", "destination parent changed"));
             }
             if let Some((base, initial)) = &mut self.base {
+                #[cfg(target_os = "macos")]
                 preserve_provenance(base, &self.content)?;
                 let current = fs::openat(
                     &self.parent,
