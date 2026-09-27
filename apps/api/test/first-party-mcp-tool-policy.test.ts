@@ -421,6 +421,50 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("delegation tools price a child and steer long waits to the result-bearing wake", () => {
+    const names: FirstPartyMcpToolName[] = [
+      "session_create",
+      "session_wait",
+      "session_get",
+      "session_send_message",
+      "wait_for_input",
+    ];
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:create", "sessions:read", "sessions:control"], names),
+    );
+    const registered = (
+      server as unknown as { _registeredTools: Record<string, { description: string }> }
+    )._registeredTools;
+    // Guidance only: every delegation and join tool stays registered.
+    expect(registeredToolNames(server)).toEqual([...names].sort());
+    const description = (name: FirstPartyMcpToolName) => registered[name]!.description;
+    expect(description("session_create")).toContain(
+      "A worker costs minutes and a large context of its own",
+    );
+    expect(description("session_create")).toContain(
+      "send a related follow-up to a worker you already spawned with session_send_message",
+    );
+    expect(description("session_create")).toContain(
+      "call wait_for_input and end the turn instead of alternating session_wait and session_get",
+    );
+    expect(description("session_send_message")).toContain(
+      "message a worker you already spawned instead of spawning a new one",
+    );
+    expect(description("session_get")).toContain("A snapshot is not new evidence");
+    expect(description("session_wait")).toContain(
+      "a session_get snapshot between waits is not new evidence",
+    );
+    for (const name of [
+      "session_create",
+      "session_get",
+      "session_wait",
+      "wait_for_input",
+    ] as const) {
+      expect(description(name)).toContain("payload.finalAnswer");
+    }
+  });
+
   test("session_get tools/list and generated attempt declarations allow an omitted ID", async () => {
     const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["session_get"]));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
