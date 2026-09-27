@@ -190,10 +190,9 @@ retain backoff.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
-Reports—including secondary audits—use native documents. Operational instructions
-route authoring to the Documents Skill; goal/artifact domains validate persisted
-requirements/current inspection proof. Chat/code/local-file
-exceptions remain. See [`goals.md`](goals.md).
+Reports default to chat; requested or large ones use native documents authored
+via the Documents Skill; goal/artifact domains validate persisted
+requirements/current inspection proof. See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 
