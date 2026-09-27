@@ -366,15 +366,16 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-Agents run directly on the user's Connected Machine (`selfhosted`); OpenGeni creates no sandbox.
+Agents run on Connected Machines (`selfhosted`), without creating sandboxes.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
 Mac updates preserve signed bundles; writes check ACLs
 ([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
-The machine owns its filesystem, Git authentication, environment, and long-lived
-platform credentials. OpenGeni neither clones repositories nor installs durable
-control-plane credentials there. Only authorized child processes receive the
-narrow transient exception: exact-attempt Codemode authority.
+The machine owns files, Git authentication, environment, and durable credentials.
+OpenGeni neither clones repositories nor installs durable control-plane credentials;
+authorized child processes receive only transient, exact-attempt Codemode authority.
+
+Sandboxless attachment rebuilds native capabilities through [same-turn recovery](run-lifecycle.md), without replaying completed tools.
 
 Machine paths are host-native and session-specific, not universal `/workspace`
 aliases. Unavailability produces a typed operation outcome; text-only reasoning
