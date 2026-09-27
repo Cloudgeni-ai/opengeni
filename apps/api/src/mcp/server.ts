@@ -84,6 +84,7 @@ import {
   type WorkClaimSubjectFilter,
   type SessionStatus,
   SubmitHumanInputResponseRequest,
+  FIRST_PARTY_MCP_CALLER_META_KEY,
 } from "@opengeni/contracts";
 import {
   countVariableSets,
@@ -289,7 +290,8 @@ import {
 import { completeChildReadSequences } from "./child-read-evidence";
 import {
   acknowledgeConsumedChildEvents,
-  supersedeConsumedChildTerminalResults,
+  listOutstandingSessionSystemUpdatesForAttempt,
+  recordConsumedChildAnswers,
 } from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
@@ -4334,23 +4336,27 @@ function registerWorkspaceOrchestrationTools(
       children,
     });
   };
-  // The caller's exact live attempt just received a direct child's complete
-  // answer, so a still-pending terminal result for it would only start another
-  // inference that repeats it. Best-effort: a failure leaves that input pending.
-  const supersedeConsumedChildResults = async (
+  // The caller's exact live attempt just returned a direct child's complete
+  // answer to its model. Record it on the reading turn: when that attempt
+  // completes its turn, a pending terminal result repeating only answers the
+  // model already holds is superseded instead of starting another inference.
+  // Only a direct model call counts: a Codemode script may keep the output to
+  // itself. Best-effort: a failure leaves that result to be delivered.
+  const recordConsumedChildResults = async (
     children: { sessionId: string; sequences: number[] }[],
-  ): Promise<boolean> => {
+    extra: { _meta?: Record<string, unknown> } | undefined,
+  ): Promise<void> => {
     const claims = exactAgentAttemptClaims(grant);
     if (
+      extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] !== "model" ||
       !callerSessionId ||
       !claims ||
       claims.sessionId !== callerSessionId ||
       !children.some((child) => child.sequences.length > 0)
     )
-      return false;
-    let result: Awaited<ReturnType<typeof supersedeConsumedChildTerminalResults>>;
+      return;
     try {
-      result = await supersedeConsumedChildTerminalResults(deps.db, {
+      await recordConsumedChildAnswers(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: callerSessionId,
@@ -4360,21 +4366,24 @@ function registerWorkspaceOrchestrationTools(
         children,
       });
     } catch (error) {
-      deps.observability?.warn("Failed to supersede a consumed child result", {
+      deps.observability?.warn("Failed to record a consumed child answer", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return false;
     }
-    if (result.events.length > 0) {
-      // Live fanout only: the committed event is durable replay truth.
-      await publishDurableSessionEvents(
-        deps.bus,
-        grant.workspaceId,
-        callerSessionId,
-        result.events,
-      ).catch(() => undefined);
-    }
-    return result.supersededUpdateIds.length > 0;
+  };
+  // The caller's own pending input, less each child result its model already
+  // holds whole: waiting for, or ending the turn to receive, such a result
+  // would only repeat an answer it has.
+  const listOwnPendingUpdates = async (ownSessionId: string) => {
+    const claims = exactAgentAttemptClaims(grant);
+    return claims && claims.sessionId === ownSessionId
+      ? await listOutstandingSessionSystemUpdatesForAttempt(
+          deps.db,
+          grant.workspaceId,
+          ownSessionId,
+          { turnId: claims.turnId, attemptId: claims.attemptId },
+        )
+      : await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, ownSessionId);
   };
   if (can("sessions:read")) {
     server.registerTool(
@@ -4678,26 +4687,29 @@ function registerWorkspaceOrchestrationTools(
           latest: z4.enum(SessionEventLatestClass.options).optional(),
         },
       },
-      async ({
-        sessionId,
-        view,
-        cursor,
-        callId,
-        includeArguments,
-        includeOutput,
-        after,
-        before,
-        limit,
-        direction: requestedDirection,
-        mode: requestedMode,
-        payloadMode: requestedPayloadMode,
-        resultMode: requestedResultMode,
-        includeTypes: requestedIncludeTypes,
-        excludeTypes: requestedExcludeTypes,
-        includeClasses,
-        excludeClasses,
-        latest,
-      }) => {
+      async (
+        {
+          sessionId,
+          view,
+          cursor,
+          callId,
+          includeArguments,
+          includeOutput,
+          after,
+          before,
+          limit,
+          direction: requestedDirection,
+          mode: requestedMode,
+          payloadMode: requestedPayloadMode,
+          resultMode: requestedResultMode,
+          includeTypes: requestedIncludeTypes,
+          excludeTypes: requestedExcludeTypes,
+          includeClasses,
+          excludeClasses,
+          latest,
+        },
+        extra,
+      ) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         // Keep the model schema compact without weakening either MCP validation
         // or direct adapter calls: the canonical registry owns accepted types.
@@ -4752,7 +4764,7 @@ function registerWorkspaceOrchestrationTools(
           );
           const consumed = [{ sessionId, sequences: completeChildReadSequences(page) }];
           await acknowledgeReads(consumed);
-          await supersedeConsumedChildResults(consumed);
+          await recordConsumedChildResults(consumed, extra);
           return json(page);
         }
         if (
@@ -4817,7 +4829,7 @@ function registerWorkspaceOrchestrationTools(
           ) {
             const consumed = [{ sessionId, sequences: [result.sequence] }];
             await acknowledgeReads(consumed);
-            await supersedeConsumedChildResults(consumed);
+            await recordConsumedChildResults(consumed, extra);
           }
           return json(result);
         }
@@ -4838,7 +4850,7 @@ function registerWorkspaceOrchestrationTools(
         ) {
           const consumed = [{ sessionId, sequences: page.events.map((event) => event.sequence) }];
           await acknowledgeReads(consumed);
-          await supersedeConsumedChildResults(consumed);
+          await recordConsumedChildResults(consumed, extra);
         }
         return json(page);
       },
@@ -4936,9 +4948,7 @@ function registerWorkspaceOrchestrationTools(
               ownSessionId === null
                 ? null
                 : async () =>
-                    (
-                      await listOutstandingSessionSystemUpdates(deps.db, workspaceId, ownSessionId)
-                    ).map((update) => update.kind),
+                    (await listOwnPendingUpdates(ownSessionId)).map((update) => update.kind),
             subscribe: (targetSessionId, onEvents) =>
               deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
           },
@@ -4951,21 +4961,20 @@ function registerWorkspaceOrchestrationTools(
               .map((event) => event.sequence),
           }));
           await acknowledgeReads(consumed);
-          if ((await supersedeConsumedChildResults(consumed)) && ownSessionId !== null) {
-            // The returned answer consumed pending input this result counted;
-            // report what is still pending so the caller is not told to end
-            // its turn only to receive the answer it already has.
-            const pending = await listOutstandingSessionSystemUpdates(
-              deps.db,
-              workspaceId,
-              ownSessionId,
-            );
-            return json(
-              withOwnPendingUpdateKinds(
-                result,
-                pending.map((update) => update.kind),
-              ),
-            );
+          await recordConsumedChildResults(consumed, extra);
+          if (result.ownPendingUpdates > 0 && ownSessionId !== null) {
+            // The returned answer may be the pending input this result
+            // counted; report what is still pending so the caller is not told
+            // to end its turn only to receive the answer it already has.
+            const pending = await listOwnPendingUpdates(ownSessionId);
+            if (pending.length !== result.ownPendingUpdates) {
+              return json(
+                withOwnPendingUpdateKinds(
+                  result,
+                  pending.map((update) => update.kind),
+                ),
+              );
+            }
           }
         }
         return json(result);

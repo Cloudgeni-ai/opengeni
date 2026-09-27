@@ -268,10 +268,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 4,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#supersedeConsumedChildTerminalResults": {
-    inserts: 1,
-    contract: "canonical",
-  },
   "packages/db/src/index.ts#appendSessionEvents": { inserts: 1, contract: "canonical" },
   "packages/db/src/index.ts#acceptSessionApprovalDecision": {
     inserts: 1,

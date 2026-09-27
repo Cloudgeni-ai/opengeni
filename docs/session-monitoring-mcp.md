@@ -39,10 +39,14 @@ are not accumulated as consumption receipts; use an explicit human mark-read
 when a full item cannot fit in one tool response. Wait/compact acknowledgments
 are restricted to complete answers; use complete result/debug reads for detailed
 failures or human-input content. No read changes append-only history or observes
-background-command completion. A complete final-answer read by the parent's exact
-live attempt does supersede that child's still-pending idle terminal result for
-exactly that answer (`consumed_by_parent_read`), so it does not start another
-inference that repeats it; a pending result for a different answer stays; see
+background-command completion. A complete final-answer read that the parent's
+exact live attempt issued as a direct model call (not from a Codemode script) is
+recorded on the reading turn. When that attempt completes its turn, the child's
+still-pending idle terminal result reporting only answers it received is
+superseded (`consumed_by_parent_read`), so it does not start another inference
+that repeats them; a result that arrives after that completion is inserted
+already consumed, and a pending result for a different answer stays. A read by
+an attempt that then fails or is interrupted suppresses nothing; see
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 An explicit mark-unread records the current raw event position as an intent

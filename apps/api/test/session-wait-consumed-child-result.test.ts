@@ -15,12 +15,13 @@ import {
   enqueueSessionTurn,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
+  listOutstandingSessionSystemUpdatesForAttempt,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   materializeGoalContinuation,
   sessionSystemUpdateOutboxKindPayload,
   setSessionGoalStatus,
+  recordConsumedChildAnswers,
   settleSessionIdleWithParentOutbox,
-  supersedeConsumedChildTerminalResults,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
@@ -345,7 +346,15 @@ function agentMcp(ws: Workspace, attempt: Attempt) {
   return buildOpenGeniMcpServer(routeDeps(), grant);
 }
 
-async function callTool(server: unknown, name: string, args: Record<string, unknown>) {
+/** How the worker's gateway marks a direct model call to the first-party server. */
+const MODEL_CALL = { _meta: { opengeniCaller: "model" } };
+
+async function callTool(
+  server: unknown,
+  name: string,
+  args: Record<string, unknown>,
+  extra: unknown = MODEL_CALL,
+) {
   const tool = (
     server as {
       _registeredTools?: Record<
@@ -355,12 +364,54 @@ async function callTool(server: unknown, name: string, args: Record<string, unkn
     }
   )._registeredTools?.[name];
   if (!tool) throw new Error(`MCP tool not registered: ${name}`);
-  const result = (await tool.handler(args, {})) as {
+  const result = (await tool.handler(args, extra)) as {
     isError?: boolean;
     content?: Array<{ text?: string }>;
   };
   if (result.isError) throw new Error(result.content?.[0]?.text ?? `${name} failed`);
   return JSON.parse(result.content?.[0]?.text ?? "null") as Record<string, unknown>;
+}
+
+/** The parent's reading turn ends successfully, as the worker settles it. */
+async function completeParentTurn(ws: Workspace, parent: Attempt): Promise<void> {
+  const settled = await applySessionTurnSettlement(client.db, ws.workspaceId, {
+    sessionId: parent.sessionId,
+    turnId: parent.turnId,
+    triggerEventId: parent.triggerEventId,
+    attemptId: parent.attemptId,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [{ type: "turn.completed" as const, payload: { output: "Integrated." } }],
+  });
+  expect(settled.action).toBe("settled");
+}
+
+async function failParentTurn(ws: Workspace, parent: Attempt): Promise<void> {
+  const settled = await applySessionTurnSettlement(client.db, ws.workspaceId, {
+    sessionId: parent.sessionId,
+    turnId: parent.turnId,
+    triggerEventId: parent.triggerEventId,
+    attemptId: parent.attemptId,
+    turnStatus: "failed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [{ type: "turn.failed", payload: { error: "expected test failure" } }],
+  });
+  expect(settled.action).toBe("settled");
+}
+
+async function consumedEvents(sessionId: string) {
+  return await shared.admin<Array<{ payload: { reason: string; updateIds: string[] } }>>`
+    select payload from session_events
+    where session_id = ${sessionId} and type = 'system.update.cancelled'
+      and payload ->> 'reason' = 'consumed_by_parent_read'`;
+}
+
+async function recordedAnswers(turnId: string) {
+  const [turn] = await shared.admin<Array<{ metadata: Record<string, unknown> }>>`
+    select metadata from session_turns where id = ${turnId}`;
+  return turn?.metadata.consumedChildAnswers ?? [];
 }
 
 async function updateState(updateSessionId: string) {
@@ -370,7 +421,7 @@ async function updateState(updateSessionId: string) {
 }
 
 describe("a parent read that returns a child's whole answer consumes its pending result", () => {
-  test("session_wait supersedes the pending result and stops asking the parent to end its turn", async () => {
+  test("session_wait keeps the parent in its turn, and its completion consumes the result", async () => {
     const ws = await workspace();
     const parent = await start(ws, "Find the user count.");
     const answer = "1,204 active users in the last 48 hours.";
@@ -389,10 +440,21 @@ describe("a parent read that returns a child's whole answer consumes its pending
     ]);
     expect(result.ownPendingUpdates).toBe(0);
     expect(result.ownPendingImmediateUpdates).toBe(0);
+    // The tool output is not durable history yet: nothing is superseded.
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+    expect(
+      await listOutstandingSessionSystemUpdatesForAttempt(
+        client.db,
+        ws.workspaceId,
+        parent.sessionId,
+        parent,
+      ),
+    ).toEqual([]);
+
+    await completeParentTurn(ws, parent);
+
     expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
-    const [event] = await shared.admin<Array<{ payload: { reason: string; count: number } }>>`
-      select payload from session_events
-      where session_id = ${parent.sessionId} and type = 'system.update.cancelled'`;
+    const [event] = await consumedEvents(parent.sessionId);
     expect(event?.payload).toMatchObject({ reason: "consumed_by_parent_read", count: 1 });
   });
 
@@ -407,8 +469,45 @@ describe("a parent read that returns a child's whole answer consumes its pending
       view: "results",
       after: 0,
     });
+    await completeParentTurn(ws, parent);
 
     expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+  });
+
+  test("the result stays pending when the reading attempt fails after the read", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Find the owner.");
+    const answer = "The owner is the platform team.";
+    const child = await childAnswersIntoBusyParent(ws, parent, answer);
+
+    await callTool(agentMcp(ws, parent), "session_wait", {
+      targets: [{ sessionId: child.sessionId, afterSequence: 0 }],
+      waitFor: "completion",
+      maxWaitSeconds: 1,
+    });
+    // The read's tool output may never have become durable parent history.
+    await failParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+    expect(await consumedEvents(parent.sessionId)).toEqual([]);
+  });
+
+  test("a Codemode or unmarked read never counts as the model receiving the answer", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Find the owner.");
+    const child = await childAnswersIntoBusyParent(ws, parent, "The owner is the platform team.");
+    const read = { sessionId: child.sessionId, view: "results", after: 0 };
+
+    // A script may return only a summary to the model, and an older worker
+    // does not say which surface called.
+    await callTool(agentMcp(ws, parent), "session_events", read, {
+      _meta: { opengeniCaller: "codemode" },
+    });
+    await callTool(agentMcp(ws, parent), "session_events", read, {});
+    expect(await recordedAnswers(parent.turnId)).toEqual([]);
+    await completeParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
   });
 
   test("a truncated wait summary, a stale attempt, or a non-parent reader keeps the input", async () => {
@@ -423,7 +522,6 @@ describe("a parent read that returns a child's whole answer consumes its pending
       maxWaitSeconds: 1,
     });
     expect(truncated.ownPendingUpdates).toBe(1);
-    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
 
     const stale = { ...parent, attemptId: crypto.randomUUID() };
     await expect(
@@ -433,7 +531,6 @@ describe("a parent read that returns a child's whole answer consumes its pending
         after: 0,
       }),
     ).rejects.toThrow();
-    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
 
     const peer = await start(ws, "Unrelated peer.");
     await callTool(agentMcp(ws, peer), "session_events", {
@@ -441,10 +538,12 @@ describe("a parent read that returns a child's whole answer consumes its pending
       view: "results",
       after: 0,
     });
+    expect(await recordedAnswers(parent.turnId)).toEqual([]);
+    await completeParentTurn(ws, parent);
     expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
   });
 
-  test("the supersession itself fences the exact live attempt and a result-bearing answer", async () => {
+  test("the record itself fences the exact live attempt and a result-bearing answer", async () => {
     const ws = await workspace();
     const parent = await start(ws, "Find the owner.");
     const child = await childAnswersIntoBusyParent(ws, parent, "The owner is the platform team.");
@@ -468,29 +567,38 @@ describe("a parent read that returns a child's whole answer consumes its pending
       { ...input, executionGeneration: parent.executionGeneration + 1 },
       { ...input, turnId: crypto.randomUUID() },
     ]) {
-      const result = await supersedeConsumedChildTerminalResults(client.db, {
+      const result = await recordConsumedChildAnswers(client.db, {
         ...rejected,
         children: [{ sessionId: child.sessionId, sequences: [answer!.sequence] }],
       });
-      expect(result.supersededUpdateIds).toEqual([]);
+      expect(result.recorded).toBe(0);
     }
     // A complete read of something other than the answer proves nothing.
     expect(
       (
-        await supersedeConsumedChildTerminalResults(client.db, {
+        await recordConsumedChildAnswers(client.db, {
           ...input,
           children: [{ sessionId: child.sessionId, sequences: [other!.sequence] }],
         })
-      ).supersededUpdateIds,
-    ).toEqual([]);
-    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+      ).recorded,
+    ).toBe(0);
+    expect(await recordedAnswers(parent.turnId)).toEqual([]);
 
-    const accepted = await supersedeConsumedChildTerminalResults(client.db, {
+    const accepted = await recordConsumedChildAnswers(client.db, {
       ...input,
       children: [{ sessionId: child.sessionId, sequences: [answer!.sequence] }],
     });
-    expect(accepted.supersededUpdateIds).toHaveLength(1);
-    expect(accepted.events.map((event) => event.type)).toEqual(["system.update.cancelled"]);
+    expect(accepted.recorded).toBe(1);
+    // A repeated read of an answer this attempt recorded writes nothing.
+    const repeated = await recordConsumedChildAnswers(client.db, {
+      ...input,
+      children: [{ sessionId: child.sessionId, sequences: [answer!.sequence] }],
+    });
+    expect(repeated.recorded).toBe(0);
+    expect(await recordedAnswers(parent.turnId)).toEqual([
+      { childSessionId: child.sessionId, sequence: answer!.sequence, attemptId: parent.attemptId },
+    ]);
+    await completeParentTurn(ws, parent);
     expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
   });
 
@@ -513,7 +621,7 @@ describe("a parent read that returns a child's whole answer consumes its pending
     expect([first?.state, second?.state]).toEqual(["pending", "pending"]);
 
     // The parent read only answer B (for example from a cursor past answer A).
-    const read = await supersedeConsumedChildTerminalResults(client.db, {
+    const read = await recordConsumedChildAnswers(client.db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       sessionId: parent.sessionId,
@@ -522,8 +630,9 @@ describe("a parent read that returns a child's whole answer consumes its pending
       executionGeneration: parent.executionGeneration,
       children: [{ sessionId: child.sessionId, sequences: [second!.sequence] }],
     });
+    expect(read.recorded).toBe(1);
+    await completeParentTurn(ws, parent);
 
-    expect(read.supersededUpdateIds).toHaveLength(1);
     expect(await results()).toEqual([
       { sequence: first!.sequence, state: "pending" },
       { sequence: second!.sequence, state: "superseded" },
@@ -560,28 +669,61 @@ describe("a parent read that returns a child's whole answer consumes its pending
       attemptId: parent.attemptId,
       executionGeneration: parent.executionGeneration,
     };
+    const outstanding = async () =>
+      (
+        await listOutstandingSessionSystemUpdatesForAttempt(
+          client.db,
+          ws.workspaceId,
+          parent.sessionId,
+          parent,
+        )
+      ).map((update) => update.id);
 
     // The parent read the answer but not the later continuation output.
-    const partial = await supersedeConsumedChildTerminalResults(client.db, {
+    await recordConsumedChildAnswers(client.db, {
       ...input,
       children: [{ sessionId: child.sessionId, sequences: [sequences.answer] }],
     });
-    expect(partial.supersededUpdateIds).toEqual([]);
-    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+    expect(await outstanding()).toEqual([pending!.id]);
 
     // A later read of the continuation completes what this attempt received.
-    const rest = await supersedeConsumedChildTerminalResults(client.db, {
+    await recordConsumedChildAnswers(client.db, {
       ...input,
       children: [{ sessionId: child.sessionId, sequences: [sequences.remark] }],
     });
-    expect(rest.supersededUpdateIds).toHaveLength(1);
-    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
-    const [turn] = await shared.admin<Array<{ metadata: Record<string, unknown> }>>`
-      select metadata from session_turns where id = ${parent.turnId}`;
-    expect(turn?.metadata.consumedChildAnswers).toEqual([
+    expect(await outstanding()).toEqual([]);
+    expect(await recordedAnswers(parent.turnId)).toEqual([
       { childSessionId: child.sessionId, sequence: sequences.answer, attemptId: parent.attemptId },
       { childSessionId: child.sessionId, sequence: sequences.remark, attemptId: parent.attemptId },
     ]);
+    await completeParentTurn(ws, parent);
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+  });
+
+  test("a result read only in part stays pending after the reading turn completes", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Count the users.");
+    const child = await start(ws, "Count them.", parent, "Count the users");
+    const sequences = await answerThenCompleteGoal(
+      ws,
+      child,
+      "28 distinct users in the window.",
+      "The goal is complete. A fresh check confirmed 28 users.",
+    );
+    await deliverIdleResult(ws, child);
+    await recordConsumedChildAnswers(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      attemptId: parent.attemptId,
+      executionGeneration: parent.executionGeneration,
+      children: [{ sessionId: child.sessionId, sequences: [sequences.answer] }],
+    });
+
+    await completeParentTurn(ws, parent);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
   });
 });
 
@@ -609,14 +751,7 @@ describe("a result committed after the parent already read the answer", () => {
     ]);
   }
 
-  async function consumedEvents(sessionId: string) {
-    return await shared.admin<Array<{ payload: { reason: string; updateIds: string[] } }>>`
-      select payload from session_events
-      where session_id = ${sessionId} and type = 'system.update.cancelled'
-        and payload ->> 'reason' = 'consumed_by_parent_read'`;
-  }
-
-  test("arrives already consumed while the reading turn is still running", async () => {
+  test("arrives pending while the reading turn runs and is consumed when that turn completes", async () => {
     const ws = await workspace();
     const parent = await start(ws, "Find the owner.");
     const answer = "The owner is the platform team.";
@@ -624,6 +759,19 @@ describe("a result committed after the parent already read the answer", () => {
     await joinChild(ws, parent, child, answer);
 
     await deliverIdleResult(ws, child);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+    // It is not input this attempt waits for or ends its turn to receive.
+    expect(
+      await listOutstandingSessionSystemUpdatesForAttempt(
+        client.db,
+        ws.workspaceId,
+        parent.sessionId,
+        parent,
+      ),
+    ).toEqual([]);
+
+    await completeParentTurn(ws, parent);
 
     expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
     expect(
@@ -715,6 +863,7 @@ describe("a result committed after the parent already read the answer", () => {
     await continueGoalWithRemark(ws, child, "The goal is complete. A fresh check confirmed it.");
 
     await deliverIdleResult(ws, child);
+    await completeParentTurn(ws, parent);
 
     expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
   });
@@ -725,6 +874,7 @@ describe("a result committed after the parent already read the answer", () => {
     const first = "Check A passed.";
     const child = await childAnswered(ws, parent, first);
     await joinChild(ws, parent, child, first);
+    await completeParentTurn(ws, parent);
     await deliverIdleResult(ws, child);
     expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
 

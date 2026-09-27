@@ -3,6 +3,7 @@ import {
   CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES,
   SessionSystemUpdatePayload,
   childTerminalResultFinalAnswer,
+  childTerminalResultFinalAnswerSequences,
   childTerminalResultFinalAnswerWithGoalContinuations,
   sessionSystemUpdateBatchHistoryItem,
 } from "../src/index";
@@ -126,7 +127,7 @@ describe("childTerminalResultFinalAnswerWithGoalContinuations", () => {
     ).toEqual(childTerminalResultFinalAnswer({ childSessionId, sequence: 7, output }));
   });
 
-  test("copies nothing when the parts together exceed the bound", () => {
+  test("copies the parts whole only while together they fit the bound", () => {
     const half = CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES / 2;
     const fits = childTerminalResultFinalAnswerWithGoalContinuations({
       childSessionId,
@@ -134,14 +135,75 @@ describe("childTerminalResultFinalAnswerWithGoalContinuations", () => {
       output: "a".repeat(half),
       goalContinuations: [{ sequence: 9, output: "b".repeat(half) }],
     });
-    expect(fits?.truncated).toBe(false);
+    expect(fits.truncated).toBe(false);
+    expect(childTerminalResultFinalAnswerSequences(fits)).toEqual([7, 9]);
+  });
+
+  test("over the bound, keeps the newest part whole and points at every part", () => {
+    const start = "Starting the audit.";
+    const progress = "p".repeat(4_600);
+    const report = `FINAL REPORT\n${"r".repeat(3_600)}`;
+    const result = childTerminalResultFinalAnswerWithGoalContinuations({
+      childSessionId,
+      sequence: 7,
+      output: start,
+      goalContinuations: [
+        { sequence: 9, output: progress },
+        { sequence: 11, output: report },
+      ],
+    });
+    const lead =
+      /^\[\.\.\. (\d+) bytes of earlier output from this child \(2 turns\) omitted here\. [^\]]+\]\n\n/.exec(
+        result.text,
+      );
+    expect(lead).not.toBeNull();
+    expect(Number(lead![1])).toBe(bytes(start) + bytes(progress));
+    expect(result.text.slice(lead![0].length)).toBe(report);
+    expect(bytes(result.text)).toBeLessThanOrEqual(CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES);
+    expect(result).toMatchObject({
+      sequence: 11,
+      truncated: true,
+      totalBytes: bytes(start) + bytes(progress) + bytes(report),
+      omittedSequences: [7, 9],
+      nextAction: {
+        tool: "session_events",
+        arguments: { sessionId: childSessionId, view: "results", after: 6 },
+      },
+    });
+    expect(result.goalContinuations).toBeUndefined();
+    expect(childTerminalResultFinalAnswerSequences(result)).toEqual([11, 7, 9]);
     expect(
-      childTerminalResultFinalAnswerWithGoalContinuations({
+      SessionSystemUpdatePayload.parse({
+        type: "child_terminal_result",
         childSessionId,
-        sequence: 7,
-        output: "a".repeat(half),
-        goalContinuations: [{ sequence: 9, output: "é".repeat(half / 2 + 1) }],
+        status: "idle",
+        finalAnswer: result,
       }),
-    ).toBeNull();
+    ).toMatchObject({ finalAnswer: result });
+  });
+
+  test("cuts a newest part that alone exceeds the bound, UTF-8 safely", () => {
+    const newest = `${"h".repeat(5_000)}${"😀".repeat(2_000)}`;
+    const result = childTerminalResultFinalAnswerWithGoalContinuations({
+      childSessionId,
+      sequence: 7,
+      output: "The answer.",
+      goalContinuations: [{ sequence: 9, output: newest }],
+    });
+    expect(result.truncated).toBe(true);
+    expect(result.sequence).toBe(9);
+    expect(result.omittedSequences).toEqual([7]);
+    expect(bytes(result.text)).toBeLessThanOrEqual(CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES);
+    const body = result.text.replace(
+      /^\[\.\.\. 11 bytes of earlier output from this child \(1 turn\)[^\]]+\]\n\n/,
+      "",
+    );
+    expect(body).not.toBe(result.text);
+    const marker = /\n\n\[\.\.\. (\d+) bytes of this output omitted here\. [^\]]+\]\n\n/.exec(body);
+    expect(marker).not.toBeNull();
+    const [head, tail] = body.split(marker![0]);
+    expect(newest.startsWith(head!)).toBe(true);
+    expect(newest.endsWith(tail!)).toBe(true);
+    expect(Number(marker![1])).toBe(bytes(newest) - bytes(head!) - bytes(tail!));
   });
 });

@@ -161,11 +161,22 @@ typically one that confirms and completes the goal after the answer) does not
 replace the answer: the settlement walks back past such turns, within the
 child's 16 newest turn outcomes, to the newest outcome that had other input,
 reports that answer, and lists each continuation's output after it as
-`finalAnswer.goalContinuations` (`sequence`, `text`, oldest first). The answer
-and every continuation are copied whole only when together they fit the 8 KiB
-bound; otherwise no answer is copied and the parent reads the child's results.
-A failed, cancelled, superseded, or segment-limited turn anywhere in that walk
-still means no answer. The worker's goal
+`finalAnswer.goalContinuations` (`sequence`, `text`, oldest first). The walk
+also stops, as at such a turn, at an earlier outcome that is not a readable
+answer (failed, cancelled, superseded, segment-limited, or a retained preview)
+and at the child's newest `goal.set` or `goal.resumed` event: goal
+continuations never cross an idle boundary that reported the goal inactive, so
+the walk never reaches output an earlier result already reported. If the window
+holds only continuations, the result is the newest answer alone, exactly as if
+no walk were made. The answer and every continuation are copied whole when
+together they fit the 8 KiB bound. Otherwise the copy is the newest part,
+marked `truncated`: `sequence` and `text` are that part behind a leading note
+of how many earlier bytes were omitted (the part itself is cut around a marker
+only if it alone exceeds the bound), `omittedSequences` lists each earlier
+part, `totalBytes` counts every part, and `nextAction` reads them all from the
+first. A child that works across goal continuations therefore still reports its
+final report, and no copy ever presents a cut or partial answer as the whole
+result. The worker's goal
 enrichment upsert keeps the committed `finalAnswer` and `childEventEvidence`
 under the row lock rather than replacing them, so an immediately delivered row
 and a reaper-delivered row carry the same answer. The field is optional, so older
@@ -174,40 +185,48 @@ continuation) is itself the consumption evidence for the parent claim's human
 acknowledgment, so such a row carries no separate `childEventEvidence`; other lifecycle notices and
 answerless terminal results keep the bounded evidence.
 
-A parent's exact live attempt that receives a direct child's complete final
-answer from `session_wait` (`contentComplete`) or `session_events` (a whole
-`results`/debug item) has consumed that result. In a separate best-effort
-transaction under the canonical event-write prefix (the shared control wait is
-bounded like other request writers; a busy prefix skips it), it re-proves that
-the attempt is the session's current one and that each returned sequence is the
-child's result-bearing `turn.completed`, then marks any still-pending idle
-`child_terminal_result` whose `finalAnswer.sequence`, and every
-`goalContinuations` sequence, is one of those exact sequences `superseded` and
-appends `system.update.cancelled` with
-`reason: consumed_by_parent_read`. A pending result for an answer the parent
-did not receive, such as an older one skipped by a later cursor, stays pending. `session_wait` then reports the remaining
-own pending input, so the parent is not told to end its turn only to receive
-the answer it already has. This mirrors a terminal `command_read`.
+A parent's exact live attempt whose model receives a direct child's complete
+final answer from `session_wait` (`contentComplete`) or `session_events` (a
+whole `results`/debug item) has consumed it. Only a direct model call counts:
+the worker's tool gateway marks each first-party call with the attempt surface
+that issued it (`_meta.opengeniCaller`, `FIRST_PARTY_MCP_CALLER_META_KEY`), and
+a Codemode script, which may return only a summary to the model, or an
+unmarked call from an older worker proves nothing. The read records each such
+answer on the reading turn as `metadata.consumedChildAnswers` entries
+(`childSessionId`, `sequence`, `attemptId`; the newest 64 are kept) in a
+separate best-effort transaction that locks only that turn row (a bounded wait;
+a busy row skips it) and re-proves that the attempt is still live and the
+session's current one and that each sequence is the child's result-bearing
+`turn.completed`. A repeated read of an answer the attempt already recorded is
+decided without any lock and writes nothing. Nothing is superseded at read
+time: the tool output is not durable parent history until the attempt
+completes its turn. `session_wait` reports own pending input less each idle
+result whose every part (the answer, each goal continuation, and each omitted
+part) this attempt or a completed turn received, so the parent is neither woken
+by nor told to end its turn for an answer it already has.
 
-The answer is usually joined before the child's idle boundary commits its row:
-the child closes its run a few seconds after its final turn. So the same
-transaction also records each consumed answer on the reading turn, under the
-turn row lock, as `metadata.consumedChildAnswers` entries
-(`childSessionId`, `sequence`, `attemptId`; the newest 64 are kept). When the
-child's successful idle result is later inserted into the parent (under the
-parent session lock, so it serializes with the read), it arrives already
-consumed if every part it carries (the answer and each goal continuation) is
-recorded on one of the parent's 16 newest turns by an attempt that is still
-live or completed its turn: the row is inserted
-`superseded`, keeps its `system.update.pending` event for replay, and appends
-`system.update.cancelled` with `reason: consumed_by_parent_read`, with no goal
-auto-resume, wake, or queued status. A completed attempt's tool output is
-durable parent history; a live attempt carries the same window as the
-read-time supersession. A read by an attempt that failed, was interrupted, or
-was replaced proves nothing, so that result is delivered normally, as is a
-result reporting any answer or continuation the parent did not read. The record
-only ever suppresses a duplicate: an older writer or a lost record delivers the
-result as before, and older workers ignore the metadata key.
+The attempt's successful completion settlement
+(`applySessionTurnSettlement` with `completed`) then marks each still-pending
+idle `child_terminal_result` whose every part was received `superseded` and
+appends `system.update.cancelled` with `reason: consumed_by_parent_read`, in
+the same transaction and before any later claim, so it starts no inference
+that repeats the answer. The child usually commits its result a few seconds
+after the answer the parent joined, while the reading turn still runs; such a
+result is inserted pending and that completion supersedes it. A result inserted
+after the reading turn completed arrives already consumed when every part it
+carries is recorded on one of the parent's 16 newest completed turns by the
+attempt that completed it: the row is inserted `superseded`, keeps its
+`system.update.pending` event for replay, and appends `system.update.cancelled`
+with `reason: consumed_by_parent_read`, with no goal auto-resume, wake, or
+queued status. The insert and the completion both hold the parent session lock,
+so they serialize. A read by an attempt that fails, is interrupted, or is
+replaced, even after the read, suppresses nothing: that result is delivered
+normally, as is a result reporting any part the parent did not read, such as an
+older answer skipped by a later cursor. The record only ever suppresses a
+duplicate: an older writer or a lost record delivers the result as before, and
+older workers ignore the metadata key. A parent that reads an answer and then
+waits with `wait_for_input` for that same result is not woken by it; it wakes
+on other input or its own deadline.
 
 When a child's `child_terminal_result` is delivered, that child's still-pending
 `child_progress` and `child_waiting_capacity` notices on the parent are

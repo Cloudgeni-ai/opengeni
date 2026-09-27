@@ -88,35 +88,59 @@ export function meaningfulSessionSequenceSql(
  * child or command result) was ever delivered. Such a turn follows an answer
  * rather than producing the task's result, so the caller walks back past it.
  * Each outcome probe walks the (workspace, session, type, sequence) index
- * backwards within `limit`, and only the selected rows' payloads are read. */
+ * backwards within `limit`, and only the selected rows' payloads are read.
+ * The child's delivered input is scanned once for all selected turns.
+ *
+ * `goalActivatedAt` is the newest `goal.set` or `goal.resumed` event: goal
+ * continuation turns never run across an idle boundary that reported the goal
+ * inactive, so a continuation walk stops there instead of reaching output a
+ * result for an earlier run already reported. */
 export function childRecentTurnOutcomesSql(
   workspaceId: SQLWrapper,
   sessionId: SQLWrapper,
   limit: number,
 ): SQL {
-  return sql`with latest as (
-    select outcome.sequence from session_events outcome
+  return sql`with latest as materialized (
+    select outcome.sequence, outcome.turn_id from session_events outcome
     where outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
       and outcome.type in ('turn.completed', 'turn.failed', 'turn.cancelled', 'turn.superseded')
       and outcome.duplicate_of_event_id is null
       and (outcome.turn_association is null or outcome.turn_association = 'current')
       and (outcome.type <> 'turn.completed' or not (outcome.payload ? 'maintenance'))
     order by outcome.sequence desc limit ${limit}
+  ), goal_turns as materialized (
+    select turn.id from session_turns turn
+    where turn.workspace_id = ${workspaceId} and turn.session_id = ${sessionId}
+      and turn.id in (select latest.turn_id from latest where latest.turn_id is not null)
+      and turn.source = 'goal'
+  ), goal_turns_with_input as materialized (
+    select distinct input.delivered_turn_id as id from session_system_updates input
+    where input.workspace_id = ${workspaceId} and input.session_id = ${sessionId}
+      and input.delivered_turn_id in (select goal_turns.id from goal_turns)
+      and input.kind <> 'goal_continuation'
+  ), goal_activation as (
+    select max(activation.sequence) as sequence from (
+      (select event.sequence from session_events event
+        where event.workspace_id = ${workspaceId} and event.session_id = ${sessionId}
+          and event.type = 'goal.set'
+        order by event.sequence desc limit 1)
+      union all
+      (select event.sequence from session_events event
+        where event.workspace_id = ${workspaceId} and event.session_id = ${sessionId}
+          and event.type = 'goal.resumed'
+        order by event.sequence desc limit 1)
+    ) activation
   )
   select outcome.sequence, outcome.type, outcome.payload,
     outcome.payload_codec_version as "payloadCodecVersion",
-    case when turn.source = 'goal' then not exists (
-      select 1 from session_system_updates input
-      where input.workspace_id = ${workspaceId} and input.session_id = ${sessionId}
-        and input.delivered_turn_id = turn.id and input.kind <> 'goal_continuation'
-    ) else false end as "goalContinuationOnly"
+    (latest.turn_id in (select goal_turns.id from goal_turns)
+      and latest.turn_id not in (select goal_turns_with_input.id from goal_turns_with_input))
+      is true as "goalContinuationOnly",
+    coalesce((select goal_activation.sequence from goal_activation), 0) as "goalActivatedAt"
   from latest
   join session_events outcome
     on outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
       and outcome.sequence = latest.sequence
-  left join session_turns turn
-    on turn.workspace_id = ${workspaceId} and turn.session_id = ${sessionId}
-      and turn.id = outcome.turn_id
   order by outcome.sequence desc`;
 }
 
