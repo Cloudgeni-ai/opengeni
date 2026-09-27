@@ -331,6 +331,7 @@ RUN set -eux; \
         xfwm4 \
         fonts-liberation \
         fonts-noto-color-emoji \
+        fonts-noto-cjk \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
