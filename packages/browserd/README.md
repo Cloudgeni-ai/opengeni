@@ -53,3 +53,13 @@ hard-coded SHA-256 digest, and install an exact Chromium/Chrome package version.
 The runtime starts the service idempotently under a placement lock, authenticates
 readiness using the file-only admin credential, refuses a foreign listener, and
 stops only the exact recorded executable/PID.
+
+`bun run --cwd packages/browserd test:e2e` includes the opt-in context pool's
+real Chromium acceptance tests. They fill all six slots, verify same-origin
+cookie/localStorage/IndexedDB and target isolation, reject a seventh context
+without evicting peers, and keep rendering after one actor ends. The supervisor
+test closes one shared browser, checks that its actors become terminal without
+restoration, and verifies that another authority partition remains usable. Set
+`OPENGENI_BROWSER_EXECUTABLE` to the test Chromium executable, as in CI. Pooling
+still requires explicit opt-in; its contexts share a crash boundary and cannot
+replace durable profiles or an OS security boundary.
