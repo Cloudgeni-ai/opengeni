@@ -376,6 +376,14 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
+Modal lease-owned physical creation uses `modal-create-session.ts` and the
+`modal-create-boundary.ts` RPC hook: persist one operation before dispatch,
+disable create retries, attribute the returned instance before manifest setup.
+An unknown outcome must retain its epoch/checkpoint even after expiry. Recovery
+requires positive historical provider identity in the same authenticated
+namespace; absence never licenses another create. Only ordinary holder-fenced
+draining may stop a recovered instance. See `docs/run-lifecycle.md`.
+
 Public historical checkpoint consent (0495) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy
 fence before a complete group census; a visible session count is not authority.

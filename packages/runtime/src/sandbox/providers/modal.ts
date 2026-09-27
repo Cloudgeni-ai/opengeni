@@ -16,6 +16,7 @@ import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
 import { ModalCommandControl } from "./modal-command-control";
 import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-router-wire";
+import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
@@ -653,10 +654,12 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
 
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   readonly #snapshotFilesystemTimeoutMs: number | undefined;
+  readonly #createOptions: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]>;
 
   constructor(...args: ConstructorParameters<typeof ModalSandboxClient>) {
     super(...args);
     this.#snapshotFilesystemTimeoutMs = args[0]?.snapshotFilesystemTimeoutMs;
+    this.#createOptions = { ...args[0] };
   }
 
   override async create(
@@ -665,6 +668,18 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   ): Promise<ModalSandboxSession> {
     const session = await super.create(args, manifestOptions);
     return installOpenGeniModalSnapshotPolicy(session);
+  }
+
+  async createWithLifecycle(
+    args: Parameters<ModalSandboxClient["create"]>[0],
+    lifecycle: ModalCreateLifecycle,
+  ): Promise<ModalSandboxSession> {
+    return await createModalSessionWithLifecycle(
+      this.#createOptions,
+      args,
+      lifecycle,
+      installOpenGeniModalSnapshotPolicy,
+    );
   }
 
   override async resume(state: ModalSandboxSessionState): Promise<ModalSandboxSession> {
@@ -1075,6 +1090,78 @@ export async function resolveModalCheckpointProviderBinding(
   }
 }
 
+/** Positive discovery only. A missing/expired provider listing never proves
+ * that a dispatched create did not happen, and never authorizes a retry. */
+export async function findModalProviderCreateReceipt(
+  settings: Settings,
+  attempt: {
+    operationId: string;
+    providerBindingKey: string;
+    appId: string;
+    providerName: string;
+    imageId: string | null;
+  },
+  createClient: (settings: Settings) => Promise<ModalClientLike> = createModalClient,
+): Promise<string | null> {
+  if (
+    !attempt.imageId ||
+    !attempt.appId ||
+    attempt.providerName !== `opengeni-create-${attempt.operationId}`
+  )
+    throw new Error("Modal create recovery requires exact persisted provider identity");
+  const modal = await createClient(settings);
+  try {
+    const binding = canonicalModalCheckpointProviderBinding(
+      await modalCheckpointProviderBindingForClient(settings, modal),
+    );
+    if (binding?.key !== attempt.providerBindingKey)
+      throw new Error("Modal create recovery refused a different authenticated namespace");
+    let beforeTimestamp: number | undefined;
+    const found = new Set<string>();
+    // An operation normally has one result. Bound malformed/ambiguous provider
+    // inventory without treating partial pagination as a unique receipt.
+    for (let page = 0; page < 16; page++) {
+      const response = await modal.cpClient.sandboxList({
+        appId: attempt.appId,
+        environmentName: modal.environmentName(settings.modalEnvironment),
+        includeFinished: true,
+        tags: [{ tagName: "opengeni_provider_create_operation_id", tagValue: attempt.operationId }],
+        ...(beforeTimestamp === undefined ? {} : { beforeTimestamp }),
+      });
+      if (!response.sandboxes.length) return found.size === 1 ? [...found][0]! : null;
+      for (const info of response.sandboxes) {
+        if (
+          !info.id.startsWith("sb-") ||
+          info.appId !== attempt.appId ||
+          info.name !== attempt.providerName ||
+          info.imageId !== attempt.imageId ||
+          info.tags.filter((tag) => tag.tagName === "opengeni_provider_create_operation_id")
+            .length !== 1 ||
+          !info.tags.some(
+            (tag) =>
+              tag.tagName === "opengeni_provider_create_operation_id" &&
+              tag.tagValue === attempt.operationId,
+          )
+        )
+          throw new Error("Modal create discovery returned inconsistent operation identity");
+        found.add(info.id);
+        if (found.size > 1) throw new Error("Modal create discovery is ambiguous; preserve fence");
+      }
+      const oldest = Math.min(...response.sandboxes.map((info) => info.createdAt));
+      if (
+        !Number.isFinite(oldest) ||
+        oldest <= 0 ||
+        (beforeTimestamp !== undefined && oldest >= beforeTimestamp)
+      )
+        throw new Error("Modal create discovery pagination did not advance");
+      beforeTimestamp = oldest;
+    }
+    throw new Error("Modal create discovery exceeded its bounded inventory");
+  } finally {
+    modal.close();
+  }
+}
+
 /** Prove a legacy lease's live sandbox is visible in the same Modal namespace
  * whose identity will own the adopted checkpoint row. */
 export async function resolveModalCheckpointProviderBindingForLiveSandbox(
@@ -1221,12 +1308,20 @@ export async function terminateModalSandboxById(
   settings: Settings,
   sandboxId: string,
   createClient: (settings: Settings) => Promise<ModalClientLike> = createModalClient,
+  expectedProviderBindingKey?: string,
 ): Promise<boolean> {
   if (!sandboxId) {
     return true;
   }
   const modal = await createClient(settings);
   try {
+    if (expectedProviderBindingKey) {
+      const binding = canonicalModalCheckpointProviderBinding(
+        await modalCheckpointProviderBindingForClient(settings, modal),
+      );
+      if (binding?.key !== expectedProviderBindingKey)
+        throw new Error("Modal create cleanup refused a different authenticated namespace");
+    }
     const sandbox = await modal.sandboxes.fromId(sandboxId);
     await confirmModalTermination(sandbox.terminate.bind(sandbox));
     return true;

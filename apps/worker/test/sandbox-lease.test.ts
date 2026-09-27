@@ -53,6 +53,7 @@ import {
   advanceWorkspaceGenerationForRetainedProcess,
   verifyRetainedProcessMutationSettlement,
   beginSandboxRematerialization,
+  beginModalProviderCreate,
   claimWorkspaceArchiveCapture,
   claimSessionWorkForAttempt,
   commitWarmingToWarm,
@@ -549,6 +550,66 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, spied provider stop)", () => {
+  test("ownership-off owner-death recovery attributes first, then ordinary draining stops the exact instance", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      ...identity,
+      kind: "turn",
+      holderId: "dead-create",
+      backend: "modal",
+      leaseTtlMs: 45000,
+    });
+    const operationId = crypto.randomUUID();
+    await beginModalProviderCreate(db, {
+      ...identity,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      operationId,
+      providerBindingKey: MODAL_PROVIDER_BINDING.key,
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-fixture",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "a".repeat(64),
+    });
+    await admin`update sandbox_leases set expires_at=now()-interval '1 hour',updated_at=now()-interval '1 hour'
+      where workspace_id=${ids.workspaceId} and sandbox_group_id=${ids.groupId}`;
+    await admin`update sandbox_lease_holders set last_heartbeat_at=now()-interval '1 hour' where workspace_id=${ids.workspaceId}`;
+    let discovered = 0;
+    const stopped: string[] = [];
+    const activities = createSandboxLeaseActivities(
+      reaperServices(testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: false })),
+      {
+        findModalProviderCreateReceipt: async (_settings, attempt) => {
+          expect(attempt.operationId).toBe(operationId);
+          discovered++;
+          return "sb-recovered-worker";
+        },
+        terminateBox: async (_settings, lease, _observability, persistArchive) => {
+          const receipt = await persistArchive(null);
+          if (receipt.wrote) stopped.push(lease.instanceId!);
+          return receipt.wrote;
+        },
+      },
+    );
+    await activities.reapSandboxLeases();
+    expect(discovered).toBe(1);
+    expect(stopped).toHaveLength(0);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.instanceId).toBe(
+      "sb-recovered-worker",
+    );
+    await activities.reapSandboxLeases();
+    expect(stopped).toEqual(["sb-recovered-worker"]);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("cold");
+  }, 60_000);
+
   test("ownership-off keeps read-only inventory fresh without provider mutation", async () => {
     if (!available) return;
     const settings = testSettings({
