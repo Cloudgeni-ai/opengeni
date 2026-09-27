@@ -1,5 +1,11 @@
 # @opengeni/interaction
 
+## 0.4.42
+
+### Patch Changes
+
+- 509513d: Accept synchronous iterables when restoring operation journals, allowing controllers to recover durable receipts without retaining every observation graph in memory at once. Existing array inputs remain supported.
+
 ## 0.4.41
 
 ### Patch Changes
