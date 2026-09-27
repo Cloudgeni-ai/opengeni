@@ -192,6 +192,57 @@ function modalSettings(overrides: Parameters<typeof testSettings>[0] = {}) {
 }
 
 describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
+  test("failed durable create admission prevents physical dispatch", async () => {
+    let creates = 0;
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(modalSettings(), null, {
+        sessionId: "create-admission-failed",
+        recovery: "create-or-restore",
+        environment: {},
+        onBeforeSandboxCreate: async () => {
+          throw new Error("fence not persisted");
+        },
+        clientFactory: () => ({
+          backendId: "modal",
+          create: async () => {
+            creates++;
+            return { state: { sandboxId: "unexpected" } };
+          },
+        }),
+      }),
+    ).rejects.toThrow("fence not persisted");
+    expect(creates).toBe(0);
+  });
+
+  test("ambiguous first create cannot silently dispatch logical fallback", async () => {
+    let attempts = 0;
+    let creates = 0;
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        modalSettings({ modalImageId: "im-selected" }),
+        null,
+        {
+          sessionId: "unknown-create-fallback",
+          recovery: "create-or-restore",
+          environment: {},
+          logicalFallbackSettings: modalSettings({ modalImageId: "im-logical" }),
+          onBeforeSandboxCreate: async () => {
+            if (++attempts > 1) throw new Error("provider_create_outcome_unknown");
+          },
+          clientFactory: () => ({
+            backendId: "modal",
+            create: async () => {
+              creates++;
+              throw { status: 404 };
+            },
+          }),
+        },
+      ),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    expect(creates).toBe(1);
+    expect(attempts).toBe(2);
+  });
+
   test("readWorkspaceArchiveFromEnvelopeSessionState round-trips base64 → exact bytes", () => {
     const out = readWorkspaceArchiveFromEnvelopeSessionState({ workspaceArchive: SNAPSHOT_B64 });
     expect(out).toBeInstanceOf(Uint8Array);

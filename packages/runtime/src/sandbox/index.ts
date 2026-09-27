@@ -1780,6 +1780,11 @@ export async function establishSandboxSessionFromEnvelope(
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
+    /** Durable lease owners fence the attempt before invoking a provider create.
+     * Called for each physical attempt, including logical-image fallback. A
+     * rejected hook prevents dispatch; a lost create reply is never permission
+     * to invoke the fallback under the same unresolved operation. */
+    onBeforeSandboxCreate?: (settings: Settings) => Promise<void>;
     /** Called after archive hydration but immediately before the exact workspace
      * fingerprint probe. Lease-aware callers persist `verifying` here so a box
      * is never observable as ready while verification is in flight. */
@@ -1962,6 +1967,7 @@ export async function establishSandboxSessionFromEnvelope(
       const createStarted = Date.now();
       let restored: Awaited<ReturnType<NonNullable<typeof restoreClient.create>>>;
       try {
+        await opts.onBeforeSandboxCreate?.(restoreSettings);
         restored = await restoreClient.create({ manifest: createManifest });
         recordSandboxCreateMetric(
           opts.metrics,
@@ -2020,6 +2026,7 @@ export async function establishSandboxSessionFromEnvelope(
         }
         const fallbackStarted = Date.now();
         try {
+          await opts.onBeforeSandboxCreate?.(fallbackSettings);
           restored = await fallbackClient.create({ manifest: createManifest });
           recordSandboxCreateMetric(
             opts.metrics,

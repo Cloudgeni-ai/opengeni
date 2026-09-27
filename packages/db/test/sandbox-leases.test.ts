@@ -13,6 +13,7 @@ import {
   SandboxWorkspaceMutationFencedError,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  beginModalProviderCreate,
   claimTemporalScheduleCleanups,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
@@ -893,6 +894,106 @@ describe("archive object publication binding and disposition", () => {
       superseded: true,
       candidateDisposition: "already_referenced",
     });
+  }, 60_000);
+});
+
+describe("Modal create outcome fencing", () => {
+  test("unknown reply survives rollback, global expiry and competing dispatch; late exact receipt unlocks cleanup", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      ...identity,
+      kind: "turn",
+      holderId: "unknown-create-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const expectedEpoch = acquired.lease.leaseEpoch;
+    const intent = {
+      ...identity,
+      expectedEpoch,
+      operationId: crypto.randomUUID(),
+      providerBindingKey: "synthetic-modal-workspace/app/environment",
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-synthetic",
+      imageRef: null,
+    };
+    await beginModalProviderCreate(db, intent);
+    const receipt = (await readLease(db, ids.workspaceId, ids.groupId))!.providerCreateAttempt;
+    await failWarmingToCold(db, { ...identity, expectedEpoch });
+    await admin`update sandbox_leases set expires_at = now() - interval '1 second'
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
+    await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 45_000,
+    });
+    await reapStaleLeaseHolders(db, {
+      workspaceId: ids.workspaceId,
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 45_000,
+    });
+    const held = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    expect(held.liveness).toBe("warming");
+    expect(held.leaseEpoch).toBe(expectedEpoch);
+    expect(held.providerCreateAttempt).toEqual(receipt);
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 8 }, () =>
+        beginModalProviderCreate(db, { ...intent, operationId: crypto.randomUUID() }),
+      ),
+    );
+    expect(attempts.every((result) => result.status === "rejected")).toBe(true);
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set resume_state = '{}'::jsonb
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set liveness = 'cold', lease_epoch = lease_epoch + 1
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set provider_create_attempt = null
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      Promise.resolve(admin`delete from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    const attribute = {
+      ...identity,
+      expectedEpoch,
+      instanceId: "sb-exact-late-reply",
+      leaseTtlMs: 45_000,
+    };
+    expect(
+      (
+        await recordWarmingSandboxCreated(db, {
+          ...attribute,
+          providerCreateOperationId: crypto.randomUUID(),
+        })
+      ).recorded,
+    ).toBe(false);
+    expect(
+      (
+        await recordWarmingSandboxCreated(db, {
+          ...attribute,
+          providerCreateOperationId: intent.operationId,
+        })
+      ).recorded,
+    ).toBe(true);
+    expect(
+      (await readLease(db, ids.workspaceId, ids.groupId))!.providerCreateAttempt?.instanceId,
+    ).toBe(attribute.instanceId);
+    // Synthetic provider terminal proof is the caller's precondition here.
+    await failWarmingToCold(db, { ...identity, expectedEpoch });
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("cold");
   }, 60_000);
 });
 

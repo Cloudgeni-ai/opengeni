@@ -2462,6 +2462,13 @@ export function modalOrphanTerminationStillEligible(
   latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
   candidate: ModalOrphanSweepTermination,
 ): boolean {
+  // The provider may have accepted a create whose reply has not arrived.
+  // Before attribution, neither its ID nor its separately-applied tags are
+  // available here. Postpone orphan deletion while any such owner exists;
+  // age/absence cannot distinguish its provider from an abandoned one.
+  if (latest.some((lease) => lease.liveness === "warming" && lease.instanceId === null)) {
+    return false;
+  }
   if (latest.some((lease) => lease.instanceId === candidate.sandboxId)) {
     return false;
   }
@@ -3296,6 +3303,11 @@ export async function terminateProviderBox(
   // fail closed instead of silently leaving a live provider behind while the
   // caller commits the lease cold.
   if (!lease.instanceId) {
+    if (lease.providerCreateAttempt?.instanceId === null) {
+      throw new Error(
+        "provider_create_outcome_unknown: cannot infer termination from missing instance ID",
+      );
+    }
     if (persistedInstanceId) {
       throw new Error(
         `sandbox backend ${backend} has persisted provider identity ${persistedInstanceId} but no authoritative lease instance; refusing teardown`,

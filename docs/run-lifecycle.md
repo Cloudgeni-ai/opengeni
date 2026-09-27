@@ -1675,8 +1675,23 @@ attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
 not create a temporary box and ask SDK hydration to replace it. Directory and tar
 archives still hydrate the elected destination. This removes the hidden second
-create; an ambiguous initial provider create still needs lifecycle fencing and
-must not be treated as stopped merely because an older box is gone. Warm
+create. Migration 0523 adds a durable Modal creation receipt before the runtime
+calls provider create. The receipt binds the lease epoch, provider namespace,
+selected archive revision, and image selectors. Only the matching creator can
+attribute an exact returned instance. Until then, failure rollback and both
+lease reapers preserve the operation, epoch, and checkpoint; a database trigger
+also rejects erasure by older transition paths. Orphan deletion is postponed
+while any warming Modal lease lacks a provider identity, because tags are
+applied after creation and cannot identify an unreturned instance reliably.
+
+This receipt is a fence, not a provider idempotency or replay guarantee. Losing
+the creator and its reply can leave the lease blocked; time, a missing named
+running sandbox, and termination of some other sandbox do not unblock it.
+Automatic logical-image fallback is also rejected once an unresolved create
+attempt has been recorded. Provider receipt reconciliation and proof of
+pre-dispatch failure are required before this can provide automatic recovery
+for those cases; do not clear the receipt or silently create another sandbox.
+Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
