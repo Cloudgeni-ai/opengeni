@@ -47,6 +47,13 @@ option, then confirm. Re-targeting the trigger can reset focus or fail when the
 open menu hides that trigger from the accessibility tree. The `select` action
 requires a native HTML select; an ARIA combobox role alone is not sufficient.
 
+The optional Lightpanda 0.3.5 engine supports `fill` and `type` only in editable
+text inputs and textareas. Browserd rejects typing into rich-text editors,
+read-only fields and other unsupported focused targets before sending text:
+Lightpanda otherwise acknowledges `Input.insertText` without editing them.
+Choose Chromium for contenteditable workflows; browserd never replaces page
+text or synthesizes an input event to disguise unsupported native editing.
+
 Live-view grants advertise `focusedInputObservations` only when the driver
 supports the optional `observationMode: "input"`. A left pointer click then uses
 a bounded isolated-world focus probe: ordinary clicks return no observation,

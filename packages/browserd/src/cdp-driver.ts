@@ -2703,6 +2703,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const node = await this.resolveLocator(state, action.locator);
           await this.focusNode(state, node.backendDOMNodeId);
         }
+        if (
+          action.text &&
+          this.engine === "lightpanda" &&
+          (await this.evaluate(state, LIGHTPANDA_TYPING_TARGET_EXPRESSION)) !== true
+        ) {
+          // Lightpanda 0.3.5 acknowledges insertText on contenteditable without
+          // inserting anything. Refuse before dispatch rather than certify it.
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "Lightpanda typing requires an editable text input or textarea; use Chromium for rich-text editors",
+          );
+        }
         if (action.text)
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.text,
@@ -4281,6 +4293,13 @@ const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
   else return false;
   return true;
 }`;
+
+const LIGHTPANDA_TYPING_TARGET_EXPRESSION = `(() => {
+  const element = document.activeElement;
+  if (!(element instanceof Element) || !element.isConnected || element.disabled || element.readOnly) return false;
+  const tag = String(element.tagName || "").toLowerCase();
+  return tag === "textarea" || (tag === "input" && ["text", "search", "url", "tel", "password", "email", "number"].includes(element.type));
+})()`;
 
 const LIGHTPANDA_CLEAR_EDITABLE_FUNCTION = `function() {
   if (!(this instanceof Element) || !this.isConnected || document.activeElement !== this) return false;
