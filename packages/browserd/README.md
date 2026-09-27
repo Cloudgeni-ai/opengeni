@@ -17,6 +17,10 @@ target queues, and SQLite WAL operation journal. A prepared receipt is durable
 before dispatch; restart settles a prepared operation as failed and a dispatched
 operation as `outcome_unknown`, without replaying either command. Session state is
 retained for restore unless its lifecycle owner explicitly ends and removes it.
+Recovery scans receipts with bounded keyset reads inside one atomic transaction,
+avoiding simultaneous raw-row and duplicate observation collections. Corruption
+in a later receipt rolls back earlier recovery changes; validation, ordering,
+retention limits and the on-disk format remain unchanged.
 
 During profile restoration, saved `blob:` previews and `chrome-error:` documents
 become inert explanatory tabs: their old process-local contents cannot be reopened.

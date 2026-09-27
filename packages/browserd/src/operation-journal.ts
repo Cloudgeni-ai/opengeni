@@ -152,16 +152,17 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       throw new Error("settledAt must be a canonical ISO timestamp");
     }
     return this.immediateTransaction(() => {
-      const records = this.rows().map((row) => this.recordFromRow(row));
-      for (let index = 0; index < records.length; index += 1) {
-        const recovered = this.recoverRecord(records[index]!, settledAt);
-        if (recovered.receipt.state !== records[index]!.receipt.state) {
+      // Avoid retaining every raw JSON row plus two complete observation graphs.
+      // Only the final recovered result remains in memory.
+      for (const row of this.rows()) {
+        const record = this.recordFromRow(row);
+        const recovered = this.recoverRecord(record, settledAt);
+        if (recovered.receipt.state !== record.receipt.state) {
           this.writeInTransaction(this.validate(recovered));
-          records[index] = recovered;
         }
       }
       this.trimToLimit();
-      return this.rows().map((row) => this.recordFromRow(row));
+      return Array.from(this.rows(), (row) => this.recordFromRow(row));
     });
   }
 
@@ -181,7 +182,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     if (checkpointFailure) throw checkpointFailure;
   }
 
-  private validate(record: InteractionJournalRecord<TReceipt>): InteractionJournalRecord<TReceipt> {
+  private validate(record: InteractionJournalRecord<unknown>): InteractionJournalRecord<TReceipt> {
     if (!/^[0-9a-f]{64}$/u.test(record.commandDigest)) {
       throw new Error(`${this.resourceLabel} operation command digest must be lowercase SHA-256`);
     }
@@ -317,15 +318,28 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     return row?.count ?? 0;
   }
 
-  private rows(): JournalRow[] {
-    return this.database
-      .query<JournalRow, [string, string, string]>(
-        `SELECT sequence, operation_id, command_digest, state, receipt_json, receipt_bytes
+  private *rows(): Generator<JournalRow> {
+    // Keyset reads avoid modifying a table through an active SQLite iterator.
+    // Sequence is immutable; the caller owns the IMMEDIATE transaction.
+    const query = this.database.query<JournalRow, [string, string, string, number]>(
+      `SELECT sequence, operation_id, command_digest, state, receipt_json, receipt_bytes
            FROM interaction_operation_journal
           WHERE resource_kind = ? AND resource_id = ? AND controller_generation = ?
-          ORDER BY sequence ASC`,
-      )
-      .all(this.resourceKind, this.resourceId, this.controllerGeneration);
+            AND sequence > ?
+          ORDER BY sequence ASC LIMIT 1`,
+    );
+    let sequence = 0;
+    while (true) {
+      const row = query.get(
+        this.resourceKind,
+        this.resourceId,
+        this.controllerGeneration,
+        sequence,
+      );
+      if (!row) return;
+      sequence = row.sequence;
+      yield row;
+    }
   }
 
   private recordFromRow(row: JournalRow): InteractionJournalRecord<TReceipt> {
@@ -341,7 +355,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     return this.validate({
       operationId: row.operation_id,
       commandDigest: row.command_digest,
-      receipt: this.parseReceipt(receipt),
+      receipt,
     });
   }
 
