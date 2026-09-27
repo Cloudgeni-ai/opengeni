@@ -64,6 +64,13 @@ export class SqliteComputerOperationJournal {
     return this.journal.loadAndRecover(settledAt);
   }
 
+  withRecoveredRecords<T>(
+    consume: (records: Iterable<ComputerOperationJournalRecord>) => T,
+    settledAt?: string,
+  ): T {
+    return this.journal.withRecoveredRecords(consume, settledAt);
+  }
+
   close(): void {
     this.journal.close();
   }
