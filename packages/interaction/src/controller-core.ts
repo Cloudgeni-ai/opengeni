@@ -128,6 +128,10 @@ export type InteractionControllerCoreOptions<
   now?: () => Date;
   initialJournal?: readonly InteractionOperationJournalRecord<TReceipt>[];
   onJournalRecord?: (record: InteractionOperationJournalRecord<TReceipt>) => Promise<void> | void;
+  /** Read the same durable journal used by onJournalRecord. Terminal receipts
+   * may leave RAM only after that writer succeeds. Missing/corrupt reads fail
+   * closed and never cause a command to dispatch again. */
+  loadJournalRecord?: (operationId: string) => InteractionOperationJournalRecord<TReceipt> | null;
   /** Override only when a private command contains ephemeral secret material.
    * The callback must bind every non-secret semantic input while excluding the
    * value bytes themselves and return lowercase SHA-256. */
@@ -138,6 +142,15 @@ type JournalEntry<TReceipt> = InteractionOperationJournalRecord<TReceipt> & {
   kind: "materialized";
   completion: Promise<TReceipt>;
   preparationPersisted: Promise<boolean>;
+  terminalPersisted: boolean;
+};
+
+type PersistedJournalEntry = {
+  kind: "persisted";
+  operationId: string;
+  commandDigest: string;
+  state: InteractionOperationState;
+  receiptDigest: string;
 };
 
 type CompactJournalEntry = {
@@ -179,7 +192,13 @@ export class InteractionControllerCore<
     | ((record: InteractionOperationJournalRecord<TReceipt>) => Promise<void> | void)
     | undefined;
   private readonly commandDigest: (command: TCommand) => string;
-  private readonly journal = new Map<string, JournalEntry<TReceipt> | CompactJournalEntry>();
+  private readonly loadJournalRecord:
+    | ((operationId: string) => InteractionOperationJournalRecord<TReceipt> | null)
+    | undefined;
+  private readonly journal = new Map<
+    string,
+    JournalEntry<TReceipt> | CompactJournalEntry | PersistedJournalEntry
+  >();
   private readonly targetTails = new Map<string, Promise<void>>();
 
   constructor(
@@ -191,6 +210,7 @@ export class InteractionControllerCore<
     this.maxJournalEntries = options.maxJournalEntries ?? 10_000;
     this.now = options.now ?? (() => new Date());
     this.onJournalRecord = options.onJournalRecord;
+    this.loadJournalRecord = options.loadJournalRecord;
     this.commandDigest = options.commandDigest ?? digestJson;
     if (!Number.isSafeInteger(this.maxJournalEntries) || this.maxJournalEntries < 1) {
       throw new Error("maxJournalEntries must be a positive safe integer");
@@ -220,9 +240,9 @@ export class InteractionControllerCore<
           `operation id is already bound to a different ${this.adapter.resourceLabel} command`,
         );
       }
-      return existing.kind === "compact"
-        ? Promise.resolve(this.readReceipt(existing))
-        : existing.completion;
+      return existing.kind === "materialized"
+        ? existing.completion
+        : Promise.resolve(this.readReceipt(existing));
     }
 
     this.makeJournalSpace();
@@ -232,6 +252,7 @@ export class InteractionControllerCore<
       operationId: command.operationId,
       commandDigest,
       receipt: prepared,
+      terminalPersisted: false,
       completion: Promise.resolve(prepared),
       preparationPersisted: this.publish(command.operationId, commandDigest, prepared).then(
         () => true,
@@ -333,6 +354,7 @@ export class InteractionControllerCore<
       try {
         await this.publish(entry.operationId, entry.commandDigest, completed);
         entry.receipt = completed;
+        entry.terminalPersisted = this.onJournalRecord !== undefined;
         return completed;
       } catch {
         return await this.settle(
@@ -411,6 +433,7 @@ export class InteractionControllerCore<
     entry.receipt = receipt;
     try {
       await this.publish(entry.operationId, entry.commandDigest, receipt);
+      entry.terminalPersisted = this.onJournalRecord !== undefined;
     } catch {
       // Controller-lifetime terminal truth remains authoritative. A restored
       // dispatched receipt is always recovered as outcome_unknown, never replayed.
@@ -448,7 +471,7 @@ export class InteractionControllerCore<
   private makeJournalSpace(): void {
     while (this.journal.size >= this.maxJournalEntries) {
       const terminal = [...this.journal.entries()].find(([, entry]) =>
-        terminalStates.has(entry.kind === "compact" ? entry.state : entry.receipt.state),
+        terminalStates.has(entry.kind === "materialized" ? entry.receipt.state : entry.state),
       );
       if (!terminal) {
         throw new InteractionControllerError(
@@ -475,6 +498,7 @@ export class InteractionControllerCore<
       operationId: record.operationId,
       commandDigest: record.commandDigest,
       receipt,
+      terminalPersisted: terminalStates.has(parsed.state),
       completion: Promise.resolve(receipt),
       preparationPersisted: Promise.resolve(true),
     };
@@ -482,8 +506,25 @@ export class InteractionControllerCore<
     this.compactJournalEntry(entry);
   }
 
-  private readReceipt(entry: JournalEntry<TReceipt> | CompactJournalEntry): TReceipt {
+  private readReceipt(
+    entry: JournalEntry<TReceipt> | CompactJournalEntry | PersistedJournalEntry,
+  ): TReceipt {
     if (entry.kind === "materialized") return entry.receipt;
+    if (entry.kind === "persisted") {
+      const record = this.loadJournalRecord?.(entry.operationId);
+      if (
+        !record ||
+        record.operationId !== entry.operationId ||
+        record.commandDigest !== entry.commandDigest
+      ) {
+        throw new Error(`${this.adapter.resourceLabel} durable operation receipt is unavailable`);
+      }
+      const receipt = this.adapter.parseReceipt(record.receipt);
+      if (digestJson(receipt) !== entry.receiptDigest) {
+        throw new Error(`${this.adapter.resourceLabel} durable operation receipt changed`);
+      }
+      return receipt;
+    }
     const json = inflateRawSync(entry.compressedReceipt, {
       maxOutputLength: entry.receiptBytes,
     });
@@ -494,6 +535,16 @@ export class InteractionControllerCore<
     if (this.journal.get(entry.operationId) !== entry || !terminalStates.has(entry.receipt.state))
       return;
     try {
+      if (entry.terminalPersisted && this.loadJournalRecord) {
+        this.journal.set(entry.operationId, {
+          kind: "persisted",
+          operationId: entry.operationId,
+          commandDigest: entry.commandDigest,
+          state: entry.receipt.state,
+          receiptDigest: digestJson(entry.receipt),
+        });
+        return;
+      }
       const json = JSON.stringify(entry.receipt);
       const receiptBytes = Buffer.byteLength(json);
       if (receiptBytes < COMPACT_RECEIPT_MIN_BYTES) return;

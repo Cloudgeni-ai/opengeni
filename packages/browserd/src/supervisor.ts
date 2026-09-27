@@ -1366,6 +1366,7 @@ export class BrowserSupervisor {
       driver,
       initialJournal,
       onJournalRecord: (record) => runtime.journal.write(record),
+      loadJournalRecord: (operationId) => runtime.journal.read(operationId),
       authority: {
         authorizeDispatch: async (command) => {
           if (runtime.lifecycle !== "active") {
@@ -1391,6 +1392,7 @@ export class BrowserSupervisor {
       controllerGeneration: runtime.options.controllerGeneration,
       initialJournal,
       onJournalRecord: (record) => runtime.protectedAuthJournal.write(record),
+      loadJournalRecord: (operationId) => runtime.protectedAuthJournal.read(operationId),
       driver: {
         target: async (targetId) => await driver.target(targetId),
         observe: async (targetId) => {

@@ -142,6 +142,19 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     this.immediateTransaction(() => this.writeInTransaction(record));
   }
 
+  read(operationId: string): InteractionJournalRecord<TReceipt> | null {
+    this.assertOpen();
+    const row = this.database
+      .query<JournalRow, [string, string, string, string]>(
+        `SELECT sequence, operation_id, command_digest, state, receipt_json, receipt_bytes
+           FROM interaction_operation_journal
+          WHERE resource_kind = ? AND resource_id = ?
+            AND controller_generation = ? AND operation_id = ?`,
+      )
+      .get(this.resourceKind, this.resourceId, this.controllerGeneration, operationId);
+    return row ? this.recordFromRow(row) : null;
+  }
+
   loadAndRecover(settledAt = new Date().toISOString()): InteractionJournalRecord<TReceipt>[] {
     this.assertOpen();
     const parsedSettledAt = new Date(settledAt);

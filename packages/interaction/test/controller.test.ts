@@ -120,6 +120,140 @@ function driver(
 }
 
 describe("BrowserInteractionController", () => {
+  test("loads settled receipts from durable authority, including restart, without redispatch", async () => {
+    type Record = ReturnType<BrowserInteractionController["journalSnapshot"]>[number];
+    const records = new Map<string, Record>();
+    let reads = 0;
+    let dispatches = 0;
+    const create = (initialJournal?: Record[]) =>
+      new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        ...(initialJournal ? { initialJournal } : {}),
+        onJournalRecord(record) {
+          records.set(record.operationId, structuredClone(record));
+        },
+        loadJournalRecord(id) {
+          reads++;
+          return records.get(id) ?? null;
+        },
+        driver: driver(new Map([["target-1", target()]]), async () => {
+          dispatches++;
+          const observed = observation(target());
+          observed.semantic = {
+            kind: "snapshot",
+            nodeCount: 1_000,
+            roots: Array.from({ length: 1_000 }, (_, index) => ({
+              ref: `row-${index}`,
+              role: "text",
+              name: `Task ${index} — inspect installation progress and document acceptance`,
+              states: [],
+              actions: [],
+            })),
+          };
+          return observed;
+        }),
+      });
+    const controller = create();
+    const receipt = await controller.run(command(1));
+    await controller.waitForIdle();
+    expect(Buffer.byteLength(JSON.stringify(receipt))).toBeGreaterThan(100_000);
+    expect(reads).toBe(0);
+    expect(controller.receipt(operationId(1))).toEqual(receipt);
+    expect(reads).toBe(1);
+    expect(await controller.run(command(1))).toEqual(receipt);
+    const snapshot = controller.journalSnapshot();
+    expect(reads).toBe(3);
+    const restored = create(snapshot);
+    expect(await restored.run(command(1))).toEqual(receipt);
+    expect(reads).toBe(4);
+    expect(dispatches).toBe(1);
+
+    expect(() => controller.run({ ...command(1), targetId: "other" })).toThrow("already bound");
+    expect(reads).toBe(4);
+    const original = structuredClone(records.get(operationId(1))!);
+    for (const changed of [
+      { ...original, operationId: operationId(2) },
+      { ...original, commandDigest: "0".repeat(64) },
+      { ...original, receipt: { ...original.receipt, targetId: "other" } },
+      { ...original, receipt: { ...original.receipt, settledAt: null } },
+      null,
+    ]) {
+      if (changed) records.set(operationId(1), changed);
+      else records.delete(operationId(1));
+      expect(() => controller.receipt(operationId(1))).toThrow();
+      expect(() => controller.run(command(1))).toThrow();
+      expect(() => controller.journalSnapshot()).toThrow();
+      expect(dispatches).toBe(1);
+    }
+    records.set(operationId(1), original);
+    expect(await controller.run(command(1))).toEqual(receipt);
+    expect(dispatches).toBe(1);
+  });
+
+  test("keeps terminal RAM truth when persistence fails or no writer exists", async () => {
+    for (const writer of ["fails", "absent"] as const) {
+      let reads = 0;
+      let dispatches = 0;
+      const controller = new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        ...(writer === "fails"
+          ? {
+              onJournalRecord(
+                record: ReturnType<BrowserInteractionController["journalSnapshot"]>[number],
+              ) {
+                if (["completed", "outcome_unknown"].includes(record.receipt.state))
+                  throw new Error("disk unavailable");
+              },
+            }
+          : {}),
+        loadJournalRecord() {
+          reads++;
+          throw new Error("stale disk must not override RAM truth");
+        },
+        driver: driver(new Map([["target-1", target()]]), async () => {
+          dispatches++;
+          return observation(target());
+        }),
+      });
+      const receipt = await controller.run(command(1));
+      await controller.waitForIdle();
+      expect(receipt.state).toBe(writer === "fails" ? "outcome_unknown" : "completed");
+      expect(await controller.run(command(1))).toEqual(receipt);
+      expect(controller.receipt(operationId(1))).toEqual(receipt);
+      expect(controller.journalSnapshot()[0]?.receipt).toEqual(receipt);
+      expect(reads).toBe(0);
+      expect(dispatches).toBe(1);
+    }
+  });
+
+  test("locally recovered nonterminal receipts do not read an unrecovered durable row", async () => {
+    const original = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: driver(new Map([["target-1", target()]]), async () => null),
+    });
+    await original.run(command(1));
+    const record = original.journalSnapshot()[0]!;
+    record.receipt = { ...record.receipt, state: "dispatched", settledAt: null };
+    let reads = 0;
+    const restored = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      initialJournal: [record],
+      loadJournalRecord() {
+        reads++;
+        return record;
+      },
+      driver: driver(new Map(), async () => {
+        throw new Error("must not dispatch");
+      }),
+    });
+    expect((await restored.run(command(1))).state).toBe("outcome_unknown");
+    expect(reads).toBe(0);
+  });
+
   test("large settled receipts preserve exact replay, conflicts and recovery without redispatch", async () => {
     const current = target();
     const largeObservation = observation(current);

@@ -52,6 +52,10 @@ export class SqliteBrowserOperationJournal {
     this.journal.write(record);
   }
 
+  read(operationId: string): BrowserOperationJournalRecord | null {
+    return this.journal.read(operationId);
+  }
+
   loadAndRecover(settledAt?: string): BrowserOperationJournalRecord[] {
     return this.journal.loadAndRecover(settledAt);
   }
