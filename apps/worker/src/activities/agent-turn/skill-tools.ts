@@ -3,6 +3,7 @@ import type { Settings } from "@opengeni/config";
 import { type SkillActor, type SkillWriteReceipt } from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
+  getActiveSessionFunctionToolResults,
   skillReviewResolution,
   installPortableSkill,
   replayPortableSkillInstall,
@@ -28,7 +29,11 @@ import {
 } from "@opengeni/runtime/skill-library";
 import type { RuntimeSkillArtifact } from "@opengeni/runtime";
 import type { SandboxChannelAService } from "@opengeni/runtime/sandbox";
-import { createSkillReadAttemptToolDefinition, type SkillReadContent } from "./skill-read";
+import {
+  createSkillReadAttemptToolDefinition,
+  SKILL_READ_TOOL_NAME,
+  type SkillReadContent,
+} from "./skill-read";
 import { createSkillSearchAttemptToolDefinition } from "./skill-search";
 import { createSkillSaveAttemptToolDefinition, type SkillSaveRequest } from "./skill-save";
 import { createSkillInstallAttemptToolDefinition } from "./skill-install";
@@ -49,6 +54,9 @@ export function createWorkspaceSkillTools(input: {
   filesystem: () => Promise<
     Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWrite" | "fsMkdir">
   >;
+  /** The resolved model's bound, which `settings` does not carry. */
+  modelToolOutputTruncationTokens: () => number;
+  onSkillReadHistoryLookupFailed?: (error: unknown) => void;
 }) {
   const context = {
     accountId: input.accountId,
@@ -131,7 +139,24 @@ export function createWorkspaceSkillTools(input: {
           await removeSkill(input.db, { ...context, ...request, actor: input.actor }),
         ),
     }),
-    createSkillReadAttemptToolDefinition({ authorize, load }),
+    createSkillReadAttemptToolDefinition({
+      authorize,
+      load,
+      activeHistory: {
+        readResults: async () =>
+          (
+            await getActiveSessionFunctionToolResults(input.db, {
+              workspaceId: input.workspaceId,
+              sessionId: input.actor.sessionId,
+              toolName: SKILL_READ_TOOL_NAME,
+            })
+          ).map((row) => row.item),
+        toolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+        ...(input.onSkillReadHistoryLookupFailed
+          ? { onLookupFailed: input.onSkillReadHistoryLookupFailed }
+          : {}),
+      },
+    }),
     createSkillSearchAttemptToolDefinition({
       authorize,
       listWorkspace: async () => [
