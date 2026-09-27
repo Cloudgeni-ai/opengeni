@@ -8,6 +8,7 @@ import {
   type TurnSummaryFacetConfiguration,
 } from "../src";
 import type { MemoryItem } from "../src/timeline";
+import { formatElapsed } from "../src/timeline/turn-summary";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -255,6 +256,66 @@ describe("TurnSummary facets", () => {
 
     expect(summaryText(rendered.container)).toBe("1 step");
     await rendered.unmount();
+  });
+});
+
+describe("TurnSummary status line", () => {
+  test("formats elapsed wall time with seconds below an hour", () => {
+    expect(formatElapsed(900)).toBe("0s");
+    expect(formatElapsed(14_000)).toBe("14s");
+    expect(formatElapsed(120_000)).toBe("2m");
+    expect(formatElapsed(134_000)).toBe("2m 14s");
+    expect(formatElapsed(3_900_000)).toBe("1h 05m");
+  });
+
+  test("a settled exchange states its span once and reads as a separator", async () => {
+    const r = await renderComponent(
+      <TurnSummary
+        items={[toolCall("1", "exec_command"), toolCall("2", "exec_command")]}
+        outcome="complete"
+        durationMs={250_000}
+        status={{ kind: "worked", durationMs: 250_000 }}
+      >
+        details
+      </TurnSummary>,
+    );
+    expect(summaryText(r.container)).toBe("Worked for 4m 10s · 2 steps · 2 commands");
+    expect(r.container.querySelector("button .h-px")).not.toBeNull();
+    await r.unmount();
+  });
+
+  test("a sub-second settled span shows only the facets", async () => {
+    const r = await renderComponent(
+      <TurnSummary
+        items={[toolCall("1", "exec_command")]}
+        outcome="complete"
+        status={{ kind: "worked", durationMs: 400 }}
+      >
+        details
+      </TurnSummary>,
+    );
+    expect(summaryText(r.container)).toBe("1 step · 1 command");
+    await r.unmount();
+  });
+
+  test("a live exchange keeps one short line and previews its note while closed", async () => {
+    const r = await renderComponent(
+      <TurnSummary
+        items={[toolCall("1", "exec_command"), toolCall("2", "exec_command", "running")]}
+        status={{
+          kind: "working",
+          since: new Date(Date.now() - 134_000).toISOString(),
+          note: "Checking the second file.",
+        }}
+      >
+        details
+      </TurnSummary>,
+    );
+    expect(summaryText(r.container)).toMatch(/^Working · 2m 1[3-5]s · 2 steps$/);
+    expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
+      "Checking the second file.",
+    );
+    await r.unmount();
   });
 });
 
