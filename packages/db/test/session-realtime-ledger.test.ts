@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { MODEL_CONTEXT_LABEL } from "@opengeni/contracts";
+import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { and, asc, eq, sql } from "drizzle-orm";
 
@@ -924,6 +924,7 @@ describe("session realtime ledger", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${modelContext}` },
+        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
         { type: "input_text", text: input.entries[0]!.text },
       ],
     });

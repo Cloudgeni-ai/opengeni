@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { MODEL_CONTEXT_LABEL } from "@opengeni/contracts";
+import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
 
 import {
@@ -477,6 +477,7 @@ describe("session realtime transcript tail and continuity", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${userModelContext}` },
+        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
         { type: "input_text", text: facts.projections[0]?.context },
       ],
     });
