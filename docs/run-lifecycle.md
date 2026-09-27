@@ -1669,7 +1669,14 @@ No cancellation/reaper protocol changes are included.
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
-their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
+their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+Filesystem snapshot recovery boots the exact selected immutable Image directly,
+attributes that single destination before verification, and rejects a missing
+snapshot without falling back to the base image or an older checkpoint. It does
+not create a temporary box and ask SDK hydration to replace it. Directory and tar
+archives still hydrate the elected destination. This removes the hidden second
+create; an ambiguous initial provider create still needs lifecycle fencing and
+must not be treated as stopped merely because an older box is gone. Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
