@@ -81,6 +81,9 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
+Heartbeats refresh desktop availability without reconnecting or granting consent;
+see `docs/connected-machines.md`.
+
 Control revisions increase.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
@@ -363,8 +366,10 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-A Connected Machine (`selfhosted` internally) is the user's computer. When selected
-for a turn, agents run there directly; OpenGeni creates, leases, and bills no hidden sandbox.
+Agents run directly on the user's Connected Machine (`selfhosted`); OpenGeni creates no sandbox.
+Browser shutdown: [native lifecycle](../agent/README.md#distribution).
+Mac updates preserve signed bundles; writes check ACLs
+([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
 The machine owns its filesystem, Git authentication, environment, and long-lived
 platform credentials. OpenGeni neither clones repositories nor installs durable
@@ -377,12 +382,12 @@ can begin without contact. An offline machine never authorizes cold-creating a
 rival box, snapshotting it, or provider-terminating the user's computer.
 
 Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; canonical links and tree nodes share that namespace.
+directory as `FileSystem.root`; links and tree nodes share this namespace.
 Connected Machine reads accept external absolute paths under the machine account's
-OS permissions: working directories are browsing defaults, not read boundaries.
-Managed provider reads and structured mutations remain workspace-confined. Files
-requests carry capability epoch and root. The API binds one active route per
-request; target/root changes return retryable conflicts, never reinterpret paths
+OS permissions; working directories remain browsing defaults.
+Managed reads and structured mutations stay workspace-confined, including `/`.
+Requests carry capability epoch and root. The API binds one route per request;
+target/root changes return retryable conflicts instead of reinterpreting paths
 on another filesystem.
 
 Generated-session schedules follow the same explicit route: they persist an
@@ -434,12 +439,10 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Historical CURRENT recovery requires same-session managed-human consent,
-checkpoint/generation CAS, singleton fencing and durable model warnings; never replay.
-Authority: `packages/core/src/application/sandbox-recovery.ts`; lifecycle:
-`packages/db/src/index.ts`; membership/GC/protocol guards: migration 0495.
-Rolling activation defaults off; permanent worker-protocol fencing applies.
-Retry checks effective routes. See [run lifecycle](run-lifecycle.md).
+Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.ts`)
+or proved provider loss (`packages/db/src/index.ts`). Both require a verified
+CURRENT checkpoint, singleton, quiescence and durable warning; no command
+replay/empty reset. See migrations 0495/0526 and [run lifecycle](run-lifecycle.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
@@ -492,26 +495,24 @@ Rotation recovery: [lifecycle](run-lifecycle.md).
 
 Archive capture/restore: [storage](workspace-archive-storage.md).
 
-Lease liveness, provider existence, route attachment, archive availability,
-workspace readiness, and operation availability are separate facts. A warm row
-or selected pointer alone is not proof that a command can run.
+Lease liveness, provider existence, route attachment, archives, workspace readiness,
+and operation availability are independent; a warm row does not prove executability.
 
-The effective backend behind a synthetic managed group is resolved once from
-the session policy and deployment backend. Fleet projection, swap readiness,
-viewer attachment, API-direct operations, and worker turns must use that same
-answer so a route cannot be advertised under one backend and established under
-another.
+Resolve synthetic groups' effective backend once from session policy and deployment
+configuration. Fleet, swaps, viewers, API operations and worker turns share that answer.
 
-The canonical backend enum currently contains `docker`, `modal`, `local`,
-`none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`,
-`selfhosted`, and `opensandbox`. The enum and provider registry—not this list—
-own exact membership and ordering.
+The contracts enum and provider registry own backend membership and ordering.
 
 Canonical: `packages/contracts/src/index.ts`,
 `packages/runtime/src/sandbox/providers/index.ts`,
 `packages/runtime/src/sandbox/routing/`,
 `apps/worker/src/activities/sandbox-lease.ts`, and
 [`connected-machines.md`](connected-machines.md).
+
+Modal creation: `sandbox/providers/modal-create-session.ts` and `modal-create-boundary.ts`
+persist an operation before dispatch and attribute its receipt before setup.
+Unknown outcomes fence replacement; historical discovery requires exact provider
+identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 
 ### 3.10 Client/server compatibility policy
 
@@ -1108,10 +1109,10 @@ handlers because its host owns process lifecycle.
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
 
-One installed agent process may maintain independent connections to multiple
-OpenGeni deployments and workspaces while sharing the physical machine's host
-capacity and OS containment. The relay carries live terminal and desktop bytes;
-it is stateless beyond active channels and does not own session or lease truth.
+One agent connects independently to multiple deployments and workspaces within
+shared host containment. The relay carries terminal/desktop bytes, not durable
+session or lease state. Install `latest` may serve baked binaries; version pins
+resolve binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
 [`connected-machines.md`](connected-machines.md).
@@ -1337,14 +1338,15 @@ Postgres state under workspace RLS, then check the existing one-use nonce.
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
 Editable artifacts use `@opengeni/artifact-tool` and durable collaboration.
-Attempt-scoped `BrowserSession` and `ComputerSession` tools run through
+Attempt-scoped `BrowserSession`/`ComputerSession` tools use
 `@opengeni/interaction` and `@opengeni/browserd` on the selected sandbox or
-machine. Agent browser views are bounded; focused reads and stills use
-authenticated session/controller/target routing. SDK/viewer retain full
-observations. Code Mode receives a local image handle. Human computer control
-requires consent. Computer frames bind screenshot digest to
-controller/session/target at runtime and API; SDK verifies independently. The
-browser extension only attaches.
+machine. Bounded reads/stills authenticate session/controller/target. SDK/viewer retain
+full observations; Code Mode receives local image handles. Human computer control
+requires consent. Computer frames bind screenshot digest to controller/session/target;
+runtime, API and SDK independently verify. The browser extension only attaches;
+Lightpanda supports semantic observations only.
+
+Typing batches: [React](../packages/react/README.md).
 
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
 Desktop discovery proceeds independently of semantic inspection.
@@ -1407,8 +1409,9 @@ partial-message row IDs. `timeline-anchor.tsx` captures pre-mutation position;
 `message-timeline.tsx` corrects residual browser-anchor movement without resuming
 tip-follow. Upward input loads bounded older pages despite collapsed rows.
 Underfill preserves tails, offers explicit earlier navigation at limits, never
-auto-pages forward; Jump to latest restores live tails. Normalization/coalescing
-joins interleaved chunks by provider identity without merging distinct messages.
+auto-pages forward; Jump to latest restores live tails. Normalization
+joins chunks by provider identity; each message completes once, in order, with
+`phase` (see `docs/run-lifecycle.md`).
 Pre-transfer metadata planning bounds database batches to 256 events and the
 default 1 MiB full-payload page budget.
 
@@ -1510,6 +1513,10 @@ holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
+`apps/worker/src/retained-process-retry.ts` caps retained observation backoff at
+the exact Modal lease's rotation lead boundary, then reaper cadence; cancellation,
+capture and settlement proofs remain unchanged.
+
 Scheduled deadline rotation stops legacy commands where possible, then captures
 after bounded grace under a quiesced owner, exact lease fence, and no other
 holders or mutation admissions. Surviving commands settle lost after capture;
@@ -1517,8 +1524,8 @@ supervised commands keep separate proof. Details:
 `docs/design/modal-workspace-durability-2026-09-23.md`.
 
 Desktop/browser images and daemons release separately. Desktop/terminal data
-use the relay; the control plane retains authority. Large edits require
-capability-gated transactional transfers and verified receipts, never blind replay.
+use the relay; the control plane retains authority. Large file writes require
+connection-fenced transactional transfers and verified receipts, never blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
 `apps/worker/src/activities/sandbox-lease.ts`,
@@ -1692,7 +1699,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
 | Lease, snapshot, reaper, or active target | `apps/worker/src/activities/sandbox-lease.ts`, `packages/runtime/src/sandbox/routing/` | §8 and [`connected-machines.md`](connected-machines.md) |
 | Connected Machine agent or protocol | `agent/`, `agent/proto/opengeni_agent.proto`, `packages/runtime/src/sandbox/selfhosted/` | [`connected-machines.md`](connected-machines.md) |
-| Browser or computer interaction | `packages/interaction/`, `packages/browserd/`, `apps/browser-extension/` | [`connected-machines.md`](connected-machines.md) |
+| Browser or computer interaction | `packages/interaction/`, `packages/browserd/`, `apps/browser-extension/` | [`connected-machines.md`](connected-machines.md), [experimental context pooling](design/ephemeral-chromium-context-pool.md) |
 
 ### Knowledge, artifacts, integrations, and clients
 
@@ -1708,7 +1715,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
-| Startup loading UI and timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
+| Startup loading, compact exchange rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md) and [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
@@ -1781,3 +1788,5 @@ Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
 `data/catalog/plugins-snapshot.json` → the workspace-authorized capabilities
 API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
 catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).
+
+[Headless-shell](headless-shell.md).

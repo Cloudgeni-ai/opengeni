@@ -41,6 +41,7 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
   const root = join(import.meta.dir, "..");
   for (const [directory, subpaths] of [
     ["packages/connect", ["."]],
+    ["packages/contracts", ["./browser-storage"]],
     ["packages/sdk", ["./site", "./browser"]],
     ["packages/react", ["./connect", "./sites", "./connect.css"]],
   ] as const) {

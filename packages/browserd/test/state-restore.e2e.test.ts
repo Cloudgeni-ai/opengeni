@@ -14,11 +14,13 @@ import {
   type BrowserProfileManifest,
 } from "../src";
 
+import { HEADLESS_SHELL_VERSION, resolvePinnedHeadlessShell } from "../src/headless-shell";
+
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
-e2e(
-  "preserves cookie, localStorage, and IndexedDB through a fresh encrypted profile restore",
-  async () => {
+e2e.each(["restart", "stop"] as const)(
+  "preserves cookie, localStorage, and IndexedDB through a fresh encrypted profile restore (%s)",
+  async (afterCapture) => {
     const directory = await mkdtemp("/tmp/ogb-state-restore-e2e-");
     const key = Buffer.alloc(32, 0x51);
     const aad = Buffer.from("browser-state:e2e:immutable-revision", "utf8");
@@ -40,7 +42,11 @@ e2e(
         });
       },
     });
+    const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
+      : undefined;
     const supervisor = await BrowserSupervisor.open({
+      ...(headlessShell ? { headlessShell } : {}),
       rootDirectory: join(directory, "state"),
       uploadArtifact: async (path) => {
         uploaded = await readFile(path);
@@ -70,13 +76,31 @@ e2e(
       );
       expect(semanticNames(ready)).toContain("cookie=present local=present idb=present");
 
+      const preview = await supervisor.action(
+        command(ready, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Open temporary preview" },
+        }),
+      );
+      expect(preview.state).toBe("completed");
+      const previewDeadline = Date.now() + 5_000;
+      while (
+        !(await supervisor.listTargets(source)).some((tab) => tab.url.startsWith("blob:")) &&
+        Date.now() < previewDeadline
+      )
+        await Bun.sleep(50);
+      expect(
+        (await supervisor.listTargets(source)).some((tab) => tab.url.startsWith("blob:")),
+      ).toBe(true);
+      await supervisor.selectTarget(source, created.observation.target.id);
+
       const operationId = randomUUID();
       const objectKey = `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/revisions/${operationId}/chromium-profile.ogbs`;
       const captured = await supervisor.captureState({
         ...source,
         operationId,
         objectKey,
-        afterCapture: "restart",
+        afterCapture,
         dataKey: key,
         aad,
         upload: {
@@ -88,6 +112,7 @@ e2e(
         },
       });
       expect(uploaded).not.toBeNull();
+      expect(captured.manifest.tabs.some((tab) => tab.url.startsWith("blob:"))).toBe(true);
       await supervisor.endSession(source, { removeState: true });
 
       const restored = await supervisor.createSession({
@@ -115,8 +140,34 @@ e2e(
         restored.observation.target.id,
         "cookie=present local=present idb=present",
       );
+      if (headlessShell) {
+        expect(
+          JSON.parse(
+            await readFile(
+              join(
+                directory,
+                "state",
+                "sessions",
+                target.browserSessionId,
+                "profile",
+                ".opengeni-headless-shell.json",
+              ),
+              "utf8",
+            ),
+          ),
+        ).toEqual({ version: HEADLESS_SHELL_VERSION });
+      }
       expect(observed.target.url).toBe(`${origin}/account`);
       expect(semanticNames(observed)).toContain("cookie=present local=present idb=present");
+      const restoredTargets = await supervisor.listTargets(target);
+      expect(restoredTargets).toHaveLength(2);
+      const unavailablePreview = restoredTargets.find(
+        (tab) => tab.title === "Tab could not be restored",
+      );
+      expect(unavailablePreview).toBeDefined();
+      const notice = await supervisor.observe(target, unavailablePreview!.id);
+      expect(semanticNames(notice)).toContain("Tab could not be restored");
+      expect(restoredTargets.find((tab) => tab.selected)?.url).toBe(`${origin}/account`);
     } finally {
       await supervisor.close().catch(() => undefined);
       web.stop(true);
@@ -228,8 +279,10 @@ function identityFixture(): string {
   return `<!doctype html>
     <title>Identity fixture</title>
     <button id="initialize">Initialize identity</button>
+    <button id="preview">Open temporary preview</button>
     <p id="status">loading</p>
     <script>
+      document.getElementById('preview').onclick = () => window.open(URL.createObjectURL(new Blob(['<!doctype html><title>Temporary preview</title><p>Preview bytes</p>'], {type:'text/html'})));
       const status = document.getElementById('status');
       const readIndexedDb = () => new Promise((resolve, reject) => {
         const request = indexedDB.open('opengeni-identity', 1);

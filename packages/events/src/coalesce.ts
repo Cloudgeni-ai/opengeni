@@ -25,6 +25,7 @@ type DeltaRun = {
   sandboxStream: string | undefined;
   sandboxCommandId: string | undefined;
   messageId: string | undefined;
+  phase: string | undefined;
 };
 
 export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent[] {
@@ -57,6 +58,7 @@ export function coalesceSessionEventDeltasWithCoverage(
             text: run.text,
             coalescedUntil: run.lastSequence,
             ...(run.messageId !== undefined ? { messageId: run.messageId } : {}),
+            ...(run.phase !== undefined ? { phase: run.phase } : {}),
           };
     coalesced.push({
       ...run.first,
@@ -84,12 +86,18 @@ export function coalesceSessionEventDeltasWithCoverage(
       event.type === "agent.message.delta" && typeof asRecord(event.payload).messageId === "string"
         ? (asRecord(event.payload).messageId as string)
         : undefined;
+    // One provider message has one phase; keep it on the coalesced delta.
+    const phase =
+      event.type === "agent.message.delta" && typeof asRecord(event.payload).phase === "string"
+        ? (asRecord(event.payload).phase as string)
+        : undefined;
     if (
       run &&
       sameDeltaRun(run.first, event, run.sandboxName, sandboxName) &&
       run.sandboxStream === sandboxStream &&
       run.sandboxCommandId === sandboxCommandId &&
-      run.messageId === messageId
+      run.messageId === messageId &&
+      run.phase === phase
     ) {
       const textBytes = encoder.encode(text).byteLength;
       if (
@@ -118,6 +126,7 @@ export function coalesceSessionEventDeltasWithCoverage(
       sandboxStream,
       sandboxCommandId,
       messageId,
+      phase,
     };
   }
 

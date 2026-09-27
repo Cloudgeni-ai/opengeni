@@ -1433,6 +1433,9 @@
 :where(.og-root).right-1\.5,:where(.og-root) .right-1\.5 {
     right: calc(var(--spacing) * 1.5);
   }
+:where(.og-root).right-2,:where(.og-root) .right-2 {
+    right: calc(var(--spacing) * 2);
+  }
 :where(.og-root).right-3,:where(.og-root) .right-3 {
     right: calc(var(--spacing) * 3);
   }
@@ -1874,6 +1877,9 @@
 :where(.og-root).max-h-80,:where(.og-root) .max-h-80 {
     max-height: calc(var(--spacing) * 80);
   }
+:where(.og-root).max-h-96,:where(.og-root) .max-h-96 {
+    max-height: calc(var(--spacing) * 96);
+  }
 :where(.og-root).max-h-\[32rem\],:where(.og-root) .max-h-\[32rem\] {
     max-height: 32rem;
   }
@@ -1882,6 +1888,9 @@
   }
 :where(.og-root).max-h-\[82vh\],:where(.og-root) .max-h-\[82vh\] {
     max-height: 82vh;
+  }
+:where(.og-root).max-h-\[calc\(100\%-3rem\)\],:where(.og-root) .max-h-\[calc\(100\%-3rem\)\] {
+    max-height: calc(100% - 3rem);
   }
 :where(.og-root).max-h-\[calc\(100dvh-2rem\)\],:where(.og-root) .max-h-\[calc\(100dvh-2rem\)\] {
     max-height: calc(100dvh - 2rem);
@@ -2071,6 +2080,12 @@
   }
 :where(.og-root).max-w-\[240px\],:where(.og-root) .max-w-\[240px\] {
     max-width: 240px;
+  }
+:where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
+    max-width: calc(100% - 1.5rem);
+  }
+:where(.og-root).max-w-\[calc\(100\%-1rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1rem\)\] {
+    max-width: calc(100% - 1rem);
   }
 :where(.og-root).max-w-\[calc\(100vw-2rem\)\],:where(.og-root) .max-w-\[calc\(100vw-2rem\)\] {
     max-width: calc(100vw - 2rem);
@@ -3402,8 +3417,14 @@
 :where(.og-root).pt-16,:where(.og-root) .pt-16 {
     padding-top: calc(var(--spacing) * 16);
   }
+:where(.og-root).pr-0\.5,:where(.og-root) .pr-0\.5 {
+    padding-right: calc(var(--spacing) * 0.5);
+  }
 :where(.og-root).pr-1,:where(.og-root) .pr-1 {
     padding-right: calc(var(--spacing) * 1);
+  }
+:where(.og-root).pr-3,:where(.og-root) .pr-3 {
+    padding-right: calc(var(--spacing) * 3);
   }
 :where(.og-root).pr-4,:where(.og-root) .pr-4 {
     padding-right: calc(var(--spacing) * 4);
@@ -3461,6 +3482,9 @@
   }
 :where(.og-root).pl-5,:where(.og-root) .pl-5 {
     padding-left: calc(var(--spacing) * 5);
+  }
+:where(.og-root).pl-6,:where(.og-root) .pl-6 {
+    padding-left: calc(var(--spacing) * 6);
   }
 :where(.og-root).text-center,:where(.og-root) .text-center {
     text-align: center;
@@ -5434,6 +5458,11 @@
 :where(.og-root).max-sm\:px-2,:where(.og-root) .max-sm\:px-2 {
     @media (width < 40rem) {
       padding-inline: calc(var(--spacing) * 2);
+    }
+  }
+:where(.og-root).max-sm\:pr-10,:where(.og-root) .max-sm\:pr-10 {
+    @media (width < 40rem) {
+      padding-right: calc(var(--spacing) * 10);
     }
   }
 :where(.og-root).max-sm\:opacity-100,:where(.og-root) .max-sm\:opacity-100 {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import type { FileAsset } from "@opengeni/contracts";
+import { CreateBrowserSessionRequest, type AccessGrant, type FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
@@ -11,6 +11,7 @@ import {
   requireAuthorizedBrowserUploadFiles,
   parseBrowserScreenshotOptions,
   browserScreenshotResponse,
+  browserCreateInput,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
@@ -46,6 +47,60 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("explicit Lightpanda preserves Connected Machine placement and semantic capabilities", () => {
+    const grant: AccessGrant = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      subjectId: "browser-user",
+      permissions: ["sessions:control"],
+    };
+    const request = CreateBrowserSessionRequest.parse({
+      operationId: "44444444-4444-4444-8444-444444444444",
+      sessionId: FILE_ID,
+      engine: "lightpanda",
+    });
+    const placement = {
+      kind: "connected_machine" as const,
+      sandboxId: FILE_ID,
+    };
+    const input = browserCreateInput(grant, grant.workspaceId, request, placement);
+    expect(input).toMatchObject({
+      engine: "lightpanda",
+      driverId: "opengeni.lightpanda.cdp.v1",
+      headless: true,
+      placement,
+      identityId: null,
+      linkedComputerSessionId: null,
+      capabilities: {
+        liveFrames: false,
+        humanInput: false,
+        linkedComputer: false,
+      },
+    });
+    const defaultInput = browserCreateInput(
+      grant,
+      grant.workspaceId,
+      CreateBrowserSessionRequest.parse({
+        operationId: request.operationId,
+        sessionId: FILE_ID,
+      }),
+      placement,
+    );
+    expect(defaultInput.engine).toBe("chromium");
+    for (const unsupported of [
+      { kind: "attached_device" as const, deviceId: FILE_ID },
+      {
+        kind: "external_provider" as const,
+        providerId: "browserbase",
+        placementId: "default",
+      },
+    ]) {
+      expect(() => browserCreateInput(grant, grant.workspaceId, request, unsupported)).toThrow(
+        "Lightpanda requires a managed sandbox or Connected Machine browser placement",
+      );
+    }
+  });
+
   test("browser screenshot query validates capture options", () => {
     expect(parseBrowserScreenshotOptions(new URLSearchParams())).toEqual({});
     expect(

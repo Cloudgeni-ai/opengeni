@@ -6,6 +6,8 @@ import {
   parseOpenSandboxSignedUriPath,
   signedEndpointNeedsRefresh,
 } from "@opengeni/runtime/sandbox";
+import type { InteractionPlacement } from "@opengeni/contracts";
+import type { ChannelAOperation } from "./sandbox/channel-a";
 
 /** Modal/Daytona/Blaxel tunnels serve browserd at `/`, so a cached
  * controller-only session can host-fetch JSON. OpenSandbox's lifecycle proxy
@@ -79,4 +81,36 @@ export function isRetryableControllerTransport(error: unknown): boolean {
     error instanceof BrowserControlTransportError ||
     (error instanceof BrowserControlRequestError && error.retryable)
   );
+}
+
+/** A stopped sidecar needs provisioning on its original, fenced placement.
+ * Only reads and journaled actions may recover, once across provider retries.
+ * Revalidate controller authority before starting the sidecar. */
+export async function withControllerTransportRecovery<T>(options: {
+  channelOperation: ChannelAOperation;
+  placementKind: InteractionPlacement["kind"];
+  recoveryState: { attempted: boolean };
+  transportAlreadyFailed: boolean;
+  use: () => Promise<T>;
+  admitRecovery: () => Promise<void>;
+  recover: () => Promise<T>;
+}): Promise<T> {
+  if (
+    (options.channelOperation !== "browser.read" &&
+      options.channelOperation !== "browser.action") ||
+    options.placementKind !== "sandbox_group" ||
+    options.recoveryState.attempted
+  ) {
+    return await options.use();
+  }
+  if (!options.transportAlreadyFailed) {
+    try {
+      return await options.use();
+    } catch (error) {
+      if (!isRetryableControllerTransport(error)) throw error;
+    }
+  }
+  options.recoveryState.attempted = true;
+  await options.admitRecovery();
+  return await options.recover();
 }

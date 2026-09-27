@@ -24,6 +24,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -322,6 +323,41 @@ function framedConfinedOutput(command: string, payload = "", status = 0, prelude
 }
 
 describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
+  test("a filesystem-root workspace permits real child file operations", async () => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "opengeni-root-workspace-")));
+    temporaryRoots.push(directory);
+    const relative = directory.slice(1);
+    const session = makeModalLikeExecOnlySession("/").session;
+    const svc = new SandboxChannelAService({ session, workspaceRoot: "/" });
+    const path = `${relative}/document.txt`;
+    await svc.fsWrite({
+      path,
+      content: "root workspace proof",
+      encoding: "utf8",
+      overwrite: false,
+      createParents: false,
+    });
+    expect(readFileSync(join(directory, "document.txt"), "utf8")).toBe("root workspace proof");
+    expect((await svc.fsRead({ path, encoding: "utf8", maxBytes: 1024 })).content).toBe(
+      "root workspace proof",
+    );
+    const listing = await svc.fsList({
+      path: relative,
+      depth: 1,
+      maxEntries: 10,
+      includeHidden: true,
+    });
+    expect(listing.root.children?.some((entry) => entry.name === "document.txt")).toBe(true);
+    await svc.fsMove({
+      path,
+      newPath: `${relative}/moved.txt`,
+      overwrite: false,
+      createParents: false,
+    });
+    await svc.fsDelete({ path: `${relative}/moved.txt`, recursive: false });
+    expect(existsSync(join(directory, "moved.txt"))).toBe(false);
+  });
+
   test("write then read-back round-trips text", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
@@ -342,6 +378,46 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(read.content).toBe("hello channel-a\n");
     expect(read.isBinary).toBe(false);
     expect(read.truncated).toBe(false);
+  });
+
+  test("large binary writes use provider bytes without oversized shell arguments", async () => {
+    const { session, root } = await makeBox();
+    const exec = session.exec?.bind(session);
+    if (!exec) throw Error("local fixture requires exec");
+    session.exec = async (args) => {
+      expect(Buffer.byteLength(args.cmd)).toBeLessThan(64 * 1024);
+      return exec(args);
+    };
+    let writes = 0;
+    session.writeFile = async ({ path, content }) => {
+      writes++;
+      writeFileSync(join(root, path.replace(/^\/workspace\//, "")), content);
+    };
+    const bytes = Buffer.alloc(2 * 1024 * 1024, 0xa7);
+    bytes[100] = 0;
+    const service = new SandboxChannelAService({ session });
+    await service.fsWrite({
+      path: "large.bin",
+      content: bytes.toString("base64"),
+      encoding: "base64",
+      overwrite: true,
+      createParents: false,
+    });
+    expect(writes).toBe(1);
+    expect(readFileSync(join(root, "large.bin"))).toEqual(bytes);
+    session.writeFile = async () => {
+      throw Error("ambiguous provider write");
+    };
+    await expect(
+      service.fsWrite({
+        path: "large.bin",
+        content: "changed".repeat(40000),
+        encoding: "utf8",
+        overwrite: true,
+        createParents: false,
+      }),
+    ).rejects.toThrow("ambiguous provider write");
+    expect(readFileSync(join(root, "large.bin"))).toEqual(bytes);
   });
 
   test("write then read-back round-trips a BINARY file (base64)", async () => {

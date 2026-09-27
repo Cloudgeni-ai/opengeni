@@ -1986,7 +1986,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -2026,6 +2026,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengeni-agent-files-ffi"
+version = "0.1.39"
+
+[[package]]
 name = "opengeni-agent-harness"
 version = "0.0.0"
 dependencies = [
@@ -2048,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-linux-ffi"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "libc",
  "tokio",
@@ -2056,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "accessibility-sys",
  "block2",
@@ -2075,13 +2079,14 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "async-trait",
  "blake3",
  "command-group",
  "image",
  "nix 0.29.0",
+ "opengeni-agent-files-ffi",
  "opengeni-agent-linux-ffi",
  "opengeni-agent-macos-ffi",
  "opengeni-agent-proto",
@@ -2099,7 +2104,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "prost",
  "prost-build",
@@ -2108,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2125,13 +2130,14 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "blake3",
  "hex",
  "minisign-verify",
  "opengeni-agent-proto",
  "reqwest",
+ "rustix 1.1.4",
  "self-replace",
  "semver",
  "serde",
@@ -2144,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2175,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.22"
+version = "0.1.39"
 dependencies = [
  "async-trait",
  "axum",

@@ -125,6 +125,12 @@ async function openMenuAndConnect(): Promise<void> {
   );
   expect(connect).toBeTruthy();
   await act(async () => connect!.click());
+  // The first lazy import may take longer than a few timer ticks on a busy
+  // runner. Wait for setup to mount; assertions below still fail if it never does.
+  const deadline = Date.now() + 2_000;
+  while ((!dialog() || setupStarts.length === 0) && Date.now() < deadline) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+  }
   await settle();
 }
 

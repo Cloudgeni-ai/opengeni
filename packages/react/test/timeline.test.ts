@@ -2905,6 +2905,72 @@ describe("groupTimeline", () => {
     });
   });
 
+  test("worker-shaped phased messages classify live commentary and fold it at settlement", () => {
+    reset();
+    // The worker streams phase on deltas, one identified completion per
+    // message, and no phase-less copy when the final message already landed.
+    const live = [
+      event("agent.message.delta", {
+        text: "Checking the ",
+        messageId: "msg_note",
+        phase: "commentary",
+      }),
+      event("agent.message.delta", { text: "logs.", messageId: "msg_note", phase: "commentary" }),
+    ];
+    const streaming = buildTimeline(live);
+    expect(streaming).toEqual([
+      expect.objectContaining({
+        kind: "agent-message",
+        text: "Checking the logs.",
+        phase: "commentary",
+        streaming: true,
+      }),
+    ]);
+
+    const settled = [
+      ...live,
+      event("agent.message.completed", {
+        text: "Checking the logs.",
+        messageId: "msg_note",
+        phase: "commentary",
+      }),
+      event("agent.toolCall.created", {
+        id: "call-logs",
+        name: "exec_command",
+        arguments: { cmd: "tail app.log" },
+      }),
+      event("agent.toolCall.output", { id: "call-logs", output: "ok" }),
+      event("agent.message.delta", {
+        text: "The logs are clean.",
+        messageId: "msg_answer",
+        phase: "final_answer",
+      }),
+      event("agent.message.completed", {
+        text: "The logs are clean.",
+        messageId: "msg_answer",
+        phase: "final_answer",
+      }),
+      event("turn.completed", { output: "The logs are clean." }),
+    ];
+    const items = buildTimeline(settled);
+    expect(
+      items
+        .filter((item): item is AgentMessageItem => item.kind === "agent-message")
+        .map((item) => [item.text, item.phase]),
+    ).toEqual([
+      ["Checking the logs.", "commentary"],
+      ["The logs are clean.", "final_answer"],
+    ]);
+    const groups = groupTimeline(items);
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "The logs are clean.",
+      phase: "final_answer",
+      streaming: false,
+    });
+  });
+
   test("does not promote commentary when the turn has an ordinary final reply", () => {
     reset();
     const groups = groupTimeline(
@@ -3188,6 +3254,51 @@ describe("groupTimeline", () => {
       tone: "waiting",
       text: `Waiting: ${reason}`,
     });
+  });
+
+  test("shows a status reply recorded on a wait-ended turn once, outside the work", () => {
+    reset();
+    const reason = "Eight reviews are still running.";
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", {
+          text: status,
+          messageId: "msg_status",
+          phase: "commentary",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-06-10T13:00:00.000Z",
+          reason,
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("turn.completed", { output: "", reply: status }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: status,
+    });
+    expect(
+      groups.filter(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === status,
+      ),
+    ).toHaveLength(1);
   });
 
   test.each([

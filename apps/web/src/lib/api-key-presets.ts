@@ -7,11 +7,12 @@
  * creating workspaces); organization developer keys exist for that.
  */
 
+import { apiKeyStatus as apiKeyStatusAt, type ApiKeyStatus } from "@/lib/api-key-status";
 import { defaultApiKeyPermissions } from "@/lib/permissions";
 
 export type ApiKeyPresetId = "read_only" | "run_sessions" | "full_automation" | "custom";
 
-export type ApiKeyStatus = "active" | "expired" | "revoked";
+export type { ApiKeyStatus };
 
 interface KeyTimes {
   expiresAt: string | null;
@@ -258,9 +259,7 @@ export function accessLabel(permissions: readonly string[]): string {
 
 /** Revoked wins; a key past its expiry is Expired even though nobody revoked it. */
 export function apiKeyStatus(key: KeyTimes, now: Date = new Date()): ApiKeyStatus {
-  if (key.revokedAt) return "revoked";
-  if (key.expiresAt && new Date(key.expiresAt).getTime() <= now.getTime()) return "expired";
-  return "active";
+  return apiKeyStatusAt(key, now.getTime());
 }
 
 export type ApiKeyExpiryId = "30d" | "90d" | "1y" | "never";

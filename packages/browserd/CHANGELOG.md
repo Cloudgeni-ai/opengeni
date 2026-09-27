@@ -1,5 +1,59 @@
 # @opengeni/browserd
 
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [509513d]
+  - @opengeni/interaction@0.4.42
+
+## 0.2.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+- 02af186: Add an optional verified Chrome headless-shell bundle for new managed headless profiles, preserving headed defaults and pinning profile recovery to the selected launcher.
+
+### Patch Changes
+
+- 2b0c23c: Disable Chromium's local AI model downloads in managed browsers, omit disposable model weights from profile checkpoints, and tolerate Linux processes disappearing during shutdown checks.
+- 78f1d59: Offer native dropdown choices in BrowserViewer when Chromium page frames omit the popup. Keep selection bound to the observed control and preserve normal input/change events, private-field redaction, and disabled options.
+- f3e3b2d: Continue exact-profile browser cleanup when an unrelated Linux process disappears during procfs discovery. Preserve unexpected read failures and the executable/profile ownership checks before signalling a process.
+- dc77d7f: Classify CDP transport failures from read-only browser target inventory and observation as retryable timeout or unavailable responses. Keep target mutations and journaled action outcome handling unchanged.
+- 8e2ba2b: Add a construction-only experimental Chromium context pool for bounded disposable verification, with context-scoped target authority and terminal failure handling. Dedicated managed browsers remain unchanged; no production path enables the pool.
+- ec707de: Negotiate bounded viewer typing batches from the active browser controller. Preserve
+  individual text events and input order while reducing request overhead; recheck the
+  original document fence before each action and discard uncertain queued input
+  without replay. Older controllers retain sequential input.
+- b870388: Recover a lost managed Lightpanda process through the existing browser lifecycle. Safe reads resume after recovery; stale actions remain fenced and ambiguous mutations are never replayed.
+- c5189e7: Replace existing Lightpanda input values during ordinary and protected fills,
+  including empty values, while preserving native input events and rejecting
+  unsupported or non-editable targets.
+- a63a029: Reject Lightpanda placeholder images as screenshots and correct screenshot
+  capabilities for existing semantic-only sessions. Keep DOM observation available.
+- 774369f: Drain managed Linux Chrome stderr into a bounded private diagnostic file so noisy browsers cannot block their CDP control channel.
+- 8693783: Keep bounded browser streams at a stable clip scale so raster rounding cannot make unchanged mobile pages oscillate in size.
+- Updated dependencies [1842911]
+- Updated dependencies [ab4d25f]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/interaction@0.4.41
+
+## 0.1.48
+
+### Patch Changes
+
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/interaction@0.4.40
+
 ## 0.1.47
 
 ### Patch Changes

@@ -77,6 +77,13 @@ describe("complete child content evidence", () => {
         event("turn.failed", { error: "failed", details: "unprojected recovery" }),
       ).contentComplete,
     ).toBe(false);
+    // A reply to a human's message is unread-worthy, and the empty wait
+    // output the summary shows is not that reply.
+    expect(
+      summarizeSessionWaitEvent(
+        event("turn.completed", { output: "", reply: "Two of ten reviews are done." }),
+      ).contentComplete,
+    ).toBe(false);
   });
   test("envelope tightening cannot turn partial summaries into proof", () => {
     const result = boundSessionWaitResult(

@@ -165,9 +165,11 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
   // "Machine connected" moment: watch the polled fleet and, once a machine first
   // shows online (a fresh enrollment coming up, or a reconnect), toast it. The
-  // first poll seeds the baseline silently so existing machines don't announce.
+  // first loaded list seeds the baseline silently so existing machines don't
+  // announce; the empty placeholder before that load is not a baseline.
   const onlineSeenRef = useRef<Set<string> | null>(null);
   useEffect(() => {
+    if (onlineSeenRef.current === null && (machines.loading || machines.error)) return;
     const online = new Set(
       machines.machines
         .filter(
@@ -191,7 +193,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       }
     }
     onlineSeenRef.current = online;
-  }, [machines.machines]);
+  }, [machines.error, machines.loading, machines.machines]);
 
   // The install/approve URLs are deployment-relative: same origin as the API
   // (falling back to the page origin), never a hardcoded marketing domain.

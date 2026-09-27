@@ -19,6 +19,17 @@ import {
 import { isNonRetryableInteractionError } from "../lib/interaction-errors";
 import { usePageLiveActivity } from "./internal";
 
+/** Immutable input fence; queued actions never need the encoded screenshot. */
+export type BrowserFrameInputFence = Pick<
+  BrowserFrame,
+  | "browserSessionId"
+  | "controllerGeneration"
+  | "targetId"
+  | "targetGeneration"
+  | "documentGeneration"
+  | "frameId"
+>;
+
 export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride & {
   browserSessionId: string | null;
   enabled?: boolean | undefined;
@@ -37,6 +48,11 @@ export type UseBrowserSessionResult = {
   mutating: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
+  observeForInput: () => Promise<BrowserObservation>;
+  actFromObservation: (
+    action: BrowserAction,
+    observation: BrowserObservation,
+  ) => Promise<BrowserActionReceipt>;
   selectTarget: (targetId: string) => Promise<BrowserTarget>;
   openTarget: (url?: string) => Promise<BrowserTarget>;
   closeTarget: (targetId: string) => Promise<void>;
@@ -48,8 +64,9 @@ export type UseBrowserSessionResult = {
    *  the controller fence instead of targeting a newer page. */
   actFromFrame: (
     action: BrowserAction | BrowserActionBatch,
-    frame: BrowserFrame,
+    frame: BrowserFrameInputFence,
     operationId?: string,
+    observationMode?: "none" | "input",
   ) => Promise<BrowserActionReceipt>;
   readClipboard: () => Promise<BrowserClipboard>;
   diagnostics: (options?: BrowserDiagnosticsOptions) => Promise<BrowserDiagnosticBatch>;
@@ -474,7 +491,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     async (
       action: BrowserAction | BrowserActionBatch,
       operationId: string,
-      frame: BrowserFrame | null,
+      frame:
+        | (Pick<BrowserFrame, "browserSessionId" | "targetId" | "targetGeneration"> & {
+            frameId: string | null;
+            documentGeneration: string | null;
+          })
+        | null,
+      observationMode: "none" | "input" = "none",
     ): Promise<BrowserActionReceipt> => {
       if (!browserSessionId) throw new Error("No BrowserSession is selected.");
       if (frame && frame.browserSessionId !== browserSessionId) {
@@ -506,7 +529,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         const receipt = await client.actInBrowser(workspaceId, browserSessionId, {
           operationId,
           ...fence,
-          observationMode: "none",
+          observationMode,
           action,
         });
         if (receipt.observation) {
@@ -548,9 +571,41 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const actFromFrame = useCallback(
     async (
       action: BrowserAction | BrowserActionBatch,
-      frame: BrowserFrame,
+      frame: BrowserFrameInputFence,
       operationId: string = crypto.randomUUID(),
-    ): Promise<BrowserActionReceipt> => await dispatchAction(action, operationId, frame),
+      observationMode: "none" | "input" = "none",
+    ): Promise<BrowserActionReceipt> =>
+      await dispatchAction(action, operationId, frame, observationMode),
+    [dispatchAction],
+  );
+
+  const observeForInput = useCallback(async (): Promise<BrowserObservation> => {
+    const target = selectedTargetRef.current;
+    if (!browserSessionId || !target) throw new Error("No browser tab is selected.");
+    const observation = await client.observeBrowserTarget(workspaceId, browserSessionId, target.id);
+    if (
+      !mountedRef.current ||
+      observation.browserSessionId !== browserSessionId ||
+      !sameObservationTarget(observation, selectedTargetRef.current)
+    ) {
+      throw new Error("The browser page changed. Open the options again.");
+    }
+    return observation;
+  }, [browserSessionId, client, workspaceId]);
+
+  const actFromObservation = useCallback(
+    async (action: BrowserAction, observation: BrowserObservation) => {
+      if (!sameObservationTarget(observation, selectedTargetRef.current)) {
+        throw new Error("The browser page changed. Open the options again.");
+      }
+      return await dispatchAction(action, crypto.randomUUID(), {
+        browserSessionId: observation.browserSessionId,
+        targetId: observation.target.id,
+        targetGeneration: observation.target.targetGeneration,
+        documentGeneration: observation.target.documentGeneration,
+        frameId: observation.frameId,
+      });
+    },
     [dispatchAction],
   );
 
@@ -589,6 +644,8 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     mutating: visible.mutating,
     error: visible.error,
     refresh,
+    observeForInput,
+    actFromObservation,
     selectTarget,
     openTarget,
     closeTarget,
@@ -637,6 +694,7 @@ function sameObservationTarget(
 ): boolean {
   return (
     target !== null &&
+    observation.browserSessionId === target.browserSessionId &&
     observation.target.id === target.id &&
     observation.target.controllerGeneration === target.controllerGeneration &&
     observation.target.targetGeneration === target.targetGeneration &&

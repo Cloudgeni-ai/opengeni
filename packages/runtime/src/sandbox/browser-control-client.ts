@@ -300,7 +300,7 @@ export type PlacementBrowserNetworkRoute = {
 };
 
 export type PlacementBrowserTransport =
-  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda"; ephemeralPartition?: string }
   | {
       kind: "external_provider";
       providerId: "browserbase" | "kernel";
@@ -322,6 +322,8 @@ export type PlacementBrowserTransport =
     };
 
 export type BrowserViewGrant = {
+  fencedInputBatches?: true;
+  focusedInputObservations?: true;
   grantId: string;
   expiresAt: string;
 };
@@ -434,6 +436,14 @@ export class BrowserControlRequestError extends Error {
 
 export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
+}
+
+function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
+  return new BrowserControlRequestError(409, {
+    code: "unsupported",
+    message: `browser controller does not support ${feature}; update the placement's controller image to match this OpenGeni release`,
+    retryable: false,
+  });
 }
 
 /** Install one placement-stable admin credential and start the pinned controller. */
@@ -710,7 +720,22 @@ export class BrowserControlClient {
     if (!isRecord(data) || data.grantId !== grantId || data.expiresAt !== expiresAt) {
       throw new BrowserControlProtocolError("browser controller returned malformed view grant");
     }
-    return { grantId, expiresAt };
+    if (data.fencedInputBatches !== undefined && data.fencedInputBatches !== true) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned invalid input batching capability",
+      );
+    }
+    if (data.focusedInputObservations !== undefined && data.focusedInputObservations !== true) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned invalid focused input capability",
+      );
+    }
+    return {
+      grantId,
+      expiresAt,
+      ...(data.fencedInputBatches === true ? { fencedInputBatches: true } : {}),
+      ...(data.focusedInputObservations === true ? { focusedInputObservations: true } : {}),
+    };
   }
 
   async createComputerViewGrant(
@@ -1042,6 +1067,7 @@ export class BrowserControlClient {
             if (
               retryNativeEndpoint &&
               !requireHostFetch &&
+              input.method === "GET" &&
               error instanceof BrowserControlTransportError
             ) {
               return await this.requestJson(input, false);
@@ -1153,7 +1179,12 @@ export class BrowserControlClient {
         throw error;
       }
       if (error instanceof BrowserControlTransportError) {
-        if (retryNativeEndpoint && this.nativeAuthority && this.session.ensureBrowserControl) {
+        if (
+          retryNativeEndpoint &&
+          input.method === "GET" &&
+          this.nativeAuthority &&
+          this.session.ensureBrowserControl
+        ) {
           nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
           await this.controllerPort();
           return await this.requestJson(input, false);
@@ -1519,14 +1550,28 @@ export class BrowserControlSessionClient {
     requestInput: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {
     const request = BrowserDomReadRequest.parse(requestInput);
-    const result = BrowserDomReadResponse.parse(
-      await this.parent.requestForSession({
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
         method: "POST",
         path: this.targetPath(targetId, "dom-read"),
         token: this.viewToken,
         body: request,
-      }),
-    );
+      });
+    } catch (error) {
+      // Protocol v1 predates focused DOM reads. Distinguish that exact legacy
+      // route response from a missing target/session; neither is safe to retry.
+      if (
+        error instanceof BrowserControlRequestError &&
+        error.status === 404 &&
+        error.error.code === "resource_not_found" &&
+        error.error.message === "route not found"
+      ) {
+        throw browserControllerCompatibilityError("focused DOM reads");
+      }
+      throw error;
+    }
+    const result = BrowserDomReadResponse.parse(data);
     if (
       result.browserSessionId !== this.reference.browserSessionId ||
       result.controllerGeneration !== this.reference.controllerGeneration ||
@@ -1588,14 +1633,29 @@ export class BrowserControlSessionClient {
     ) {
       throw new BrowserControlProtocolError("browser action targets another controller binding");
     }
-    return BrowserActionReceipt.parse(
-      await this.parent.requestForSession({
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
         method: "POST",
         path: this.path("actions"),
         token: this.controlToken,
         body: parsed,
-      }),
-    );
+      });
+    } catch (error) {
+      // This command already passed the release's schema. The controller's
+      // exact parser rejection proves a schema mismatch, not invalid tool use.
+      // Do not replay the action, restart the controller, or lose live tabs.
+      if (
+        error instanceof BrowserControlRequestError &&
+        error.status === 400 &&
+        error.error.code === "invalid_action" &&
+        error.error.message === "browser action is invalid"
+      ) {
+        throw browserControllerCompatibilityError("this browser action");
+      }
+      throw error;
+    }
+    return BrowserActionReceipt.parse(data);
   }
 
   /** API-broker-only file authority path. Signed read URLs are materialized by
@@ -1941,21 +2001,25 @@ async function requestExposedController(
   if (body !== undefined && Buffer.byteLength(body) > BROWSER_CONTROL_MAX_JSON_BYTES) {
     throw new RangeError("browser controller request body is too large");
   }
-  const response = await fetch(streamUrl, {
-    method: input.method,
-    headers: {
-      ...exposedPortHeaders(endpoint),
-      authorization: `Bearer ${token}`,
-      ...(body === undefined ? {} : { "content-type": "application/json" }),
-    },
-    ...(body === undefined ? {} : { body }),
-    redirect: "manual",
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const responseText = await response.text();
+  const response = await controllerTransport(
+    async () =>
+      await fetch(streamUrl, {
+        method: input.method,
+        headers: {
+          ...exposedPortHeaders(endpoint),
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body }),
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+      }),
+  );
+  const responseText = await controllerTransport(async () => await response.text());
   if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
     throw new BrowserControlProtocolError("browser controller response is too large");
   }
+  rejectProviderGatewayResponse(responseText, response.status);
   if (
     (response.status === 401 || response.status === 403) &&
     !looksLikeBrowserControlEnvelope(responseText)
@@ -1985,21 +2049,25 @@ async function requestExposedControllerBytes(
   const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
   const streamUrl = exposedControllerUrl(endpoint, input.path);
   streamUrl.protocol = streamUrl.protocol === "wss:" ? "https:" : "http:";
-  const response = await fetch(streamUrl, {
-    method: input.method,
-    headers: {
-      ...exposedPortHeaders(endpoint),
-      authorization: `Bearer ${token}`,
-      accept: "image/jpeg, image/png",
-    },
-    redirect: "manual",
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const response = await controllerTransport(
+    async () =>
+      await fetch(streamUrl, {
+        method: input.method,
+        headers: {
+          ...exposedPortHeaders(endpoint),
+          authorization: `Bearer ${token}`,
+          accept: "image/jpeg, image/png",
+        },
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+      }),
+  );
   if (!response.ok) {
-    const responseText = await response.text();
+    const responseText = await controllerTransport(async () => await response.text());
     if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
       throw new BrowserControlProtocolError("browser controller response is too large");
     }
+    rejectProviderGatewayResponse(responseText, response.status);
     parseEnvelope(responseText, response.status);
     throw new BrowserControlProtocolError("browser controller image response is invalid");
   }
@@ -2009,8 +2077,30 @@ async function requestExposedControllerBytes(
     await response.body?.cancel("frame exceeds its byte bound").catch(() => undefined);
     throw new RangeError("frame exceeds its byte bound");
   }
-  const data = await readBoundedFrameResponse(response, maxBytes);
+  const data = await controllerTransport(
+    async () => await readBoundedFrameResponse(response, maxBytes),
+  );
   return controllerImageFrame(data, response.headers, input);
+}
+
+async function controllerTransport<T>(readOrDispatch: () => Promise<T>): Promise<T> {
+  try {
+    return await readOrDispatch();
+  } catch (error) {
+    if (
+      error instanceof BrowserControlProtocolError ||
+      error instanceof BrowserControlTransportError ||
+      error instanceof RangeError
+    ) {
+      throw error;
+    }
+    // Fetch or response-body failure cannot prove the controller did not
+    // execute a mutation. Keep it typed so endpoint discovery's in-box fallback
+    // cannot replay an already-dispatched request.
+    throw new BrowserControlTransportError("browser controller host-fetch failed", {
+      cause: error,
+    });
+  }
 }
 
 async function readBoundedFrameResponse(response: Response, maxBytes: number): Promise<Uint8Array> {
@@ -2272,6 +2362,15 @@ function looksLikeBrowserControlEnvelope(body: string): boolean {
   }
 }
 
+function rejectProviderGatewayResponse(body: string, status: number): void {
+  // A tunnel's transient upstream failure is not a browserd protocol response.
+  // Preserve browserd envelopes, including their semantic retry policy. This
+  // transport classification cannot prove that a mutation was not dispatched.
+  if ([502, 503, 504].includes(status) && !looksLikeBrowserControlEnvelope(body)) {
+    throw new BrowserControlTransportError(`browser controller returned HTTP ${status}`);
+  }
+}
+
 function parseEnvelope(body: string, status: number): unknown {
   let value: unknown;
   try {
@@ -2324,7 +2423,13 @@ function placementBrowserTransport(input: PlacementBrowserTransport): PlacementB
     ) {
       throw new BrowserControlProtocolError("managed browser engine is invalid");
     }
-    return { kind: "managed", engine: input.engine ?? "chromium" };
+    if (input.ephemeralPartition !== undefined && !SHA256_PATTERN.test(input.ephemeralPartition))
+      throw new Error("ephemeral browser partition is invalid");
+    return {
+      kind: "managed",
+      engine: input.engine ?? "chromium",
+      ...(input.ephemeralPartition ? { ephemeralPartition: input.ephemeralPartition } : {}),
+    };
   }
   if (input.kind === "external_provider") {
     if (input.providerId !== "browserbase" && input.providerId !== "kernel") {

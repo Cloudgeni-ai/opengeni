@@ -61,7 +61,7 @@ import { FieldStack } from "@/components/ui/field";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { formatAbsoluteTime, RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingDangerRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -543,6 +543,26 @@ function CodexAccountDetail({
               }
             >
               {account.lastError ?? "This account can't be used until someone signs in again."}
+            </Notice>
+          </DetailSection>
+        ) : null}
+        {account.planExcludedModels?.length ? (
+          <DetailSection>
+            <Notice tone="waiting" title="Not included in this plan">
+              {`${account.planExcludedModels.map((entry) => entry.label).join(", ")} ${
+                account.planExcludedModels.length === 1 ? "isn't" : "aren't"
+              } included in this account's current plan, so OpenGeni skips this account for ${
+                account.planExcludedModels.length === 1 ? "that model" : "those models"
+              } until ${formatAbsoluteTime(
+                new Date(
+                  Math.min(
+                    ...account.planExcludedModels.map((entry) =>
+                      new Date(entry.retryAfter).getTime(),
+                    ),
+                  ),
+                ),
+                { now: codex.now },
+              )}, or sooner once a plan change is seen. Check usage after upgrading.`}
             </Notice>
           </DetailSection>
         ) : null}

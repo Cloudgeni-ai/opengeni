@@ -11,6 +11,7 @@ import {
   environmentsEncryptionKeyBytes,
   configuredModels,
   getSettings,
+  productLabelForModelId,
   withCodexCatalogProvider,
   type Settings,
 } from "@opengeni/config";
@@ -77,6 +78,7 @@ import {
   upsertCodexSubscriptionCredential,
   withCodexCapacityMutation,
   withSessionCodexCapacityMutation,
+  activeCodexPlanExclusions,
   type CodexAccountStatus,
   type CodexCapacityWakeTarget,
 } from "@opengeni/db";
@@ -103,6 +105,20 @@ export function codexAccountJson(
     label: row.label,
     email: row.accountEmail,
     plan: row.planType,
+    planCheckedAt: row.planCheckedAt ?? null,
+    // The most recent observed plan change (for example "pro" before a move to
+    // "free"), kept as evidence until the plan changes again.
+    planChangedFrom: row.planPreviousType ?? null,
+    planChangedAt: row.planChangedAt ?? null,
+    // Models the CURRENT plan was proven not to include. Each leaves automatic
+    // selection until `retryAfter` (one request then re-checks it) or until a
+    // different plan is observed (refresh usage after an upgrade).
+    planExcludedModels: activeCodexPlanExclusions(row, new Date()).map((entry) => ({
+      model: entry.modelId,
+      label: productLabelForModelId(entry.modelId),
+      excludedAt: entry.excludedAt,
+      retryAfter: entry.expiresAt,
+    })),
     status: row.status,
     active: row.isActive,
     expiresAt: row.expiresAt,

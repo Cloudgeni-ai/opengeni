@@ -76,7 +76,7 @@ describe("Connected Machine background-command reconciliation", () => {
           await capture(
             mode === "empty" ? [] : [{ sequence: "1", stream: "stdout", chunk: "part" }],
           );
-          return { status: "running" };
+          return { status: "running", replaySequence: mode === "empty" ? "0" : "1" };
         },
       } as unknown as Parameters<typeof replayConnectedCommandOutput>[0];
       const result = replayConnectedCommandOutput(
@@ -110,7 +110,9 @@ describe("Connected Machine background-command reconciliation", () => {
         expect(opId).toBe("durable-op");
         reads += 1;
         await capture([{ sequence: String(reads), stream: "stdout", chunk: "part" }]);
-        return reads === 5 ? { status: "completed", outcome: {} } : { status: "running" };
+        return reads === 5
+          ? { status: "completed", outcome: {}, replaySequence: String(reads) }
+          : { status: "running", replaySequence: String(reads) };
       },
     } as unknown as Parameters<typeof replayConnectedCommandOutput>[0];
     await replayConnectedCommandOutput(reader, "durable-op", true, async (frames) => {
@@ -118,6 +120,21 @@ describe("Connected Machine background-command reconciliation", () => {
     });
     expect(captured).toEqual(["1", "2", "3", "4", "5"]);
     expect(reads).toBe(5);
+  });
+
+  test("terminal replay advances across progress-only batches before the exit frame", async () => {
+    let reads = 0;
+    const reader = {
+      readExisting: async (_id: string, _wait: number, capture: (frames: []) => Promise<void>) => {
+        reads += 1;
+        await capture([]);
+        return reads === 4
+          ? { status: "completed", outcome: {}, replaySequence: "3073" }
+          : { status: "running", replaySequence: String(reads * 1024) };
+      },
+    } as unknown as Parameters<typeof replayConnectedCommandOutput>[0];
+    await replayConnectedCommandOutput(reader, "quiet-completed-command", true, async () => {});
+    expect(reads).toBe(4);
   });
 
   test("runner failure remains typed with zero exit even when cancellation or timeout also occurred", () => {

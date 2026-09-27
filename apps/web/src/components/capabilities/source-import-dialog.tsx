@@ -485,7 +485,7 @@ function PluginComponentCard({
               id={`plugin-connection-${component.key}`}
               value={selectedConnectionId}
               onChange={(event) => onBindingChange(event.target.value)}
-              className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
+              className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
             >
               <option value="">Choose an account…</option>
               {compatible.map((connection) => (

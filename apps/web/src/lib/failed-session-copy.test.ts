@@ -162,6 +162,7 @@ test("an exhausted provider quota is terminal copy that points at the model pick
     unavailableModel: false,
     retryUnhelpful: false,
     detail: daily.recordedDetail,
+    dailyLimit: true,
   });
   // Once another model is chosen the hint is dropped; Retry stays available.
   expect(failedSessionCopy(daily, false, true, true)).toMatchObject({
@@ -177,6 +178,9 @@ test("an exhausted provider quota is terminal copy that points at the model pick
   expect(failedSessionCopy(monthly, false, false, true).reason).toBe(
     "This model's monthly limit has been reached. Choose another model below.",
   );
+  // Only a daily allowance lets the banner name the deployment's free model.
+  expect(failedSessionCopy(monthly, false, false, true).dailyLimit).toBeUndefined();
+  expect(failedSessionCopy(daily, true, false, true).dailyLimit).toBeUndefined();
 
   const credits = exhausted(
     "The model provider account for this model is out of credits, so automatic retries stopped. Choose another model, or add credits with the provider and try again.",
@@ -220,6 +224,7 @@ test("an exhausted provider quota is terminal copy that points at the model pick
     unavailableModel: false,
     retryUnhelpful: false,
     detail: compactionError,
+    dailyLimit: true,
   });
   // An unknown marker value is ignored rather than trusted.
   expect(
@@ -249,4 +254,35 @@ test("authored worker copy and OpenGeni credit failures keep their own wording",
       recordedDetail: "Connection interrupted.",
     }),
   ).toEqual({ reason: "Connection interrupted.", unavailableModel: false });
+});
+
+test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", () => {
+  const plan =
+    'The ChatGPT account "Work Pro" is now on the Free plan, which doesn\'t include GPT-6 Sol. ' +
+    "Upgrade it, use another connected account, or choose another model.";
+  expect(
+    failedSessionCopy(
+      {
+        ...summary,
+        reason: plan,
+        recordedDetail: `${plan}\nThe Codex backend answered HTTP 400 with no error body.`,
+        failureCode: "codex_plan_entitlement",
+      },
+      false,
+      false,
+      true,
+    ),
+  ).toEqual({
+    reason: plan,
+    unavailableModel: false,
+    detail: `${plan}\nThe Codex backend answered HTTP 400 with no error body.`,
+  });
+  const rejected =
+    "The Codex backend rejected this request (HTTP 400) without an error message. " +
+    'The ChatGPT account "Work Pro" still reports the Pro plan, so OpenGeni did not switch accounts. ' +
+    "Try again, or choose another model if it keeps failing.";
+  expect(rejected.length).toBeGreaterThan(160);
+  expect(
+    failedSessionCopy({ ...summary, reason: rejected, failureCode: "codex_request_rejected" }),
+  ).toEqual({ reason: rejected, unavailableModel: false });
 });

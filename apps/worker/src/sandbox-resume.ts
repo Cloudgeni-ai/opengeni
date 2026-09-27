@@ -37,6 +37,7 @@ import {
   commitWarmingToWarm,
   failSandboxRematerialization,
   failWarmingToCold,
+  beginModalProviderCreate,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolderStatus,
   markSandboxRestoreVerifying,
@@ -1564,6 +1565,8 @@ async function resumeBoxForTurnOnce(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    let providerCreateOperationId: string | undefined;
+    let providerCreateBindingKey: string | undefined;
     let rematerialization: {
       id: string;
       selectedRevision: string;
@@ -1700,6 +1703,34 @@ async function resumeBoxForTurnOnce(
         ...(services.logicalFallbackSettings
           ? { logicalFallbackSettings: services.logicalFallbackSettings }
           : {}),
+        onBeforeSandboxCreate: async (createSettings, intent, providerContext) => {
+          if (ids.backend !== "modal") return;
+          if (!intent || !providerContext)
+            throw new Error("Modal create requires the provider dispatch boundary");
+          throwIfReleasedOrCancelled();
+          const binding = await resolveModalCheckpointProviderBindingForSession(
+            createSettings,
+            providerContext,
+          );
+          const operationId = intent.operationId;
+          await beginModalProviderCreate(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+            operationId,
+            providerBindingKey: binding.key,
+            rematerializationId: rematerialization?.id ?? null,
+            selectedRevision: rematerialization?.selectedRevision ?? null,
+            imageId: intent.imageId,
+            imageRef: createSettings.modalImageRef ?? null,
+            appId: intent.appId,
+            providerName: intent.name,
+            requestSha256: intent.requestSha256,
+          });
+          providerCreateOperationId = operationId;
+          providerCreateBindingKey = binding.key;
+        },
         onSandboxCreated: async (created) => {
           createdEstablished = created;
           providerRenewalTarget = {
@@ -1707,7 +1738,16 @@ async function resumeBoxForTurnOnce(
             instanceId: created.instanceId,
           };
           providerRenewedAtMs = Date.now();
-          throwIfReleasedOrCancelled();
+          if (
+            providerCreateBindingKey &&
+            !(await modalSessionMatchesCheckpointProviderBinding(
+              settings,
+              created.session,
+              providerCreateBindingKey,
+            ))
+          ) {
+            throw new Error("Modal creation receipt crossed the fenced provider namespace");
+          }
           if (
             rematerialization &&
             (rematerialization.providerBindingKey || rematerialization.legacyCheckpoint)
@@ -1758,6 +1798,7 @@ async function resumeBoxForTurnOnce(
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             rematerializationId: rematerialization?.id ?? null,
+            ...(providerCreateOperationId ? { providerCreateOperationId } : {}),
             ...(created.providerContinuity
               ? { continuityRecovery: created.providerContinuity }
               : {}),

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
 import {
@@ -27,6 +27,9 @@ export {
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
+
+// Opaque runtime identity shared by observers in this process, never a metric label.
+const serviceInstanceId = randomUUID();
 
 export type ObservabilitySettings = {
   serviceName: string;
@@ -590,8 +593,10 @@ export class Observability {
     this.exporter = options.exporter ?? defaultExporter;
     this.resourceAttributes = {
       "service.name": settings.serviceName,
+      "service.instance.id": serviceInstanceId,
       "deployment.environment": settings.environment,
       "opengeni.component": options.component,
+      "opengeni.deployment_revision": settings.deploymentRevision || undefined,
     };
     this.registry.setDefaultLabels({
       service: settings.serviceName,

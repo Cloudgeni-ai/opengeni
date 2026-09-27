@@ -1054,6 +1054,7 @@ export function recordOpenSandboxKubernetesInventoryGauges(
 export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "leases",
   "checkpoint_artifacts",
+  "recovery_observations",
   "rotation_backlog",
   "retained_processes",
   "expired_drains",
@@ -1113,6 +1114,40 @@ export function recordCreditBalanceGauges(
     }
   }
   creditBalanceGaugeAccounts.set(observability, current);
+}
+
+/**
+ * The deployment-level runtime switch for the one-time verified signup trial
+ * credit (migration 0521): 1 while it allows grants, 0 when an operator has
+ * disabled it or no revision exists. A grant also needs the API's
+ * OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in, which
+ * {@link recordVerifiedSignupTrialDeploymentFlagGauge} reports separately.
+ */
+export function recordVerifiedSignupTrialSwitchGauge(
+  observability: Observability,
+  grantsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_verified_signup_trial_credits_runtime_enabled",
+    help: "Whether the runtime switch allows new verified signup trial credit grants (1) or blocks them (0).",
+    value: grantsEnabled ? 1 : 0,
+  });
+}
+
+/**
+ * The OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in as this
+ * worker's configuration sees it. The API reads the same shared setting; new
+ * grants happen only while this gauge and the runtime switch gauge are both 1.
+ */
+export function recordVerifiedSignupTrialDeploymentFlagGauge(
+  observability: Observability,
+  enabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_verified_signup_trial_credits_deployment_enabled",
+    help: "Whether the OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in is on (1) or off (0) in this deployment's configuration.",
+    value: enabled ? 1 : 0,
+  });
 }
 
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {
@@ -1188,6 +1223,38 @@ export function recordSandboxDeadlineRotationsRequested(
     help: "Total finite-lifetime sandbox rotations requested before provider deadline.",
     amount: count,
   });
+}
+
+/** Only call after the exact draining->cold commit reports wentCold. The
+ * backend is validated against the closed contract so provider IDs and other
+ * per-sandbox values can never become metric labels. */
+export function recordSandboxProviderMissingBeforeCapture(
+  observability: Observability,
+  backend: string,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_provider_missing_before_capture_total",
+    help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
+    labels: { backend: safeBackend },
+  });
+}
+
+export function recordSandboxRecoveryObservationGauges(
+  observability: Observability,
+  observations: { providerLosses: number; fallbackSelections: number },
+): void {
+  for (const [kind, value] of [
+    ["provider_missing_before_capture", observations.providerLosses],
+    ["checkpoint_fallback_selected", observations.fallbackSelections],
+  ] as const) {
+    observability.setGauge({
+      name: "opengeni_sandbox_recovery_observations_recent",
+      help: "Committed sandbox recovery observations in the last 30 minutes by fixed kind.",
+      labels: { kind },
+      value,
+    });
+  }
 }
 
 export function recordSandboxRotationBacklogGauges(

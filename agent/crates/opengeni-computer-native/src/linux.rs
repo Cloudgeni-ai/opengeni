@@ -41,6 +41,7 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::captured_frames::CapturedFrames;
 use crate::clipboard::NativeClipboardController;
 use crate::tree::semantic_roots_equivalent;
 use crate::{
@@ -60,7 +61,6 @@ const MAX_CACHE_ITEMS: usize = 50_000;
 const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
 const MAX_APPLICATION_SNAPSHOTS: usize = 128;
-const MAX_WINDOW_FRAME_FENCES: usize = 512;
 const WINDOW_CAPTURE_RESIZE_ERROR: &str = "X11 window resized during capture";
 const WINDOW_CAPTURE_RETRY_DELAYS: [Duration; 4] = [
     Duration::ZERO,
@@ -167,12 +167,17 @@ struct TargetLocator {
 
 #[derive(Clone)]
 struct WindowFrameFence {
-    sequence: u64,
     frame_id: String,
     target_generation: String,
     window: LinuxWindow,
     width: u32,
     height: u32,
+}
+
+impl WindowFrameFence {
+    fn matches(&self, generation: &str, window: &LinuxWindow) -> bool {
+        self.target_generation == generation && same_window_placement(&self.window, window)
+    }
 }
 
 #[derive(Clone)]
@@ -181,6 +186,27 @@ struct ScreenFrameFence {
     target_generation: String,
     width: u32,
     height: u32,
+}
+
+#[derive(Clone)]
+enum FrameFence {
+    Window(WindowFrameFence),
+    Screen(ScreenFrameFence),
+}
+
+impl FrameFence {
+    fn window(&self) -> Option<&WindowFrameFence> {
+        match self {
+            Self::Window(frame) => Some(frame),
+            Self::Screen(_) => None,
+        }
+    }
+    fn screen(&self) -> Option<&ScreenFrameFence> {
+        match self {
+            Self::Screen(frame) => Some(frame),
+            Self::Window(_) => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -255,8 +281,7 @@ pub(crate) struct AtspiComputerAdapter {
     desktop: Option<LinuxDesktop>,
     application_launcher: Option<LinuxApplicationLauncher>,
     clipboard: Option<NativeClipboardController>,
-    latest_screen_frame: RwLock<Option<ScreenFrameFence>>,
-    latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
+    captured_frames: RwLock<CapturedFrames<FrameFence>>,
     semantic_generation: Arc<AtomicU64>,
     application_snapshots: RwLock<BTreeMap<String, CachedApplicationSnapshot>>,
     semantic_event_cache: Arc<AtomicBool>,
@@ -305,8 +330,7 @@ impl AtspiComputerAdapter {
             desktop: LinuxDesktop::open_default().ok(),
             application_launcher: LinuxApplicationLauncher::discover(),
             clipboard: NativeClipboardController::open().ok(),
-            latest_screen_frame: RwLock::new(None),
-            latest_window_frames: RwLock::new(BTreeMap::new()),
+            captured_frames: RwLock::new(CapturedFrames::new()),
             semantic_generation,
             application_snapshots: RwLock::new(BTreeMap::new()),
             semantic_event_cache,
@@ -335,15 +359,17 @@ impl AtspiComputerAdapter {
 
     async fn screen_observation(&self, target: NativeTarget) -> NativeObservation {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let frame_id = self
+            .captured_frames
+            .read()
+            .await
+            .latest(&target.id)
+            .and_then(FrameFence::screen)
+            .map(|frame| frame.frame_id.clone());
         NativeObservation {
             observation_id: format!("o_{}_{}", self.incarnation.simple(), sequence),
             target,
-            frame_id: self
-                .latest_screen_frame
-                .read()
-                .await
-                .as_ref()
-                .map(|frame| frame.frame_id.clone()),
+            frame_id,
             roots: Vec::new(),
             node_count: 0,
             focused_ref: None,
@@ -740,10 +766,11 @@ impl AtspiComputerAdapter {
         )?;
         let focused_ref = find_focused_ref(snapshot.roots());
         let frame_id = self
-            .latest_window_frames
+            .captured_frames
             .read()
             .await
-            .get(&target.target.id)
+            .latest(&target.target.id)
+            .and_then(FrameFence::window)
             .filter(|frame| {
                 frame.target_generation == target.target.target_generation
                     && target
@@ -1278,14 +1305,17 @@ impl AtspiComputerAdapter {
                 end_y,
                 ..
             } => {
-                let latest = self.latest_screen_frame.read().await;
-                let frame = latest.as_ref().ok_or_else(|| {
-                    NativeAdapterError::definite(
-                        NativeAdapterErrorCode::FrameStale,
-                        "Linux pointer coordinates target a stale captured frame",
-                        true,
-                    )
-                })?;
+                let frames = self.captured_frames.read().await;
+                let frame = frames
+                    .get(&command.target_id, frame_id)
+                    .and_then(FrameFence::screen)
+                    .ok_or_else(|| {
+                        NativeAdapterError::definite(
+                            NativeAdapterErrorCode::FrameStale,
+                            "Linux pointer coordinates target a stale captured frame",
+                            true,
+                        )
+                    })?;
                 if command.expected_frame_id.as_deref() != Some(frame_id)
                     || frame.frame_id != *frame_id
                     || frame.target_generation != target.target_generation
@@ -1496,28 +1526,18 @@ impl AtspiComputerAdapter {
 
         let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
-        let mut frames = self.latest_window_frames.write().await;
+        let mut frames = self.captured_frames.write().await;
         frames.insert(
             record.target.id.clone(),
-            WindowFrameFence {
-                sequence,
+            frame_id.clone(),
+            FrameFence::Window(WindowFrameFence {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
                 window: current,
                 width: frame_size.0,
                 height: frame_size.1,
-            },
+            }),
         );
-        while frames.len() > MAX_WINDOW_FRAME_FENCES {
-            let oldest = frames
-                .iter()
-                .min_by_key(|(_, frame)| frame.sequence)
-                .map(|(target_id, _)| target_id.clone());
-            let Some(oldest) = oldest else {
-                break;
-            };
-            frames.remove(&oldest);
-        }
         drop(frames);
         Ok(NativeCapturedFrame {
             frame_id,
@@ -1556,10 +1576,14 @@ impl AtspiComputerAdapter {
             )
         })?;
         let frame = self
-            .latest_window_frames
+            .captured_frames
             .read()
             .await
-            .get(&command.target_id)
+            .get(
+                &command.target_id,
+                command.expected_frame_id.as_deref().unwrap_or(""),
+            )
+            .and_then(FrameFence::window)
             .cloned()
             .ok_or_else(|| {
                 NativeAdapterError::definite(
@@ -1583,8 +1607,7 @@ impl AtspiComputerAdapter {
         };
         if command.expected_frame_id.as_deref() != Some(frame_id)
             || frame.frame_id != *frame_id
-            || frame.target_generation != command.expected_target_generation
-            || !same_window_placement(&frame.window, current_window)
+            || !frame.matches(&command.expected_target_generation, current_window)
         {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
@@ -1624,11 +1647,7 @@ impl AtspiComputerAdapter {
             f64::from(frame.window.bounds.width) / f64::from(frame.width),
             f64::from(frame.window.bounds.height) / f64::from(frame.height),
         )?;
-        self.latest_window_frames
-            .write()
-            .await
-            .remove(&command.target_id);
-        *self.latest_screen_frame.write().await = None;
+        self.captured_frames.write().await.clear();
         desktop
             .inject_window(frame.window.id, frame.window.bounds, inputs)
             .await
@@ -1758,12 +1777,16 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 })?;
                 let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                 let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
-                *self.latest_screen_frame.write().await = Some(ScreenFrameFence {
-                    frame_id: frame_id.clone(),
-                    target_generation: target.target_generation.clone(),
-                    width: captured.width,
-                    height: captured.height,
-                });
+                self.captured_frames.write().await.insert(
+                    target.id.clone(),
+                    frame_id.clone(),
+                    FrameFence::Screen(ScreenFrameFence {
+                        frame_id: frame_id.clone(),
+                        target_generation: target.target_generation.clone(),
+                        width: captured.width,
+                        height: captured.height,
+                    }),
+                );
                 return Ok(NativeCapturedFrame {
                     frame_id,
                     target_id: target.id,
@@ -1809,12 +1832,16 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 let (width, height, mime_type, bytes) = encode_live_frame(&captured, options)?;
                 let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                 let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
-                *self.latest_screen_frame.write().await = Some(ScreenFrameFence {
-                    frame_id: frame_id.clone(),
-                    target_generation: target.target_generation.clone(),
-                    width,
-                    height,
-                });
+                self.captured_frames.write().await.insert(
+                    target.id.clone(),
+                    frame_id.clone(),
+                    FrameFence::Screen(ScreenFrameFence {
+                        frame_id: frame_id.clone(),
+                        target_generation: target.target_generation.clone(),
+                        width,
+                        height,
+                    }),
+                );
                 return Ok(NativeCapturedFrame {
                     frame_id,
                     target_id: target.id,
@@ -1936,8 +1963,17 @@ impl ComputerAdapter for AtspiComputerAdapter {
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
                 self.validate_screen(command, &screen).await?;
-                let frame = self.latest_screen_frame.read().await.clone();
-                *self.latest_screen_frame.write().await = None;
+                let frame = self
+                    .captured_frames
+                    .read()
+                    .await
+                    .get(
+                        &command.target_id,
+                        command.expected_frame_id.as_deref().unwrap_or(""),
+                    )
+                    .and_then(FrameFence::screen)
+                    .cloned();
+                self.captured_frames.write().await.clear();
                 if let NativeAction::Launch { application_id } = &command.action {
                     self.application_launcher
                         .as_ref()
@@ -2059,11 +2095,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
             self.perform_semantic(&record, action, value.as_ref())
                 .await?;
         }
-        self.latest_window_frames
-            .write()
-            .await
-            .remove(&command.target_id);
-        *self.latest_screen_frame.write().await = None;
+        self.captured_frames.write().await.clear();
         if let Some(expected_focus_key) = expected_focus_key {
             return Ok(Some(
                 self.observe_after_focus(&command.target_id, &expected_focus_key)
@@ -2864,6 +2896,67 @@ mod live_tests {
     }
 
     #[test]
+    fn painted_window_frame_survives_capture_but_not_identity_or_placement_changes() {
+        let window = x11_window(77, Some(42), "Fixture", 10);
+        let frame = WindowFrameFence {
+            frame_id: "painted".into(),
+            target_generation: "g_window".into(),
+            window: window.clone(),
+            width: 210,
+            height: 90,
+        };
+        let mut frames = CapturedFrames::new();
+        frames.insert(
+            "window".into(),
+            "painted".into(),
+            FrameFence::Window(frame.clone()),
+        );
+        frames.insert(
+            "window".into(),
+            "new".into(),
+            FrameFence::Window(WindowFrameFence {
+                frame_id: "new".into(),
+                width: 420,
+                height: 180,
+                ..frame
+            }),
+        );
+        let painted = frames
+            .get("window", "painted")
+            .and_then(FrameFence::window)
+            .unwrap();
+        assert_eq!((painted.width, painted.height), (210, 90));
+        assert!(painted.matches("g_window", &window));
+        assert!(!painted.matches("g_replaced", &window));
+        for changed in [
+            LinuxWindow {
+                id: 78,
+                ..window.clone()
+            },
+            LinuxWindow {
+                process_id: Some(43),
+                ..window.clone()
+            },
+            LinuxWindow {
+                bounds: LinuxWindowRect {
+                    x: 11,
+                    ..window.bounds
+                },
+                ..window.clone()
+            },
+            LinuxWindow {
+                bounds: LinuxWindowRect {
+                    width: 421,
+                    ..window.bounds
+                },
+                ..window.clone()
+            },
+        ] {
+            assert!(!painted.matches("g_window", &changed));
+        }
+    }
+
+    #[test]
     fn live_frame_encoding_downscales_jpeg_without_changing_aspect_ratio() {
         let frame = LinuxRgbaFrame {
             rgba: vec![255_u8; 1_280 * 800 * 4],
@@ -3198,6 +3291,23 @@ Gtk.main()
             button_bounds.x - window_bounds.x + button_bounds.width / 2.0,
             button_bounds.y - window_bounds.y + button_bounds.height / 2.0,
         );
+        // A live viewer paints this frame, then delays the click while new
+        // captures arrive. The painted frame must retain its own pixel scale.
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            adapter
+                .capture_stream(
+                    &target.id,
+                    crate::NativeCaptureOptions {
+                        format: crate::NativeFrameFormat::Jpeg,
+                        quality: 72,
+                        max_width: 210,
+                        max_height: 90,
+                    },
+                )
+                .await
+                .expect("capture a newer streaming frame before the painted-frame click");
+        }
         adapter
             .dispatch(&click)
             .await

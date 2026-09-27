@@ -529,6 +529,7 @@ export {
 } from "./model-input";
 export type { ContextRobustnessFilterOptions, ModelInputProjectionPolicy } from "./model-input";
 export {
+  AssistantMessagePhaseTracker,
   HUMAN_INPUT_TOOL_NAME,
   modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromResponse,
@@ -1975,6 +1976,14 @@ export type BuildAgentOptions = {
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
   serviceTier?: "fast" | "priority";
+  /**
+   * Responses `text.verbosity`, set only for routes and models that accept it.
+   * Hosts must keep it constant for a session: like reasoning effort, a
+   * provider may treat it as part of the cached prompt prefix, so a
+   * per-message value could defeat prompt caching.
+   * Omitted sends no `text` settings, byte-identical to earlier requests.
+   */
+  textVerbosity?: "low" | "medium" | "high";
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
   // global-client callers (no model resolution) are byte-for-byte unchanged.
@@ -2840,6 +2849,7 @@ export function buildOpenGeniAgent(
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
         summary: "detailed",
       },
+      ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
@@ -7787,6 +7797,7 @@ export const CODE_SEARCH_DIRECTIVE =
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
+  "Codemode calls and result reads require the same live execution attempt. While a Codemode command is pending, keep this attempt alive with `command_wait`/`command_read`; do not end the turn or call `wait_for_input` to await it. After an attempt ends, its CLI credentials expire and a new attempt cannot read its operation ID. Inspect retained command output and session tool receipts before deciding whether another call is needed; an observation error does not prove execution failed. Never automatically replay a mutation. " +
   "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +
   'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 

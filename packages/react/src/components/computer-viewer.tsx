@@ -32,6 +32,7 @@ import {
   type WheelEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -282,7 +283,8 @@ export function ComputerViewer({
   const displayedFrame =
     frames.frame &&
     frames.frame.computerSessionId === selection?.sessionId &&
-    frames.frame.targetId === computer.selectedTarget?.id
+    frames.frame.targetId === computer.selectedTarget?.id &&
+    frames.frame.targetGeneration === computer.selectedTarget?.targetGeneration
       ? frames.frame
       : null;
   const rfbStream =
@@ -434,11 +436,15 @@ export function ComputerViewer({
 
   const perform = useCallback(
     async (action: ComputerAction, frame: ComputerFrame | null): Promise<void> => {
+      let receipt;
       if (action.type === "pointer") {
         if (!frame) throw new Error("Desktop view is not ready for pointer input.");
-        await actFromFrame(action, frame);
+        receipt = await actFromFrame(action, frame);
       } else {
-        await act(action);
+        receipt = await act(action);
+      }
+      if (receipt.state !== "completed") {
+        throw new Error(receipt.error?.message ?? "Desktop input did not complete.");
       }
     },
     [act, actFromFrame],
@@ -627,6 +633,12 @@ export function ComputerViewer({
               </div>
             ) : (
               <ComputerViewport
+                key={JSON.stringify([
+                  selection?.sessionId,
+                  computer.selectedTarget?.id,
+                  computer.selectedTarget?.targetGeneration,
+                  frames.attachment?.controllerGeneration,
+                ])}
                 frame={machineLocked ? null : displayedFrame}
                 observation={computer.observation}
                 target={computer.selectedTarget}
@@ -1030,7 +1042,11 @@ function ComputerViewport(props: {
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
+  const actionQueueEpochRef = useRef(0);
   const queuedFrameRef = useRef<ComputerFrame | null>(null);
+  const currentFrameRef = useRef<ComputerFrame | null>(props.frame);
+  const paintedFrameRef = useRef<ComputerFrame | null>(null);
+  const [paintedFrame, setPaintedFrame] = useState<ComputerFrame | null>(null);
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
@@ -1041,6 +1057,18 @@ function ComputerViewport(props: {
     !streamFailed &&
     !props.machineLocked &&
     (!props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true);
+
+  const clearBufferedInput = useCallback(() => {
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
+    if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
+    clickTimerRef.current = null;
+    wheelRef.current = null;
+    pendingTextRef.current = null;
+    pointerStartRef.current = null;
+    lastClickRef.current = null;
+    if (inputRef.current) inputRef.current.value = "";
+  }, []);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -1058,8 +1086,15 @@ function ComputerViewport(props: {
               const bitmap = await createImageBitmap(blob);
               try {
                 const canvas = canvasRef.current;
-                if (mountedRef.current && canvas) {
+                if (
+                  mountedRef.current &&
+                  canvas &&
+                  currentFrameRef.current &&
+                  sameComputerTarget(frame, currentFrameRef.current)
+                ) {
                   paintCanvas(canvas, bitmap, frame.width, frame.height);
+                  paintedFrameRef.current = frame;
+                  setPaintedFrame(frame);
                 }
               } finally {
                 bitmap.close();
@@ -1069,11 +1104,23 @@ function ComputerViewport(props: {
             objectUrl = URL.createObjectURL(blob);
             const image = await loadImage(objectUrl);
             const canvas = canvasRef.current;
-            if (mountedRef.current && canvas) {
+            if (
+              mountedRef.current &&
+              canvas &&
+              currentFrameRef.current &&
+              sameComputerTarget(frame, currentFrameRef.current)
+            ) {
               paintCanvas(canvas, image, frame.width, frame.height);
+              paintedFrameRef.current = frame;
+              setPaintedFrame(frame);
             }
           } catch (cause) {
-            if (mountedRef.current) errorRef.current(cause);
+            if (
+              mountedRef.current &&
+              currentFrameRef.current &&
+              sameComputerTarget(frame, currentFrameRef.current)
+            )
+              errorRef.current(cause);
           } finally {
             if (objectUrl) URL.revokeObjectURL(objectUrl);
           }
@@ -1085,40 +1132,64 @@ function ComputerViewport(props: {
     })();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      actionQueueEpochRef.current += 1;
       queuedFrameRef.current = null;
+      clearBufferedInput();
     };
-  }, []);
+  }, [clearBufferedInput]);
 
-  useEffect(() => {
-    if (!props.frame) return;
+  useLayoutEffect(() => {
+    if (currentFrameRef.current && !props.frame) {
+      actionQueueEpochRef.current += 1;
+      clearBufferedInput();
+    }
+    currentFrameRef.current = props.frame;
+    if (!props.frame) {
+      queuedFrameRef.current = null;
+      paintedFrameRef.current = null;
+      setPaintedFrame(null);
+      return;
+    }
     queuedFrameRef.current = props.frame;
     paintQueuedFrames();
-  }, [paintQueuedFrames, props.frame]);
+  }, [clearBufferedInput, paintQueuedFrames, props.frame]);
 
-  useEffect(
-    () => () => {
-      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-      if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
-      if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
-    },
-    [],
-  );
+  useLayoutEffect(() => {
+    if (!rawInputEnabled) {
+      actionQueueEpochRef.current += 1;
+      clearBufferedInput();
+    }
+  }, [clearBufferedInput, rawInputEnabled]);
 
   const enqueue = useCallback(
-    (action: ComputerAction, frame: ComputerFrame | null, after?: () => Promise<void>) => {
+    (
+      action: ComputerAction,
+      frame: ComputerFrame | null,
+      after?: (isCurrent: () => boolean) => Promise<void>,
+    ) => {
+      const epoch = actionQueueEpochRef.current;
+      const dispatch = actionRef.current;
+      const isCurrent = () => mountedRef.current && epoch === actionQueueEpochRef.current;
       actionTailRef.current = actionTailRef.current
         .catch(() => undefined)
         .then(async () => {
-          await actionRef.current(action, frame);
-          await after?.();
+          if (!isCurrent()) return;
+          await dispatch(action, frame);
+          if (!isCurrent()) return;
+          await after?.(isCurrent);
         })
-        .catch((cause) => errorRef.current(cause));
+        .catch((cause) => {
+          if (!isCurrent()) return;
+          actionQueueEpochRef.current += 1;
+          clearBufferedInput();
+          errorRef.current(cause);
+        });
     },
-    [],
+    [clearBufferedInput],
   );
 
   const point = useCallback(
@@ -1153,14 +1224,37 @@ function ComputerViewport(props: {
     );
   }, [enqueue]);
 
+  const flushPendingWheel = useCallback(() => {
+    const batch = wheelRef.current;
+    if (!batch) return;
+    if (batch.timer) clearTimeout(batch.timer);
+    wheelRef.current = null;
+    enqueue(
+      {
+        type: "pointer",
+        frameId: batch.frame.frameId,
+        action: "scroll",
+        x: batch.x,
+        y: batch.y,
+        deltaX: batch.deltaX,
+        deltaY: batch.deltaY,
+      },
+      batch.frame,
+    );
+  }, [enqueue]);
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || props.mutating || !rawInputEnabled || event.button !== 0) return;
+    const frame = paintedFrameRef.current;
+    if (!frame || props.mutating || !rawInputEnabled || event.button !== 0) return;
+    // Preserve the keyboard sink's focus through the canvas pointer default action.
+    event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
       y: event.clientY,
       pointerId: event.pointerId,
-      frame: props.frame,
+      frame,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     inputRef.current?.focus({ preventScroll: true });
@@ -1233,8 +1327,9 @@ function ComputerViewport(props: {
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
     if (!rawInputEnabled) return;
-    const frame = props.frame;
+    const frame = paintedFrameRef.current;
     if (!frame) return;
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
     const at = point(frame, event.clientX, event.clientY);
@@ -1255,44 +1350,35 @@ function ComputerViewport(props: {
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
     if (!rawInputEnabled) return;
-    const frame = props.frame;
+    const frame = paintedFrameRef.current;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
     if (!at) return;
     flushPendingText();
     flushPendingClick();
     event.preventDefault();
-    const pending = wheelRef.current;
-    if (pending?.timer) clearTimeout(pending.timer);
+    let pending = wheelRef.current;
+    if (
+      pending &&
+      (!sameComputerTarget(pending.frame, frame) ||
+        Math.hypot(pending.x - at.x, pending.y - at.y) > 6)
+    ) {
+      flushPendingWheel();
+      pending = null;
+    }
     wheelRef.current = {
       x: at.x,
       y: at.y,
-      deltaX: (pending && sameFrameFence(pending.frame, frame) ? pending.deltaX : 0) + event.deltaX,
-      deltaY: (pending && sameFrameFence(pending.frame, frame) ? pending.deltaY : 0) + event.deltaY,
+      deltaX: (pending?.deltaX ?? 0) + event.deltaX,
+      deltaY: (pending?.deltaY ?? 0) + event.deltaY,
       frame,
-      timer: setTimeout(() => {
-        const batch = wheelRef.current;
-        wheelRef.current = null;
-        if (batch) {
-          enqueue(
-            {
-              type: "pointer",
-              frameId: batch.frame.frameId,
-              action: "scroll",
-              x: batch.x,
-              y: batch.y,
-              deltaX: batch.deltaX,
-              deltaY: batch.deltaY,
-            },
-            batch.frame,
-          );
-        }
-      }, 45),
+      timer: pending?.timer ?? setTimeout(flushPendingWheel, 45),
     };
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (!rawInputEnabled) return;
+    flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
       props.clipboardEnabled &&
@@ -1314,10 +1400,13 @@ function ComputerViewport(props: {
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled || !rawInputEnabled) return;
     event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
-    enqueue({ type: "clipboard", operation: "copy" }, null, async () => {
-      const clipboard = await readClipboardRef.current();
+    const readClipboard = readClipboardRef.current;
+    enqueue({ type: "clipboard", operation: "copy" }, null, async (isCurrent) => {
+      const clipboard = await readClipboard();
+      if (!isCurrent()) return;
       if (!clipboard.text) return;
       if (!(await copyTextToClipboard(clipboard.text))) {
         throw new Error("Desktop text could not be copied to the local clipboard");
@@ -1328,17 +1417,23 @@ function ComputerViewport(props: {
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled || !rawInputEnabled) return;
     event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
     const text = event.clipboardData.getData("text/plain");
-    enqueue({ type: "clipboard", operation: "write", text }, null, async () => {
-      assertExactComputerClipboard(await readClipboardRef.current(), text);
-      await actionRef.current({ type: "clipboard", operation: "paste" }, null);
+    const readClipboard = readClipboardRef.current;
+    const dispatch = actionRef.current;
+    enqueue({ type: "clipboard", operation: "write", text }, null, async (isCurrent) => {
+      const clipboard = await readClipboard();
+      if (!isCurrent()) return;
+      assertExactComputerClipboard(clipboard, text);
+      await dispatch({ type: "clipboard", operation: "paste" }, null);
     });
   };
 
   const input = (value: string) => {
     if (!value || !rawInputEnabled) return;
+    flushPendingWheel();
     flushPendingClick();
     const pending = pendingTextRef.current;
     if (pending) {
@@ -1354,7 +1449,12 @@ function ComputerViewport(props: {
     if (inputRef.current) inputRef.current.value = "";
   };
 
-  const showCanvas = props.frame !== null && !props.machineLocked && !streamFailed;
+  const showCanvas =
+    props.frame !== null &&
+    paintedFrame !== null &&
+    sameComputerTarget(props.frame, paintedFrame) &&
+    !props.machineLocked &&
+    !streamFailed;
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
       <canvas
@@ -1772,9 +1872,13 @@ export function computerKey(
 }
 
 function sameFrameFence(left: ComputerFrame, right: ComputerFrame): boolean {
+  return left.frameId === right.frameId && sameComputerTarget(left, right);
+}
+
+function sameComputerTarget(left: ComputerFrame, right: ComputerFrame): boolean {
   return (
-    left.frameId === right.frameId &&
     left.computerSessionId === right.computerSessionId &&
+    left.controllerGeneration === right.controllerGeneration &&
     left.targetId === right.targetId &&
     left.targetGeneration === right.targetGeneration
   );

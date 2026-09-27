@@ -18,6 +18,7 @@ import { RelativeTime } from "@/components/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { apiKeyStatus } from "@/lib/api-key-status";
 import type { ApiKey } from "@/types";
 
 type CreateOrganizationApiKeyRequest = Parameters<
@@ -501,10 +502,4 @@ const session = await client.createSession(workspace.id, {
   idempotencyKey: productRequest.id,
   skills: selectedSkills,
 });`;
-}
-
-function apiKeyStatus(apiKey: ApiKey): "active" | "expired" | "revoked" {
-  if (apiKey.revokedAt) return "revoked";
-  if (apiKey.expiresAt && Date.parse(apiKey.expiresAt) <= Date.now()) return "expired";
-  return "active";
 }

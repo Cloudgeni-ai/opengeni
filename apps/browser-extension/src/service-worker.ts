@@ -127,23 +127,21 @@ async function connect(): Promise<void> {
     reconnectTimer = null;
   }
   const generation = crypto.randomUUID();
+  let port: chrome.runtime.Port | null = null;
   try {
-    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    const connectingPort = port;
     nativePort = port;
     connectionGeneration = generation;
     readyGeneration = null;
-    await setBadge(false);
-    port.onMessage.addListener(handleNativeMessage);
-    port.onDisconnect.addListener(() => {
-      if (nativePort !== port) return;
-      clearHandshakeTimer();
-      lastError = chrome.runtime.lastError?.message ?? "OpenGeni agent disconnected";
-      nativePort = null;
-      connectionGeneration = null;
-      readyGeneration = null;
-      void setBadge(false);
-      scheduleReconnect();
+    port.onMessage.addListener((message: unknown) => {
+      if (nativePort === connectingPort) handleNativeMessage(message);
     });
+    port.onDisconnect.addListener(() => {
+      const error = chrome.runtime.lastError?.message ?? "OpenGeni agent disconnected";
+      disconnectPort(connectingPort, error);
+    });
+    await setBadge(false);
     const revision = await nextInventoryRevision();
     const hello: ExtensionHello = {
       type: "hello",
@@ -159,20 +157,33 @@ async function connect(): Promise<void> {
         connectionGeneration === generation &&
         readyGeneration !== generation
       ) {
-        lastError = "OpenGeni agent did not accept this browser profile";
-        port.disconnect();
+        disconnectPort(connectingPort, "OpenGeni agent did not accept this browser profile");
       }
     }, HANDSHAKE_TIMEOUT_MS);
   } catch (error) {
-    clearHandshakeTimer();
-    nativePort?.disconnect();
-    nativePort = null;
-    connectionGeneration = null;
-    readyGeneration = null;
-    lastError = error instanceof Error ? error.message : String(error);
-    await setBadge(false);
-    scheduleReconnect();
+    const message = error instanceof Error ? error.message : String(error);
+    if (port) {
+      disconnectPort(port, message);
+    } else if (!nativePort) {
+      lastError = message;
+      void setBadge(false);
+      scheduleReconnect();
+    }
   }
+}
+
+// Locally calling Port.disconnect() does not fire our onDisconnect listener.
+// Clear the exact port before closing it; stale events must not reset a successor.
+function disconnectPort(port: chrome.runtime.Port, error: string): void {
+  if (nativePort !== port) return;
+  clearHandshakeTimer();
+  nativePort = null;
+  connectionGeneration = null;
+  readyGeneration = null;
+  lastError = error;
+  port.disconnect();
+  void setBadge(false);
+  scheduleReconnect();
 }
 
 function clearHandshakeTimer(): void {
@@ -212,8 +223,7 @@ function handleNativeMessage(message: unknown): void {
       lastError = null;
       void setBadge(true);
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      port.disconnect();
+      disconnectPort(port, error instanceof Error ? error.message : String(error));
     }
     return;
   }
@@ -522,10 +532,12 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
     );
     void chrome.storage.local.set({ profileLabel }).then(() => {
       currentProfileLabel = profileLabel;
-      nativePort?.disconnect();
+      clearHandshakeTimer();
+      const previous = nativePort;
       nativePort = null;
       connectionGeneration = null;
       readyGeneration = null;
+      previous?.disconnect();
       void connect();
       respond({ saved: true, profileLabel });
     });
