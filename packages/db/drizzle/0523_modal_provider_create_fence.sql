@@ -61,6 +61,24 @@ CREATE TRIGGER sandbox_provider_create_fence
 BEFORE UPDATE OR DELETE ON sandbox_leases
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_unresolved_provider_create();
 
+-- Trigger execution does not require callers to execute its function. Remove
+-- PUBLIC and hostile default grants instead of widening specialized roles.
+REVOKE ALL ON FUNCTION opengeni_private.guard_unresolved_provider_create() FROM PUBLIC;
+DO $guard_acl$
+DECLARE role_name text;
+BEGIN
+  FOR role_name IN
+    SELECT DISTINCT role.rolname FROM pg_catalog.pg_proc proc
+    CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(proc.proacl, pg_catalog.acldefault('f', proc.proowner))) acl
+    JOIN pg_catalog.pg_roles role ON role.oid = acl.grantee
+    WHERE proc.oid = 'opengeni_private.guard_unresolved_provider_create()'::regprocedure
+      AND acl.grantee <> proc.proowner
+  LOOP
+    EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION opengeni_private.guard_unresolved_provider_create() FROM %I', role_name);
+  END LOOP;
+END;
+$guard_acl$;
+
 -- Preserve the installed reaper's locks, scope, holder settlement and ACL.
 -- Skip unknown creates instead of letting one fence abort the entire sweep.
 DO $patch_reaper$

@@ -104,3 +104,14 @@ test("hostile defaults and PUBLIC cannot execute the new cross-tenant inventory"
     where p.oid='opengeni_private.list_pending_modal_provider_creates()'::regprocedure and acl.grantee=0 and acl.privilege_type='EXECUTE'`;
   expect(row!.n).toBe(0);
 });
+test("the lease trigger grants no authority to PUBLIC or hostile default roles", async () => {
+  expect(
+    (
+      await fixture.admin`select has_function_privilege(${hostileRole},'opengeni_private.guard_unresolved_provider_create()','EXECUTE') as allowed`
+    )[0]!.allowed,
+  ).toBe(false);
+  const [row] = await fixture.admin`select count(*)::int as n from pg_proc p,
+    lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+    where p.oid='opengeni_private.guard_unresolved_provider_create()'::regprocedure and acl.grantee=0 and acl.privilege_type='EXECUTE'`;
+  expect(row!.n).toBe(0);
+});
