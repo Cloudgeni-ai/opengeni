@@ -525,7 +525,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const connection = await this.ensureConnection();
-    const deferNavigation = this.emulation !== null && url !== "about:blank";
+    // Establish the blank document and target policies before remote navigation.
+    // A slow response must use the navigation budget, not the target-creation deadline.
+    const deferNavigation = url !== "about:blank";
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
       ...this.contextScope(),
       url: deferNavigation ? "about:blank" : url,
