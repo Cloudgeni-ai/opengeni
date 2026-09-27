@@ -171,6 +171,13 @@ export async function createModalSessionWithLifecycle(
                 constructorArgs as unknown as ConstructorParameters<typeof ModalSandboxSession>[0],
               ),
             );
+            // The pinned SDK closes processes/the box, but not its Modal
+            // transport. This adapter owns a dedicated client per create.
+            const closeSession = session.close.bind(session);
+            session.close = async () => {
+              await closeSession();
+              modal.close();
+            };
             await lifecycle.onCreated(session, receipt);
           },
         }),
