@@ -1,5 +1,43 @@
 # @opengeni/runtime
 
+## 4.2.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+
+### Patch Changes
+
+- 74e0dfb: Refresh the default Modal desktop image to the verified publication supporting
+  viewport actions and focused DOM reads. Report exact legacy controller schema
+  and route mismatches as unsupported controller features without replaying browser
+  actions or restarting live sessions.
+- 1fa1216: Bind browser viewer input to the frame actually painted, cancel stale queued input
+  across navigation and target changes, and preserve ordered scroll input. Treat
+  plain upstream gateway failures as transport errors without blindly replaying
+  browser mutations.
+- d83d5d0: Distinguish Connected Machine self-update drains and admission breakers in errors instead of labeling every refusal as capacity exhaustion. Preserve typed reasons through retry exhaustion without changing retry or execution behavior.
+- 9d0c1bb: Clarify that closing a tab does not release its browser process. Guide agents to
+  end their completed disposable browser sessions or suspend supported sessions
+  that need continuation, while preserving shared and user-owned browsers.
+- ec707de: Negotiate bounded viewer typing batches from the active browser controller. Preserve
+  individual text events and input order while reducing request overhead; recheck the
+  original document fence before each action and discard uncertain queued input
+  without replay. Older controllers retain sequential input.
+- 82fa577: Use supported transactional file transfers for small in-place editor updates and file creation, avoiding interruption-prone direct replacement writes. Preserve legacy-agent and small-move compatibility.
+- 3aab8f9: Allow a single MCP provider to use the existing aggregate tool-count allowance instead of dropping otherwise bounded catalogs above 1,000 tools. Align permissions discovery and explicit tool selections with the same allowance. Preserve definition, response, per-provider and aggregate byte limits and shared count accounting.
+- Updated dependencies [74e0dfb]
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/config@3.1.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/sdk@7.3.0
+  - @opengeni/codemode@0.6.4
+  - @opengeni/codex@0.2.28
+  - @opengeni/tool-gateway@0.1.15
+
 ## 4.1.0
 
 ### Minor Changes

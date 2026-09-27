@@ -1062,8 +1062,17 @@ headedE2e(
       downloadDirectory: join(directory, "downloads"),
       screenshotDirectory: join(directory, "screenshots"),
       headed: true,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
     });
     let detachOnResolve = false;
+    let accessibilityReads = 0;
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
       controllerGeneration: randomUUID(),
@@ -1077,6 +1086,7 @@ headedE2e(
             params?: Readonly<Record<string, unknown>>,
             options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
           ): Promise<T> => {
+            if (method.startsWith("Accessibility.get")) accessibilityReads++;
             if (detachOnResolve && method === "DOM.resolveNode" && params?.executionContextId) {
               detachOnResolve = false;
               await connection.send(
@@ -1108,9 +1118,12 @@ headedE2e(
           '<style>select{position:absolute;left:10px;top:40px;width:200px;height:40px}button{position:absolute;left:10px;top:150px;width:200px;height:40px}</style><button onclick="this.textContent=\'Counter 1\'">Counter 0</button><label>Priority<select id="priority" oninput="document.querySelector(\'p\').textContent += \' input:\' + this.value" onchange="document.querySelector(\'p\').textContent += \' change:\' + this.value"><option value="low">Low</option><optgroup label="More"><option value="high">High</option><option value="blocked" disabled>Blocked</option></optgroup></select></label><p>Events</p>',
         ),
       );
-      view = await driver.dispatch(
-        command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
-      );
+      expect(driver.focusedInputObservations).toBe(true);
+      view = (await driver.dispatch({
+        ...command(view, { type: "pointer", action: "click", x: 110, y: 60 }),
+        observationMode: "input",
+      }))!;
+      expect(view).not.toBeNull();
       expect(focused(view)?.native?.data).toEqual({
         kind: "native-select",
         multiple: false,
@@ -1135,9 +1148,15 @@ headedE2e(
         command(view, { type: "select", locator: { kind: "ref", ref }, values: ["high"] }),
       );
       expect(names(view)).toContain("Events input:high change:high");
-      view = await driver.dispatch(
-        command(view, { type: "pointer", action: "click", x: 110, y: 170 }),
-      );
+      const readsBeforeOrdinaryClick = accessibilityReads;
+      expect(
+        await driver.dispatch({
+          ...command(view, { type: "pointer", action: "click", x: 110, y: 170 }),
+          observationMode: "input",
+        }),
+      ).toBeNull();
+      expect(accessibilityReads).toBe(readsBeforeOrdinaryClick);
+      view = await driver.observe(view.target.id);
       expect(names(view)).toContain("Counter 1");
       expect(
         (

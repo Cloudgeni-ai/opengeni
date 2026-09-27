@@ -1,5 +1,33 @@
 # @opengeni/core
 
+## 4.0.5
+
+### Patch Changes
+
+- 3aab8f9: Allow a single MCP provider to use the existing aggregate tool-count allowance instead of dropping otherwise bounded catalogs above 1,000 tools. Align permissions discovery and explicit tool selections with the same allowance. Preserve definition, response, per-provider and aggregate byte limits and shared count accounting.
+- Updated dependencies [74e0dfb]
+- Updated dependencies [1fa1216]
+- Updated dependencies [1842911]
+- Updated dependencies [d83d5d0]
+- Updated dependencies [9d0c1bb]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [a63a029]
+- Updated dependencies [b9482ea]
+- Updated dependencies [4124c7c]
+- Updated dependencies [82fa577]
+- Updated dependencies [3aab8f9]
+- Updated dependencies [2563950]
+  - @opengeni/config@3.1.0
+  - @opengeni/runtime@4.2.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/db@6.1.1
+  - @opengeni/observability@0.8.34
+  - @opengeni/documents@0.8.36
+  - @opengeni/storage@0.2.135
+  - @opengeni/codex@0.2.28
+  - @opengeni/events@0.4.34
+
 ## 4.0.4
 
 ### Patch Changes

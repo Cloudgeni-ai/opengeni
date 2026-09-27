@@ -186,6 +186,7 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
 
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
+  readonly focusedInputObservations?: boolean;
   start(url?: string): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
   openTarget(url?: string): Promise<BrowserObservation>;
@@ -1366,6 +1367,7 @@ export class BrowserSupervisor {
       driver,
       initialJournal,
       onJournalRecord: (record) => runtime.journal.write(record),
+      loadJournalRecord: (operationId) => runtime.journal.read(operationId),
       authority: {
         authorizeDispatch: async (command) => {
           if (runtime.lifecycle !== "active") {
@@ -1391,6 +1393,7 @@ export class BrowserSupervisor {
       controllerGeneration: runtime.options.controllerGeneration,
       initialJournal,
       onJournalRecord: (record) => runtime.protectedAuthJournal.write(record),
+      loadJournalRecord: (operationId) => runtime.protectedAuthJournal.read(operationId),
       driver: {
         target: async (targetId) => await driver.target(targetId),
         observe: async (targetId) => {
@@ -1473,6 +1476,10 @@ export class BrowserSupervisor {
 
   supportsFencedInputBatches(reference: BrowserSessionReference): boolean {
     return this.requireBound(reference).driver.fencedInputBatches === true;
+  }
+
+  supportsFocusedInputObservations(reference: BrowserSessionReference): boolean {
+    return this.requireBound(reference).driver.focusedInputObservations === true;
   }
 
   private requireActive(reference: BrowserSessionReference): Runtime {

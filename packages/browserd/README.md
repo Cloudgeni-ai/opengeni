@@ -17,6 +17,24 @@ target queues, and SQLite WAL operation journal. A prepared receipt is durable
 before dispatch; restart settles a prepared operation as failed and a dispatched
 operation as `outcome_unknown`, without replaying either command. Session state is
 retained for restore unless its lifecycle owner explicitly ends and removes it.
+Recovery scans receipts with bounded keyset reads inside one atomic transaction,
+avoiding simultaneous raw-row and duplicate observation collections. Corruption
+in a later receipt rolls back earlier recovery changes.
+
+Each Browser/Computer journal authority retains at most 10,000 operations and
+256 MiB of serialized receipts (64 MiB per receipt). Inserts and settlements
+evict the oldest terminal receipts until both limits fit; in-flight records
+are never evicted. If they prevent a write, the transaction fails without
+partial eviction. These are receipt-retention limits, not changes to model
+history. SQLite files may retain previously allocated free pages, so lowering
+a limit does not immediately shrink an existing file. End/remove reclaims the
+session directory. The SQLite receipt format remains compatible.
+
+Settled interaction receipts use the same authority-scoped SQLite journal for
+on-demand replay. Controllers retain a content digest rather than a second full
+receipt in memory after successful terminal persistence. Replay validates the
+full stored receipt; a missing/corrupt record cannot trigger repeated input.
+Failed persistence preserves the existing controller-lifetime RAM fallback.
 
 During profile restoration, saved `blob:` previews and `chrome-error:` documents
 become inert explanatory tabs: their old process-local contents cannot be reopened.
@@ -37,6 +55,25 @@ option, then confirm. Re-targeting the trigger can reset focus or fail when the
 open menu hides that trigger from the accessibility tree. The `select` action
 requires a native HTML select; an ARIA combobox role alone is not sufficient.
 
+The optional Lightpanda 0.3.5 engine supports `fill` and `type` only in editable
+text inputs and textareas. Browserd rejects typing into rich-text editors,
+read-only fields and other unsupported focused targets before sending text:
+Lightpanda otherwise acknowledges `Input.insertText` without editing them.
+Choose Chromium for contenteditable workflows; browserd never replaces page
+text or synthesizes an input event to disguise unsupported native editing.
+Back/Forward history is also refused for Lightpanda: its pinned implementation
+mixes iframe URLs into main-page history. Navigate to an explicit URL or use
+Chromium for history-dependent workflows. Refusal leaves the current page intact.
+
+Live-view grants advertise `focusedInputObservations` only when the driver
+supports the optional `observationMode: "input"`. A left pointer click then uses
+a bounded isolated-world focus probe: ordinary clicks return no observation,
+while a native select or child-frame focus hint requests the existing redacted
+semantic snapshot. Only a snapshot identifying a focused native select is
+returned. Optional metadata failure never changes a completed click into a
+failed mutation; clients retain explicit observation as a fallback. Agent
+actions keep the default full observation behavior.
+
 The compiled `opengeni-browserd` placement service exposes the supervisor through
 one versioned HTTP/WebSocket protocol on port 7682. An owner-only file supplies
 the placement admin credential; each session receives independently rotatable
@@ -54,6 +91,15 @@ The runtime starts the service idempotently under a placement lock, authenticate
 readiness using the file-only admin credential, refuses a foreign listener, and
 stops only the exact recorded executable/PID.
 
+Sandbox startup places the service below `opengeni-command-supervisor service`.
+Provider exec processes may bypass the image's entrypoint init; the local
+subreaper collects detached browser descendants after crashes and normal close.
+When browserd exits, including SIGKILL, it terminates and reaps remaining
+descendants before exiting itself. Killing the supervisor itself is outside
+this guarantee and requires sandbox teardown.
+The PID file continues to identify browserd itself, preserving authenticated
+readiness and exact-process shutdown checks.
+
 `bun run --cwd packages/browserd test:e2e` includes the opt-in context pool's
 real Chromium acceptance tests. They fill all six slots, verify same-origin
 cookie/localStorage/IndexedDB and target isolation, reject a seventh context
@@ -63,3 +109,9 @@ restoration, and verifies that another authority partition remains usable. Set
 `OPENGENI_BROWSER_EXECUTABLE` to the test Chromium executable, as in CI. Pooling
 still requires explicit opt-in; its contexts share a crash boundary and cannot
 replace durable profiles or an OS security boundary.
+
+Chromium main-frame reference actions revalidate the exact observed node through
+a single-node accessibility read before input, retaining document/ref checks
+and native hit testing. Other frames, semantic locators and engines still use
+full-tree resolution. Full post-action observations are unchanged; this removes
+redundant page-wide reads without acting on cached node state.

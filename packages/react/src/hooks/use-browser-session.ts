@@ -66,6 +66,7 @@ export type UseBrowserSessionResult = {
     action: BrowserAction | BrowserActionBatch,
     frame: BrowserFrameInputFence,
     operationId?: string,
+    observationMode?: "none" | "input",
   ) => Promise<BrowserActionReceipt>;
   readClipboard: () => Promise<BrowserClipboard>;
   diagnostics: (options?: BrowserDiagnosticsOptions) => Promise<BrowserDiagnosticBatch>;
@@ -496,6 +497,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
             documentGeneration: string | null;
           })
         | null,
+      observationMode: "none" | "input" = "none",
     ): Promise<BrowserActionReceipt> => {
       if (!browserSessionId) throw new Error("No BrowserSession is selected.");
       if (frame && frame.browserSessionId !== browserSessionId) {
@@ -527,7 +529,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         const receipt = await client.actInBrowser(workspaceId, browserSessionId, {
           operationId,
           ...fence,
-          observationMode: "none",
+          observationMode,
           action,
         });
         if (receipt.observation) {
@@ -571,7 +573,9 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       action: BrowserAction | BrowserActionBatch,
       frame: BrowserFrameInputFence,
       operationId: string = crypto.randomUUID(),
-    ): Promise<BrowserActionReceipt> => await dispatchAction(action, operationId, frame),
+      observationMode: "none" | "input" = "none",
+    ): Promise<BrowserActionReceipt> =>
+      await dispatchAction(action, operationId, frame, observationMode),
     [dispatchAction],
   );
 
