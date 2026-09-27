@@ -3630,6 +3630,16 @@ export type CodexUsagePayload = {
   };
 };
 
+/** One model a Codex account's current ChatGPT plan was proven not to include. */
+export type CodexPlanExcludedModel = {
+  /** Product model id, for example `codex/gpt-6-sol`. */
+  model: string;
+  /** Display name, for example "GPT-6 Sol". */
+  label: string;
+  excludedAt: string;
+  retryAfter: string;
+};
+
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
 export type CodexAccount = {
   id: string;
@@ -3638,6 +3648,17 @@ export type CodexAccount = {
   label?: string | null;
   email?: string | null;
   plan?: string | null;
+  /** When the provider last confirmed `plan` (connect, token refresh, or usage read). */
+  planCheckedAt?: string | null;
+  /** Plan before the most recent observed plan change, and when that change was seen. */
+  planChangedFrom?: string | null;
+  planChangedAt?: string | null;
+  /**
+   * Models the current plan was proven not to include. Each is skipped by
+   * automatic selection until `retryAfter` (one request then re-checks it), or
+   * until a different plan is observed, for example after refreshing usage.
+   */
+  planExcludedModels?: CodexPlanExcludedModel[];
   status: "active" | "needs_relogin" | "error";
   active: boolean;
   expiresAt?: string | null;
