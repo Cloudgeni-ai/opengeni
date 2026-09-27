@@ -120,6 +120,57 @@ function driver(
 }
 
 describe("BrowserInteractionController", () => {
+  test("large settled receipts preserve exact replay, conflicts and recovery without redispatch", async () => {
+    const current = target();
+    const largeObservation = observation(current);
+    largeObservation.semantic = {
+      kind: "snapshot",
+      roots: Array.from({ length: 1_000 }, (_, index) => ({
+        ref: `row-${index}`,
+        role: "text",
+        name: `Task ${index} — inspect installation progress and document acceptance`,
+        states: [],
+        actions: [],
+      })),
+      nodeCount: 1_000,
+    };
+    let dispatches = 0;
+    const create = (initialJournal?: ReturnType<BrowserInteractionController["journalSnapshot"]>) =>
+      new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        ...(initialJournal ? { initialJournal } : {}),
+        maxJournalEntries: 2,
+        driver: driver(new Map([[current.id, current]]), async () => {
+          dispatches++;
+          return largeObservation;
+        }),
+      });
+    const controller = create();
+    const first = await controller.run(command(1));
+    await controller.waitForIdle();
+    const serialized = JSON.stringify(first);
+    expect(Buffer.byteLength(serialized)).toBeGreaterThan(100_000);
+    expect(JSON.stringify(controller.receipt(operationId(1)))).toBe(serialized);
+    expect(JSON.stringify(await controller.run(command(1)))).toBe(serialized);
+    expect(() =>
+      controller.run({ ...command(1), action: { type: "navigate", url: "https://other.test" } }),
+    ).toThrow(InteractionControllerError);
+
+    const restored = create(controller.journalSnapshot());
+    expect(JSON.stringify(await restored.run(command(1)))).toBe(serialized);
+    expect(dispatches).toBe(1);
+    await controller.run(command(2));
+    await controller.run(command(3));
+    await controller.waitForIdle();
+    expect(controller.receipt(operationId(1))).toBeNull();
+    expect(controller.journalSnapshot().map((record) => record.operationId)).toEqual([
+      operationId(2),
+      operationId(3),
+    ]);
+    expect(dispatches).toBe(3);
+  });
+
   test("deduplicates concurrent operation ids and rejects conflicting reuse", async () => {
     const targets = new Map([["target-1", target()]]);
     const started = deferred();

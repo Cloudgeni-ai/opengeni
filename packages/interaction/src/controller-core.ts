@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { InteractionError, InteractionOperationState } from "@opengeni/contracts";
 
 export type InteractionControllerErrorCode = InteractionError["code"] | "journal_full";
@@ -134,9 +135,23 @@ export type InteractionControllerCoreOptions<
 };
 
 type JournalEntry<TReceipt> = InteractionOperationJournalRecord<TReceipt> & {
+  kind: "materialized";
   completion: Promise<TReceipt>;
   preparationPersisted: Promise<boolean>;
 };
+
+type CompactJournalEntry = {
+  kind: "compact";
+  operationId: string;
+  commandDigest: string;
+  state: InteractionOperationState;
+  receiptBytes: number;
+  compressedReceipt: Uint8Array;
+};
+
+// Keep small receipts and all in-flight promises untouched. Large settled AX
+// trees otherwise remain live as thousands of JS objects per past operation.
+const COMPACT_RECEIPT_MIN_BYTES = 16 * 1024;
 
 const terminalStates = new Set<InteractionOperationState>([
   "completed",
@@ -164,7 +179,7 @@ export class InteractionControllerCore<
     | ((record: InteractionOperationJournalRecord<TReceipt>) => Promise<void> | void)
     | undefined;
   private readonly commandDigest: (command: TCommand) => string;
-  private readonly journal = new Map<string, JournalEntry<TReceipt>>();
+  private readonly journal = new Map<string, JournalEntry<TReceipt> | CompactJournalEntry>();
   private readonly targetTails = new Map<string, Promise<void>>();
 
   constructor(
@@ -205,12 +220,15 @@ export class InteractionControllerCore<
           `operation id is already bound to a different ${this.adapter.resourceLabel} command`,
         );
       }
-      return existing.completion;
+      return existing.kind === "compact"
+        ? Promise.resolve(this.readReceipt(existing))
+        : existing.completion;
     }
 
     this.makeJournalSpace();
     const prepared = this.makeReceipt(command, "prepared", null, null, null, null);
     const entry: JournalEntry<TReceipt> = {
+      kind: "materialized",
       operationId: command.operationId,
       commandDigest,
       receipt: prepared,
@@ -232,19 +250,21 @@ export class InteractionControllerCore<
     void tail.finally(() => {
       if (this.targetTails.get(command.targetId) === tail)
         this.targetTails.delete(command.targetId);
+      this.compactJournalEntry(entry);
     });
     return entry.completion;
   }
 
   receipt(operationId: string): TReceipt | null {
-    return this.journal.get(operationId)?.receipt ?? null;
+    const entry = this.journal.get(operationId);
+    return entry ? this.readReceipt(entry) : null;
   }
 
   journalSnapshot(): InteractionOperationJournalRecord<TReceipt>[] {
-    return [...this.journal.values()].map(({ operationId, commandDigest, receipt }) => ({
-      operationId,
-      commandDigest,
-      receipt,
+    return [...this.journal.values()].map((entry) => ({
+      operationId: entry.operationId,
+      commandDigest: entry.commandDigest,
+      receipt: this.readReceipt(entry),
     }));
   }
 
@@ -428,7 +448,7 @@ export class InteractionControllerCore<
   private makeJournalSpace(): void {
     while (this.journal.size >= this.maxJournalEntries) {
       const terminal = [...this.journal.entries()].find(([, entry]) =>
-        terminalStates.has(entry.receipt.state),
+        terminalStates.has(entry.kind === "compact" ? entry.state : entry.receipt.state),
       );
       if (!terminal) {
         throw new InteractionControllerError(
@@ -451,6 +471,7 @@ export class InteractionControllerCore<
     }
     const receipt = this.adapter.recoverReceipt(parsed, this.timestamp());
     const entry: JournalEntry<TReceipt> = {
+      kind: "materialized",
       operationId: record.operationId,
       commandDigest: record.commandDigest,
       receipt,
@@ -458,6 +479,37 @@ export class InteractionControllerCore<
       preparationPersisted: Promise.resolve(true),
     };
     this.journal.set(record.operationId, entry);
+    this.compactJournalEntry(entry);
+  }
+
+  private readReceipt(entry: JournalEntry<TReceipt> | CompactJournalEntry): TReceipt {
+    if (entry.kind === "materialized") return entry.receipt;
+    const json = inflateRawSync(entry.compressedReceipt, {
+      maxOutputLength: entry.receiptBytes,
+    });
+    return this.adapter.parseReceipt(JSON.parse(json.toString("utf8")));
+  }
+
+  private compactJournalEntry(entry: JournalEntry<TReceipt>): void {
+    if (this.journal.get(entry.operationId) !== entry || !terminalStates.has(entry.receipt.state))
+      return;
+    try {
+      const json = JSON.stringify(entry.receipt);
+      const receiptBytes = Buffer.byteLength(json);
+      if (receiptBytes < COMPACT_RECEIPT_MIN_BYTES) return;
+      const compressedReceipt = deflateRawSync(json, { level: 1 });
+      this.journal.set(entry.operationId, {
+        kind: "compact",
+        operationId: entry.operationId,
+        commandDigest: entry.commandDigest,
+        state: entry.receipt.state,
+        receiptBytes,
+        compressedReceipt,
+      });
+    } catch {
+      // Cache optimization must never change a settled mutation's outcome.
+      // Retain the original receipt if serialization/compression is unavailable.
+    }
   }
 }
 

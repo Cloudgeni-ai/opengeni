@@ -20,3 +20,11 @@ contracts.
 must accept `prepared` and `dispatched` synchronously before execution proceeds;
 the exported recovery function is the sole crash-settlement policy used by both
 the controller and durable adapters.
+
+Large terminal receipts are compressed in the controller's in-memory journal
+after their command settles. Replay, receipt lookup and explicit journal export
+restore the full typed receipt; conflicting operation IDs still fail before
+dispatch. In-flight promises and durable journal records keep their existing
+semantics. This cache representation does not replace observations in model
+history or change screenshot references. The entry-count retention limit remains
+in force; compression is not a total memory or durable storage quota.
