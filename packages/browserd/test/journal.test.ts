@@ -180,6 +180,111 @@ describe("SqliteBrowserOperationJournal", () => {
       { maxEntries: 1 },
     );
   });
+
+  test("bounds receipt bytes on settlement while preserving in-flight work and exact replay", async () => {
+    await withJournal(
+      async ({ journal, path }) => {
+        const digest = "a".repeat(64);
+        const failed = (n: number) => ({
+          ...record(id(n), digest, "failed"),
+          receipt: {
+            ...receipt(id(n), "failed"),
+            error: {
+              code: "controller_lost" as const,
+              message: "x".repeat(1300),
+              retryable: false,
+            },
+          },
+        });
+        journal.write(record(id(1), digest, "prepared"));
+        journal.write(failed(1));
+        journal.write(record(id(2), digest, "prepared"));
+        journal.write(record(id(3), digest, "prepared"));
+        journal.write(failed(3));
+        expect(journal.read(id(1))).toBeNull();
+        expect(journal.read(id(2))?.receipt.state).toBe("prepared");
+        expect(journal.read(id(3))).toEqual(failed(3));
+        const db = new Database(path, { readonly: true });
+        try {
+          expect(
+            (
+              db
+                .query("SELECT sum(receipt_bytes) AS bytes FROM interaction_operation_journal")
+                .get() as { bytes: number }
+            ).bytes,
+          ).toBeLessThanOrEqual(3000);
+        } finally {
+          db.close();
+        }
+        journal.close();
+        const reopened = await SqliteBrowserOperationJournal.open({
+          path,
+          browserSessionId,
+          controllerGeneration,
+          maxTotalReceiptBytes: 3000,
+        });
+        try {
+          expect(reopened.loadAndRecover(settledAt).find((r) => r.operationId === id(3))).toEqual(
+            failed(3),
+          );
+          expect(reopened.read(id(2))?.receipt.state).toBe("failed");
+        } finally {
+          reopened.close();
+        }
+      },
+      { maxTotalReceiptBytes: 3000 },
+    );
+  });
+
+  test("byte eviction cannot redispatch a previously completed live operation", async () => {
+    await withJournal(
+      async ({ journal }) => {
+        let dispatches = 0;
+        const controller = new BrowserInteractionController({
+          browserSessionId,
+          controllerGeneration,
+          onJournalRecord: (next) => journal.write(next),
+          loadJournalRecord: (operation) => journal.read(operation),
+          driver: fixtureDriver(() => {
+            dispatches++;
+          }),
+        });
+        await controller.run(command(id(1)));
+        await controller.waitForIdle();
+        const digest = "c".repeat(64);
+        journal.write(record(id(2), digest, "prepared"));
+        const large = record(id(2), digest, "failed");
+        large.receipt.error!.message = "x".repeat(2500);
+        journal.write(large);
+        expect(journal.read(id(1))).toBeNull();
+        expect(() => controller.run(command(id(1)))).toThrow(
+          "durable operation receipt is unavailable",
+        );
+        expect(dispatches).toBe(1);
+      },
+      { maxTotalReceiptBytes: 3000 },
+    );
+  });
+
+  test("byte-cap refusal rolls back tentative evictions and never discards in-flight records", async () => {
+    await withJournal(
+      async ({ journal }) => {
+        const digest = "b".repeat(64);
+        for (const n of [1, 2, 3]) journal.write(record(id(n), digest, "prepared"));
+        journal.write(record(id(1), digest, "failed"));
+        const previous = journal.read(id(1));
+        const large = record(id(3), digest, "failed");
+        large.receipt.error!.message = "x".repeat(2500);
+        expect(() => journal.write(large)).toThrow("byte budget");
+        expect(journal.read(id(1))).toEqual(previous);
+        expect(journal.read(id(2))?.receipt.state).toBe("prepared");
+        expect(journal.read(id(3))?.receipt.state).toBe("prepared");
+        large.receipt.error!.message = "x".repeat(3000);
+        expect(() => journal.write(large)).toThrow("durable byte envelope");
+      },
+      { maxTotalReceiptBytes: 3000 },
+    );
+  });
 });
 
 describe("SqliteBrowserProtectedAuthJournal", () => {
@@ -230,7 +335,7 @@ describe("SqliteBrowserProtectedAuthJournal", () => {
 
 async function withJournal(
   callback: (fixture: { path: string; journal: SqliteBrowserOperationJournal }) => Promise<void>,
-  options: { maxEntries?: number } = {},
+  options: { maxEntries?: number; maxTotalReceiptBytes?: number } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-journal-");
   const path = join(directory, "operations.sqlite");

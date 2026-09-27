@@ -11,6 +11,7 @@ export type SqliteComputerOperationJournalOptions = {
   controllerGeneration: string;
   maxEntries?: number;
   maxRecordBytes?: number;
+  maxTotalReceiptBytes?: number;
 };
 
 /** Computer adapter over the one resource-neutral placement journal. */
@@ -44,6 +45,9 @@ export class SqliteComputerOperationJournal {
       recoverRecord: recoverComputerOperationJournalRecord,
       ...(options.maxEntries !== undefined ? { maxEntries: options.maxEntries } : {}),
       ...(options.maxRecordBytes !== undefined ? { maxRecordBytes: options.maxRecordBytes } : {}),
+      ...(options.maxTotalReceiptBytes !== undefined
+        ? { maxTotalReceiptBytes: options.maxTotalReceiptBytes }
+        : {}),
     });
     return new SqliteComputerOperationJournal(journal);
   }

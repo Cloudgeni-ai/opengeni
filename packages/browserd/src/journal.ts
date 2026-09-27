@@ -11,6 +11,7 @@ export type SqliteBrowserOperationJournalOptions = {
   controllerGeneration: string;
   maxEntries?: number;
   maxRecordBytes?: number;
+  maxTotalReceiptBytes?: number;
 };
 
 /** Browser adapter over the one resource-neutral placement journal. */
@@ -44,6 +45,9 @@ export class SqliteBrowserOperationJournal {
       recoverRecord: recoverBrowserOperationJournalRecord,
       ...(options.maxEntries !== undefined ? { maxEntries: options.maxEntries } : {}),
       ...(options.maxRecordBytes !== undefined ? { maxRecordBytes: options.maxRecordBytes } : {}),
+      ...(options.maxTotalReceiptBytes !== undefined
+        ? { maxTotalReceiptBytes: options.maxTotalReceiptBytes }
+        : {}),
     });
     return new SqliteBrowserOperationJournal(journal);
   }
