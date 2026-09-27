@@ -82,3 +82,9 @@ restoration, and verifies that another authority partition remains usable. Set
 `OPENGENI_BROWSER_EXECUTABLE` to the test Chromium executable, as in CI. Pooling
 still requires explicit opt-in; its contexts share a crash boundary and cannot
 replace durable profiles or an OS security boundary.
+
+Chromium main-frame reference actions revalidate the exact observed node through
+a single-node accessibility read before input, retaining document/ref checks
+and native hit testing. Other frames, semantic locators and engines still use
+full-tree resolution. Full post-action observations are unchanged; this removes
+redundant page-wide reads without acting on cached node state.
