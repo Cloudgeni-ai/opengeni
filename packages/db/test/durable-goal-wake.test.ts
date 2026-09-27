@@ -31,6 +31,7 @@ import {
   getScheduledTaskRevisionAuthority,
   getScheduledTaskRunAcceptedExecution,
   peekSessionWork,
+  requestSessionCompaction,
   settleSessionInputWait,
   settleSessionIdleWithParentOutbox,
   waitForSessionInputWithEvent,
@@ -44,6 +45,7 @@ import {
   projectSessionGoalPromptField,
   recoverSessionDispatch,
   recordSessionGoalProgressWithEvent,
+  recordSkippedContextCompaction,
   sendAgentMessageInTransaction,
   settleScheduledTaskRunInTransaction,
   setSessionGoalStatusWithEvent,
@@ -2523,6 +2525,297 @@ describe("session-level wait_for_input", () => {
     return await shared.admin`select id from session_system_update_outbox
       where source_session_id = ${ctx.session.id} and kind = 'child_terminal_result'`;
   }
+
+  function submitPrompt(ctx: GoalFixture, source: "user" | "api", text: string) {
+    return withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text,
+          resources: [],
+          reasoningEffortFallback: "low",
+          source,
+        }),
+      ),
+    );
+  }
+
+  async function claimNext(ctx: GoalFixture) {
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") {
+      throw new Error(`expected a claimable turn, got ${claimed.action}`);
+    }
+    return { claimed, attemptId };
+  }
+
+  async function waitFinishedEvents(ctx: GoalFixture) {
+    return await shared.admin<Array<{ payload: Record<string, unknown> }>>`
+      select payload from session_events
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+        and type = 'session.wait.finished'
+      order by sequence`;
+  }
+
+  // The benchmark ordering that lost a child result: the question is queued
+  // while the declaring turn is still running, that turn then waits, and the
+  // answer turn ends without waiting again.
+  async function answerQuestionAfterWait(ctx: GoalFixture, source: "user" | "api") {
+    const question = await submitPrompt(ctx, source, "how's it going?");
+    const waiting = await wait(ctx, { timeoutSeconds: 600, reason: "Waiting for the child count" });
+    await settleIdle(ctx);
+    const answer = await claimNext(ctx);
+    expect(answer.claimed.turn.id).toBe(question.turn.id);
+    expect(answer.claimed.turn.source).toBe(source);
+    await settleClaimedIdle(ctx, answer.claimed, answer.attemptId);
+    return waiting;
+  }
+
+  test.each(["user", "api"] as const)(
+    "a person's %s turn that does not re-wait leaves the wait held until its own deadline",
+    async (source) => {
+      const ctx = await runningGoalFixture({ withAncestor: true });
+      await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      const waiting = await answerQuestionAfterWait(ctx, source);
+      expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+        kind: "input-wait",
+        disposition: "held",
+        waitTurnId: ctx.turn.id,
+        deadlineAt: waiting.deadlineAt,
+      });
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+      ).toEqual({ deadlineAt: waiting.deadlineAt, reason: "Waiting for the child count" });
+      expect(
+        (
+          await listSessionsForSubject(client.db, ctx.grant.workspaceId!, {
+            subjectId: ctx.grant.subjectId,
+          })
+        ).sessions.find((row) => row.id === ctx.ancestor!.id)?.treeStats?.waitingDescendants,
+      ).toBe(1);
+      const settle = (disposition: "held" | "timeout" | "superseded") =>
+        settleSessionInputWait(client.db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          waitTurnId: ctx.turn.id,
+          disposition,
+        });
+      // A worker that still believes the person's turn retired the wait is refused.
+      expect(await settle("superseded")).toEqual({ action: "stale", events: [] });
+      expect((await waitColumns(ctx)).input_wait_turn_id).toBe(ctx.turn.id);
+      expect((await settle("held")).action).toBe("held");
+      expect(await waitFinishedEvents(ctx)).toHaveLength(0);
+
+      await shared.admin`update sessions set input_wait_until = now() - interval '1 second'
+        where id = ${ctx.session.id}`;
+      expect(
+        await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id),
+      ).toMatchObject({ kind: "input-wait", disposition: "timeout", waitTurnId: ctx.turn.id });
+      expect((await settle("timeout")).action).toBe("timeout");
+      expect((await waitFinishedEvents(ctx)).map((event) => event.payload.outcome)).toEqual([
+        "timeout",
+      ]);
+      expect(
+        (
+          await listOutstandingSessionSystemUpdates(
+            client.db,
+            ctx.grant.workspaceId!,
+            ctx.session.id,
+          )
+        ).map((update) => update.kind),
+      ).toEqual(["session_wait_timeout"]);
+    },
+  );
+
+  test("a child result wakes a goalless root after a person's answer turn ended without re-waiting", async () => {
+    const ctx = await runningGoalFixture();
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    const waiting = await answerQuestionAfterWait(ctx, "user");
+    const childSessionId = crypto.randomUUID();
+    const childResult = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: childSessionId,
+      dedupeKey: `child-completion:${childSessionId}:1`,
+      summary: "A worker session you spawned has finished its work and gone idle.",
+      payload: { type: "child_terminal_result", childSessionId, status: "idle" },
+      lineage: { parentSessionId: ctx.session.id, parentTurnId: ctx.turn.id, childSessionId },
+    });
+    if (!childResult.added) throw new Error("child result was not inserted");
+    const wake = (await outboxRow(ctx))!;
+    expect(Number(wake.wake_revision)).toBeGreaterThan(Number(wake.delivered_revision));
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        temporalWorkflowId: `session-${ctx.session.id}`,
+        wakeRevision: Number(wake.wake_revision),
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_machine_input" });
+    expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+      kind: "runnable",
+    });
+
+    const resumed = await claimNext(ctx);
+    expect(resumed.claimed.turn.source).toBe("system");
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          ctx.grant.workspaceId!,
+          ctx.session.id,
+          resumed.claimed.turn.id,
+        )
+      ).map((update) => update.kind),
+    ).toEqual(["child_terminal_result"]);
+    await settleClaimedIdle(ctx, resumed.claimed, resumed.attemptId);
+    expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+      kind: "input-wait",
+      disposition: "superseded",
+      waitTurnId: ctx.turn.id,
+      deadlineAt: waiting.deadlineAt,
+    });
+    const superseded = await settleSessionInputWait(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      waitTurnId: ctx.turn.id,
+      disposition: "superseded",
+    });
+    expect(superseded.action).toBe("superseded");
+    expect(superseded.events[0]!.payload).toMatchObject({ outcome: "input" });
+    expect((await waitColumns(ctx)).input_wait_turn_id).toBeNull();
+  });
+
+  test.each(["system", "goal"] as const)(
+    "a %s turn still supersedes a wait that outlived a person's turn",
+    async (kind) => {
+      const ctx = await runningGoalFixture();
+      if (kind === "system") {
+        await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      }
+      const waiting = await answerQuestionAfterWait(ctx, "user");
+      expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+        kind: "input-wait",
+        disposition: "held",
+        waitTurnId: ctx.turn.id,
+        deadlineAt: waiting.deadlineAt,
+      });
+      if (kind === "system") {
+        const input = await addSessionSystemUpdate(client.db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          kind: "agent_message",
+          classification: "info",
+          sourceId: crypto.randomUUID(),
+          dedupeKey: `agent-message-${crypto.randomUUID()}`,
+          summary: "Peer session finished",
+          payload: {
+            type: "agent_message",
+            text: "Peer session finished: PR opened",
+            operationId: crypto.randomUUID(),
+          },
+        });
+        if (!input.added) throw new Error("agent message was not inserted");
+      } else {
+        expect((await materialize(ctx)).action).toBe("continue");
+      }
+      const machine = await claimNext(ctx);
+      expect(machine.claimed.turn.source).toBe(kind);
+      await settleClaimedIdle(ctx, machine.claimed, machine.attemptId);
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+      ).toBeNull();
+      expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+        kind: "input-wait",
+        disposition: "superseded",
+        waitTurnId: ctx.turn.id,
+        deadlineAt: waiting.deadlineAt,
+      });
+    },
+  );
+
+  test("a person's own re-wait and a manual compaction keep the session waiting", async () => {
+    const ctx = await runningGoalFixture();
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    await wait(ctx, { timeoutSeconds: 600 });
+    await settleIdle(ctx);
+    await submitPrompt(ctx, "user", "keep waiting for the child, please");
+    const person = await claimNext(ctx);
+    const rewait = await waitForSessionInputWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        reason: "Still waiting for the child",
+        timeoutSeconds: 900,
+        command: {
+          accountId: ctx.grant.accountId,
+          actor: {
+            type: "agent_attempt",
+            sessionId: ctx.session.id,
+            turnId: person.claimed.turn.id,
+            attemptId: person.attemptId,
+            executionGeneration: person.claimed.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      },
+    );
+    expect(rewait.waitTurnId).toBe(person.claimed.turn.id);
+    await settleClaimedIdle(ctx, person.claimed, person.attemptId);
+    const heldPeek = {
+      kind: "input-wait" as const,
+      disposition: "held" as const,
+      waitTurnId: person.claimed.turn.id,
+      deadlineAt: rewait.deadlineAt,
+    };
+    expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual(
+      heldPeek,
+    );
+
+    // A manual compaction is maintenance a person requested; it carries no input.
+    await requestSessionCompaction(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    const compaction = await claimNext(ctx);
+    expect(compaction.claimed.turn.source).toBe("compaction");
+    expect(
+      await recordSkippedContextCompaction(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        turnId: compaction.claimed.turn.id,
+        expectedExecutionGeneration: compaction.claimed.turn.executionGeneration,
+        expectedAttemptId: compaction.attemptId,
+        reason: "replacement_unchanged",
+      }),
+    ).toMatchObject({ recorded: true });
+    await settleClaimedIdle(ctx, compaction.claimed, compaction.attemptId);
+    expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual(
+      heldPeek,
+    );
+    expect(
+      (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+    ).toEqual({ deadlineAt: rewait.deadlineAt, reason: "Still waiting for the child" });
+  });
 
   test("active child goal suppresses idle completion until goal completion, then replays once", async () => {
     const ctx = await runningGoalFixture({ withAncestor: true });

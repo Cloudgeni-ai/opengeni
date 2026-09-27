@@ -35025,6 +35025,36 @@ type SessionRow = typeof schema.sessions.$inferSelect & {
   meaningfulSequence?: number;
 };
 
+/**
+ * Turn sources a person starts: a human or API message, or an operator's
+ * manual `/compact`. Such a turn carries no machine input the agent is waiting
+ * for, so unless it declares its own wait it does not retire the held session
+ * wait. Every wait reader filters through `sessionInputWaitDecidingTurnSql`.
+ */
+const SESSION_INPUT_WAIT_PERSON_TURN_SOURCES = [
+  "user",
+  "api",
+  "compaction",
+] as const satisfies readonly SessionTurnSource[];
+
+/**
+ * The one predicate for "finished turns that decide the session wait": the
+ * declaring turn itself, plus every turn a person did not start. The newest
+ * finished turn matching it decides the disposition; if that is not the
+ * declaring turn, the wait is superseded. Worker settlement, peek/claim/wake
+ * admission, public projections, and descendant counts all use this so they
+ * cannot drift apart.
+ */
+function sessionInputWaitDecidingTurnSql(
+  turn: { id: SQLWrapper; source: SQLWrapper },
+  waitTurnId: SQLWrapper | string,
+): SQL {
+  return sql`(${turn.id} = ${waitTurnId} or ${turn.source} not in (${sql.join(
+    SESSION_INPUT_WAIT_PERSON_TURN_SOURCES.map((source) => sql`${source}`),
+    sql`, `,
+  )}))`;
+}
+
 /** One bounded query in the caller's RLS scope; never infer waits from history text. */
 async function withCurrentSessionInputWait(
   db: Database,
@@ -35044,6 +35074,7 @@ async function withCurrentSessionInputWait(
         eq(schema.sessionTurns.workspaceId, workspaceId),
         eq(schema.sessionTurns.sessionId, schema.sessions.id),
         isNotNull(schema.sessionTurns.finishedAt),
+        sessionInputWaitDecidingTurnSql(schema.sessionTurns, schema.sessions.inputWaitTurnId),
       ),
     )
     .orderBy(
@@ -35462,6 +35493,10 @@ export async function sessionTreeStatsForSessions(
                     select finished.id from ${schema.sessionTurns} finished
                     where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
                       and finished.finished_at is not null
+                      and ${sessionInputWaitDecidingTurnSql(
+                        { id: sql`finished.id`, source: sql`finished.source` },
+                        sql`waiting_session.input_wait_turn_id`,
+                      )}
                     order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
                   )
               )
@@ -71873,9 +71908,12 @@ async function pendingSystemUpdateWakeClassesTx(
 }
 
 /**
- * Evaluate the durable session-level wait against the newest finished turn and
- * the PostgreSQL clock. A newer completed turn is input that supersedes the
- * declaration; only the unchanged declaring turn can time out.
+ * Evaluate the durable session-level wait against the newest finished turn
+ * that can decide it (`sessionInputWaitDecidingTurnSql`) and the PostgreSQL
+ * clock. A newer finished turn that a person did not start is input that
+ * supersedes the declaration. A person's turn that does not wait again leaves
+ * the wait held, so a later child result or background command still wakes the
+ * agent; the unchanged deadline bounds it.
  */
 async function sessionInputWaitStateTx(
   db: Database,
@@ -71889,7 +71927,7 @@ async function sessionInputWaitStateTx(
   if (!wait.inputWaitTurnId || !wait.inputWaitUntil) {
     return { disposition: "none" };
   }
-  const [latestFinishedTurn] = await db
+  const [decidingTurn] = await db
     .select({ id: schema.sessionTurns.id })
     .from(schema.sessionTurns)
     .where(
@@ -71897,6 +71935,7 @@ async function sessionInputWaitStateTx(
         eq(schema.sessionTurns.workspaceId, workspaceId),
         eq(schema.sessionTurns.sessionId, sessionId),
         sql`${schema.sessionTurns.finishedAt} is not null`,
+        sessionInputWaitDecidingTurnSql(schema.sessionTurns, wait.inputWaitTurnId),
       ),
     )
     .orderBy(
@@ -71905,7 +71944,7 @@ async function sessionInputWaitStateTx(
       desc(schema.sessionTurns.createdAt),
     )
     .limit(1);
-  if (latestFinishedTurn?.id !== wait.inputWaitTurnId) {
+  if (decidingTurn?.id !== wait.inputWaitTurnId) {
     return { disposition: "superseded" };
   }
   const dbNow = await transactionNow(db);

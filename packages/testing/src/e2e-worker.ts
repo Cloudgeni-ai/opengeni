@@ -71,6 +71,7 @@ try {
 
 function scriptedModelForScenario(scenario: string): Model {
   if (scenario === "child-wait-boundary") return new ChildWaitBoundaryModel();
+  if (scenario === "held-wait-person-turn") return new HeldWaitPersonTurnModel();
   if (scenario === "sandbox") {
     return new SandboxScriptedModel();
   }
@@ -358,5 +359,62 @@ class ChildWaitBoundaryModel implements Model {
   }
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     yield* new ScriptedModel([this.step(request)]).getStreamedResponse(request);
+  }
+}
+
+/**
+ * A goalless root spawns a child and waits for it. A person's question was
+ * queued before the spawn, so it runs right after the wait and is answered
+ * without waiting again. The child finishes only after its own 30 s wait
+ * deadline, so its result always arrives after that answer turn has ended.
+ */
+class HeldWaitPersonTurnModel implements Model {
+  private async step(request: ModelRequest): Promise<ScriptedModelStep> {
+    const body = JSON.stringify(request.input);
+    const name = (suffix: string) =>
+      request.tools.find((tool) => tool.name?.endsWith(suffix))?.name ?? `opengeni__${suffix}`;
+    if (body.includes("HELD_WAIT_ROOT_FIXTURE")) {
+      if (!body.includes("opengeni__session_create")) {
+        // Keep the first turn busy long enough for the person's question to be
+        // queued before the child exists.
+        await Bun.sleep(3_000);
+        return {
+          output: [
+            functionCall(name("session_create"), {
+              initialMessage: "HELD_WAIT_CHILD_FIXTURE",
+              sandboxBackend: "none",
+            }),
+          ],
+        };
+      }
+      if (!body.includes("opengeni__wait_for_input"))
+        return {
+          output: [
+            functionCall(name("wait_for_input"), {
+              reason: "Waiting for the child's count",
+              timeoutSeconds: 600,
+            }),
+          ],
+        };
+      if (body.includes("worker session you spawned") || body.includes("child_terminal_result"))
+        return { outputText: "HELD_WAIT_ROOT_FINAL: the child counted 25 customers." };
+      return { outputText: "HELD_WAIT_STATUS_REPLY: the child is still counting." };
+    }
+    if (!body.includes("opengeni__wait_for_input"))
+      return {
+        output: [
+          functionCall(name("wait_for_input"), {
+            reason: "Controlled child delay before reporting",
+            timeoutSeconds: 30,
+          }),
+        ],
+      };
+    return { outputText: "HELD_WAIT_CHILD_RESULT: 25 customers." };
+  }
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return new ScriptedModel([await this.step(request)]).getResponse(request);
+  }
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([await this.step(request)]).getStreamedResponse(request);
   }
 }
