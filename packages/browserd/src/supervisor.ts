@@ -391,6 +391,14 @@ export class BrowserSupervisor {
       const poolSocketDirectory = join(this.socketRootDirectory, shortDigest(poolDirectory));
       pool = new EphemeralChromiumContextPool({
         authorityKey: key,
+        onTerminal: () => {
+          if (this.closed) return;
+          // Do not await retirement from pool shutdown: driver.close joins that
+          // same shutdown promise. Each end is fenced/deduplicated by `ending`.
+          void this.retireTerminalSessions().catch((error) => {
+            console.error("browser terminal-session retirement failed", error);
+          });
+        },
         launch: async () => {
           const runner = await AgentBrowserJsonRunner.create({
             namespace: "og",
@@ -460,6 +468,7 @@ export class BrowserSupervisor {
       );
     }
     try {
+      await this.retireTerminalSessions();
       const active = this.sessions.get(options.browserSessionId);
       if (active) {
         this.assertSameBinding(active, options);
@@ -799,7 +808,17 @@ export class BrowserSupervisor {
     if (raced) return await raced;
     const driverAlreadyClosed = runtime.lifecycle === "captured";
     runtime.lifecycle = "ending";
-    const ending = this.disposeRuntime(runtime, options.removeState ?? false, driverAlreadyClosed);
+    const ending = (async () => {
+      if (runtime.driver.isTerminal?.()) {
+        // Settle already-dispatched commands before their durable journals close.
+        // lifecycle=ending fences queued/new dispatches without replaying input.
+        await Promise.all([
+          runtime.controller.waitForIdle(),
+          runtime.protectedAuthController.waitForIdle(),
+        ]);
+      }
+      await this.disposeRuntime(runtime, options.removeState ?? false, driverAlreadyClosed);
+    })();
     this.ending.set(reference.browserSessionId, ending);
     try {
       await ending;
@@ -809,6 +828,14 @@ export class BrowserSupervisor {
         this.ending.delete(reference.browserSessionId);
       }
     }
+  }
+
+  private async retireTerminalSessions(): Promise<void> {
+    await Promise.all(
+      [...this.sessions.values()]
+        .filter((runtime) => runtime.driver.isTerminal?.())
+        .map((runtime) => this.endSession(binding(runtime))),
+    );
   }
 
   async close(): Promise<void> {
@@ -960,7 +987,6 @@ export class BrowserSupervisor {
     };
     let driver: BrowserSupervisorDriver | null = null;
     try {
-      const initialJournal = journal.loadAndRecover();
       const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
@@ -991,7 +1017,7 @@ export class BrowserSupervisor {
         creationObservation: null,
         recovery: null,
       };
-      runtime.controller = this.createController(runtime, driver, initialJournal);
+      runtime.controller = this.createController(runtime, driver);
       runtime.protectedAuthController = this.createProtectedAuthController(
         runtime,
         driver,
@@ -1187,7 +1213,7 @@ export class BrowserSupervisor {
       const currentSnapshot = await driver.runtimeSnapshot();
       const currentTargets = await driver.listTargets();
       runtime.driver = driver;
-      runtime.controller = this.createController(runtime, driver, runtime.journal.loadAndRecover());
+      runtime.controller = this.createController(runtime, driver);
       runtime.protectedAuthController = this.createProtectedAuthController(
         runtime,
         driver,
@@ -1359,28 +1385,30 @@ export class BrowserSupervisor {
   private createController(
     runtime: Runtime,
     driver: BrowserSupervisorDriver,
-    initialJournal: ReturnType<SqliteBrowserOperationJournal["loadAndRecover"]>,
   ): BrowserInteractionController {
-    return new BrowserInteractionController({
-      browserSessionId: runtime.options.browserSessionId,
-      controllerGeneration: runtime.options.controllerGeneration,
-      driver,
-      initialJournal,
-      onJournalRecord: (record) => runtime.journal.write(record),
-      loadJournalRecord: (operationId) => runtime.journal.read(operationId),
-      authority: {
-        authorizeDispatch: async (command) => {
-          if (runtime.lifecycle !== "active") {
-            throw new InteractionControllerError(
-              "resource_unavailable",
-              "browser session is changing state",
-              true,
-            );
-          }
-          await runtime.options.authority?.authorizeDispatch(command);
-        },
-      },
-    });
+    return runtime.journal.withRecoveredRecords(
+      (initialJournal) =>
+        new BrowserInteractionController({
+          browserSessionId: runtime.options.browserSessionId,
+          controllerGeneration: runtime.options.controllerGeneration,
+          driver,
+          initialJournal,
+          onJournalRecord: (record) => runtime.journal.write(record),
+          loadJournalRecord: (operationId) => runtime.journal.read(operationId),
+          authority: {
+            authorizeDispatch: async (command) => {
+              if (runtime.lifecycle !== "active") {
+                throw new InteractionControllerError(
+                  "resource_unavailable",
+                  "browser session is changing state",
+                  true,
+                );
+              }
+              await runtime.options.authority?.authorizeDispatch(command);
+            },
+          },
+        }),
+    );
   }
 
   private createProtectedAuthController(
@@ -1560,6 +1588,8 @@ export class BrowserSupervisor {
     try {
       await runtime.downloadStore?.close();
       downloadStoreClosed = true;
+      // A later process-cleanup retry must not interrupt an already closed store.
+      runtime.downloadStore = null;
     } catch (error) {
       failures.push(error);
     }

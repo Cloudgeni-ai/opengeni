@@ -36,6 +36,14 @@ receipt in memory after successful terminal persistence. Replay validates the
 full stored receipt; a missing/corrupt record cannot trigger repeated input.
 Failed persistence preserves the existing controller-lifetime RAM fallback.
 
+When an ephemeral Chromium pool terminates, its lost sessions settle pending
+receipts and retire their runtime and journal handles. New admission joins that
+cleanup before checking capacity. Healthy peers remain active. Retired sessions
+are no longer queryable as active resources; their receipt files and issued
+generation markers remain on disk, and the same session identity cannot silently
+launch a replacement browser. Failed cleanup remains visible and must succeed
+before its capacity is reclaimed.
+
 During profile restoration, saved `blob:` previews and `chrome-error:` documents
 become inert explanatory tabs: their old process-local contents cannot be reopened.
 They retain separate tabs and selection instead of failing the entire restore.
@@ -115,3 +123,23 @@ a single-node accessibility read before input, retaining document/ref checks
 and native hit testing. Other frames, semantic locators and engines still use
 full-tree resolution. Full post-action observations are unchanged; this removes
 redundant page-wide reads without acting on cached node state.
+
+## Journal recovery memory benchmark
+
+Browser/Computer controllers consume the recovered records synchronously inside
+that transaction, retaining replay descriptors one at a time. Restart no longer
+materializes all retained observation graphs into an intermediate array. Failed
+controller initialization rolls back recovery and closes the scoped iterator.
+
+For an opt-in synthetic restart-memory comparison, run each mode in a fresh Bun
+process against the same fixture. This seeds 1,800 receipts with 1,000 semantic
+nodes each (roughly 223 MiB on disk); the baseline can consume several GiB of RAM.
+It never launches a browser or uses real session data. Both modes verify every
+replayed receipt against the restored digest. Compare Linux `maxRSSKiB` on the
+same host; this measures journal/controller recovery, not browser capacity.
+
+```sh
+bun packages/browserd/test/journal-recovery.bench.ts seed /tmp/browser-recovery-bench.sqlite
+bun packages/browserd/test/journal-recovery.bench.ts baseline /tmp/browser-recovery-bench.sqlite
+bun packages/browserd/test/journal-recovery.bench.ts candidate /tmp/browser-recovery-bench.sqlite
+```

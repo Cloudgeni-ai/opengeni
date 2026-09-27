@@ -167,6 +167,15 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
   }
 
   loadAndRecover(settledAt = new Date().toISOString()): InteractionJournalRecord<TReceipt>[] {
+    return this.withRecoveredRecords((records) => Array.from(records), settledAt);
+  }
+
+  /** Consume recovered receipts synchronously, within their recovery transaction.
+   * Controllers can retain only replay descriptors instead of all observation graphs. */
+  withRecoveredRecords<T>(
+    consume: (records: Iterable<InteractionJournalRecord<TReceipt>>) => T,
+    settledAt = new Date().toISOString(),
+  ): T {
     this.assertOpen();
     const parsedSettledAt = new Date(settledAt);
     if (
@@ -176,8 +185,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       throw new Error("settledAt must be a canonical ISO timestamp");
     }
     return this.immediateTransaction(() => {
-      // Avoid retaining every raw JSON row plus two complete observation graphs.
-      // Only the final recovered result remains in memory.
+      // Validate every row before exposing any recovered records to the consumer.
       for (const row of this.rows()) {
         const record = this.recordFromRow(row);
         const recovered = this.recoverRecord(record, settledAt);
@@ -186,7 +194,16 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
         }
       }
       this.trimToLimit();
-      return Array.from(this.rows(), (row) => this.recordFromRow(row));
+      const records = this.records();
+      try {
+        const result = consume(records);
+        if (result && typeof (result as { then?: unknown }).then === "function") {
+          throw new Error("journal recovery consumer must be synchronous");
+        }
+        return result;
+      } finally {
+        records.return(undefined);
+      }
     });
   }
 
@@ -391,6 +408,10 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       sequence = row.sequence;
       yield row;
     }
+  }
+
+  private *records(): Generator<InteractionJournalRecord<TReceipt>> {
+    for (const row of this.rows()) yield this.recordFromRow(row);
   }
 
   private recordFromRow(row: JournalRow): InteractionJournalRecord<TReceipt> {
