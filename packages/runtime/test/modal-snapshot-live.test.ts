@@ -175,7 +175,13 @@ describe("Modal native checkpoint round trip (opt-in live service)", () => {
 
         const attributedIds: string[] = [];
         restored = await establishSandboxSessionFromEnvelope(
-          settings,
+          workspacePersistence === "snapshot_filesystem"
+            ? {
+                ...settings,
+                modalImageRef: "invalid.example/unused-base:missing",
+                modalImageRegistrySecret: "opengeni-unused-restore-secret",
+              }
+            : settings,
           {
             backendId: "modal",
             sessionState: {

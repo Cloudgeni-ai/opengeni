@@ -1806,13 +1806,6 @@ export async function establishSandboxSessionFromEnvelope(
   const createImageSource =
     backend === "modal" && settings.modalImageId ? "provider_immutable" : "logical";
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
-  // Every fresh-create caller crosses this one async boundary, including API
-  // interaction endpoints that do not run inside the turn worker. Resolve a
-  // private registry image before the synchronous client factory reads its
-  // selector. Worker-start prewarming remains only a latency optimization.
-  if (backend === "modal" && opts.recovery === "create-or-restore" && !opts.clientFactory) {
-    await ensureModalRegistryImage(settings);
-  }
   const client = (
     opts.clientFactory
       ? opts.clientFactory(backend, settings, environment)
@@ -1941,8 +1934,15 @@ export async function establishSandboxSessionFromEnvelope(
       const restoreImageSource = createdFromFilesystemSnapshot
         ? "provider_immutable"
         : createImageSource;
+      // Resolve only the image this create will use. A retained filesystem
+      // snapshot must not depend on the availability of today's registry image
+      // or its secret. Rebuild the Modal client after registry resolution so
+      // fresh/directory creates receive the resolved private-image selector.
+      if (backend === "modal" && !opts.clientFactory) {
+        await ensureModalRegistryImage(restoreSettings);
+      }
       const restoreClient =
-        restoreSettings === settings
+        restoreSettings === settings && (backend !== "modal" || opts.clientFactory)
           ? client
           : ((opts.clientFactory
               ? opts.clientFactory(backend, restoreSettings, environment)
