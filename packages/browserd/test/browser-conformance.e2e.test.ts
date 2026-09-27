@@ -138,11 +138,27 @@ e2e(
         expect(names(page)).toContain("Shadow 1");
       }
 
-      page = await act(driver, page, {
-        type: "fill",
-        locator: { kind: "role", role: "textbox", name: "Editable note", exact: true },
-        value: "fixture note",
-      });
+      if (lightpandaBinary) {
+        // Pinned Lightpanda cannot natively edit contenteditable. Refusal is the
+        // supported contract; do not turn a silent no-op into a success claim.
+        await expectDefiniteError(
+          driver.dispatch(
+            command(page, {
+              type: "fill",
+              locator: { kind: "role", role: "textbox", name: "Editable note", exact: true },
+              value: "fixture note",
+            }),
+          ),
+          "invalid_action",
+        );
+        page = await driver.observe(page.target.id);
+      } else {
+        page = await act(driver, page, {
+          type: "fill",
+          locator: { kind: "role", role: "textbox", name: "Editable note", exact: true },
+          value: "fixture note",
+        });
+      }
       expect(names(page)).not.toContain("fixture note");
       page = await act(driver, page, {
         type: "select",
@@ -385,10 +401,22 @@ e2e(
       page = await act(driver, page, { type: "navigate", url: `${fixture.mainUrl}/redirect` });
       expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
       expect(names(page)).toContain("Redirect complete");
-      page = await act(driver, page, { type: "history", direction: "back" });
-      expect(page.target.url).toBe(beforeRedirect);
-      page = await act(driver, page, { type: "history", direction: "forward" });
-      expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
+      if (lightpandaBinary) {
+        for (const direction of ["back", "forward"] as const) {
+          await expectDefiniteError(
+            driver.dispatch(command(page, { type: "history", direction })),
+            "invalid_action",
+          );
+          page = await driver.observe(page.target.id);
+          expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
+          expect(names(page)).toContain("Redirect complete");
+        }
+      } else {
+        page = await act(driver, page, { type: "history", direction: "back" });
+        expect(page.target.url).toBe(beforeRedirect);
+        page = await act(driver, page, { type: "history", direction: "forward" });
+        expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
+      }
 
       if (!lightpandaBinary) {
         page = await act(driver, page, {
