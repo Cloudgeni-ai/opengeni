@@ -9,9 +9,8 @@ import {
   fixedOrganizationApiKeyPermissions,
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
-  resolveWorkspaceAccessLevels,
-  workspaceMemberAccessRole,
 } from "./permissions";
+import { resolveWorkspaceAccessLevels, workspaceMemberAccessRole } from "./workspace-access-levels";
 
 describe("workspace member permission groups", () => {
   test("members can discover connections without gaining connection administration", () => {

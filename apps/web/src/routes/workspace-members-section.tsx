@@ -32,12 +32,14 @@ import { useAppContext } from "@/context";
 import {
   defaultWorkspaceMemberPermissions,
   organizationAdministrationAccountIds,
-  resolveWorkspaceAccessLevels,
-  workspaceMemberAccessRole,
   workspaceMemberPermissionGroups,
   type WorkspaceAccessLevel,
   type WorkspaceAccessLevelDefinition,
 } from "@/lib/permissions";
+import {
+  resolveWorkspaceAccessLevels,
+  workspaceMemberAccessRole,
+} from "@/lib/workspace-access-levels";
 import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
