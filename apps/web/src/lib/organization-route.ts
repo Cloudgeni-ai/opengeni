@@ -7,12 +7,15 @@
      ?section=people&view=invite              Invite people
      ?section=workspaces                      the Workspaces list
      ?section=workspaces&workspace=<id>       a workspace's page
-     ?section=workspaces&view=new-workspace   New workspace */
+     ?section=workspaces&view=new-workspace   New workspace
+     ?section=developer&view=new-key          Create API key */
 
-export type OrganizationView = "invite" | "new-workspace";
+export type OrganizationView = "invite" | "new-workspace" | "new-key";
 
 export function parseOrganizationView(value: unknown): OrganizationView | undefined {
-  return value === "invite" || value === "new-workspace" ? value : undefined;
+  return value === "invite" || value === "new-workspace" || value === "new-key"
+    ? value
+    : undefined;
 }
 
 const RECORD_ID = /^[\w:.-]{1,128}$/;

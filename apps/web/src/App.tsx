@@ -49,6 +49,16 @@ import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
 import {
+  parseOrganizationSection,
+  type LegacyOrganizationAdminSection,
+  type OrganizationAdminSection as OrganizationSettingsSection,
+} from "@/lib/organization-admin";
+import {
+  parseOrganizationRecordId,
+  parseOrganizationView,
+  type OrganizationView,
+} from "@/lib/organization-route";
+import {
   parseRootWorkspaceSearch,
   readLastWorkspaceId,
   resolveLandingWorkspaceId,
@@ -57,16 +67,10 @@ import {
 } from "@/lib/workspace-navigation-preference";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
-type OrganizationAdminSection =
-  | "integrations"
-  | "overview"
-  | "knowledge"
-  | "models"
-  | "people"
-  | "recovery"
-  | "retention"
-  | "developer"
-  | "billing";
+// Legacy section names (overview, knowledge, recovery, retention) still parse,
+// so older links keep working; they land on the page that holds them now.
+type OrganizationAdminSection = OrganizationSettingsSection | LegacyOrganizationAdminSection;
+
 type WorkspaceSettingsSection =
   | "learning"
   | "general"
@@ -526,28 +530,33 @@ const workspaceOrganizationRoute = createRoute({
     checkout?: CheckoutOutcome;
     section?: OrganizationAdminSection;
     account?: string;
-    view?: ModelsView;
+    view?: ModelsView | OrganizationView;
+    person?: string;
+    invitation?: string;
+    workspace?: string;
   } => {
     const checkout = parseCheckoutOutcome(search);
-    const section =
-      search.section === "overview" ||
-      search.section === "knowledge" ||
-      search.section === "models" ||
-      search.section === "people" ||
-      search.section === "recovery" ||
-      search.section === "retention" ||
-      search.section === "integrations" ||
-      search.section === "developer" ||
-      search.section === "billing"
-        ? search.section
-        : undefined;
+    const section = parseOrganizationSection(search.section);
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
-    const view = section === "models" ? parseModelsView(search.view) : undefined;
+    const view =
+      section === "models"
+        ? parseModelsView(search.view)
+        : section === "people" || section === "workspaces" || section === "developer"
+          ? parseOrganizationView(search.view)
+          : undefined;
+    const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
+    const invitation =
+      section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
+    const workspace =
+      section === "workspaces" ? parseOrganizationRecordId(search.workspace) : undefined;
     return {
       ...(checkout ? { checkout } : {}),
       ...(section ? { section } : {}),
       ...(account ? { account } : {}),
       ...(view ? { view } : {}),
+      ...(person ? { person } : {}),
+      ...(invitation ? { invitation } : {}),
+      ...(workspace ? { workspace } : {}),
     };
   },
   component: Organization,
@@ -870,14 +879,20 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
-  const { checkout, section, account, view } = workspaceOrganizationRoute.useSearch();
+  const { checkout, section, account, view, person, invitation, workspace } =
+    workspaceOrganizationRoute.useSearch();
+  const page = parseOrganizationSection(section);
   return (
     <LazyOrgSettingsRoute
       workspaceId={workspaceId}
       checkout={checkout}
-      section={section}
+      section={page}
       modelsAccount={account}
-      modelsView={view}
+      modelsView={page === "models" ? parseModelsView(view) : undefined}
+      organizationView={page === "models" ? undefined : parseOrganizationView(view)}
+      person={person}
+      invitation={invitation}
+      workspace={workspace}
     />
   );
 }

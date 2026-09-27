@@ -243,7 +243,8 @@ export function OrgSettingsRoute({
   const subPage =
     (section === "models" && Boolean(modelsAccount || modelsView)) ||
     (section === "people" && Boolean(person || invitation || organizationView)) ||
-    (section === "workspaces" && Boolean(workspace || organizationView));
+    (section === "workspaces" && Boolean(workspace || organizationView)) ||
+    (section === "developer" && organizationView === "new-key");
 
   return (
     <OrganizationDirectoryProvider
@@ -322,6 +323,14 @@ export function OrgSettingsRoute({
               key={`${identityKey}:organization-api-keys`}
               organizationId={accountId}
               canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+              view={organizationView === "new-key" ? "new-key" : undefined}
+              onViewChange={(view) =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/organization",
+                  params: { workspaceId },
+                  search: view ? { section: "developer", view } : { section: "developer" },
+                })
+              }
               listApiKeys={async () => await client.listOrganizationApiKeys(accountId)}
               createApiKey={async (request) =>
                 await client.createOrganizationApiKey(accountId, request)
