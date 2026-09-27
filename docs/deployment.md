@@ -1166,8 +1166,14 @@ Current profiles:
 prefers Docker only when its daemon answers a bounded server probe, then falls
 back to native PostgreSQL, NATS, Temporal, and pinned MinIO processes. Set
 `OPENGENI_DEV_BACKEND=docker` or `native` to require one path. The native path
-is Linux-only, changes a copied Docker sandbox default to the credentials-free
+supports Linux and macOS, changes a copied Docker sandbox default to the credentials-free
 in-process local provider, and preserves explicit remote sandbox providers.
+
+Native dependencies must already be installed: PostgreSQL with pgvector,
+NATS, Temporal CLI, MinIO and its `mc` client, and `setsid`. On macOS, put the
+PostgreSQL binaries and Homebrew util-linux binaries on the launcher's PATH.
+The local sandbox uses a fixed command PATH; `setsid` must also be reachable
+from `/opt/homebrew/bin` or `/usr/local/bin` for cancellable shell commands.
 
 Both infrastructure paths run migrations, import the fingerprinted reviewed
 integrations catalog, and start the API, control and turn workers, Connected

@@ -111,8 +111,12 @@ service_start_time() {
 
 process_start_time() {
   local pid="$1"
-  [ -r "/proc/$pid/stat" ] || return 1
-  awk '{print $22}' "/proc/$pid/stat"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    LC_ALL=C ps -p "$pid" -o lstart=
+  else
+    [ -r "/proc/$pid/stat" ] || return 1
+    awk '{print $22}' "/proc/$pid/stat"
+  fi
 }
 
 service_running() {
@@ -258,10 +262,14 @@ start_postgres() {
 }
 
 start_stack() {
+  local temporal_optional_args=()
   require_command nats-server
   require_command temporal
   require_command minio
   require_command mc
+  if temporal server start-dev --help 2>&1 | grep -- '--ui-disable-news-fetch' >/dev/null; then
+    temporal_optional_args+=(--ui-disable-news-fetch)
+  fi
   [ "${OPENGENI_OBJECT_STORAGE_FIXTURE:-}" = "minio" ] ||
     die "native infrastructure requires OPENGENI_OBJECT_STORAGE_FIXTURE=minio"
 
@@ -281,7 +289,7 @@ start_stack() {
       --ui-ip 127.0.0.1 \
       --ui-port "$OPENGENI_TEMPORAL_UI_HOST_PORT" \
       --db-filename "$TEMPORAL_DATA/temporal.db" \
-      --ui-disable-news-fetch \
+      ${temporal_optional_args[@]+"${temporal_optional_args[@]}"} \
       --log-level warn
   start_service minio \
     env MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
