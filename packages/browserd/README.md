@@ -36,6 +36,14 @@ receipt in memory after successful terminal persistence. Replay validates the
 full stored receipt; a missing/corrupt record cannot trigger repeated input.
 Failed persistence preserves the existing controller-lifetime RAM fallback.
 
+When an ephemeral Chromium pool terminates, its lost sessions settle pending
+receipts and retire their runtime and journal handles. New admission joins that
+cleanup before checking capacity. Healthy peers remain active. Retired sessions
+are no longer queryable as active resources; their receipt files and issued
+generation markers remain on disk, and the same session identity cannot silently
+launch a replacement browser. Failed cleanup remains visible and must succeed
+before its capacity is reclaimed.
+
 During profile restoration, saved `blob:` previews and `chrome-error:` documents
 become inert explanatory tabs: their old process-local contents cannot be reopened.
 They retain separate tabs and selection instead of failing the entire restore.
