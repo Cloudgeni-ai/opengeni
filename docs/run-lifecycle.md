@@ -19,6 +19,10 @@ checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append
 cursor; database position conflicts succeed only for the same turn and exact
 canonical item. Provider dispatch and successful settlement require this check.
+Fresh history inserts verify their persisted representation through `RETURNING`;
+only conflicting positions require a separate read. This keeps numeric-position
+RLS scans out of the ordinary append path without weakening retry verification
+or the exact-attempt write fence.
 
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
