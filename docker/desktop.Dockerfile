@@ -330,7 +330,7 @@ RUN set -eux; \
         xdotool scrot ffmpeg \
         libgl1-mesa-dri \
         xterm tesseract-ocr \
-        fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-color-emoji \
+        fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
