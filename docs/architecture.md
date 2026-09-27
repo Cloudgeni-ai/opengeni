@@ -165,8 +165,8 @@ They remain on the turn cancellation fence and stop before finalization, letting
 agents test preview servers without awaiting exit.
 
 `wait_for_input` persists a turn and deadline; input or timeout resumes execution.
-Only a newer finished turn a person did not start, or the timeout, retires it: a
-human/API turn that does not wait again runs but leaves the wait held.
+A human/API turn that neither waits again nor consumes immediate input leaves it
+held.
 Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
 drives working/recheck UI separately from unread. `session_wait`/`command_wait`
 are in-turn reads; idle child results carry final answers. See
