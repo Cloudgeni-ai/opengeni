@@ -57,9 +57,12 @@ export function PermissionSelect({
 export function ConnectorToolPermissions({
   workspaceId,
   capabilityId,
+  bare = false,
 }: {
   workspaceId: string;
   capabilityId: string;
+  /** Inside a page section that already names it: drop the frame and heading. */
+  bare?: boolean;
 }) {
   const { client } = useAppContext();
   const [data, setData] = useState<ConnectorToolPermissionsResponse | null>(null);
@@ -151,14 +154,19 @@ export function ConnectorToolPermissions({
     }
   }
   return (
-    <section className="space-y-3 border-t border-border pt-5" aria-label="Tool permissions">
-      <div>
-        <h3 className="text-sm font-medium">Tool permissions</h3>
-        <p className="mt-1 text-xs leading-5 text-fg-subtle">
-          Choose when OpenGeni can use this connector. Changes apply from the next turn. Existing
-          approvals remain in place.
-        </p>
-      </div>
+    <section
+      className={bare ? "space-y-3" : "space-y-3 border-t border-border pt-5"}
+      aria-label="Tool permissions"
+    >
+      {bare ? null : (
+        <div>
+          <h3 className="text-sm font-medium">Tool permissions</h3>
+          <p className="mt-1 text-xs leading-5 text-fg-subtle">
+            Choose when OpenGeni can use this connector. Changes apply from the next turn. Existing
+            approvals remain in place.
+          </p>
+        </div>
+      )}
       {error ? <Notice tone="failed">{error}</Notice> : null}
       {!data && !error ? (
         <p role="status" className="text-xs text-fg-subtle">

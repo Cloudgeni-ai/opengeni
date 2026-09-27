@@ -491,7 +491,7 @@ export function useGoogleDriveIntegration({
                   items: [...primaryAccessItems, ...extraAccounts.accessItems],
                   ...(canChange
                     ? {
-                        editLabel: "+ Add account",
+                        editLabel: "Add account",
                         onEdit: extraAccounts.addAccount,
                         editDisabled: extraAccounts.busy,
                         editDisclosureId: "google-drive-access",

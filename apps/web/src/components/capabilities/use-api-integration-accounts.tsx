@@ -584,7 +584,7 @@ export function useIntegrationDefinitionRow({
             items: controller.accessItems,
             ...(canManage
               ? {
-                  editLabel: "+ Add account",
+                  editLabel: "Add account",
                   onEdit: controller.addAccount,
                   editDisabled: controller.busy,
                 }
@@ -595,6 +595,10 @@ export function useIntegrationDefinitionRow({
     options: [],
     footer,
     ...(controller.tools.length > 0 ? { tools: { tools: controller.tools } } : {}),
+    outcomes: (
+      definitions.find((definition) => definition.id === definitionId)?.presentation
+        ?.capabilities ?? []
+    ).slice(0, 4),
   };
 
   return { model, dialogs: controller.dialogs };
