@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import type { BrowserActionReceipt } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
@@ -78,6 +79,29 @@ describe("SqliteBrowserOperationJournal", () => {
         dispatchedAt: null,
         error: { code: "controller_lost", retryable: true },
       });
+    });
+  });
+
+  test("rolls back earlier recovery when a later retained receipt is corrupt", async () => {
+    await withJournal(async ({ path, journal }) => {
+      const digest = createHash("sha256").update("recovery").digest("hex");
+      journal.write(record(id(1), digest, "prepared"));
+      journal.write(record(id(2), digest, "prepared"));
+      journal.write(record(id(2), digest, "dispatched"));
+      const db = new Database(path);
+      try {
+        db.query(
+          "UPDATE interaction_operation_journal SET receipt_json = '{}' WHERE operation_id = ?",
+        ).run(id(2));
+        expect(() => journal.loadAndRecover(settledAt)).toThrow("byte count is corrupt");
+        expect(
+          db
+            .query("SELECT state FROM interaction_operation_journal WHERE operation_id = ?")
+            .get(id(1)),
+        ).toEqual({ state: "prepared" });
+      } finally {
+        db.close();
+      }
     });
   });
 
