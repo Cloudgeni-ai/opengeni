@@ -18,6 +18,12 @@ before dispatch; restart settles a prepared operation as failed and a dispatched
 operation as `outcome_unknown`, without replaying either command. Session state is
 retained for restore unless its lifecycle owner explicitly ends and removes it.
 
+Settled interaction receipts use the same authority-scoped SQLite journal for
+on-demand replay. Controllers retain a content digest rather than a second full
+receipt in memory after successful terminal persistence. Replay validates the
+full stored receipt; a missing/corrupt record cannot trigger repeated input.
+Failed persistence preserves the existing controller-lifetime RAM fallback.
+
 During profile restoration, saved `blob:` previews and `chrome-error:` documents
 become inert explanatory tabs: their old process-local contents cannot be reopened.
 They retain separate tabs and selection instead of failing the entire restore.
@@ -53,9 +59,3 @@ hard-coded SHA-256 digest, and install an exact Chromium/Chrome package version.
 The runtime starts the service idempotently under a placement lock, authenticates
 readiness using the file-only admin credential, refuses a foreign listener, and
 stops only the exact recorded executable/PID.
-
-Settled interaction receipts use the same authority-scoped SQLite journal for
-on-demand replay. Controllers retain a content digest rather than a second full
-receipt in memory after successful terminal persistence. Replay validates the
-full stored receipt; a missing/corrupt record cannot trigger repeated input.
-Failed persistence preserves the existing controller-lifetime RAM fallback.
