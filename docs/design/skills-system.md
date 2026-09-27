@@ -118,8 +118,11 @@ naturally depends on that folder being accessible.
 skill_read({ skill, paths?, listFiles? })
 ```
 
-- Omit `paths`: return `SKILL.md`.
-- Specify `paths`: return exactly those paths, including multiple paths.
+- Omit `paths`: return `SKILL.md`. A repeat while the same revision and text
+  are still in the session's active model history returns a short
+  `alreadyInContext` receipt instead (see [run lifecycle](../run-lifecycle.md)).
+- Specify `paths`: return exactly those paths, including multiple paths. An
+  explicit path always returns a fresh copy.
 - Proposed: reject an empty array rather than ambiguously defaulting it.
 - Proposed: return files with their paths; report missing paths explicitly.
   Never silently omit files or present truncation as complete content.
