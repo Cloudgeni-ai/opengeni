@@ -53,8 +53,9 @@ human question. Without an active goal or a held wait, a later child result or
 command result does not wake the session; with an active goal, ending the answer
 turn starts a continuation that only rediscovers the same wait. The operational
 instructions therefore tell the agent to answer and then call `wait_for_input`
-again with the same reason while the awaited work is still in flight, whether or
-not a goal is active.
+again while the awaited work is still in flight, whether or not a goal is
+active, reusing the earlier reason and only the time left before the earlier
+deadline, because each turn's wait sets a fresh deadline from its timeout.
 
 A successful Temporal signal is transport delivery, not input admission. The
 current workflow-wake revision stays retryable while an eligible immediate input

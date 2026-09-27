@@ -249,8 +249,10 @@ describe("provider-neutral operational instructions", () => {
   test("keeps a status answer short and in the user's terms", () => {
     // Benchmark status replies led with plumbing such as "this session didn't
     // inherit its credentials" instead of progress.
+    // A blocker only the user can clear (a missing credential, a tool approval
+    // a worker is waiting on) must still reach them.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Keep a status answer to one or two sentences about progress in the user's terms, without session, credential, or tool mechanics.",
+      "Keep a status answer to one or two sentences about progress in the user's terms, without session, credential, or tool mechanics; name a blocker only when the user must act on it, and say what they need to do.",
     );
   });
 
@@ -261,8 +263,15 @@ describe("provider-neutral operational instructions", () => {
     // active goal it instead starts a continuation that rediscovers the same
     // wait. The re-wait rule must not be conditional on having no goal.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "If work you already started is still in flight (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` again with the same reason so its result resumes you, even when a goal is active.",
+      "If work you already started is still in flight (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` when available so its result resumes you, even when a goal is active.",
     );
+    // Each turn's wait sets a fresh absolute deadline from its timeout, so a
+    // re-wait with the full timeout would push a timed recheck back on every
+    // status question.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("again with the same reason");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "Otherwise the answer is your final response: an active goal continues on its own",
     );
@@ -376,8 +385,10 @@ describe("proportional effort", () => {
     expect(instructions).toContain(
       "When the Git repository you change has a remote and git provider credentials are available, work on a focused branch and open a pull request.",
     );
+    // A repository with a remote but no credentials still says the changes
+    // are not pushed, so the user does not assume they were.
     expect(instructions).toContain(
-      "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if they ask for one you cannot make, say what blocks it.",
+      "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if the repository has a remote, say the changes are not pushed, and if the user asks for something you cannot make, say what blocks it.",
     );
     expect(instructions).not.toContain("make code changes on a focused branch with a pull request");
     expect(instructions).not.toContain("report the exact commands and blockers");
