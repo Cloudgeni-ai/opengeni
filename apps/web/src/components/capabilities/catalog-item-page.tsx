@@ -34,7 +34,7 @@ import {
   capabilityPresentation,
   presentationPermissions,
 } from "@/components/capabilities/integration-experience";
-import { MoreMenu, RowButton } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { DetailSection } from "@/components/ui/detail-sheet";

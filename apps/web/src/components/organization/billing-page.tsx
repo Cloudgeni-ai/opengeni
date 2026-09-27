@@ -2,7 +2,7 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
 import { ErrorMessage } from "@/components/ui/error-message";

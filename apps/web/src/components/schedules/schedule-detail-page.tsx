@@ -2,13 +2,13 @@
  * One schedule's own page: back to Schedules, the header with its actions,
  * then Overview (on/off, instructions, setup) and Runs. Never a side sheet.
  */
+import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClockIcon,
   CopyIcon,
   LinkIcon,
   LockIcon,
-  MoreHorizontalIcon,
   PencilIcon,
   PlayIcon,
   ServerIcon,
@@ -28,13 +28,7 @@ import {
   DetailPageHeader,
 } from "@/components/ui/detail-page";
 import { DetailFact, DetailFacts, DetailSection } from "@/components/ui/detail-sheet";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, FieldStack, TextInput } from "@/components/ui/field";
@@ -93,6 +87,7 @@ import {
   type ScheduleAccess,
 } from "./schedule-parts";
 import { useScheduleActions } from "./use-schedule-actions";
+import { MoreMenu } from "@/components/ui/page-actions";
 
 const POLL_MS = 30_000;
 
@@ -278,9 +273,10 @@ export function ScheduleDetailPage({
                 {perms.canEdit ? (
                   <Button
                     type="button"
+                    size="sm"
                     variant="outline"
                     onClick={() => go.edit(task.id)}
-                    className="pointer-coarse:h-11"
+                    className="rounded-[10px] pointer-coarse:h-11"
                   >
                     <PencilIcon aria-hidden="true" />
                     Edit
@@ -289,9 +285,10 @@ export function ScheduleDetailPage({
                 {task.status === "paused" && perms.canPauseOrDelete ? (
                   <Button
                     type="button"
+                    size="sm"
                     onClick={() => void actions.resume(task)}
                     disabled={busy}
-                    className="pointer-coarse:h-11"
+                    className="rounded-[10px] pointer-coarse:h-11"
                   >
                     <PlayIcon aria-hidden="true" />
                     Resume
@@ -299,9 +296,10 @@ export function ScheduleDetailPage({
                 ) : perms.canRun ? (
                   <Button
                     type="button"
+                    size="sm"
                     onClick={() => void actions.runNow(task)}
                     disabled={busy || !scheduledTaskStateLabel(task).active}
-                    className="pointer-coarse:h-11"
+                    className="rounded-[10px] pointer-coarse:h-11"
                   >
                     <PlayIcon aria-hidden="true" />
                     Run now
@@ -310,58 +308,46 @@ export function ScheduleDetailPage({
                 {!perms.canEdit && !perms.canRun && perms.canDuplicate ? (
                   <Button
                     type="button"
+                    size="sm"
                     variant="outline"
                     onClick={() => go.create({ from: task.id })}
-                    className="pointer-coarse:h-11"
+                    className="rounded-[10px] pointer-coarse:h-11"
                   >
                     <CopyIcon aria-hidden="true" />
                     Duplicate
                   </Button>
                 ) : null}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`More actions for ${task.name}`}
-                      className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-                    >
-                      <MoreHorizontalIcon />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="min-w-44">
-                    {perms.canEdit ? (
-                      <DropdownMenuItem onSelect={() => setRenaming(true)}>
-                        <TextCursorInputIcon />
-                        Rename
-                      </DropdownMenuItem>
-                    ) : null}
-                    {perms.canDuplicate && (perms.canEdit || perms.canRun) ? (
-                      <DropdownMenuItem onSelect={() => go.create({ from: task.id })}>
-                        <CopyIcon />
-                        Duplicate
-                      </DropdownMenuItem>
-                    ) : null}
-                    <DropdownMenuItem onSelect={copyLink}>
-                      <LinkIcon />
-                      Copy link
+                <MoreMenu label={`More actions for ${task.name}`}>
+                  {perms.canEdit ? (
+                    <DropdownMenuItem onSelect={() => setRenaming(true)}>
+                      <TextCursorInputIcon />
+                      Rename
                     </DropdownMenuItem>
-                    {perms.canPauseOrDelete ? (
-                      <>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          disabled={busy}
-                          onSelect={() => actions.requestDelete(task)}
-                        >
-                          <Trash2Icon />
-                          Delete
-                        </DropdownMenuItem>
-                      </>
-                    ) : null}
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                  ) : null}
+                  {perms.canDuplicate && (perms.canEdit || perms.canRun) ? (
+                    <DropdownMenuItem onSelect={() => go.create({ from: task.id })}>
+                      <CopyIcon />
+                      Duplicate
+                    </DropdownMenuItem>
+                  ) : null}
+                  <DropdownMenuItem onSelect={copyLink}>
+                    <LinkIcon />
+                    Copy link
+                  </DropdownMenuItem>
+                  {perms.canPauseOrDelete ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant="destructive"
+                        disabled={busy}
+                        onSelect={() => actions.requestDelete(task)}
+                      >
+                        <Trash2Icon />
+                        Delete
+                      </DropdownMenuItem>
+                    </>
+                  ) : null}
+                </MoreMenu>
               </>
             }
             tabs={
@@ -661,7 +647,6 @@ function Setup({
         ? "Workspace tools"
         : (toolMcpServers.find((server) => server.id === tool.id)?.name ?? tool.id),
     );
-  const variableSetsHref = `/workspaces/${encodeURIComponent(workspaceId)}/variable-sets`;
   return (
     <DetailFacts>
       <DetailFact label="Each run">{EACH_RUN[task.runMode]}</DetailFact>
@@ -685,12 +670,13 @@ function Setup({
       ) : null}
       {task.variableSetId ? (
         <DetailFact label="Variable set">
-          <a
-            href={variableSetsHref}
+          <Link
+            to="/workspaces/$workspaceId/variable-sets/$variableSetId"
+            params={{ workspaceId, variableSetId: task.variableSetId }}
             className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
           >
             {setName ?? (variableSets.loading ? "Loading…" : "Attached variable set")}
-          </a>
+          </Link>
         </DetailFact>
       ) : null}
       {repositories.length > 0 ? (
@@ -707,7 +693,13 @@ function Setup({
       ) : null}
       {task.rigId ? (
         <DetailFact label="Environment">
-          {rigName ?? (rigs.loading ? "Loading…" : "Attached Sandbox Environment")}
+          <Link
+            to="/workspaces/$workspaceId/rigs/$rigId"
+            params={{ workspaceId, rigId: task.rigId }}
+            className="rounded-[6px] font-medium text-brand underline-offset-4 hover:underline"
+          >
+            {rigName ?? (rigs.loading ? "Loading…" : "Attached sandbox environment")}
+          </Link>
         </DetailFact>
       ) : null}
       {tools.length > 0 ? <DetailFact label="Tools">{tools.join(", ")}</DetailFact> : null}

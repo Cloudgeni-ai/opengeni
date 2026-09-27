@@ -16,7 +16,6 @@ import {
   LinkIcon,
   LockIcon,
   MessageSquareIcon,
-  MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
   QuoteIcon,
@@ -35,13 +34,7 @@ import {
 } from "@/components/ui/detail-page";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Checkbox, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
@@ -77,6 +70,7 @@ import {
 } from "./knowledge-labels";
 import { EntryList, KindTile, type EntryRowActions } from "./knowledge-library";
 import { KnowledgeOriginalFile } from "./knowledge-original-file";
+import { MoreMenu } from "@/components/ui/page-actions";
 
 /* ----------------------------------------------------------------------------
    One entry or collection: its own page with a back link, like a skill in
@@ -471,74 +465,61 @@ function EntryPageContent({
   );
 
   const menu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label={`More actions for ${entry.title}`}
-          className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-        >
-          <MoreHorizontalIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-48">
-        <DropdownMenuItem
-          onSelect={() => {
-            void navigator.clipboard
-              ?.writeText(new URL(entryLink(record.id), window.location.origin).href)
-              .then(() => toast("Copied a link to this entry"))
-              .catch(() => toast.error("Couldn't copy the link"));
-          }}
-        >
-          <LinkIcon />
-          Copy link
+    <MoreMenu label={`More actions for ${entry.title}`}>
+      <DropdownMenuItem
+        onSelect={() => {
+          void navigator.clipboard
+            ?.writeText(new URL(entryLink(record.id), window.location.origin).href)
+            .then(() => toast("Copied a link to this entry"))
+            .catch(() => toast.error("Couldn't copy the link"));
+        }}
+      >
+        <LinkIcon />
+        Copy link
+      </DropdownMenuItem>
+      {collection && editable ? (
+        <DropdownMenuItem onSelect={() => onAddInCollection(record.id)}>
+          <PlusIcon />
+          Add knowledge here
         </DropdownMenuItem>
-        {collection && editable ? (
-          <DropdownMenuItem onSelect={() => onAddInCollection(record.id)}>
-            <PlusIcon />
-            Add knowledge here
-          </DropdownMenuItem>
-        ) : null}
-        {canEdit && record.scope === "personal" && !collection && !record.archived && !pending ? (
-          <DropdownMenuItem onSelect={() => setSharing(true)}>
-            <Share2Icon />
-            Share with a workspace…
-          </DropdownMenuItem>
-        ) : null}
-        {writable && !pending && !historical && !rejected ? (
-          <>
-            <DropdownMenuSeparator />
-            {record.archived ? (
-              <DropdownMenuItem
-                disabled={busy}
-                onSelect={() =>
-                  void restore(record.revision.id, `Restored ${entry.title}. Agents use it again.`)
-                }
-              >
-                <ArchiveRestoreIcon />
-                Restore
-              </DropdownMenuItem>
-            ) : (
-              <DropdownMenuItem
-                disabled={busy}
-                onSelect={() => {
-                  setBusy(true);
-                  void onArchive(record).finally(() => {
-                    setBusy(false);
-                    setLocalRefresh((value) => value + 1);
-                  });
-                }}
-              >
-                <ArchiveIcon />
-                Archive
-              </DropdownMenuItem>
-            )}
-          </>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      ) : null}
+      {canEdit && record.scope === "personal" && !collection && !record.archived && !pending ? (
+        <DropdownMenuItem onSelect={() => setSharing(true)}>
+          <Share2Icon />
+          Share with a workspace…
+        </DropdownMenuItem>
+      ) : null}
+      {writable && !pending && !historical && !rejected ? (
+        <>
+          <DropdownMenuSeparator />
+          {record.archived ? (
+            <DropdownMenuItem
+              disabled={busy}
+              onSelect={() =>
+                void restore(record.revision.id, `Restored ${entry.title}. Agents use it again.`)
+              }
+            >
+              <ArchiveRestoreIcon />
+              Restore
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem
+              disabled={busy}
+              onSelect={() => {
+                setBusy(true);
+                void onArchive(record).finally(() => {
+                  setBusy(false);
+                  setLocalRefresh((value) => value + 1);
+                });
+              }}
+            >
+              <ArchiveIcon />
+              Archive
+            </DropdownMenuItem>
+          )}
+        </>
+      ) : null}
+    </MoreMenu>
   );
 
   return (
@@ -573,9 +554,10 @@ function EntryPageContent({
               {editable ? (
                 <Button
                   type="button"
+                  size="sm"
                   variant="outline"
                   onClick={() => onEdit(record.id)}
-                  className="pointer-coarse:h-11"
+                  className="rounded-[10px] pointer-coarse:h-11"
                 >
                   <PencilIcon aria-hidden="true" />
                   Edit

@@ -12,7 +12,7 @@ import {
   useWorkspaceSessions,
 } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -46,6 +46,7 @@ import { orgLabel } from "@/lib/org";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import type { WorkspaceVariableSet } from "@/types";
+import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 
 export {
   sessionUsesVariableSet,
@@ -242,7 +243,11 @@ export function VariableSetsRoute({
   /* ------------------------------------------------------------ focus */
 
   const pageKey = `${variableSetId ?? ""}|${view ?? ""}`;
-  const root = useFocusOnNavigation(pageKey);
+  const root = useFocusOnNavigation(pageKey, {
+    onList: pageKey === "|",
+    // An open set's page (not its forms): its title names its row on the list.
+    rememberTitle: Boolean(variableSetId) && !view,
+  });
 
   /* ------------------------------------------------------------ pages */
 
@@ -438,46 +443,4 @@ export function VariableSetsRoute({
       />
     </ContentPage>
   );
-}
-
-/**
- * After a navigation, focus lands on the new page's title so keyboard and
- * screen reader users start at the top of it; back on the list, focus returns
- * to the row that was opened.
- */
-function useFocusOnNavigation(pageKey: string) {
-  const ref = useRef<HTMLDivElement>(null);
-  const previousKey = useRef(pageKey);
-  const lastTitle = useRef<string | null>(null);
-  useEffect(() => {
-    const root = ref.current;
-    // Strict mode runs effects twice; only a real change of page moves focus.
-    if (previousKey.current !== pageKey && root) {
-      previousKey.current = pageKey;
-      const returnTo = lastTitle.current;
-      const onList = pageKey === "|";
-      const row = onList
-        ? Array.from(root.querySelectorAll<HTMLElement>("[data-slot=list-row]")).find(
-            (each) => returnTo !== null && each.textContent?.includes(returnTo),
-          )
-        : undefined;
-      if (row) {
-        row.querySelector<HTMLElement>("[data-row-action]")?.focus();
-      } else {
-        const heading = root.querySelector<HTMLElement>("h1");
-        if (heading) {
-          if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
-          // A heading is not a control: no ring, but screen readers start here.
-          heading.style.outline = "none";
-          heading.focus({ preventScroll: true });
-        }
-        root.scrollIntoView?.({ block: "start" });
-      }
-    }
-    // Remember the open set's name, to find its row again on the list.
-    const heading = pageKey.endsWith("|") && pageKey !== "|" ? root?.querySelector("h1") : null;
-    if (heading?.textContent) lastTitle.current = heading.textContent;
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- only when the page changes
-  }, [pageKey]);
-  return ref;
 }

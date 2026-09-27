@@ -3,7 +3,8 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage, RowButton } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { ErrorMessage } from "@/components/ui/error-message";

@@ -1,26 +1,13 @@
 import { useNavigate } from "@tanstack/react-router";
-import { MoreHorizontalIcon, RouteIcon, SparklesIcon } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useState,
-  type ComponentProps,
-  type ReactNode,
-  type SVGProps,
-} from "react";
+import { RouteIcon, SparklesIcon } from "lucide-react";
+import { useCallback, useEffect, useState, type ComponentProps, type SVGProps } from "react";
 
 import { ChatGptMark } from "@/components/chatgpt-mark";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
+import { FormDialog } from "@/components/ui/form-dialog";
+import { FlushFormPage } from "@/components/ui/flush-form-page";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 import type { ModelsView } from "@/lib/models-route";
-import { cn } from "@/lib/utils";
 
 export type ModelsScope =
   | { kind: "workspace"; workspaceId: string }
@@ -66,82 +53,12 @@ export function ProviderTile({
   return <LogoTile size={size} icon={<ProviderMark provider={provider} className="text-fg" />} />;
 }
 
-/** The ⋯ button and its menu. `quiet` sits in a group header; the default in a page header. */
-export function MoreMenu({
-  label,
-  quiet = false,
-  children,
-}: {
-  label: string;
-  quiet?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant={quiet ? "ghost" : "outline"}
-          size="icon-sm"
-          aria-label={label}
-          className={cn(
-            "rounded-[10px] pointer-coarse:size-11",
-            quiet ? "-mr-1.5 text-fg-subtle hover:text-fg" : "text-fg-muted hover:text-fg",
-          )}
-        >
-          <MoreHorizontalIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-48">
-        {children}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-/** An outlined small button, 44px on coarse pointers, the shape every row action uses. */
-export function RowButton({ children, className, ...props }: ComponentProps<typeof Button>) {
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      className={cn("rounded-[10px] pointer-coarse:h-11", className)}
-      {...props}
-    >
-      {children}
-    </Button>
-  );
-}
-
-const FLUSH_FORM_PAGE = [
-  "[&>form>header]:mx-0 [&>form>header]:px-0 [&>form>header]:pt-0",
-  "[&>form>[data-slot=form-body]]:mx-0 [&>form>[data-slot=form-body]]:px-0",
-  "[&>form>footer>div]:mx-0 [&>form>footer>div]:px-0",
-  // The footer's hairline ends where the 640px column does, like the header's.
-  "[&>form>footer]:max-w-[640px]",
-].join(" ");
-
 /** A full-page form with a back link and a sticky Cancel + primary footer. */
 export function ModelsFormPage({
-  onClose,
   backLabel = "Models",
-  className,
   ...props
-}: Omit<FormFrameProps, "variant" | "back" | "onCancel"> & {
-  onClose: () => void;
-  backLabel?: string;
-}) {
-  return (
-    <FormPage
-      back={{ label: backLabel, onClick: onClose }}
-      onCancel={onClose}
-      // The settings content column already has its gutter: start the form
-      // where a detail page starts instead of centring it again.
-      className={cn(FLUSH_FORM_PAGE, className)}
-      {...props}
-    />
-  );
+}: Omit<ComponentProps<typeof FlushFormPage>, "backLabel"> & { backLabel?: string }) {
+  return <FlushFormPage backLabel={backLabel} {...props} />;
 }
 
 /**

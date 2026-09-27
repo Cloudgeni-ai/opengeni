@@ -36,7 +36,8 @@ code disagree, this file wins; bring the code in line when you touch it.
    4px grid. Every destination appears once, with one name and one icon.
 10. **Destructive means explicit.** Confirm with the real name, the real consequences and what
     depends on it. When something can't be deleted, say what blocks it before the click.
-    Reversible actions use Undo instead of a dialog.
+    Reversible actions (remove access, archive, restore from history) use an Undo toast instead
+    of a dialog.
 
 ## 2. Tokens
 
@@ -168,6 +169,25 @@ Learned on Settings > Models, 27 Sep 2026.
   (section 5). Buttons on rows do something (Rename, Make primary, Turn on).
 - **Edit pages for existing settings** show Cancel and Save only once something changed; until
   then the back link is the way out.
+- **Empty lists carry their own action.** While a list is empty, its toolbar and the header's
+  create action hide; the empty state holds the one action.
+- **Nothing to pick, nothing shown.** Hide a chip, filter or picker that has only one possible
+  value or none.
+- **One row per provider.** A provider with several connection modes is one row; its page lists
+  the modes as outcomes ("Pay with your ChatGPT plan", "Pay per use with an API key").
+- **Toolbar pieces stay in the toolbar.** `ToolbarSearch` always sits inside a `Toolbar`. A `Select`
+  in a narrow `SettingRow` gets a fixed width so the column doesn't jump between values.
+
+### State and truth on a page
+
+- **Workspace-wide state is a banner with its action.** A paused workspace shows one banner at the
+  top of the affected pages with Resume in it, not a disabled control on every row.
+- **On a paused object's page the primary action is Resume.** Everything else moves to the ⋯
+  menu until it runs again.
+- **Unrelated gaps never block editing.** A missing capability disables only the control that needs
+  it, with the reason; the rest of the form stays editable.
+- **Never claim a count you don't have.** Detail meta and "Used by" say "Checking use..." while
+  unknown and fail closed (no count, no "Not used") when the check fails.
 
 ## 8. Pages, not sheets
 
@@ -195,11 +215,22 @@ Main column: DetailSection ...        | Quiet aside card:
 - `DetailPageHeader` - 40px `LogoTile` or avatar, 20/600 title, `chips` (StatusBadge, MetaChip),
   a `meta` line (pass an array; parts join with " · "), `actions` (at most one primary, then a ⋯
   menu that holds Rename, Delete, Disconnect), and optional `tabs` (`LineTabsNav` underline, with
-  counts).
+  counts). Header actions are 32px with the 10px radius (`size="sm"` buttons, `RowButton`, and
+  `MoreMenu` for the ⋯); the default 36px button is for a list page's `PageHeader` primary only.
 - `DetailPageBody` - the main column of `DetailSection`s split by hairlines, and an optional
   `aside` (`DetailAside` + `DetailAsideItem`: "Created by", "Available to", "Plan", IDs). The aside
   drops under the main column below 620px of content width.
-- Focus moves to the page title when the page opens in place; the title is focusable from script.
+- Focus moves to the page title when the page opens in place; the title is focusable from script
+  (`useFocusOnNavigation`). Back on the list, focus returns to the row that was opened.
+
+**Settings pages render in `SettingsFrame`.** The frame draws the sub-nav and the section's page
+header; a sub-page (an account, a key, a person, a form) hides that header and declares its own
+back link and title. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
+reload and browser Back work, and its back link returns to the tab or list it was opened from.
+Inside the settings column pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
+`FlushFormPage` (or `FLUSH_FORM_PAGE_CLASS`) for `FormPage`, and the flush `AccessList`, so the
+back link, title and rows start where the section header does. Page actions use `RowButton` and
+`MoreMenu` from `components/ui/page-actions.tsx`.
 
 **Creating and editing is a page too.** New schedule (`/schedules/new`), Edit schedule, New
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New
@@ -213,6 +244,8 @@ page. After a create, go to the new object's page.
 - Destructive confirmations with consequences: Delete, Revoke, Disconnect, Remove
   (`DestructiveConfirm`, including type-to-confirm and the blocked variant).
 - One-field prompts where a page would be absurd: Rename, Replace value (`FormDialog`, size `sm`).
+- A short OAuth or device-code step (show a code, wait for the provider), opened only from a
+  page's primary button.
 
 Never: a right-side sheet or panel for anything, a sheet opened from a sheet, an inline create form
 that pushes the list down, or a dialog with tabs or a list in it. `DetailSheet` and `FormSheet`
@@ -245,7 +278,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | Secret values | Write-only: values are never shown after saving; Replace value only. |
 | Cadence picker | Sentence builder: [Every weekday] at [08:00] [Oslo time], with a live next-run line. |
 | Access list | Inline role select that saves immediately and a ⋯ menu with Remove, the same rows in every place access is edited. |
-| Foundations | One `LogoTile` (40/32/24px), `RelativeTime` ("3 days ago", exact time on hover), `CopyField` for IDs, `DiffView` with revision history. |
+| Foundations | One `LogoTile` (40/32/24px): brand logos on a light tile in both themes, fallback icons on `surface-2`. `RelativeTime` ("3 days ago", exact time on hover), `CopyField` for IDs, `DiffView` with revision history. |
 
 ## 10. How to restyle
 

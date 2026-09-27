@@ -31,7 +31,9 @@ import {
   useConnectionAccess,
   type ConnectionAccessTarget,
 } from "@/components/connection-access-settings";
-import { ModelsFormPage, MoreMenu, ProviderTile, RowButton } from "@/components/models/models-ui";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { ModelsFormPage, ProviderTile } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
@@ -1176,7 +1178,7 @@ export function ProviderConnectionPage({
   return (
     <DetailPage
       back={onBack ? { label: "Models", onClick: onBack } : undefined}
-      className="max-w-none px-0 pt-0 pb-0 max-sm:px-0"
+      className={FLUSH_DETAIL_PAGE_CLASS}
     >
       {header}
       <DetailPageBody

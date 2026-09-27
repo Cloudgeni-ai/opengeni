@@ -1,7 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";

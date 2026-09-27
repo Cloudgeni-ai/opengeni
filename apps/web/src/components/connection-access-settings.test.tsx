@@ -92,10 +92,15 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
     try {
       await act(async () => root.render(<Page editing={false} />));
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-      expect(container.textContent).toContain("All shared workspaces");
-      expect(container.textContent).toContain("All models, including new ones");
-      if (kind === "codex" || kind === "supergrok")
-        expect(container.textContent).toContain("+ Personal");
+      // The "Available in" and "Models it can serve" rows show short values.
+      expect(container.textContent).toContain("Available in");
+      expect(container.textContent).toContain(
+        kind === "codex" || kind === "supergrok" ? "All workspaces + Personal" : "All workspaces",
+      );
+      if (kind !== "codex" && kind !== "supergrok")
+        expect(container.textContent).not.toContain("+ Personal");
+      expect(container.textContent).toContain("Models it can serve");
+      expect(container.textContent).toContain("All models");
 
       await act(async () => root.render(<Page editing />));
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));

@@ -2,7 +2,7 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import { ErrorMessage } from "@/components/ui/error-message";

@@ -15,7 +15,6 @@ import {
   BoxIcon,
   Building2Icon,
   ContainerIcon,
-  MoreHorizontalIcon,
   PencilIcon,
   StarIcon,
   StarOffIcon,
@@ -41,13 +40,7 @@ import {
 } from "@/components/ui/detail-page";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, FieldStack, TextInput } from "@/components/ui/field";
 import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@/components/ui/flush-form-page";
@@ -69,6 +62,7 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
 import type { Rig } from "@/types";
+import { MoreMenu } from "@/components/ui/page-actions";
 
 // Live cadence: fast enough that a verifying change resolves without a manual
 // refresh, slow enough to stay quiet.
@@ -320,47 +314,34 @@ export function RigDetailRoute({
               {active ? (
                 <Button
                   type="button"
+                  size="sm"
                   onClick={() => openRig({ view: "edit-setup" })}
-                  className="pointer-coarse:h-11"
+                  className="rounded-[10px] pointer-coarse:h-11"
                 >
                   <PencilIcon aria-hidden="true" />
                   Edit setup
                 </Button>
               ) : null}
               {canManage ? (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      aria-label={`More actions for ${current.name}`}
-                      disabled={rig.mutating}
-                      className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-                    >
-                      <MoreHorizontalIcon />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-60">
-                    <DropdownMenuItem onSelect={() => void toggleDefault()}>
-                      {isDefaultRig ? (
-                        <StarOffIcon aria-hidden="true" />
-                      ) : (
-                        <StarIcon aria-hidden="true" />
-                      )}
-                      {isDefaultRig ? "Stop using as default" : "Use for new sessions"}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => openRig({ view: "edit" })}>
-                      <PencilIcon aria-hidden="true" />
-                      Edit details
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
-                      <Trash2Icon aria-hidden="true" />
-                      Delete environment
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <MoreMenu label={`More actions for ${current.name}`} disabled={rig.mutating}>
+                  <DropdownMenuItem onSelect={() => void toggleDefault()}>
+                    {isDefaultRig ? (
+                      <StarOffIcon aria-hidden="true" />
+                    ) : (
+                      <StarIcon aria-hidden="true" />
+                    )}
+                    {isDefaultRig ? "Stop using as default" : "Use for new sessions"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => openRig({ view: "edit" })}>
+                    <PencilIcon aria-hidden="true" />
+                    Edit details
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
+                    <Trash2Icon aria-hidden="true" />
+                    Delete environment
+                  </DropdownMenuItem>
+                </MoreMenu>
               ) : null}
             </>
           }

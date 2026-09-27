@@ -7,7 +7,7 @@ import {
   type UpdateOrganizationIntegrationPolicyRequest,
 } from "@opengeni/sdk/organization-integration-policy";
 import { useEffect, useRef, useState } from "react";
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";

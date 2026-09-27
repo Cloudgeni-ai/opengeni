@@ -1,6 +1,6 @@
 // Workspace settings pages, rendered inside the settings frame
 // (components/settings/workspace-settings-shell.tsx): General, Access,
-// Models, Agent learning and API keys. The org/billing console lives at
+// Models and API keys. The org/billing console lives at
 // Organization settings.
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -42,7 +42,6 @@ import {
 import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
-import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 
 export function WorkspaceSettingsRoute({
   workspaceId,
@@ -161,10 +160,6 @@ function OperationalWorkspaceSettingsRoute({
           canManageSettings={canManageSettings}
           gatewayRevision={gatewayRevision}
         />
-      ) : null}
-
-      {section === "learning" ? (
-        <WorkspaceLearningAdministration workspaceId={workspaceId} />
       ) : null}
 
       {section === "access" ? (

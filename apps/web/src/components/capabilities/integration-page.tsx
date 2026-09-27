@@ -16,7 +16,7 @@ import {
   type IntegrationOption,
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
-import { MoreMenu, RowButton } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";

@@ -13,7 +13,7 @@ import {
   scopeLabel,
   skillSummary,
 } from "@/components/capabilities/skill-copy";
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { Input } from "@/components/ui/input";

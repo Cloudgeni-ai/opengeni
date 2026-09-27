@@ -71,18 +71,10 @@ import {
 import { NEW_API_KEY } from "@/lib/api-keys-route";
 import { delegableApiKeyPermissions, hasWorkspacePermission } from "@/lib/permissions";
 import type { ApiKey } from "@/types";
+import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 
 const DOCS_URL = "https://docs.opengeni.ai/reference/authentication";
-
-/* Inside the settings column the frame already has its gutter: detail and form
-   pages start where the settings page header does (the Models page does the same). */
-const DETAIL_PAGE_CLASS = "max-w-none px-0 pt-0 pb-0 max-sm:px-0";
-const FORM_PAGE_CLASS = [
-  "[&>form>header]:mx-0 [&>form>header]:px-0 [&>form>header]:pt-0",
-  "[&>form>[data-slot=form-body]]:mx-0 [&>form>[data-slot=form-body]]:px-0",
-  "[&>form>footer>div]:mx-0 [&>form>footer>div]:px-0",
-  "[&>form>footer]:max-w-[640px]",
-].join(" ");
 
 const COLUMNS: RowListColumn[] = [
   { id: "lastUsed", label: "Last used", width: 116 },
@@ -469,14 +461,14 @@ function KeyPage({
 
   if (data.canManage && !data.loaded) {
     return (
-      <DetailPage back={back} className={DETAIL_PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <KeyPageSkeleton />
       </DetailPage>
     );
   }
   if (!apiKey) {
     return (
-      <DetailPage back={back} className={DETAIL_PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <EmptyState
           variant="page"
           icon={<KeyRoundIcon />}
@@ -508,18 +500,20 @@ function KeyPage({
   const actions = !data.canManage ? null : live ? (
     <Button
       type="button"
+      size="sm"
       variant="outline"
       onClick={() => setConfirmOpen(true)}
-      className="text-danger hover:text-danger pointer-coarse:h-11"
+      className="rounded-[10px] text-danger hover:text-danger pointer-coarse:h-11"
     >
       Revoke key
     </Button>
   ) : (
     <Button
       type="button"
+      size="sm"
       variant="outline"
       onClick={() => onReplace(apiKey)}
-      className="pointer-coarse:h-11"
+      className="rounded-[10px] pointer-coarse:h-11"
     >
       <RotateCcwIcon aria-hidden="true" />
       Create a replacement
@@ -535,7 +529,7 @@ function KeyPage({
         : "Never";
 
   return (
-    <DetailPage back={back} className={DETAIL_PAGE_CLASS}>
+    <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
       <DetailPageHeader
         leading={<KeyTile />}
         title={apiKey.name}
@@ -782,7 +776,10 @@ function CreateKeyPage({
 
   if (!data.canManage) {
     return (
-      <DetailPage back={{ label: "API keys", onClick: onClose }} className={DETAIL_PAGE_CLASS}>
+      <DetailPage
+        back={{ label: "API keys", onClick: onClose }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
         <EmptyState
           variant="page"
           icon={<KeyRoundIcon />}
@@ -820,7 +817,7 @@ function CreateKeyPage({
     return (
       <div ref={rootRef} className="min-w-0">
         <FormPage
-          className={FORM_PAGE_CLASS}
+          className={FLUSH_FORM_PAGE_CLASS}
           title="API key created"
           description={[
             apiKey.name,
@@ -867,7 +864,7 @@ function CreateKeyPage({
   return (
     <div ref={rootRef} className="min-w-0">
       <FormPage
-        className={FORM_PAGE_CLASS}
+        className={FLUSH_FORM_PAGE_CLASS}
         back={{ label: "API keys", onClick: onClose }}
         title="Create API key"
         description={`For scripts, CI and your own apps that work in ${workspaceName}.`}
@@ -976,39 +973,6 @@ function CreateKeyPage({
    The page.
    -------------------------------------------------------------------------- */
 
-/** Moves focus to the new page's title, or back to the row that was opened. */
-function useFocusOnNavigation(pageKey: string) {
-  const ref = useRef<HTMLDivElement>(null);
-  const first = useRef(true);
-  const lastTitle = useRef<string | null>(null);
-  useEffect(() => {
-    const root = ref.current;
-    const returnTo = lastTitle.current;
-    if (first.current) {
-      first.current = false;
-    } else if (root) {
-      const row =
-        pageKey === ""
-          ? Array.from(root.querySelectorAll<HTMLElement>("[data-slot=list-row]")).find(
-              (each) => returnTo !== null && each.textContent?.includes(returnTo),
-            )
-          : undefined;
-      if (row) {
-        row.querySelector<HTMLElement>("[data-row-action]")?.focus();
-      } else {
-        const heading = root.querySelector<HTMLElement>("h1");
-        if (heading && !heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
-        heading?.focus({ preventScroll: true });
-      }
-    }
-    if (pageKey && pageKey !== NEW_API_KEY) {
-      lastTitle.current = root?.querySelector<HTMLElement>("h1")?.textContent ?? null;
-    }
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- only when the page changes
-  }, [pageKey]);
-  return ref;
-}
-
 export function WorkspaceApiKeysPage({
   workspaceId,
   keyParam,
@@ -1021,7 +985,10 @@ export function WorkspaceApiKeysPage({
   const navigate = useNavigate();
   const data = useWorkspaceApiKeys(workspaceId);
   const [prefill, setPrefill] = useState<CreatePrefill | null>(null);
-  const root = useFocusOnNavigation(keyParam ?? "");
+  const root = useFocusOnNavigation(keyParam ?? "", {
+    onList: !keyParam,
+    rememberTitle: Boolean(keyParam) && keyParam !== NEW_API_KEY,
+  });
   const workspaceName =
     context.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "this workspace";
 

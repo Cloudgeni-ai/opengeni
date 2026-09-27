@@ -6,7 +6,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { FormDialog } from "@/components/ui/form-dialog";

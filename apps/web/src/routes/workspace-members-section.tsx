@@ -36,6 +36,7 @@ import type {
   WorkspaceMember,
   WorkspaceMemberCandidate,
 } from "@/types";
+import { FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Roles and rows, shared with the organization-managed Access page.
@@ -135,15 +136,6 @@ export function toAccessMember(
 /* ----------------------------------------------------------------------------
    Pages that open in place of the list.
    -------------------------------------------------------------------------- */
-
-// The frame's content column already has its gutter: start the form where a
-// detail page starts instead of centring it again (the same as Models).
-const FLUSH_FORM_PAGE = [
-  "[&>form>header]:mx-0 [&>form>header]:px-0 [&>form>header]:pt-0",
-  "[&>form>[data-slot=form-body]]:mx-0 [&>form>[data-slot=form-body]]:px-0",
-  "[&>form>footer>div]:mx-0 [&>form>footer>div]:px-0",
-  "[&>form>footer]:max-w-[640px]",
-].join(" ");
 
 /**
  * The access list inside an open section, flush like a resource RowList:
@@ -342,7 +334,7 @@ export function AddPeoplePage({
     <OpenedPage>
       <FormPage
         back={{ label: "Access", onClick: onClose }}
-        className={FLUSH_FORM_PAGE}
+        className={FLUSH_FORM_PAGE_CLASS}
         title={`Add people to ${workspaceName}`}
         description={`Choose people who are already in ${organizationName}.`}
         submitLabel={
@@ -391,7 +383,7 @@ function CustomPermissionsPage({
     <OpenedPage>
       <FormPage
         back={{ label: "Access", onClick: onClose }}
-        className={FLUSH_FORM_PAGE}
+        className={FLUSH_FORM_PAGE_CLASS}
         title={`Custom permissions for ${memberDisplayName(member)}`}
         description={`Choose exactly what they can do in ${workspaceName}. Picking a role later replaces these.`}
         submitLabel="Save permissions"
@@ -571,6 +563,9 @@ function MembersSectionContent({
   const organizationName = activeWorkspace
     ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants ?? [])
     : "your organization";
+  // A local install has one person: nobody else to add, and no People page.
+  const singleUser = context.clientConfig?.productAccessMode === "local";
+  const canAddPeople = canManage && !singleUser;
 
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
@@ -683,7 +678,13 @@ function MembersSectionContent({
     [],
   );
 
-  const adding = view?.kind === "add" && canManage;
+  const adding = view?.kind === "add" && canAddPeople;
+  // A single-user install has nobody to add: an old ?view=add link lands on the list.
+  const addUnavailable = view?.kind === "add" && singleUser;
+  useEffect(() => {
+    if (addUnavailable) setView(null);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- only when the link asks for it
+  }, [addUnavailable]);
   useEffect(() => {
     if (adding) void loadMemberCandidates();
   }, [adding, loadMemberCandidates]);
@@ -898,7 +899,7 @@ function MembersSectionContent({
 
   return (
     <>
-      {canManage ? (
+      {canAddPeople ? (
         <SettingsHeaderActions>
           <Button type="button" onClick={() => setView({ kind: "add" })}>
             <UserPlusIcon aria-hidden="true" />
@@ -965,10 +966,14 @@ function MembersSectionContent({
         <Section
           title="People"
           description={
-            <>
-              People come from {organizationName}. To invite someone new, go to{" "}
-              {organizationPeopleLink("Organization > People")}.
-            </>
+            singleUser ? (
+              "This is a single-user install, so only you have access."
+            ) : (
+              <>
+                People come from {organizationName}. To invite someone new, go to{" "}
+                {organizationPeopleLink("Organization > People")}.
+              </>
+            )
           }
         >
           <AccessList
@@ -1004,7 +1009,7 @@ function MembersSectionContent({
             onCustomize={(entry) => setView({ kind: "custom", subjectId: entry.id })}
             onRemove={(entry) => setRemoveTarget(bySubject(entry) ?? null)}
             emptyMessage={
-              canManage ? (
+              canAddPeople ? (
                 <>
                   Only you have access.{" "}
                   <button

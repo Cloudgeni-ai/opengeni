@@ -9,7 +9,7 @@ import {
 } from "@/components/capabilities/capability-page";
 import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
 import { humanizeName } from "@/components/capabilities/skill-copy";
-import { MoreMenu, RowButton } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Notice } from "@/components/ui/notice";

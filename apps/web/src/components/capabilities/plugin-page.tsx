@@ -14,7 +14,7 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { humanizeName } from "@/components/capabilities/skill-copy";
-import { MoreMenu, RowButton } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";

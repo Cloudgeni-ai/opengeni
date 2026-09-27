@@ -64,8 +64,8 @@ mock.module("@/components/ui/destructive-confirm", () => ({
       <div data-testid="confirm">
         <h2>{title}</h2>
         <ul>
-          {consequences?.map((line, index) => (
-            <li key={index}>{line}</li>
+          {consequences?.map((line) => (
+            <li key={String(line)}>{line}</li>
           ))}
         </ul>
         <button type="button" onClick={() => void onConfirm?.()}>
@@ -133,8 +133,18 @@ function overview(name = "Acme Robotics"): OrganizationAdministrationOverview {
   return {
     organization: { id: "org-a", name, createdAt: timestamp, updatedAt: timestamp },
     roles: [
-      { role: "viewer", label: "Viewer", description: "Can view.", permissions: ["workspace:read"] },
-      { role: "member", label: "Member", description: "Can work.", permissions: ["workspace:read"] },
+      {
+        role: "viewer",
+        label: "Viewer",
+        description: "Can view.",
+        permissions: ["workspace:read"],
+      },
+      {
+        role: "member",
+        label: "Member",
+        description: "Can work.",
+        permissions: ["workspace:read"],
+      },
       {
         role: "admin",
         label: "Workspace admin",
@@ -209,7 +219,10 @@ function makeClient(overrides: Record<string, unknown> = {}) {
       id: `created-${request.email}`,
       targetEmail: request.email,
     })),
-    revokeOrganizationInvitation: mock(async () => ({ ...invitation("member"), status: "revoked" })),
+    revokeOrganizationInvitation: mock(async () => ({
+      ...invitation("member"),
+      status: "revoked",
+    })),
     ...overrides,
   };
 }
@@ -321,7 +334,9 @@ describe("organization directory", () => {
     await expect(captured!.setWorkspaceRole(request)).rejects.toThrow(/couldn't confirm/);
     put.mockImplementation(async () => ({}) as never);
     await act(async () => captured!.setWorkspaceRole(request));
-    const calls = put.mock.calls as unknown as Array<[string, string, string, { operationId: string; expectedUpdatedAt: string }]>;
+    const calls = put.mock.calls as unknown as Array<
+      [string, string, string, { operationId: string; expectedUpdatedAt: string }]
+    >;
     expect(calls).toHaveLength(2);
     expect(calls[0]![3].operationId).toBe(calls[1]![3].operationId);
     expect(calls[0]![3].expectedUpdatedAt).toBe("2026-08-21T10:00:00.000Z");
@@ -395,8 +410,12 @@ describe("organization directory", () => {
       });
     });
     expect(result.sent.map((each) => each.targetEmail)).toEqual(["a@example.test"]);
-    expect(result.failed).toEqual([{ email: "bad@example.test", message: "rejected by the server" }]);
-    const first = (create.mock.calls[0] as unknown as [string, { initialWorkspaceIds: string[] }])[1];
+    expect(result.failed).toEqual([
+      { email: "bad@example.test", message: "rejected by the server" },
+    ]);
+    const first = (
+      create.mock.calls[0] as unknown as [string, { initialWorkspaceIds: string[] }]
+    )[1];
     expect(first.initialWorkspaceIds).toEqual(["ws-platform"]);
     await view.unmount();
   });

@@ -673,7 +673,9 @@ function AgentScheduleForm({
         : learningLoading || connectionAccounts.loading
           ? "Loading this schedule's settings…"
           : connectionAccounts.error
-            ? "Connected accounts couldn't load. Try again."
+            ? connectionAccounts.accessDenied
+              ? "You can't see this workspace's connected accounts. Ask a workspace admin."
+              : "Connected accounts couldn't load. Try again."
             : undefined;
 
   const selectedSession = sessions.find((session) => session.id === draft.targetSessionId);

@@ -13,9 +13,7 @@
 export type OrganizationView = "invite" | "new-workspace" | "new-key";
 
 export function parseOrganizationView(value: unknown): OrganizationView | undefined {
-  return value === "invite" || value === "new-workspace" || value === "new-key"
-    ? value
-    : undefined;
+  return value === "invite" || value === "new-workspace" || value === "new-key" ? value : undefined;
 }
 
 const RECORD_ID = /^[\w:.-]{1,128}$/;

@@ -13,8 +13,9 @@ import { Popover as PopoverPrimitive } from "radix-ui";
 import { useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { PAGE_CLASS } from "@/components/models/codex-models";
-import { ModelsFormPage, MoreMenu, RowButton } from "@/components/models/models-ui";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { ModelsFormPage } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
@@ -741,7 +742,7 @@ function PersonPage({
 
   if (!member) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         {directory.members.loading ? (
           <DetailSkeleton />
         ) : directory.members.error ? (
@@ -807,7 +808,7 @@ function PersonPage({
   );
 
   return (
-    <DetailPage back={back} className={PAGE_CLASS}>
+    <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
       <DetailPageHeader
         leading={<PersonAvatar name={name} size="lg" />}
         title={name}
@@ -904,7 +905,7 @@ function InvitationPage({
     directory.invitations.value.invitations.find((candidate) => candidate.id === id) ?? null;
   if (!invitation || invitation.status !== "pending") {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         {directory.invitations.loading ? (
           <DetailSkeleton />
         ) : (
@@ -933,7 +934,7 @@ function InvitationPage({
   const canResend = canResendInvitation(invitation);
   const canRevoke = canRevokeOrganizationInvitation(directory.actorRole, invitation.role);
   return (
-    <DetailPage back={back} className={PAGE_CLASS}>
+    <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
       <DetailPageHeader
         leading={<PersonAvatar name={name} pending size="lg" />}
         title={name}

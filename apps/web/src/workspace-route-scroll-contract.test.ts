@@ -18,6 +18,16 @@ const workspaceRouteContracts = {
     kind: "page",
     source: "routes/variable-sets.tsx",
   },
+  // The list and each set's page only match the URL; the parent's single
+  // VariableSetsRoute component renders both inside one ContentPage.
+  workspaceVariableSetsIndexRoute: {
+    kind: "page",
+    source: "routes/variable-sets.tsx",
+  },
+  workspaceVariableSetDetailRoute: {
+    kind: "page",
+    source: "routes/variable-sets.tsx",
+  },
   workspaceEnvironmentsRoute: { kind: "redirect" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
@@ -79,7 +89,9 @@ describe("workspace route scroll ownership", () => {
     if (!workspaceChildrenSource) throw new Error("Workspace route children were not found");
 
     const registeredRoutes = Array.from(
-      workspaceChildrenSource.matchAll(/^\s+(workspace[A-Z]\w+Route),$/gm),
+      // Leaf routes (`workspaceXRoute,`) and parents with nested children
+      // (`workspaceXRoute.addChildren([`).
+      workspaceChildrenSource.matchAll(/^\s+(workspace[A-Z]\w+Route)(?:,|\.addChildren\(\[)$/gm),
       (match) => match[1],
     ).sort();
 

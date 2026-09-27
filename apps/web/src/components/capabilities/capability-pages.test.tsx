@@ -156,7 +156,10 @@ describe("IntegrationPage", () => {
 
   test("tool names sit behind a collapsed Technical details", async () => {
     const view = await render(
-      <IntegrationPage model={model({ tools: { tools: ["mail_send", "mail_list"] } })} onBack={() => {}} />,
+      <IntegrationPage
+        model={model({ tools: { tools: ["mail_send", "mail_list"] } })}
+        onBack={() => {}}
+      />,
     );
     expect(view.container.textContent).toContain("Technical details");
     expect(visibleText(view.container)).not.toContain("mail_send");

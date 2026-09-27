@@ -17,14 +17,8 @@ import {
   ConnectionAccessRows,
   useConnectionAccess,
 } from "@/components/connection-access-settings";
-import {
-  ModelsFormPage,
-  MoreMenu,
-  ProviderTile,
-  RenameAccountDialog,
-  RowButton,
-} from "@/components/models/models-ui";
-import { PAGE_CLASS } from "@/components/models/codex-models";
+import { ModelsFormPage, ProviderTile, RenameAccountDialog } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import {
   SuperGrokDeviceCodePanel,
   superGrokAccountName,
@@ -60,6 +54,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    SuperGrok on Settings > Models, at workspace and organization scope: the
@@ -241,14 +236,14 @@ export function SuperGrokAccountPage({
   const back = { label: "Models", onClick: places.backToList };
   if (grok.loading) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <DetailSkeleton />
       </DetailPage>
     );
   }
   if (!account) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <EmptyState
           variant="page"
           icon={<UnplugIcon />}
@@ -296,7 +291,10 @@ function SuperGrokAccountDetail({
         ? "Organization account"
         : "Workspace account";
   return (
-    <DetailPage back={{ label: "Models", onClick: places.backToList }} className={PAGE_CLASS}>
+    <DetailPage
+      back={{ label: "Models", onClick: places.backToList }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
       <DetailPageHeader
         leading={<ProviderTile provider="supergrok" />}
         title={name}

@@ -3,7 +3,8 @@ import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage, RowButton } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorMessage } from "@/components/ui/error-message";

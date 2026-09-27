@@ -25,13 +25,13 @@ import {
   CodexAccountRows,
   CodexConnectPage,
   CodexSettingRows,
-  PAGE_CLASS,
   codexListedCount,
   codexSectionVisible,
   type CodexPlaces,
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
-import { ProviderTile, RowButton, useModelsNavigation } from "@/components/models/models-ui";
+import { ProviderTile, useModelsNavigation } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import {
   SuperGrokAccessPage,
   SuperGrokAccountPage,
@@ -50,6 +50,8 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import { accountKeyOf, type ModelsView } from "@/lib/models-route";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 
 /* ----------------------------------------------------------------------------
    Workspace Settings > Models: the defaults, one flat list of the accounts
@@ -139,7 +141,10 @@ export function WorkspaceModelsPage({
 
   const key = accountKeyOf(account);
   const pageKey = `${view ?? ""}|${account ?? ""}`;
-  const root = useFocusOnNavigation(pageKey, account);
+  const root = useFocusOnNavigation(pageKey, {
+    onList: pageKey === "|",
+    rememberTitle: Boolean(account) && !view,
+  });
 
   let page: ReactNode;
   if (view === "connect") {
@@ -406,7 +411,7 @@ export function ConnectPickerPage({
       : []),
   ];
   return (
-    <DetailPage back={{ label: "Models", onClick: onClose }} className={PAGE_CLASS}>
+    <DetailPage back={{ label: "Models", onClick: onClose }} className={FLUSH_DETAIL_PAGE_CLASS}>
       <DetailPageHeader
         title="Connect account"
         meta={
@@ -441,43 +446,4 @@ export function ConnectPickerPage({
       </div>
     </DetailPage>
   );
-}
-
-/**
- * After a navigation, focus lands on the new page's title so keyboard and
- * screen reader users start at the top of it; back on the list, focus returns
- * to the row that was opened.
- */
-function useFocusOnNavigation(pageKey: string, account: string | undefined) {
-  const ref = useRef<HTMLDivElement>(null);
-  const first = useRef(true);
-  const lastAccount = useRef<string | undefined>(account);
-  const lastTitle = useRef<string | null>(null);
-  useEffect(() => {
-    const root = ref.current;
-    const returnTo = lastTitle.current;
-    const previousAccount = lastAccount.current;
-    lastAccount.current = account;
-    if (first.current) {
-      first.current = false;
-    } else if (root) {
-      const onList = pageKey === "|";
-      if (onList && previousAccount && returnTo) {
-        const row = Array.from(root.querySelectorAll<HTMLElement>("[data-slot=list-row]")).find(
-          (each) => each.textContent?.includes(returnTo),
-        );
-        row?.querySelector<HTMLElement>("[data-row-action]")?.focus();
-      } else if (!onList) {
-        const heading = root.querySelector<HTMLElement>("h1");
-        if (heading && !heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
-        heading?.focus({ preventScroll: true });
-        root.scrollIntoView?.({ block: "start" });
-      }
-    }
-    // Remember the title of an account page, to find its row again.
-    const heading = account ? root?.querySelector<HTMLElement>("h1")?.textContent : null;
-    lastTitle.current = heading ?? lastTitle.current;
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- only when the page changes
-  }, [pageKey]);
-  return ref;
 }

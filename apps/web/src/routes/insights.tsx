@@ -496,7 +496,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="Prompt context">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="max-w-2xl">
-            <h3 className="text-sm font-medium text-fg">Agent Knowledge contribution</h3>
+            <h3 className="text-sm font-medium text-fg">Knowledge contribution</h3>
             <p className="mt-1 text-xs leading-5 text-fg-muted">
               Estimated tokens added to model input by workspace instructions, company profile,
               memory, and Skill descriptors. Estimates use UTF-8 bytes ÷ 4 and stay separate from
@@ -513,7 +513,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <Metric
             label="Estimated prompt tokens"
             value={formatTokens(promptContributions.estimatedTokens)}
-            delta="Agent Knowledge material only"
+            delta="Knowledge material only"
           />
           <Metric
             label="Average per covered call"

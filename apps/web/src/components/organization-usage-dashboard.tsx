@@ -6,7 +6,7 @@ import type {
 import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
 import { AreaChart } from "@/components/insights/charts";
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";

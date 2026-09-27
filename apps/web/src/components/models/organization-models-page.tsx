@@ -26,15 +26,14 @@ import {
   useConnectionAccess,
   workspacesSummary,
 } from "@/components/connection-access-settings";
-import { ACCOUNT_COLUMNS, PAGE_CLASS } from "@/components/models/codex-models";
+import { ACCOUNT_COLUMNS } from "@/components/models/codex-models";
 import {
   ModelsFormPage,
-  MoreMenu,
   ProviderTile,
   RenameAccountDialog,
-  RowButton,
   useModelsNavigation,
 } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import {
   SuperGrokAccessPage,
   SuperGrokAccountPage,
@@ -75,6 +74,7 @@ import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
 import { accountKeyOf, type ModelsView } from "@/lib/models-route";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Models: one flat list of the subscriptions and API
@@ -389,14 +389,14 @@ function OrgCodexAccountPage({
   const back = { label: "Models", onClick: places.backToList };
   if (codex.loading) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <DetailSkeleton />
       </DetailPage>
     );
   }
   if (!account) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <EmptyState
           variant="page"
           icon={<UnplugIcon />}
@@ -430,7 +430,10 @@ function OrgCodexAccountDetail({
   });
   const reconnect = account.status !== "active";
   return (
-    <DetailPage back={{ label: "Models", onClick: places.backToList }} className={PAGE_CLASS}>
+    <DetailPage
+      back={{ label: "Models", onClick: places.backToList }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
       <DetailPageHeader
         leading={<ProviderTile provider="codex" />}
         title={name}

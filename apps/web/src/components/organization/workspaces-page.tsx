@@ -13,8 +13,8 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { PAGE_CLASS } from "@/components/models/codex-models";
-import { ModelsFormPage, MoreMenu, RowButton } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { AccessList, type AccessMember } from "@/components/ui/access-list";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -60,6 +60,7 @@ import {
   workspaceRoleLabel,
   workspaceRoleOptions,
 } from "./organization-people-model";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Workspaces: every shared workspace, who is in it
@@ -410,7 +411,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
 
   if (!overview) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         {directory.overview.error ? (
           <ErrorMessage
             variant="inline"
@@ -427,7 +428,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
   }
   if (!workspace) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <EmptyState
           variant="page"
           icon={<SquareStackIcon />}
@@ -517,7 +518,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
   );
 
   return (
-    <DetailPage back={back} className={PAGE_CLASS}>
+    <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
       <DetailPageHeader
         leading={<LogoTile name={workspace.name} />}
         title={workspace.name}
@@ -585,7 +586,9 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
               removeLabel="Remove from workspace"
               readOnlyReason={directory.singleUser ? SINGLE_USER_LOCK : undefined}
               emptyMessage={
-                directory.singleUser ? undefined : "Only you so far. Add people from the organization."
+                directory.singleUser
+                  ? undefined
+                  : "Only you so far. Add people from the organization."
               }
               onRoleChange={(member, role) => (role ? changeRole(member, role) : remove(member))}
               onResetToRole={(member) => changeRole(member, member.resetRole ?? "member")}

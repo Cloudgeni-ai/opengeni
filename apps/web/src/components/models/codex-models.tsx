@@ -31,12 +31,11 @@ import {
 } from "@/components/connection-access-settings";
 import {
   ModelsFormPage,
-  MoreMenu,
   ProviderTile,
   RenameAccountDialog,
-  RowButton,
   resetsLabel,
 } from "@/components/models/models-ui";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { CopyField } from "@/components/ui/copy-field";
@@ -67,6 +66,7 @@ import { SettingDangerRow, SettingRow, SettingRowGroup } from "@/components/ui/s
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Codex on Settings > Models: the provider group (header with the pool-wide
@@ -398,14 +398,14 @@ export function CodexAccountPage({
   const back = { label: "Models", onClick: places.backToList };
   if (codex.loading) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <DetailSkeleton />
       </DetailPage>
     );
   }
   if (!account) {
     return (
-      <DetailPage back={back} className={PAGE_CLASS}>
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         <EmptyState
           variant="page"
           icon={<UnplugIcon />}
@@ -422,8 +422,6 @@ export function CodexAccountPage({
   }
   return <CodexAccountDetail codex={codex} account={account} places={places} />;
 }
-
-export const PAGE_CLASS = "max-w-none px-0 pt-0 pb-0 max-sm:px-0";
 
 function CodexAccountDetail({
   codex,
@@ -472,7 +470,10 @@ function CodexAccountDetail({
   ) : null;
 
   return (
-    <DetailPage back={{ label: "Models", onClick: places.backToList }} className={PAGE_CLASS}>
+    <DetailPage
+      back={{ label: "Models", onClick: places.backToList }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
       <DetailPageHeader
         leading={<ProviderTile provider="codex" />}
         title={name}

@@ -6,7 +6,6 @@ import {
   ContainerIcon,
   FileTextIcon,
   MessageSquareIcon,
-  MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
   RotateCcwIcon,
@@ -24,13 +23,7 @@ import {
   DetailPageHeader,
 } from "@/components/ui/detail-page";
 import { DetailSection } from "@/components/ui/detail-sheet";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
@@ -63,6 +56,7 @@ import {
   type VariableSetScope,
   type VariableSetUsage,
 } from "./variable-set-model";
+import { MoreMenu } from "@/components/ui/page-actions";
 
 /* ----------------------------------------------------------------------------
    /variable-sets: one borderless list, the whole row opens the set's own
@@ -324,34 +318,21 @@ function SetMenu({
 }) {
   if (!canEdit && !canDelete) return null;
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          aria-label={`More actions for ${set.name}`}
-          className="text-fg-muted hover:text-fg pointer-coarse:size-11"
-        >
-          <MoreHorizontalIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
-        {canEdit ? (
-          <DropdownMenuItem onSelect={actions.editSet}>
-            <PencilIcon aria-hidden="true" />
-            Edit details
-          </DropdownMenuItem>
-        ) : null}
-        {canEdit && canDelete ? <DropdownMenuSeparator /> : null}
-        {canDelete ? (
-          <DropdownMenuItem variant="destructive" onSelect={actions.deleteSet}>
-            <Trash2Icon aria-hidden="true" />
-            Delete variable set
-          </DropdownMenuItem>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <MoreMenu label={`More actions for ${set.name}`}>
+      {canEdit ? (
+        <DropdownMenuItem onSelect={actions.editSet}>
+          <PencilIcon aria-hidden="true" />
+          Edit details
+        </DropdownMenuItem>
+      ) : null}
+      {canEdit && canDelete ? <DropdownMenuSeparator /> : null}
+      {canDelete ? (
+        <DropdownMenuItem variant="destructive" onSelect={actions.deleteSet}>
+          <Trash2Icon aria-hidden="true" />
+          Delete variable set
+        </DropdownMenuItem>
+      ) : null}
+    </MoreMenu>
   );
 }
 
@@ -538,8 +519,9 @@ export function VariableSetDetailPage({
               {canManageSecrets && !empty ? (
                 <Button
                   type="button"
+                  size="sm"
                   onClick={() => actions.addVariable("one")}
-                  className="pointer-coarse:h-11"
+                  className="rounded-[10px] pointer-coarse:h-11"
                 >
                   <PlusIcon aria-hidden="true" />
                   Add variable

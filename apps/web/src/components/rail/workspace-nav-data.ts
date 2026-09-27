@@ -9,7 +9,6 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
   | "/workspaces/$workspaceId/schedules"
-  | "/workspaces/$workspaceId/memory"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
   | "/workspaces/$workspaceId/settings";
@@ -64,7 +63,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
-    label: "Agent Knowledge",
+    label: "Knowledge",
     description: "Knowledge, instructions, and skills",
   },
   {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/models/models-ui";
+import { RowButton } from "@/components/ui/page-actions";
 import { CopyField } from "@/components/ui/copy-field";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, TextInput } from "@/components/ui/field";
