@@ -1474,6 +1474,12 @@ export const codexSubscriptionCredentials = pgTable(
     chatgptAccountId: text("chatgpt_account_id"), // plaintext ChatGPT-Account-ID header value (non-secret)
     scopes: text("scopes"), // space-delimited, as granted
     planType: text("plan_type"),
+    // When a provider plan observation (connect, token refresh id_token, or
+    // /wham/usage plan_type) last confirmed plan_type. Null for legacy rows.
+    planCheckedAt: timestamp("plan_checked_at", { withTimezone: true }),
+    // {planType, modelIds}: models the CURRENT plan was proven not to include.
+    // Inert once plan_type no longer matches planType. Never user policy.
+    planEntitlementExclusion: jsonb("plan_entitlement_exclusion"),
     isFedramp: boolean("is_fedramp").notNull().default(false),
     expiresAt: timestamp("expires_at", { withTimezone: true }), // derived from access-token JWT exp
     lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),

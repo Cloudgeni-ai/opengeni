@@ -255,3 +255,30 @@ test("authored worker copy and OpenGeni credit failures keep their own wording",
     }),
   ).toEqual({ reason: "Connection interrupted.", unavailableModel: false });
 });
+
+test("Codex plan copy stays whole and steers to another model before Retry", () => {
+  const plan =
+    'The ChatGPT account "Work Pro" is now on the Free plan, which doesn\'t include GPT-6 Sol. ' +
+    "Upgrade it, use another connected account, or choose another model.";
+  expect(
+    failedSessionCopy(
+      {
+        ...summary,
+        reason: plan,
+        recordedDetail: `${plan}\nThe Codex backend answered HTTP 400 with no error body.`,
+        failureCode: "codex_plan_entitlement",
+      },
+      false,
+      false,
+      true,
+    ),
+  ).toEqual({ reason: plan, unavailableModel: false, retryUnhelpful: true });
+  const rejected =
+    "The Codex backend rejected this request (HTTP 400) without an error message. " +
+    'The ChatGPT account "Work Pro" still reports the Pro plan, so OpenGeni did not switch accounts. ' +
+    "Try again, or choose another model if it keeps failing.";
+  expect(rejected.length).toBeGreaterThan(160);
+  expect(
+    failedSessionCopy({ ...summary, reason: rejected, failureCode: "codex_request_rejected" }),
+  ).toEqual({ reason: rejected, unavailableModel: false });
+});

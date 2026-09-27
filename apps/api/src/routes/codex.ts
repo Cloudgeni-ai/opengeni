@@ -103,6 +103,7 @@ export function codexAccountJson(
     label: row.label,
     email: row.accountEmail,
     plan: row.planType,
+    planCheckedAt: row.planCheckedAt ?? null,
     status: row.status,
     active: row.isActive,
     expiresAt: row.expiresAt,

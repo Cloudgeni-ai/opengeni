@@ -242,3 +242,57 @@ describe("buildCodexTokenResolver", () => {
     expect(counts.refresh).toBe(2);
   });
 });
+
+function idToken(planType: string | null): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none" })}.${encode({
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_1",
+      ...(planType ? { chatgpt_plan_type: planType } : {}),
+    },
+  })}.sig`;
+}
+
+describe("Codex plan observation", () => {
+  test("a token refresh persists the id_token's current plan with the rotated tokens", async () => {
+    const recorded: Array<string | null | undefined> = [];
+    const { deps: d } = deps({
+      loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
+      refresh: async () => ({ accessToken: "AC2", refreshToken: "RF2", idToken: idToken("free") }),
+      recordRefresh: async (_db, input) => {
+        recorded.push(input.planType);
+        return true;
+      },
+    });
+    const token = await buildCodexTokenResolver(
+      db,
+      settings,
+      "ws_plan_refresh",
+      "cred_1",
+      d,
+    ).getToken();
+    expect(recorded).toEqual(["free"]);
+    expect(token.planType).toBe("free");
+  });
+
+  test("a refresh without a rotated id_token leaves the recorded plan untouched", async () => {
+    const recorded: Array<string | null | undefined> = [];
+    const { deps: d } = deps({
+      loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
+      refresh: async () => ({ accessToken: "AC2" }),
+      recordRefresh: async (_db, input) => {
+        recorded.push(input.planType);
+        return true;
+      },
+    });
+    const token = await buildCodexTokenResolver(
+      db,
+      settings,
+      "ws_plan_keep",
+      "cred_1",
+      d,
+    ).getToken();
+    expect(recorded).toEqual([undefined]);
+    expect(token.planType).toBe("pro");
+  });
+});

@@ -3638,6 +3638,8 @@ export type CodexAccount = {
   label?: string | null;
   email?: string | null;
   plan?: string | null;
+  /** When the provider last confirmed `plan` (connect, token refresh, or usage read). */
+  planCheckedAt?: string | null;
   status: "active" | "needs_relogin" | "error";
   active: boolean;
   expiresAt?: string | null;

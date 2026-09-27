@@ -42,10 +42,16 @@ import {
   CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
+  classifyCodexEntitlementRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   isCodexTransportError,
 } from "@opengeni/codex";
+import {
+  CodexPlanEntitlementError,
+  codexPlanEntitlementFailurePayload,
+  codexRequestRejectedFailurePayload,
+} from "./codex-plan-entitlement";
 import {
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
@@ -993,6 +999,10 @@ function baseAgentRunFailurePayload(
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
   quotaScope?: ProviderQuotaScope;
+  /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
+  planType?: string | null;
+  /** Product model id a `codex_plan_entitlement` failure refers to. */
+  model?: string | null;
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
@@ -1135,6 +1145,29 @@ function baseAgentRunFailurePayload(
       ...(Object.keys(details.database).length > 0 ? { database: details.database } : {}),
     };
   }
+  // Codex plan entitlement: the settlement path normally re-checks the plan
+  // and records a precise payload. These branches keep any other path from
+  // surfacing the SDK's raw "400 status code (no body)" text.
+  if (error instanceof CodexPlanEntitlementError) {
+    return error.payload;
+  }
+  const entitlementRejection = classifyCodexEntitlementRejection(error);
+  if (entitlementRejection) {
+    return entitlementRejection.evidence === "plan_entitlement"
+      ? codexPlanEntitlementFailurePayload({
+          accountLabel: null,
+          planType: null,
+          planChanged: false,
+          modelId: null,
+          rejection: entitlementRejection,
+        })
+      : codexRequestRejectedFailurePayload({
+          accountLabel: null,
+          planType: null,
+          rejection: entitlementRejection,
+          planChecked: false,
+        });
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with
@@ -1258,7 +1291,11 @@ function baseAgentRunFailurePayload(
 }
 
 export type CodexCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit" | "quota";
+  /**
+   * `plan_entitlement` is produced only after a plan re-check proves the
+   * serving account's current plan does not include the requested model.
+   */
+  kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
 };
 
@@ -1279,7 +1316,11 @@ export function codexCredentialCooldownUntil(
   > | null,
   now: Date,
 ): Date | null {
-  if (failure.kind === "auth" || failure.kind === "forbidden") {
+  if (
+    failure.kind === "auth" ||
+    failure.kind === "forbidden" ||
+    failure.kind === "plan_entitlement"
+  ) {
     return null;
   }
   const providerReset =
@@ -1337,6 +1378,12 @@ export function classifyCodexCredentialFailure(error: unknown): CodexCredentialF
   // Their HTTP status codes are not Codex account state and must never walk the
   // subscription pool or replay a tool on another credential.
   if (!isCodexTransportError(error)) {
+    return null;
+  }
+  // Plan/model entitlement evidence (an explicit plan refusal, or an empty
+  // HTTP 400) is not account health or quota. The worker re-checks the plan
+  // first; only a proven entitlement loss walks the pool, as `plan_entitlement`.
+  if (classifyCodexEntitlementRejection(error)) {
     return null;
   }
   const usageLimit = classifyCodexUsageLimitError(error);

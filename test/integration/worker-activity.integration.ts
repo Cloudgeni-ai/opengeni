@@ -32,6 +32,12 @@ import {
   dbSql,
   setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
+  ensureCodexRotationSettings,
+  listCodexAccountStatuses,
+  setInitialActiveCodexCredential,
+  setSessionCodexPin,
+  updateCodexRotationSettings,
+  upsertCodexSubscriptionCredential,
   loadVariableSetForRun,
   setVariableSetVariable,
   getSession,
@@ -4926,9 +4932,449 @@ describe("worker activities integration", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ status: "skipped", error: "session_cancelled" });
   });
+
+  describe("Codex subscription plan downgrade", () => {
+    // The production model client is cached per provider and keeps the fetch it
+    // was built with, so one fake backend serves the whole block. Every test
+    // registers its own ChatGPT account ids.
+    const fakeAccounts: Record<string, FakeCodexAccountBehavior> = {};
+    let backend: ReturnType<typeof installFakeCodexBackend>;
+    beforeAll(() => {
+      backend = installFakeCodexBackend(fakeAccounts);
+    });
+    afterAll(() => {
+      backend.restore();
+    });
+    const callsFor = (route: "responses" | "usage" | "refresh", accounts: readonly string[]) =>
+      backend.calls
+        .filter((call) => call.route === route && accounts.includes(call.account ?? ""))
+        .map((call) => call.account);
+    const codexSettings = () =>
+      testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        codexSubscriptionEnabled: true,
+        environmentsEncryptionKey: workerEnvironmentsKey,
+      });
+
+    async function seedCodexTurn(input: {
+      accounts: Array<{ externalId: string; label: string }>;
+      homeExternalId: string;
+      pinSource: "policy" | "manual";
+      rotationEnabled?: boolean;
+    }) {
+      const grant = await testGrant(dbClient.db);
+      const credentialIds = new Map<string, string>();
+      for (const account of input.accounts) {
+        credentialIds.set(
+          account.externalId,
+          await connectFakeCodexCredential(dbClient.db, grant, account.externalId, account.label),
+        );
+      }
+      await ensureCodexRotationSettings(dbClient.db, grant.accountId, grant.workspaceId);
+      await setInitialActiveCodexCredential(
+        dbClient.db,
+        grant.workspaceId,
+        credentialIds.get(input.homeExternalId)!,
+      );
+      await updateCodexRotationSettings(dbClient.db, grant.workspaceId, {
+        rotationEnabled: input.rotationEnabled ?? true,
+      });
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "plan downgrade",
+        resources: [],
+        metadata: {},
+        model: "codex/gpt-6-sol",
+        sandboxBackend: "none",
+      });
+      await setSessionCodexPin(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        credentialIds.get(input.homeExternalId)!,
+        input.pinSource,
+      );
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "plan downgrade" } },
+      ]);
+      return { grant, session, credentialIds };
+    }
+
+    function runCodexTurn(
+      activities: ReturnType<typeof createWorkerActivities>,
+      grant: AccessGrant,
+      sessionId: string,
+    ) {
+      return activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId,
+        trigger: { kind: "next" },
+        workflowId: `session-${sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+      });
+    }
+
+    test("an empty-body 400 after a Pro to Free downgrade recovers the same turn on another subscription", async () => {
+      Object.assign(fakeAccounts, {
+        "acct-downgraded": { responses: "empty_400", usagePlan: "free", refreshedPlan: "free" },
+        "acct-healthy": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+      });
+      {
+        const { grant, session, credentialIds } = await seedCodexTurn({
+          accounts: [
+            { externalId: "acct-downgraded", label: "Downgraded Pro" },
+            { externalId: "acct-healthy", label: "Healthy Pro" },
+          ],
+          homeExternalId: "acct-downgraded",
+          pinSource: "policy",
+        });
+        const activities = createWorkerActivities({
+          settings: codexSettings(),
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime(),
+        });
+
+        const first = await runCodexTurn(activities, grant, session.id);
+        const firstEvents = await listSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          0,
+          100,
+        );
+        expect(
+          firstEvents.find((event) => event.type === "turn.failed")?.payload ?? null,
+        ).toBeNull();
+        expect(first).toMatchObject({ status: "recovering" });
+        expect(
+          firstEvents.find((event) => event.type === "turn.recovery.requested")?.payload,
+        ).toMatchObject({
+          reason: "codex_credential_failover",
+          credentialId: credentialIds.get("acct-downgraded"),
+          failureKind: "plan_entitlement",
+        });
+
+        const accounts = await listCodexAccountStatuses(dbClient.db, grant.workspaceId);
+        const downgraded = accounts.find(
+          (account) => account.id === credentialIds.get("acct-downgraded"),
+        );
+        expect(downgraded).toMatchObject({ planType: "free", status: "active" });
+        expect(downgraded?.planEntitlementExclusion).toEqual({
+          planType: "free",
+          modelIds: ["codex/gpt-6-sol"],
+        });
+
+        const second = await runCodexTurn(activities, grant, session.id);
+        expect(second).toMatchObject({ status: "idle", turnId: first.turnId });
+        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+        expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+        const completed = events.find((event) => event.type === "turn.completed");
+        expect(JSON.stringify(completed?.payload)).toContain("Served by acct-healthy");
+        const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
+        expect(turns).toHaveLength(1);
+        expect(callsFor("responses", ["acct-downgraded", "acct-healthy"])).toEqual([
+          "acct-downgraded",
+          "acct-healthy",
+        ]);
+      }
+    }, 60_000);
+
+    test("without another subscription the turn fails with typed plan copy until the plan is upgraded", async () => {
+      const solo: FakeCodexAccountBehavior = {
+        responses: "empty_400",
+        usagePlan: "free",
+        refreshedPlan: "free",
+      };
+      fakeAccounts["acct-solo"] = solo;
+      {
+        const { grant, session, credentialIds } = await seedCodexTurn({
+          accounts: [{ externalId: "acct-solo", label: "Solo Pro" }],
+          homeExternalId: "acct-solo",
+          pinSource: "manual",
+        });
+        const activities = createWorkerActivities({
+          settings: codexSettings(),
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime(),
+        });
+        const expectedCopy =
+          'The ChatGPT account "Solo Pro" is now on the Free plan, which doesn\'t include GPT-6 Sol. ' +
+          "Upgrade it, use another connected account, or choose another model.";
+
+        const first = await runCodexTurn(activities, grant, session.id);
+        expect(first).toMatchObject({ status: "failed" });
+        let events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+        expect(events.filter((event) => event.type === "turn.failed").at(-1)?.payload).toEqual({
+          error: expectedCopy,
+          code: "codex_plan_entitlement",
+          retryable: false,
+          planType: "free",
+          model: "codex/gpt-6-sol",
+          detail: "The Codex backend answered HTTP 400 with no error body.",
+        });
+        expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+        const [soloAccount] = await listCodexAccountStatuses(dbClient.db, grant.workspaceId);
+        expect(soloAccount).toMatchObject({
+          id: credentialIds.get("acct-solo"),
+          planType: "free",
+          status: "active",
+          planEntitlementExclusion: { planType: "free", modelIds: ["codex/gpt-6-sol"] },
+        });
+
+        // A new message while the account is still Free fails at admission:
+        // the plan is re-read once, and no model request is sent.
+        await appendOwnedEvents(dbClient.db, grant, session.id, [
+          { type: "user.message", payload: { text: "still free" } },
+        ]);
+        const responsesBefore = callsFor("responses", ["acct-solo"]).length;
+        const second = await runCodexTurn(activities, grant, session.id);
+        expect(second).toMatchObject({ status: "failed" });
+        expect(callsFor("responses", ["acct-solo"])).toHaveLength(responsesBefore);
+        events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+        expect(events.filter((event) => event.type === "turn.failed").at(-1)?.payload).toEqual({
+          error:
+            'The ChatGPT account "Solo Pro" is on the Free plan, which doesn\'t include GPT-6 Sol. ' +
+            "Upgrade it, use another connected account, or choose another model.",
+          code: "codex_plan_entitlement",
+          retryable: false,
+          planType: "free",
+          model: "codex/gpt-6-sol",
+        });
+
+        // The account is upgraded again. Admission re-reads the plan, retires
+        // the exclusion, and the same account serves the next turn.
+        solo.responses = "ok";
+        solo.usagePlan = "pro";
+        solo.refreshedPlan = "pro";
+        await appendOwnedEvents(dbClient.db, grant, session.id, [
+          { type: "user.message", payload: { text: "upgraded" } },
+        ]);
+        const third = await runCodexTurn(activities, grant, session.id);
+        expect(third).toMatchObject({ status: "idle" });
+        events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 300);
+        expect(JSON.stringify(events.filter((e) => e.type === "turn.completed").at(-1))).toContain(
+          "Served by acct-solo",
+        );
+        const [upgraded] = await listCodexAccountStatuses(dbClient.db, grant.workspaceId);
+        expect(upgraded).toMatchObject({ planType: "pro", planEntitlementExclusion: null });
+      }
+    }, 60_000);
+
+    test("an empty-body 400 on an unchanged paid plan fails with typed copy and keeps the account", async () => {
+      Object.assign(fakeAccounts, {
+        "acct-paid": { responses: "empty_400", usagePlan: "pro", refreshedPlan: "pro" },
+        "acct-other": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+      });
+      {
+        const { grant, session, credentialIds } = await seedCodexTurn({
+          accounts: [
+            { externalId: "acct-paid", label: "Paid Pro" },
+            { externalId: "acct-other", label: "Other Pro" },
+          ],
+          homeExternalId: "acct-paid",
+          pinSource: "policy",
+        });
+        const activities = createWorkerActivities({
+          settings: codexSettings(),
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime(),
+        });
+
+        const result = await runCodexTurn(activities, grant, session.id);
+        expect(result).toMatchObject({ status: "failed" });
+        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+        expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+        expect(events.find((event) => event.type === "turn.failed")?.payload).toEqual({
+          error:
+            "The Codex backend rejected this request (HTTP 400) without an error message. " +
+            'The ChatGPT account "Paid Pro" still reports the Pro plan, so OpenGeni did not switch accounts. ' +
+            "Try again, or choose another model if it keeps failing.",
+          code: "codex_request_rejected",
+          retryable: false,
+          planType: "pro",
+          detail: "The Codex backend answered HTTP 400 with no error body.",
+        });
+        const paid = (await listCodexAccountStatuses(dbClient.db, grant.workspaceId)).find(
+          (account) => account.id === credentialIds.get("acct-paid"),
+        );
+        expect(paid).toMatchObject({
+          planType: "pro",
+          status: "active",
+          planEntitlementExclusion: null,
+        });
+        expect(paid?.planCheckedAt).toBeInstanceOf(Date);
+        expect(callsFor("responses", ["acct-paid", "acct-other"])).toEqual(["acct-paid"]);
+      }
+    }, 60_000);
+  });
 });
 
 type TestDb = ReturnType<typeof createDb>["db"];
+
+function fakeCodexJwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.signature`;
+}
+
+function fakeCodexTokens(externalId: string, planType: string, generation = 1) {
+  return {
+    access_token: fakeCodexJwt({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      sub: `${externalId}:${generation}`,
+    }),
+    refresh_token: `refresh:${externalId}:${generation}`,
+    id_token: fakeCodexJwt({
+      email: `${externalId}@example.test`,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: externalId,
+        chatgpt_plan_type: planType,
+      },
+    }),
+  };
+}
+
+async function connectFakeCodexCredential(
+  db: TestDb,
+  grant: AccessGrant,
+  externalId: string,
+  label: string,
+): Promise<string> {
+  const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
+  const result = await upsertCodexSubscriptionCredential(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    credentialEncrypted: encryptEnvironmentValue(
+      key,
+      JSON.stringify(fakeCodexTokens(externalId, "pro")),
+    ),
+    chatgptAccountId: externalId,
+    scopes: null,
+    planType: "pro",
+    isFedramp: false,
+    expiresAt: new Date(Date.now() + 3_600_000),
+    lastRefreshAt: new Date(),
+    accountEmail: `${externalId}@example.test`,
+    label,
+  });
+  if (result.kind !== "upserted") throw new Error("fake Codex credential was not connected");
+  return result.id;
+}
+
+type FakeCodexAccountBehavior = {
+  responses: "ok" | "empty_400" | "plan_403";
+  usagePlan: string | null;
+  refreshedPlan: string;
+};
+
+/**
+ * A fake ChatGPT/Codex backend on the real transport: every model, usage and
+ * token-refresh request from the worker goes through the production fetch
+ * wrapper and is answered per ChatGPT account id. Unrelated traffic passes
+ * through untouched.
+ */
+function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavior>) {
+  const original = globalThis.fetch;
+  const calls: Array<{ route: "responses" | "usage" | "refresh"; account: string | null }> = [];
+  const refreshGenerations = new Map<string, number>();
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : {}));
+    const account = headers.get("ChatGPT-Account-ID");
+    if (url === "https://chatgpt.com/backend-api/codex/responses") {
+      calls.push({ route: "responses", account });
+      const behavior = account ? accounts[account] : undefined;
+      if (!behavior) return new Response("", { status: 401 });
+      if (behavior.responses === "empty_400") return new Response("", { status: 400 });
+      if (behavior.responses === "plan_403") {
+        return new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              code: "model_not_available_on_plan",
+              message: "This model is not available on your current plan.",
+            },
+          }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      }
+      const sse = [
+        {
+          type: "response.created",
+          response: { id: `resp-${account}`, status: "in_progress", output: [] },
+        },
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            type: "message",
+            id: `msg-${account}`,
+            status: "completed",
+            role: "assistant",
+            content: [
+              { type: "output_text", text: `Served by ${account}`, annotations: [], logprobs: [] },
+            ],
+          },
+        },
+        {
+          type: "response.completed",
+          response: {
+            id: `resp-${account}`,
+            status: "completed",
+            output: [],
+            usage: {
+              input_tokens: 10,
+              input_tokens_details: { cached_tokens: 0 },
+              output_tokens: 4,
+              output_tokens_details: { reasoning_tokens: 0 },
+              total_tokens: 14,
+            },
+          },
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(sse, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    if (url === "https://chatgpt.com/backend-api/wham/usage") {
+      calls.push({ route: "usage", account });
+      const behavior = account ? accounts[account] : undefined;
+      if (!behavior) return new Response("", { status: 401 });
+      return new Response(
+        JSON.stringify(behavior.usagePlan === null ? {} : { plan_type: behavior.usagePlan }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url === "https://auth.openai.com/oauth/token") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { refresh_token?: string };
+      const externalId = body.refresh_token?.split(":")[1] ?? null;
+      calls.push({ route: "refresh", account: externalId });
+      const behavior = externalId ? accounts[externalId] : undefined;
+      if (!externalId || !behavior) return new Response("", { status: 401 });
+      const generation = (refreshGenerations.get(externalId) ?? 1) + 1;
+      refreshGenerations.set(externalId, generation);
+      return new Response(
+        JSON.stringify(fakeCodexTokens(externalId, behavior.refreshedPlan, generation)),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return await original(input, init);
+  }) as typeof fetch;
+  return {
+    calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
 
 const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
 
