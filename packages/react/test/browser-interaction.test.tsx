@@ -2537,11 +2537,30 @@ describe("BrowserViewer", () => {
         keyboardAfterClipboard!.dispatchEvent(
           new InputEvent("input", { bubbles: true, data: "に", isComposing: true }),
         );
+        for (const key of ["ArrowDown", "Backspace", "Escape", "Enter"]) {
+          const candidateKey = new KeyboardEvent("keydown", {
+            key,
+            bubbles: true,
+            cancelable: true,
+            isComposing: true,
+          });
+          keyboardAfterClipboard!.dispatchEvent(candidateKey);
+          expect(candidateKey.defaultPrevented).toBe(false);
+        }
         keyboardAfterClipboard!.value = "日本";
         keyboardAfterClipboard!.dispatchEvent(
           new CompositionEvent("compositionend", { bubbles: true, data: "日本" }),
         );
         keyboardAfterClipboard!.dispatchEvent(new Event("input", { bubbles: true }));
+        // A native composing key must also be ignored outside composition events.
+        const commitKey = new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+          isComposing: true,
+        });
+        keyboardAfterClipboard!.dispatchEvent(commitKey);
+        expect(commitKey.defaultPrevented).toBe(false);
       });
       await flush(20);
 
@@ -2552,6 +2571,14 @@ describe("BrowserViewer", () => {
         { type: "type", text: "日本" },
       ]);
       expect(copied).toEqual(["remote selection"]);
+      await actRun(() => {
+        keyboardAfterClipboard!.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      });
+      await flush(20);
+      expect(actionValues.at(-1)).toEqual({ type: "press", key: "Enter" });
+      expect(actions).toHaveLength(4);
     } finally {
       canvasMock.restore();
       if (priorClipboard) Object.defineProperty(navigator, "clipboard", priorClipboard);

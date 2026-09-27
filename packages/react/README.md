@@ -554,6 +554,8 @@ request per action. Only queued text actions share a request (at most 16), with
 each text/input event preserved. Keys, pointer input and clipboard operations
 remain ordering barriers. A failed or uncertain action discards the queued suffix
 without replay.
+IME candidate-selection keys stay local to the viewer; only committed text is
+sent to the remote page. A later ordinary Enter remains a remote key action.
 Live image props use opaque byte buffers so React development timing diagnostics
 cannot expand and retain every screenshot byte. Normal timing diagnostics remain enabled.
 Queued inputs retain only immutable frame fences, not screenshot bytes or prior
