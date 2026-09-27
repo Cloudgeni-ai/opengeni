@@ -101,8 +101,13 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 Configured Skill descriptors enter durable developer-message history during
 turn-attempt preparation; unchanged catalogs add nothing and retries reuse the
 same snapshot. The eager `skill_read` reads text without sandbox setup, and lazy
-`skill_checkout` copies files only on demand. Preserve repository-file discovery
-independently; it still uses the sandbox SDK instruction source.
+`skill_checkout` copies files only on demand. A repeated default `skill_read`
+returns a short `alreadyInContext` receipt only while an active, call-paired
+result in the session's own history holds the same identity and exact text as
+the current model receives it (after this turn's tool-output bound);
+compacted-away reads count as absent and explicit `paths` always return content.
+Preserve repository-file discovery independently; it still uses the sandbox SDK
+instruction source.
 See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.
 
 - Public clients talk only to the API.
