@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, readlink, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { BrowserSupervisor, CdpConnection } from "../src";
 
@@ -14,6 +14,7 @@ e2e(
       rootDirectory: root,
       socketRootDirectory: sockets,
       ephemeralContextPoolEnabled: true,
+      maxSessions: 3,
     });
     const make = (partition: string) => ({
       browserSessionId: randomUUID(),
@@ -74,10 +75,34 @@ e2e(
       expect(killed).toBe(true);
       for (let attempt = 0; attempt < 100 && supervisor.listSessions().length !== 1; attempt++)
         await Bun.sleep(25);
-      await expect(supervisor.observe(a, one.observation.target.id)).rejects.toThrow();
-      await expect(supervisor.observe(b, two.observation.target.id)).rejects.toThrow(
-        "generation ended",
-      );
+      // Admission joins automatic retirement, reclaiming both crashed slots.
+      const replacement = make("a");
+      await supervisor.createSession(replacement);
+      await expect(supervisor.observe(a, one.observation.target.id)).rejects.toMatchObject({
+        code: "resource_not_found",
+      });
+      await expect(supervisor.observe(b, two.observation.target.id)).rejects.toMatchObject({
+        code: "resource_not_found",
+      });
+      await expect(supervisor.createSession(a)).rejects.toThrow("generation already issued");
+      if (process.platform === "linux") {
+        const fds = await Promise.all(
+          (await readdir("/proc/self/fd")).map(async (fd) => {
+            try {
+              return await readlink(`/proc/self/fd/${fd}`);
+            } catch {
+              return "";
+            }
+          }),
+        );
+        for (const lost of [a, b])
+          expect(
+            fds.some((path) =>
+              path.startsWith(join(root, "sessions", lost.browserSessionId) + "/"),
+            ),
+          ).toBe(false);
+      }
+      await supervisor.endSession(replacement, { removeState: true });
       expect(supervisor.listSessions().map((session) => session.browserSessionId)).toEqual([
         c.browserSessionId,
       ]);
