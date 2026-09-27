@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 7.3.1
+
+### Patch Changes
+
+- 6cbccaa: Keep IME candidate-selection and commit keys local to the browser viewer so composing text cannot move the remote caret or submit a remote form. Continue forwarding committed text and subsequent ordinary keys.
+
 ## 7.3.0
 
 ### Patch Changes
