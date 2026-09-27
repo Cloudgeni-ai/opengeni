@@ -1742,6 +1742,16 @@ function settingsForWorkspaceArchiveRestore(
 ): Settings {
   if (backend !== "modal") return settings;
   const workspacePersistence = modalWorkspacePersistenceForRestore(archive);
+  if (workspacePersistence === "snapshot_filesystem" && archive?.kind === "provider_snapshot") {
+    // Boot the selected filesystem image directly. SDK hydrateWorkspace would
+    // create a second box and expose its identity only after old-box teardown.
+    // The ordinary create callback must own the only destination before verify.
+    return {
+      ...settings,
+      modalWorkspacePersistence: workspacePersistence,
+      modalImageId: archive.nativeSnapshot!.snapshotId,
+    };
+  }
   return workspacePersistence && settings.modalWorkspacePersistence !== workspacePersistence
     ? { ...settings, modalWorkspacePersistence: workspacePersistence }
     : settings;
@@ -1860,11 +1870,9 @@ export async function establishSandboxSessionFromEnvelope(
   const workspaceArchiveBase64 = archiveState?.workspaceArchive;
   const workspaceArchiveMetadata = archiveState?.workspaceArchiveMeta;
 
-  // create() a FRESH box, THEN replay the persisted /workspace snapshot via
-  // session.hydrateWorkspace(archive) when one rode the envelope. hydrateWorkspace
-  // decodes the snapshot-ref and swaps the box for one booted from the snapshot
-  // image (restoreSnapshotFilesystem). No archive is valid only for a genuinely
-  // new workspace; recovery callers select and verify an exact archive before
+  // Create one destination directly from a Modal filesystem snapshot; other
+  // archive protocols hydrate the fresh destination. No archive is valid only
+  // for a genuinely new workspace; callers select and verify an exact archive before
   // entering this seam. This is the SOLE archive-replay path, shared by the
   // NotFound warm-reattach path and the cold-restore branch (b) below.
   const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
@@ -1926,6 +1934,13 @@ export async function establishSandboxSessionFromEnvelope(
         settings,
         workspaceArchive,
       );
+      const createdFromFilesystemSnapshot =
+        backend === "modal" &&
+        workspaceArchive?.kind === "provider_snapshot" &&
+        workspaceArchive.nativeSnapshot?.provider === "modal_snapshot_filesystem";
+      const restoreImageSource = createdFromFilesystemSnapshot
+        ? "provider_immutable"
+        : createImageSource;
       const restoreClient =
         restoreSettings === settings
           ? client
@@ -1951,7 +1966,7 @@ export async function establishSandboxSessionFromEnvelope(
         recordSandboxCreateMetric(
           opts.metrics,
           restoreClient.backendId,
-          createImageSource,
+          restoreImageSource,
           "completed",
           createStarted,
         );
@@ -1959,7 +1974,7 @@ export async function establishSandboxSessionFromEnvelope(
         recordSandboxCreateMetric(
           opts.metrics,
           restoreClient.backendId,
-          createImageSource,
+          restoreImageSource,
           "failed",
           createStarted,
         );
@@ -1970,6 +1985,7 @@ export async function establishSandboxSessionFromEnvelope(
           error,
         );
         if (
+          createdFromFilesystemSnapshot ||
           createImageSource !== "provider_immutable" ||
           backend !== "modal" ||
           !isProviderSandboxNotFoundError(restoreClient.backendId, error)
@@ -2058,7 +2074,11 @@ export async function establishSandboxSessionFromEnvelope(
       if (workspaceArchive) {
         const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
           .hydrateWorkspace;
-        if (workspaceArchive.kind !== "host_spool" && typeof hydrate !== "function") {
+        if (
+          !createdFromFilesystemSnapshot &&
+          workspaceArchive.kind !== "host_spool" &&
+          typeof hydrate !== "function"
+        ) {
           await terminateCreatedSandbox(createdClient, restored, restoredState);
           throw new WorkspaceArchiveIntegrityError(
             "archive_hydration_failed",
@@ -2066,7 +2086,17 @@ export async function establishSandboxSessionFromEnvelope(
           );
         }
         try {
-          // hydrateWorkspace may internally replace the underlying box.
+          if (
+            createdFromFilesystemSnapshot &&
+            (restoredState as { imageId?: unknown } | undefined)?.imageId !==
+              restoreSettings.modalImageId
+          ) {
+            throw new WorkspaceArchiveIntegrityError(
+              "archive_hydration_failed",
+              "Modal destination did not boot the selected filesystem snapshot",
+            );
+          }
+          // Directory/tar hydration operates on the attributed destination.
           if (workspaceArchive.kind === "host_spool") {
             // This is the exact newly-created, unpublished destination. The lease
             // restore fence must exclude admitted writers until verification ends;
@@ -2081,7 +2111,9 @@ export async function establishSandboxSessionFromEnvelope(
             await restoreHostWorkspaceArchive(root, hostSpool!, {
               archiveLimits: Reflect.get(restored as object, "archiveLimits"),
             });
-          } else await hydrate!.call(restored, workspaceArchive.bytes);
+          } else if (!createdFromFilesystemSnapshot) {
+            await hydrate!.call(restored, workspaceArchive.bytes);
+          }
         } catch (error) {
           await terminateCreatedSandbox(
             createdClient,
@@ -2095,8 +2127,8 @@ export async function establishSandboxSessionFromEnvelope(
             { retryable: true, cause: error },
           );
         }
-        // hydrateWorkspace may replace the provider box (Modal's native snapshot
-        // restore does this). Attribute the newly-active identity immediately,
+        // Defend against a backend replacing its provider during hydration.
+        // Attribute the newly-active identity immediately,
         // before restore-state marking, fingerprint verification, or any caller
         // can publish the box warm. The callback is the durable lease/tagging
         // boundary; if it cannot persist the replacement, the caller fails closed

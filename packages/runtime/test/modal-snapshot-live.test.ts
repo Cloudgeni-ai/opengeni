@@ -173,6 +173,7 @@ describe("Modal native checkpoint round trip (opt-in live service)", () => {
           ),
         ).toBe("source-still-live");
 
+        const attributedIds: string[] = [];
         restored = await establishSandboxSessionFromEnvelope(
           settings,
           {
@@ -187,9 +188,19 @@ describe("Modal native checkpoint round trip (opt-in live service)", () => {
             sessionId: crypto.randomUUID(),
             recovery: "create-or-restore",
             backendOverride: "modal",
+            onSandboxCreated: async (created) => {
+              attributedIds.push(created.instanceId);
+            },
           },
         );
         expect(restored.origin).toBe("restored");
+        expect(attributedIds).toEqual([restored.instanceId]);
+        expect(restored.instanceId).not.toBe(source.instanceId);
+        if (workspacePersistence === "snapshot_filesystem") {
+          expect((restored.sessionState as { imageId?: string }).imageId).toBe(
+            snapshot.nativeSnapshot?.snapshotId,
+          );
+        }
         await expect(
           modalSessionMatchesCheckpointProviderBinding(
             settings,
