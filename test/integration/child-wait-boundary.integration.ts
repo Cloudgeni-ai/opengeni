@@ -190,13 +190,22 @@ test("a person's answer turn keeps a goalless root waiting so its child result w
         describe,
       });
       // Without a goal, only the held wait lets the child result start a turn.
+      // Its final message is published before the turn settles, so wait for the
+      // settlement and the wait retirement rather than the message alone.
       await waitFor(
-        async () =>
-          (await events()).some(
+        async () => {
+          const all = await events();
+          const final = all.find(
             (e) =>
               e.type === "agent.message.completed" &&
               JSON.stringify(e.payload).includes("HELD_WAIT_ROOT_FINAL"),
-          ),
+          );
+          return (
+            final !== undefined &&
+            all.some((e) => e.type === "turn.completed" && e.turnId === final.turnId) &&
+            all.some((e) => e.type === "session.wait.finished")
+          );
+        },
         { timeoutMs: 60000, describe },
       );
     } finally {
