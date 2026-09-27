@@ -515,7 +515,7 @@ export const attachedBrowserDevices = pgTable(
         and octet_length(${table.extensionVersion}) between 1 and 256
         and ${table.extensionVersion} = btrim(${table.extensionVersion})
         and octet_length(${table.connectionGeneration}) between 1 and 256
-        and ${table.connectionGeneration} ~ '^[A-Za-z0-9._:-]+$'
+        and ${table.connectionGeneration} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
         and ${table.inventoryRevision} >= 0
         and ${table.tabCount} between 0 and 100000
         and jsonb_typeof(${table.capabilities}) = 'object'
@@ -546,7 +546,7 @@ export const attachedBrowserInventories = pgTable(
     valuesValid: check(
       "attached_browser_inventories_values_check",
       sql`octet_length(${table.bridgeGeneration}) between 1 and 256
-        and ${table.bridgeGeneration} ~ '^[A-Za-z0-9._:-]+$'
+        and ${table.bridgeGeneration} ~ '^[A-Za-z0-9_-][A-Za-z0-9._:-]*$'
         and ${table.revision} >= 0`,
     ),
   }),

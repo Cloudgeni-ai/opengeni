@@ -251,17 +251,24 @@ describe("attached browser endpoint registry", () => {
         snapshot: {
           bridgeGeneration: generation,
           revision: revision + 1,
-          devices: [device(id, "Primary Chrome", revision + 1, generation)],
+          devices: [device(id, "Primary Chrome", revision + 1, "extension-1")],
         },
       });
       expect(result.accepted).toBe(true);
       const inventory = await listAttachedBrowserDevices(client.db, scope);
       expect(inventory.bridges[0]?.bridgeGeneration).toBe(generation);
-      expect(inventory.devices[0]?.connectionGeneration).toBe(generation);
+      expect(inventory.devices[0]?.connectionGeneration).toBe("extension-1");
       expect(inventory.devices[0]?.state).toBe("connected");
     }
     // Exercise the database fences independently of API parsing.
-    for (const invalid of ["", "bad generation", "bad/path", "x".repeat(257)]) {
+    for (const invalid of [
+      "",
+      ".invalid",
+      ":invalid",
+      "bad generation",
+      "bad/path",
+      "x".repeat(257),
+    ]) {
       await expect(shared!.admin`
         UPDATE attached_browser_inventories SET bridge_generation = ${invalid}
         WHERE workspace_id = ${scope.workspaceId} AND enrollment_id = ${scope.enrollmentId}
