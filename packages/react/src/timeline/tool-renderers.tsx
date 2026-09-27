@@ -941,7 +941,15 @@ function LoadedRetainedSessionImageDisclosure({
         </BodyNote>
       ) : (
         <BodyNote tone="error">
-          {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed: {state.message}
+          {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed.{" "}
+          <button
+            type="button"
+            aria-label={`Retry ${noun} retrieval`}
+            onClick={state.retry}
+            className="underline underline-offset-2"
+          >
+            Retry
+          </button>
         </BodyNote>
       )}
       {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
@@ -1294,7 +1302,17 @@ function GeneratedImageDisclosure({
       ) : state.kind === "unavailable" ? (
         <BodyNote>Image {state.label}.</BodyNote>
       ) : (
-        <BodyNote tone="error">Image retrieval failed.</BodyNote>
+        <BodyNote tone="error">
+          Image retrieval failed.{" "}
+          <button
+            type="button"
+            aria-label="Retry image retrieval"
+            onClick={state.retry}
+            className="underline underline-offset-2"
+          >
+            Retry
+          </button>
+        </BodyNote>
       )}
       <BodyNote>
         {dimensions.width}×{dimensions.height} · {receipt.sandboxPath}
