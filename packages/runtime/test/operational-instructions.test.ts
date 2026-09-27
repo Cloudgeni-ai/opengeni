@@ -363,7 +363,7 @@ describe("proportional effort", () => {
     expect(guidance).not.toContain("more than 60 seconds");
     expect(guidance).toContain("one short, plain sentence");
     expect(guidance).toContain(
-      "Skip the opening update when you expect to answer within about a minute",
+      "Skip the opening update when you expect to answer within about 20 seconds",
     );
     expect(guidance).toContain("at least every two minutes");
     expect(guidance).toContain("Do not narrate Skill reads or waits");
