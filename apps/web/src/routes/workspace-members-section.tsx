@@ -31,15 +31,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
   defaultWorkspaceMemberPermissions,
-  organizationAdministrationAccountIds,
+  workspaceAccessLevels,
   workspaceMemberPermissionGroups,
   type WorkspaceAccessLevel,
-  type WorkspaceAccessLevelDefinition,
 } from "@/lib/permissions";
-import {
-  resolveWorkspaceAccessLevels,
-  workspaceMemberAccessRole,
-} from "@/lib/workspace-access-levels";
+import { workspaceMemberAccessRole } from "@/lib/workspace-access-levels";
 import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
@@ -78,14 +74,6 @@ function MembersSectionContent({
     permissions: Set<string>;
   } | null>(null);
   const [removeTarget, setRemoveTarget] = useState<WorkspaceMember | null>(null);
-  const [serverAccessLevels, setServerAccessLevels] =
-    useState<ReadonlyArray<WorkspaceAccessLevelDefinition> | null>(null);
-  const workspaceAccessLevels = resolveWorkspaceAccessLevels(serverAccessLevels);
-  const organizationId =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.accountId ?? null;
-  const canReadRoleCatalog =
-    organizationId !== null &&
-    organizationAdministrationAccountIds(context.accessContext).includes(organizationId);
   const refreshGenerationRef = useRef(0);
   const candidateRefreshGenerationRef = useRef(0);
   const currentRefreshScopeRef = useRef<{
@@ -157,24 +145,6 @@ function MembersSectionContent({
       refreshGenerationRef.current += 1;
     };
   }, [refresh]);
-
-  // The server owns the named-role presets. Organization admins can read them,
-  // so match members against that catalog instead of a client copy.
-  useEffect(() => {
-    if (!canReadRoleCatalog || !organizationId) return;
-    let disposed = false;
-    void client
-      .getOrganizationAdministrationOverview(organizationId)
-      .then((overview) => {
-        if (!disposed) setServerAccessLevels(overview.roles);
-      })
-      .catch(() => {
-        // Fall back to the client catalog; the member list stays usable.
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [canReadRoleCatalog, client, organizationId]);
 
   const loadMemberCandidates = useCallback(async () => {
     const generation = ++candidateRefreshGenerationRef.current;

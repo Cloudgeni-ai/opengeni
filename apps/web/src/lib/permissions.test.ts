@@ -10,7 +10,7 @@ import {
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
 } from "./permissions";
-import { resolveWorkspaceAccessLevels, workspaceMemberAccessRole } from "./workspace-access-levels";
+import { workspaceMemberAccessRole } from "./workspace-access-levels";
 
 describe("workspace member permission groups", () => {
   test("members can discover connections without gaining connection administration", () => {
@@ -147,37 +147,25 @@ describe("Personal workspace settings", () => {
 });
 
 describe("workspace member access roles", () => {
-  const serverMember = {
-    role: "member" as const,
-    label: "Member",
-    description: "Can create sessions and contribute shared workspace content.",
-    permissions: ["workspace:read", "sessions:create", "sessions:read"],
-  };
-
-  test("matches members against the server role catalog", () => {
-    const levels = resolveWorkspaceAccessLevels([serverMember]);
-    expect(levels.find((level) => level.role === "member")).toBe(serverMember);
-    // Roles the server did not return keep the client fallback.
-    expect(levels.map((level) => level.role)).toEqual(["viewer", "member", "admin"]);
+  test("names the workspace owner and marks divergent grants as custom", () => {
     expect(
       workspaceMemberAccessRole(
-        { role: "member", permissions: ["sessions:read", "workspace:read", "sessions:create"] },
-        levels,
+        { role: "owner", permissions: ["workspace:admin"] },
+        workspaceAccessLevels,
+      ),
+    ).toBe("owner");
+    const member = workspaceAccessLevels.find((level) => level.role === "member")!;
+    expect(
+      workspaceMemberAccessRole(
+        { role: "member", permissions: [...member.permissions].reverse() },
+        workspaceAccessLevels,
       ),
     ).toBe("member");
-  });
-
-  test("falls back to the client catalog without a server catalog", () => {
-    expect(resolveWorkspaceAccessLevels(null)).toBe(workspaceAccessLevels);
-  });
-
-  test("names the workspace owner and marks divergent grants as custom", () => {
-    const levels = resolveWorkspaceAccessLevels(null);
     expect(
-      workspaceMemberAccessRole({ role: "owner", permissions: ["workspace:admin"] }, levels),
-    ).toBe("owner");
-    expect(
-      workspaceMemberAccessRole({ role: "member", permissions: ["workspace:read"] }, levels),
+      workspaceMemberAccessRole(
+        { role: "member", permissions: ["workspace:read"] },
+        workspaceAccessLevels,
+      ),
     ).toBe("custom");
   });
 });

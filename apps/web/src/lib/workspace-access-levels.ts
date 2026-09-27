@@ -1,21 +1,4 @@
-import {
-  workspaceAccessLevels,
-  type WorkspaceAccessLevel,
-  type WorkspaceAccessLevelDefinition,
-} from "./permissions";
-
-/**
- * Merge the server's named-role catalog over the client fallback, per role, so
- * a partial or missing server catalog never drops an assignable role.
- */
-export function resolveWorkspaceAccessLevels(
-  serverRoles: ReadonlyArray<WorkspaceAccessLevelDefinition> | null | undefined,
-): ReadonlyArray<WorkspaceAccessLevelDefinition> {
-  if (!serverRoles || serverRoles.length === 0) return workspaceAccessLevels;
-  return workspaceAccessLevels.map(
-    (fallback) => serverRoles.find((role) => role.role === fallback.role) ?? fallback,
-  );
-}
+import type { WorkspaceAccessLevel, WorkspaceAccessLevelDefinition } from "./permissions";
 
 /** What a member's stored grant means: a named role, the workspace owner, or custom. */
 export function workspaceMemberAccessRole(

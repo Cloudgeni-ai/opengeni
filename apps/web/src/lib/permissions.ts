@@ -260,15 +260,16 @@ export type WorkspaceAccessLevelDefinition = {
 };
 
 /**
- * Client fallback for the named workspace roles. The server owns the canonical
- * catalog (organization overview `roles`); prefer it whenever it is available
- * so a server-side preset change never turns real members into "Custom access".
+ * Named workspace roles. These mirror the server catalog
+ * (`opengeni_private.workspace_member_role_permissions`, returned as the
+ * organization overview `roles`) exactly, labels and descriptions included;
+ * keep them in sync when a migration changes a preset.
  */
 export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition> = [
   {
     role: "viewer",
     label: "Viewer",
-    description: "Can browse sessions and shared workspace content.",
+    description: "Can view shared workspace sessions, files, and approved knowledge.",
     permissions: [
       "workspace:read",
       "sessions:read",
@@ -284,13 +285,13 @@ export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition
   {
     role: "member",
     label: "Member",
-    description: "Can create sessions and work with the workspace's shared resources.",
+    description: "Can create sessions and contribute shared workspace content.",
     permissions: [...defaultWorkspaceMemberPermissions],
   },
   {
     role: "admin",
     label: "Workspace admin",
-    description: "Can manage this workspace, including its members and integrations.",
+    description: "Can manage shared workspace settings, access, and integrations.",
     permissions: [
       "workspace:read",
       "workspace:admin",
