@@ -2833,7 +2833,7 @@ export async function sendAgentMessageInTransaction(
     updateId: update.id,
     eventIds,
     wakeRevision: wake?.wakeRevision ?? null,
-    shouldSignal: wake?.shouldSignal ?? false,
+    shouldSignal: wake !== null,
     workflowId,
     effectiveState: effective.state,
     interruptionCount: 0,
