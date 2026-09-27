@@ -12,6 +12,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import {
   addSessionSystemUpdate,
@@ -21,6 +22,7 @@ import {
   appendSessionEventsAndUpdateSession,
   appendSessionEventsForTurnAttempt,
   appendSessionEventsWithLockedSessionUpdate,
+  appendSessionHistoryItems,
   armCodexCapacityWait,
   applySessionTurnSettlement,
   canonicalSessionCommandHash,
@@ -32,6 +34,7 @@ import {
   QueueCommandConflictError,
   reconcileCodexCapacityWait,
   recoverSessionDispatch,
+  registerDbBinding,
   sendAgentMessageInTransaction,
   SessionCommandIdempotencyError,
   SessionControlInvariantError,
@@ -44,6 +47,8 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
+import * as schema from "../src/schema";
 
 const BARRIER_CLASS = 630_063;
 const RAW_SESSION_EVENT_TYPES = new Set<string>(SESSION_EVENT_RAW_DELTA_TYPES);
@@ -985,6 +990,90 @@ afterAll(async () => {
 }, 60_000);
 
 describe("event-ordering invariant canonical session-event lock order", () => {
+  test("fresh history appends verify returned rows without rereading history under the session lock", async () => {
+    const fixture = await seedRunningSession();
+    const queries: string[] = [];
+    const connection = postgres(shared.appUrl, {
+      max: 1,
+      prepare: false,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    const observedDb = drizzle(connection, {
+      schema,
+      logger: { logQuery: (query) => queries.push(query) },
+    });
+    registerDbBinding(observedDb, { rlsStrategy: "force" });
+    const base = {
+      ...fixture,
+      expectedExecutionGeneration: 1,
+      expectedAttemptId: fixture.attemptId,
+    };
+    const first = {
+      position: 1,
+      item: { type: "message", role: "user", content: "first\u0000item" },
+    };
+    const second = { position: 2, item: { type: "message", role: "user", content: "second" } };
+    const reads = () =>
+      queries.filter(
+        (query) => query.startsWith("select ") && query.includes('from "session_history_items"'),
+      );
+    try {
+      expect(await appendSessionHistoryItems(observedDb, { ...base, items: [first] })).toBeTrue();
+      expect(reads()).toEqual([]);
+
+      queries.length = 0;
+      expect(
+        await appendSessionHistoryItems(observedDb, { ...base, items: [first, second] }),
+      ).toBeTrue();
+      expect(reads()).toHaveLength(1);
+      expect(
+        await appendSessionHistoryItems(observedDb, { ...base, items: [first, second] }),
+      ).toBeTrue();
+
+      await expect(
+        appendSessionHistoryItems(observedDb, {
+          ...base,
+          items: [
+            { position: 1, item: { ...first.item, content: "different" } },
+            { ...second, position: 3 },
+          ],
+        }),
+      ).rejects.toThrow("Conversation history persistence conflict at position 1");
+      const rows =
+        await admin`select position from session_history_items where session_id = ${fixture.sessionId} order by position`;
+      expect(rows.map((row) => Number(row.position))).toEqual([1, 2]);
+
+      await expect(
+        appendSessionHistoryItems(observedDb, {
+          ...base,
+          items: [
+            { ...first, position: 3 },
+            { ...second, position: 3 },
+          ],
+        }),
+      ).rejects.toThrow("Conversation history persistence conflict at position 3");
+      // Matching content from another logical turn is not an idempotent retry.
+      await admin`update session_history_items set turn_id = null where session_id = ${fixture.sessionId} and position = 1`;
+      await expect(
+        appendSessionHistoryItems(observedDb, { ...base, items: [first] }),
+      ).rejects.toThrow("Conversation history persistence conflict at position 1");
+
+      queries.length = 0;
+      expect(
+        await appendSessionHistoryItems(observedDb, {
+          ...base,
+          expectedExecutionGeneration: 2,
+          items: [{ ...second, position: 3 }],
+        }),
+      ).toBeFalse();
+      expect(
+        queries.some((query) => query.startsWith('insert into "session_history_items"')),
+      ).toBeFalse();
+    } finally {
+      await connection.end();
+    }
+  });
+
   test("runs the lock-order races through a non-superuser without RLS bypass", async () => {
     const appProbe = postgres(shared.appUrl, { max: 1 });
     try {
