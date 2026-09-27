@@ -225,6 +225,31 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
+  test("prices delegation and uses the result-bearing wake instead of a poll ritual", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "A child costs minutes of wall time and a large context of its own",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "send a related follow-up to a child you already spawned with `session_send_message`",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "call `wait_for_input` right after spawning instead of alternating `session_wait` and `session_get`",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "carries its final answer in `payload.finalAnswer`. Use that answer directly",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "only when `finalAnswer` is absent or truncated",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "a `session_get` snapshot between waits is not new evidence",
+    );
+    // Guidance only: the join tool stays available and uncapped.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      'To join a short child inside this turn, use `session_wait` with `waitFor: "completion"`',
+    );
+  });
+
   test("answers a question asked mid-run with a final response instead of resuming work", () => {
     const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "The user may send a new message while you are still working.",

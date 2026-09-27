@@ -107,7 +107,7 @@ rows:
 
 | Kind | Class | Produced by | Dedupe |
 | --- | --- | --- | --- |
-| `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary (unchanged) | `child-completion:<child>:...` |
+| `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary; an idle result carries the child's `finalAnswer` | `child-completion:<child>:...` |
 | `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
 | `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
 | `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
@@ -171,6 +171,46 @@ unparseable row (`status = failed`, bounded `last_error`) and keeps delivering
 the rest, and the claim path marks a pending row whose kind or payload it
 cannot parse `failed` with a visible `system.update.cancelled{reason:
 "unrecognized_kind"}` instead of throwing.
+
+An idle `child_terminal_result` is result-bearing. The idle settlement that
+commits its outbox row also freezes the child's newest result-bearing
+`turn.completed` output as optional `payload.finalAnswer` (`sequence`, `text`,
+`truncated`, `totalBytes`, and `nextAction` when truncated). The copy is at
+most `CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES` (8 KiB) UTF-8 bytes
+including its marker: a longer answer keeps its head and tail around an
+explicit omitted-bytes marker, never splits a character, and `nextAction`
+names the exact `session_events` `view: "results"` read of the full answer.
+The complete answer stays only in the child's own durable event. No answer is
+copied when the child's newest turn ended failed, cancelled, superseded, or at a
+segment limit (`max_turns`, `budget_exhausted`), or its answer row is itself a
+retained preview: an older answer is never presented as the newest task's
+result. Only standalone maintenance turns are skipped. The worker's goal
+enrichment upsert keeps the committed `finalAnswer` and `childEventEvidence`
+under the row lock rather than replacing them, so an immediately delivered row
+and a reaper-delivered row carry the same answer. The field is optional, so older
+rows and older workers keep working. An untruncated `finalAnswer` is itself
+the consumption evidence for the parent claim's human acknowledgment, so such a
+row carries no separate `childEventEvidence`; other lifecycle notices and
+answerless terminal results keep the bounded evidence.
+
+A parent's exact live attempt that receives a direct child's complete final
+answer from `session_wait` (`contentComplete`) or `session_events` (a whole
+`results`/debug item) has consumed that result. In a separate best-effort
+transaction under the canonical event-write prefix (the shared control wait is
+bounded like other request writers; a busy prefix skips it), it re-proves that
+the attempt is the session's current one and that each returned sequence is the
+child's result-bearing `turn.completed`, then marks any still-pending idle
+`child_terminal_result` whose `finalAnswer.sequence` is one of those exact
+sequences `superseded` and appends `system.update.cancelled` with
+`reason: consumed_by_parent_read`. A pending result for an answer the parent
+did not receive, such as an older one skipped by a later cursor, stays pending. `session_wait` then reports the remaining
+own pending input, so the parent is not told to end its turn only to receive
+the answer it already has. This mirrors a terminal `command_read`, including
+its window: when the answer was joined before the child's idle boundary
+committed its row (the child closes its run a few seconds after its final
+turn), the row arrives later and still wakes an obligated parent, now with the
+answer included. Suppressing that later row would need a durable per-child
+consumption fact that a delivery can check; it is not implemented.
 
 When a child's `child_terminal_result` is delivered, that child's still-pending
 `child_progress` and `child_waiting_capacity` notices on the parent are

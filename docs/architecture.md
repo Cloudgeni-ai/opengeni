@@ -161,13 +161,14 @@ scalar windows, returning bounded snippets/cursors, not histories. See
 [`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
-They remain on the turn cancellation fence and stop before finalization, allowing
-an agent to test a preview server without waiting for it to exit.
+They remain on the turn cancellation fence and stop before finalization, letting
+agents test preview servers without awaiting exit.
 
 `wait_for_input` persists a turn and deadline; input or timeout resumes execution.
 Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
 drives working/recheck UI separately from unread. `session_wait`/`command_wait`
-are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
+are in-turn reads; idle child results carry final answers. See
+[durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and

@@ -8209,6 +8209,71 @@ export const ChildProgressPayload = z
   .passthrough();
 export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
 
+/**
+ * Bound, in UTF-8 bytes including the truncation marker, on the child's final
+ * answer copied into its `child_terminal_result`. The complete answer stays in
+ * the child's durable `turn.completed` event; `nextAction` points at it.
+ */
+export const CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES = 8 * 1024;
+
+/**
+ * The child's final answer, frozen by the idle settlement that produced the
+ * terminal result. `sequence` is the child's result-bearing `turn.completed`
+ * event. A truncated copy keeps the head and the tail around an explicit
+ * marker, and `nextAction` reads the complete answer.
+ */
+export const ChildTerminalResultFinalAnswer = z
+  .object({
+    sequence: z.number().int().positive(),
+    text: z.string(),
+    truncated: z.boolean(),
+    totalBytes: z.number().int().nonnegative(),
+    nextAction: z
+      .object({
+        tool: z.literal("session_events"),
+        arguments: z
+          .object({
+            sessionId: z.string().uuid(),
+            view: z.literal("results"),
+            after: z.number().int().nonnegative(),
+          })
+          .passthrough(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type ChildTerminalResultFinalAnswer = z.infer<typeof ChildTerminalResultFinalAnswer>;
+
+/** Bounded, UTF-8 safe copy of one child's final answer for its parent. */
+export function childTerminalResultFinalAnswer(input: {
+  childSessionId: string;
+  sequence: number;
+  output: string;
+}): ChildTerminalResultFinalAnswer {
+  const totalBytes = utf8Bytes(input.output);
+  if (totalBytes <= CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES) {
+    return { sequence: input.sequence, text: input.output, truncated: false, totalBytes };
+  }
+  const marker = (omittedBytes: number) =>
+    `\n\n[... ${omittedBytes} bytes of the final answer omitted here. Call finalAnswer.nextAction to read the complete answer. ...]\n\n`;
+  // Reserve the widest marker first: the real omitted count never has more
+  // digits than the total, so the result always fits the bound.
+  const budget = CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES - utf8Bytes(marker(totalBytes));
+  const head = utf8PrefixForResult(input.output, Math.floor(budget * 0.7));
+  const tail = utf8SuffixForResult(input.output, budget - utf8Bytes(head));
+  return {
+    sequence: input.sequence,
+    text: `${head}${marker(totalBytes - utf8Bytes(head) - utf8Bytes(tail))}${tail}`,
+    truncated: true,
+    totalBytes,
+    nextAction: {
+      tool: "session_events",
+      arguments: { sessionId: input.childSessionId, view: "results", after: input.sequence - 1 },
+    },
+  };
+}
+
 export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
   z
     .object({
@@ -8272,6 +8337,8 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       type: z.literal("child_terminal_result"),
       childSessionId: z.string().uuid(),
       status: z.enum(["idle", "failed", "cancelled"]),
+      /** Optional so older rows and older producers remain valid. */
+      finalAnswer: ChildTerminalResultFinalAnswer.optional(),
     })
     .passthrough(),
   MediaGenerationResult,

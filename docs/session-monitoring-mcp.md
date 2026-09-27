@@ -19,7 +19,11 @@ logical 8 KiB evidence budget, parent rendering, or equality checks. The query's
 64 KiB raw inspection cap is only a bounded-read safeguard. Outbox/update payloads
 have their own independent versions; null-version legacy marker text stays literal.
 It never advances to the child's current cursor. A legacy terminal status notice
-without answer content is not proof that the parent consumed an answer.
+without answer content is not proof that the parent consumed an answer. An idle
+terminal result that carries the child's untruncated `finalAnswer` needs no
+separate evidence: claim verifies that answer against the child's retained
+`turn.completed` event instead. A truncated answer acknowledges nothing until a
+complete read (see [`durable-agent-inputs.md`](durable-agent-inputs.md)).
 
 For a live exact parent attempt, `session_events` and `session_wait` also
 acknowledge complete returned content for that same frozen human and a real
@@ -34,7 +38,11 @@ are not accumulated as consumption receipts; use an explicit human mark-read
 when a full item cannot fit in one tool response. Wait/compact acknowledgments
 are restricted to complete answers; use complete result/debug reads for detailed
 failures or human-input content. No read changes append-only history or observes
-background-command completion.
+background-command completion. A complete final-answer read by the parent's exact
+live attempt does supersede that child's still-pending idle terminal result for
+exactly that answer (`consumed_by_parent_read`), so it does not start another
+inference that repeats it; a pending result for a different answer stays; see
+[`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 An explicit mark-unread records the current raw event position as an intent
 fence. Old answer replay and later housekeeping do not clear it; proven consumption
