@@ -1316,7 +1316,7 @@ mod tests {
             match failure {
                 "disabled" => assert!(matches!(error, RetentionError::Overflow { .. })),
                 "disk-budget" => {
-                    assert!(matches!(error, RetentionError::GlobalSpoolExhausted { .. }))
+                    assert!(matches!(error, RetentionError::GlobalSpoolExhausted { .. }));
                 }
                 _ => assert!(matches!(error, RetentionError::SpoolIo { .. })),
             }
