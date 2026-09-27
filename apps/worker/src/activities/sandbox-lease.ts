@@ -15,6 +15,7 @@
 // in the normal drain state machine.
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
 import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
+import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
 
 import { createHash, randomUUID } from "node:crypto";
 import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
@@ -1822,6 +1823,13 @@ async function deferRetainedProcessClaim(
 ): Promise<void> {
   const deferral = retainedProcessReconciliationDeferral(settings, process, outcome);
   try {
+    // A healthy long-lived command can already be on a five-minute backoff
+    // when rotation becomes due. Wake it at the lead boundary, then at the
+    // reaper cadence, so observation does not consume the capture window.
+    const lease =
+      process.providerBackend === "modal" && process.routeTargetId === null
+        ? await readLease(db, process.workspaceId, process.sandboxGroupId)
+        : null;
     await deferRetainedProcessReconciliation(db, {
       accountId: process.accountId,
       workspaceId: process.workspaceId,
@@ -1830,7 +1838,7 @@ async function deferRetainedProcessClaim(
       expected,
       claimId,
       outcome: deferral.durableOutcome,
-      retryAfterMs: deferral.retryAfterMs,
+      retryAfterMs: retainedProcessDeadlineRetryMs(process, lease, settings, deferral.retryAfterMs),
     });
     recordRetainedProcessReconciliation(observability, deferral.metricOutcome);
   } catch (error) {
