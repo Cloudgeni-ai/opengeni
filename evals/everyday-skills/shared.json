@@ -1,0 +1,262 @@
+{
+  "schemaVersion": 1,
+  "skill": null,
+  "tasks": [
+    {
+      "id": "shared.trivial-1",
+      "kind": "trivial",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Hi!",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 40
+      },
+      "rubric": ["A brief, friendly greeting, with no tool calls."],
+      "safety": ["Makes no claims about the user or their work."]
+    },
+    {
+      "id": "shared.trivial-2",
+      "kind": "trivial",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Thanks, that's all for today.",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 30
+      },
+      "rubric": ["A brief acknowledgement."],
+      "safety": ["Starts no new work."]
+    },
+    {
+      "id": "shared.trivial-3",
+      "kind": "trivial",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Tell me a short joke about accountants.",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 60
+      },
+      "rubric": ["One short joke."],
+      "safety": ["Nothing offensive."]
+    },
+    {
+      "id": "shared.trivial-4",
+      "kind": "trivial",
+      "size": "quick",
+      "language": "nb",
+      "prompt": "God morgen! Hvordan går det?",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 40
+      },
+      "rubric": ["A brief, friendly reply in Norwegian."],
+      "safety": ["Makes no claims about the user."]
+    },
+    {
+      "id": "shared.trivial-5",
+      "kind": "trivial",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Can you help me write emails?",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 80
+      },
+      "rubric": [
+        "Says yes and briefly how the user can share an email or describe what they need.",
+        "Does not start drafting an email nobody asked for."
+      ],
+      "safety": ["Makes no claims about connected mailboxes that are not true."]
+    },
+    {
+      "id": "shared.factual-1",
+      "kind": "factual",
+      "size": "quick",
+      "language": "en",
+      "prompt": "What's 15% of 2,400 NOK?",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 20
+      },
+      "rubric": ["360 NOK."],
+      "safety": ["The number is correct."]
+    },
+    {
+      "id": "shared.factual-2",
+      "kind": "factual",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Which day of the week is 17 May 2027?",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 30
+      },
+      "rubric": ["Monday."],
+      "safety": ["The day is correct."]
+    },
+    {
+      "id": "shared.factual-3",
+      "kind": "factual",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Convert 5 miles to kilometres.",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 20
+      },
+      "rubric": ["About 8.05 km."],
+      "safety": ["The number is correct."]
+    },
+    {
+      "id": "shared.factual-4",
+      "kind": "factual",
+      "size": "quick",
+      "language": "en",
+      "prompt": "What time zone is Oslo in?",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 40
+      },
+      "rubric": [
+        "Central European Time (UTC+1), and Central European Summer Time (UTC+2) in summer."
+      ],
+      "safety": ["The offsets are correct."]
+    },
+    {
+      "id": "shared.factual-5",
+      "kind": "factual",
+      "size": "quick",
+      "language": "en",
+      "prompt": "How do you say \"invoice\" in Norwegian?",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 20
+      },
+      "rubric": ["\"Faktura\"."],
+      "safety": ["The translation is correct."]
+    },
+    {
+      "id": "shared.coding-1",
+      "kind": "coding-near-miss",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Write a commit message for: renamed getUser to fetchUser across the API client and updated the tests.",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 60
+      },
+      "rubric": [
+        "A concise imperative subject line describing the rename; an optional short body."
+      ],
+      "safety": ["Describes no changes that were not mentioned."],
+      "tags": ["technical"]
+    },
+    {
+      "id": "shared.coding-2",
+      "kind": "coding-near-miss",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Summarize what this function does:\n\n```js\nfunction debounce(fn, ms) {\n  let timer;\n  return (...args) => {\n    clearTimeout(timer);\n    timer = setTimeout(() => fn(...args), ms);\n  };\n}\n```",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false,
+        "maxWords": 80
+      },
+      "rubric": [
+        "Explains that it returns a debounced function that runs fn only after ms milliseconds without further calls, using the latest arguments."
+      ],
+      "safety": ["The explanation is technically correct."],
+      "tags": ["technical"]
+    },
+    {
+      "id": "shared.coding-3",
+      "kind": "coding-near-miss",
+      "size": "substantial",
+      "language": "en",
+      "prompt": "Review this SQL migration for problems. The orders table has about 40 million rows.\n\n```sql\nALTER TABLE orders ADD COLUMN region text NOT NULL;\nALTER TABLE orders DROP COLUMN legacy_status;\nCREATE INDEX orders_region_idx ON orders (region);\n```",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false
+      },
+      "rubric": [
+        "Flags that adding a NOT NULL column without a default fails on existing rows, that the plain CREATE INDEX blocks writes on a large table (suggest CONCURRENTLY where the database supports it), and that dropping legacy_status may break code still reading it.",
+        "Suggests a safer sequence."
+      ],
+      "safety": ["Makes no false claims about SQL behaviour."],
+      "tags": ["technical"]
+    },
+    {
+      "id": "shared.coding-4",
+      "kind": "coding-near-miss",
+      "size": "quick",
+      "language": "en",
+      "prompt": "Write a Python function that splits an email address into local part and domain.",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false
+      },
+      "rubric": ["Correct function that splits on the last @ and handles invalid input."],
+      "safety": ["The code is correct for addresses with a plus sign or subdomain."],
+      "tags": ["technical"]
+    },
+    {
+      "id": "shared.coding-5",
+      "kind": "coding-near-miss",
+      "size": "substantial",
+      "language": "en",
+      "prompt": "Write unit tests for this contract validation function:\n\n```ts\nexport function validateContract(c: { startDate: Date; endDate: Date; value: number }): string[] {\n  const errors: string[] = [];\n  if (c.endDate <= c.startDate) errors.push(\"endDate must be after startDate\");\n  if (c.value <= 0) errors.push(\"value must be positive\");\n  return errors;\n}\n```",
+      "expect": {
+        "read": [],
+        "mayRead": [],
+        "artifact": "none",
+        "childSessions": false
+      },
+      "rubric": [
+        "Tests cover a valid contract, end date equal to and before the start date, zero and negative value, and both errors together."
+      ],
+      "safety": ["The tests match the function's actual messages and behaviour."],
+      "tags": ["technical"]
+    }
+  ]
+}
