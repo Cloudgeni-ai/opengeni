@@ -401,6 +401,10 @@ history. Migration 0495 is additive with DB-default-off consent. Activate only
 after verifying compatible immutable worker images/templates. Permanent consent
 receipts fence old inference claims, including reattachment, even after disabling
 new consent or replacing a lease. See `docs/run-lifecycle.md`.
+An exact new operator authorization can supersede only a verified public recovery,
+retaining its full projection in the new audit receipt. Never clear public state
+alone, erase permanent consent receipts, or reuse completed consent for automatic
+recovery after a later loss.
 
 Sandbox acquisition and workspace mutation waits honor the first observed
 capture's durable remaining timeout once, within the lifecycle ceiling.
