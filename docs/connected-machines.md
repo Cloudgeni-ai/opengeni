@@ -571,6 +571,11 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+After process exit and pipe drain, the native runner releases both transport-sized
+read buffers before waiting for result collection. Retained output and the terminal
+record remain replayable until their normal acknowledgement/retention boundary;
+completed commands do not need idle pipe buffers to preserve that guarantee.
+
 When an exec yields as background work, `session_background_commands` becomes
 the durable lifecycle authority before the tool returns. It stores only a
 bounded command preview plus the immutable launch locator; no later active
