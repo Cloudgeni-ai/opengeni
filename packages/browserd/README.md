@@ -37,6 +37,15 @@ option, then confirm. Re-targeting the trigger can reset focus or fail when the
 open menu hides that trigger from the accessibility tree. The `select` action
 requires a native HTML select; an ARIA combobox role alone is not sufficient.
 
+Live-view grants advertise `focusedInputObservations` only when the driver
+supports the optional `observationMode: "input"`. A left pointer click then uses
+a bounded isolated-world focus probe: ordinary clicks return no observation,
+while a native select or child-frame focus hint requests the existing redacted
+semantic snapshot. Only a snapshot identifying a focused native select is
+returned. Optional metadata failure never changes a completed click into a
+failed mutation; clients retain explicit observation as a fallback. Agent
+actions keep the default full observation behavior.
+
 The compiled `opengeni-browserd` placement service exposes the supervisor through
 one versioned HTTP/WebSocket protocol on port 7682. An owner-only file supplies
 the placement admin credential; each session receives independently rotatable

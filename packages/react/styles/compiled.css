@@ -1466,9 +1466,6 @@
 :where(.og-root).left-2,:where(.og-root) .left-2 {
     left: calc(var(--spacing) * 2);
   }
-:where(.og-root).left-3,:where(.og-root) .left-3 {
-    left: calc(var(--spacing) * 3);
-  }
 :where(.og-root).z-0,:where(.og-root) .z-0 {
     z-index: 0;
   }

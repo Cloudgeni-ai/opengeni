@@ -584,9 +584,13 @@ returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
 
-Native dropdown popups may not appear in page frames. After focusing a dropdown,
-the human can use **Choose option** to read its choices and select through the
-normal browser action API. The viewer reads only on demand and retains that
+Native dropdown popups may not appear in page frames. With a controller that
+advertises focused input observations, clicking one opens its choices beside
+the click. Ordinary clicks use a bounded focus probe instead of a full page
+snapshot; only a focused native dropdown (or a child-frame focus hint) requests
+semantic options. **Choose option** remains an explicit fallback for older
+controllers and controls that cannot be identified automatically. Selection uses the
+normal browser action API. The viewer retains that
 observation's target/document/frame fence. Private, oversized, or ambiguous
 choices remain unavailable; the page's keyboard controls still work. This
 fallback requires a controller with focused native-select metadata support and

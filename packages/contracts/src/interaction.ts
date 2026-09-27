@@ -2370,8 +2370,10 @@ export const BrowserActionCommand = z
     expectedFrameId: opaqueGeneration.nullable(),
     actor: InteractionActor,
     /** Human live-control surfaces already receive the resulting pixels. They
-     * may omit the expensive semantic snapshot; agent actions keep it. */
-    observationMode: z.enum(["full", "none"]).optional(),
+     * may omit the expensive semantic snapshot; agent actions keep it. The
+     * negotiated input mode only observes a focused native dropdown after a
+     * pointer click, and otherwise returns no observation. */
+    observationMode: z.enum(["full", "none", "input"]).optional(),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
@@ -2741,6 +2743,7 @@ export const BrowserSessionAttachment = z
     targetId: boundedOpaqueId,
     stream: BrowserFrameStreamAttachment,
     fencedInputBatches: z.literal(true).optional(),
+    focusedInputObservations: z.literal(true).optional(),
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();
@@ -2765,7 +2768,7 @@ export const BrowserActionRequest = z
     expectedTargetGeneration: opaqueGeneration,
     expectedDocumentGeneration: opaqueGeneration.nullable(),
     expectedFrameId: opaqueGeneration.nullable(),
-    observationMode: z.enum(["full", "none"]).default("full"),
+    observationMode: z.enum(["full", "none", "input"]).default("full"),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
