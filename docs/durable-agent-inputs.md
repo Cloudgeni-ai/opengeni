@@ -50,9 +50,11 @@ passes unchanged, settlement clears the wait and atomically queues one typed
 
 Any newer finished turn supersedes the wait, including one that only answers a
 human question. Without an active goal or a held wait, a later child result or
-command result does not wake the session, so the operational instructions tell
-the agent to answer and then call `wait_for_input` again with the same reason
-while the awaited work is unchanged.
+command result does not wake the session; with an active goal, ending the answer
+turn starts a continuation that only rediscovers the same wait. The operational
+instructions therefore tell the agent to answer and then call `wait_for_input`
+again with the same reason while the awaited work is still in flight, whether or
+not a goal is active.
 
 A successful Temporal signal is transport delivery, not input admission. The
 current workflow-wake revision stays retryable while an eligible immediate input

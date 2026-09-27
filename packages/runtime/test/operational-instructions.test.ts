@@ -241,17 +241,30 @@ describe("provider-neutral operational instructions", () => {
       "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
     );
     expect(guidance).toContain(
-      "Otherwise the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains.",
+      "If nothing is in flight, the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains.",
     );
     expect(guidance).toContain("acknowledgement, not approval");
+  });
+
+  test("keeps a status answer short and in the user's terms", () => {
+    // Benchmark status replies led with plumbing such as "this session didn't
+    // inherit its credentials" instead of progress.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Keep a status answer to one or two sentences about progress in the user's terms, without session, credential, or tool mechanics.",
+    );
   });
 
   test("a question asked during a wait keeps the wait so in-flight results still resume the agent", () => {
     // A newer finished turn supersedes a registered wait, and child or command
     // results wake a goal-less session only while a wait is held. A question
-    // turn that answered and ended would silently drop the watch.
+    // turn that answered and ended would silently drop the watch; with an
+    // active goal it instead starts a continuation that rediscovers the same
+    // wait. The re-wait rule must not be conditional on having no goal.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "If you were waiting on unchanged in-flight work (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` again with the same reason so its result still resumes you.",
+      "If work you already started is still in flight (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` again with the same reason so its result resumes you, even when a goal is active.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "Otherwise the answer is your final response: an active goal continues on its own",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "do not post a status right before `wait_for_input` unless it answers the user",
@@ -356,7 +369,18 @@ describe("proportional effort", () => {
     const instructions = agent.instructions as string;
     expect(instructions).toContain("general assistant");
     expect(instructions).not.toMatch(/Checkov|Terraform|GitOps/);
-    expect(instructions).toContain("When working in a Git repository");
+    // Branches, commits, and pull requests are conditional on a remote plus
+    // credentials, or on the user asking. An unconditional branch clause made
+    // every benchmark coding run create a branch in a repository without a
+    // remote, and a blocker clause ended every answer with pull-request talk.
+    expect(instructions).toContain(
+      "When the Git repository you change has a remote and git provider credentials are available, work on a focused branch and open a pull request.",
+    );
+    expect(instructions).toContain(
+      "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if they ask for one you cannot make, say what blocks it.",
+    );
+    expect(instructions).not.toContain("make code changes on a focused branch with a pull request");
+    expect(instructions).not.toContain("report the exact commands and blockers");
     expect(instructions).toContain("Attached files are mounted read-only");
     expect(instructions).toContain("pre-authenticated");
   });

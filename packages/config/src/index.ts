@@ -211,7 +211,8 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "Attached files are mounted read-only; copy them before modifying.",
   "Installed and selected Skills appear in the session Skill index; follow its reading instructions and any role-specific guidance.",
   "Provider CLIs such as gh, glab, and az may be pre-authenticated by the host through brokered git credentials or a sandbox preparation profile; try them before asking for credentials.",
-  "When working in a Git repository, make code changes on a focused branch with a pull request when git provider credentials are available; otherwise report the exact commands and blockers.",
+  "When the Git repository you change has a remote and git provider credentials are available, work on a focused branch and open a pull request.",
+  "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if they ask for one you cannot make, say what blocks it.",
   "Answer questions directly and briefly; after making changes, say what changed, how you checked it, and anything still blocked.",
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
 ].join(" ");
