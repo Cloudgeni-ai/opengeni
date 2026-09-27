@@ -1748,6 +1748,12 @@ lease fenced until recovery settles it; they cannot promote recorded `not_ready`
 state to warm. Legacy envelopes without a recovery record retain the existing
 exact-provider-identity checks.
 
+Modal cleanup waits for the provider's terminal exit result. A stop request
+acknowledgement alone cannot settle SDK shutdown, by-ID rescue, or an orphan
+sweep. Failed or unavailable exit confirmation propagates to recovery (and is
+not reported as an orphan termination); borrowed SDK handles still leave their
+provider running. This does not establish the outcome of an unattributed create.
+
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
 recovery. Each ambiguous operation is invoked at most once and is never replayed
