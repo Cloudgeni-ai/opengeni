@@ -348,8 +348,10 @@ describe("proportional effort", () => {
     expect(guidance).toContain("do not verify beyond what the question needs");
     expect(guidance).toContain("Waiting is the user's main cost");
     expect(guidance).toContain(
-      "research or comparison questions, still get the full effort they need: cover every part of the question and link the sources you rely on",
+      "research or comparison questions, still get the full effort they need.",
     );
+    // What a sourced answer contains is decided in the final answer, not here.
+    expect(guidance).not.toContain("link the sources you rely on");
     expect(guidance).toContain('"check again"');
     expect(guidance).toContain("reuse the approach");
     expect(guidance).toContain("instead of rediscovering");
@@ -381,6 +383,13 @@ describe("proportional effort", () => {
     expect(guidance).toContain("Put the answer or outcome in the first sentence");
     expect(guidance).toContain("a few sentences or one table");
     expect(guidance).toContain("to the minute");
+  });
+
+  test("keeps source-backed answers short but not partial", () => {
+    const guidance = section("## Final answer");
+    expect(guidance).toContain(
+      "An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.",
+    );
   });
 
   test("reads a Skill once, without announcing it or triggering on keywords", () => {
