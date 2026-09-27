@@ -582,6 +582,16 @@ read buffers before waiting for result collection. Retained output and the termi
 record remain replayable until their normal acknowledgement/retention boundary;
 completed commands do not need idle pipe buffers to preserve that guarantee.
 
+Retained frames also share a runner-wide memory ledger: one sixteenth of measured
+available RAM, with a 64 MiB floor. Starting a command reserves nothing. Appending
+past either its per-command limit or the shared limit spills its retained frames
+to the existing disk spool; sequence numbers, replay and acknowledgement remain
+unchanged. Acknowledgement, successful spill and log disposal release memory
+charges. Lower capacity samples affect future reservations without discarding
+existing output. This bounds memory-backed record costs, not total runner RSS:
+spool indexes, transport/replay buffers and other subsystems use memory separately.
+Disk exhaustion remains an explicit retention failure.
+
 When an exec yields as background work, `session_background_commands` becomes
 the durable lifecycle authority before the tool returns. It stores only a
 bounded command preview plus the immutable launch locator; no later active
