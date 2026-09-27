@@ -424,13 +424,15 @@ status, and timestamps. The SDK mirrors these as `listInstalledPlugins`,
 
 ## Curated skill library
 
-The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/curated_skill_library/` and are discoverable but uninstalled until explicitly installed through the normal Skill lifecycle, selected for an exact session. The initial reviewed set is Checkov, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, Terraform Test, and Azure Verified Modules.
+The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/curated_skill_library/` and stay uninstalled until explicitly installed through the normal Skill lifecycle. `packages/runtime/src/skill-library.ts` is the canonical list of reviewed entries: Azure Verified Modules, Checkov, Document Parsing, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, and Terraform Test. The Document Parsing entry duplicates the bundled `document-parsing` guide that sessions already receive by default.
+
+Uninstalled entries are not advertised in Skill search: `skill_search` returns no library results (its `library` array stays empty for older clients). The capability catalog still lists each entry as `skill:<id>`. An entry is installed through the human endpoint below or the agent `skill_install` tool with `library:<id>`.
 
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
 - Entries are immutable. A changed artifact is a new version and hash; install requires the exact reviewed version and whole-artifact hash and returns `409` if the reviewed artifact changed.
-- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach a Variable Set, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The Skill contributes guidance files to the normal `.agents/` Skill index only.
-- Active library skills are resolved by the worker at turn start. A missing entry, unavailable artifact, or hash mismatch fails closed; it never substitutes a different version.
+- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach a Variable Set, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The installed Skill joins the workspace Skill index like any other workspace Skill and is read server-side through `skill_read`.
+- Installation loads the library artifact and verifies its whole-artifact hash; a missing entry, unavailable artifact, or hash mismatch fails closed and never substitutes a different version. Turns then read the installed revision's exact files from the Skill ledger, not from the runtime library.
 
 Install the exact reviewed catalog version and hash:
 

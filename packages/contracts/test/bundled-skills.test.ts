@@ -102,3 +102,21 @@ test("arbitrary metadata cannot override typed selection at admission", () => {
   ).toEqual([documents]);
   expect(JSON.stringify(metadata)).toBe(original);
 });
+
+test("stored selection drops ids this build does not know, while input stays strict", () => {
+  const key = "_opengeni_bundled_skill_ids_v1";
+  const unknown = "builtin:not-in-this-build";
+  expect(bundledSkillSelectionFromMetadata({ [key]: [unknown, sites, documents] })).toEqual([
+    documents,
+    sites,
+  ]);
+  // Dropping can only narrow: a stored list of unknown ids reads as an explicit none.
+  expect(bundledSkillSelectionFromMetadata({ [key]: [unknown] })).toEqual([]);
+  expect(bundledSkillSelectionFromMetadata({})).toBeUndefined();
+  expect(() => bundledSkillSelectionFromMetadata({ [key]: "not a list" })).toThrow();
+  expect(BundledSkillSelection.safeParse([documents, unknown]).success).toBe(false);
+  expect(() => withBundledSkillSelectionMetadata({}, [unknown as typeof documents])).toThrow();
+  expect(
+    CreateSessionRequest.safeParse({ initialMessage: "Run", bundledSkillIds: [unknown] }).success,
+  ).toBe(false);
+});

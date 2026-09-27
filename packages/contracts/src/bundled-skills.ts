@@ -43,9 +43,21 @@ export function withBundledSkillSelectionMetadata(
   if (ids !== undefined) next[BUNDLED_SKILL_SELECTION_KEY] = BundledSkillSelection.parse(ids);
   return next;
 }
+/**
+ * Stored-data read. Ids are permanent, but a row written by a newer (or
+ * rolled-back-from) release can hold an id this build lacks. Such ids are
+ * dropped rather than failing the session read; dropping only narrows the
+ * stored selection and never turns it back into defaults. Input stays strict.
+ */
+const StoredBundledSkillSelection = z.array(z.unknown());
+const knownBundledSkillIds: ReadonlySet<unknown> = new Set(BundledSkillId.options);
 export function bundledSkillSelectionFromMetadata(
   metadata: Record<string, unknown>,
 ): BundledSkillId[] | undefined {
   const value = metadata[BUNDLED_SKILL_SELECTION_KEY];
-  return value === undefined ? undefined : BundledSkillSelection.parse(value);
+  if (value === undefined) return undefined;
+  const known = StoredBundledSkillSelection.parse(value).filter((id): id is BundledSkillId =>
+    knownBundledSkillIds.has(id),
+  );
+  return [...new Set(known)].sort();
 }

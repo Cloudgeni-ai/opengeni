@@ -131,4 +131,30 @@ describe("bundled Skill selection real PostgreSQL create identity", () => {
         ).rejects.toThrow("Session create idempotency key was reused with a different request");
     }
   });
+
+  test("a stored id this build does not know is dropped instead of breaking the session read", async () => {
+    if (!client) return;
+    // A newer release (or one rolled back from) may have stored an id this build
+    // lacks. Reading it must narrow the selection, never fail the row mapping.
+    const request = { ...(await input()), bundledSkillIds: ["builtin:opengeni-sites" as const] };
+    const created = await createSessionWithIdempotencyKeyResult(client.db, request);
+    if (created.denied) throw new Error("Unexpected admission denial");
+    const sessionId = created.session.id;
+    await shared!.admin`UPDATE sessions
+      SET metadata = jsonb_set(metadata, ${[reservedKey]}::text[],
+        '["builtin:not-in-this-build", "builtin:opengeni-sites"]'::jsonb)
+      WHERE id=${sessionId}`;
+    const session = await getSession(client.db, request.workspaceId, sessionId);
+    expect(session!.bundledSkillIds).toEqual(["builtin:opengeni-sites"]);
+    const replay = await createSessionWithIdempotencyKeyResult(client.db, request);
+    if (replay.denied) throw new Error("Unexpected retry denial");
+    expect(replay.created).toBe(false);
+    expect(replay.session.bundledSkillIds).toEqual(["builtin:opengeni-sites"]);
+    await shared!.admin`UPDATE sessions
+      SET metadata = jsonb_set(metadata, ${[reservedKey]}::text[], '["builtin:not-in-this-build"]'::jsonb)
+      WHERE id=${sessionId}`;
+    expect((await getSession(client.db, request.workspaceId, sessionId))!.bundledSkillIds).toEqual(
+      [],
+    );
+  });
 });
