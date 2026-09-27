@@ -188,7 +188,7 @@
 .og-plugin-discovery h3 { margin:0; font-size:14px; font-weight:600; }
 .og-plugin-filters { display:flex; gap:3px; padding:3px; border-radius:9px; background:color-mix(in srgb,currentColor 5%,transparent); }
 .og-plugin-filters button { border:0; border-radius:6px; padding:6px 12px; background:transparent; color:inherit; font:inherit; font-size:12px; cursor:pointer; opacity:.65; }
-.og-plugin-filters button[aria-pressed=true] { background:var(--og-color-surface,#ffffff); color:var(--og-color-text,#17191d); box-shadow:0 1px 3px #00000014; opacity:1; }
+.og-plugin-filters button[aria-pressed=true] { background:var(--og-color-surface-1,#ffffff); color:var(--og-color-fg,#17191d); box-shadow:0 1px 3px #00000014; opacity:1; }
 .og-plugin-discovery p, .og-skill-discovery p { font-size:13px; opacity:.65; margin:0 0 12px; }
 .og-plugin-discovery-row { display:flex; align-items:center; gap:12px; width:100%; min-width:0; min-height:64px; padding:10px 12px; text-align:left; color:inherit; background:transparent; border:0; border-radius:8px; font:inherit; cursor:pointer; }
 .og-plugin-discovery-row:hover { background:color-mix(in srgb,currentColor 4%,transparent); }

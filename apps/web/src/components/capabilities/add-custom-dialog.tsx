@@ -122,7 +122,7 @@ export function AddCustomDialog({
                 value={form.description}
                 onChange={(event) => update({ description: event.target.value })}
                 placeholder="What is it for?"
-                className="min-h-16 rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
+                className="min-h-16 rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
               />
             </div>
 

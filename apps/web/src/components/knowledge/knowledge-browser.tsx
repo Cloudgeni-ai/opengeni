@@ -477,7 +477,7 @@ export function KnowledgeBrowser({
     );
   }
   return (
-    <div className="grid gap-5">
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5">
       {fileFilter ? (
         <div className="flex items-center gap-3 text-sm text-fg-muted">
           <span>Knowledge related to this file</span>
@@ -599,6 +599,7 @@ export function KnowledgeBrowser({
         </div>
       ) : null}
       <Tabs
+        className="min-w-0"
         value={view}
         onValueChange={(value) => {
           setView(value as View);

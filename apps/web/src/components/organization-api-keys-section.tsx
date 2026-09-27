@@ -32,6 +32,7 @@ import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { formatTimestamp } from "@/lib/format";
+import { apiKeyStatus } from "@/lib/api-key-status";
 import type { ApiKey } from "@/types";
 
 type CreateOrganizationApiKeyRequest = Parameters<
@@ -709,10 +710,4 @@ const session = await client.createSession(workspace.id, {
   idempotencyKey: productRequest.id,
   skills: selectedSkills,
 });`;
-}
-
-function apiKeyStatus(apiKey: ApiKey): "active" | "expired" | "revoked" {
-  if (apiKey.revokedAt) return "revoked";
-  if (apiKey.expiresAt && Date.parse(apiKey.expiresAt) <= Date.now()) return "expired";
-  return "active";
 }

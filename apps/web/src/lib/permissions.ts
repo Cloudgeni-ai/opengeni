@@ -252,16 +252,24 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
 
 export type WorkspaceAccessLevel = "viewer" | "member" | "admin";
 
-export const workspaceAccessLevels: ReadonlyArray<{
+export type WorkspaceAccessLevelDefinition = {
   role: WorkspaceAccessLevel;
   label: string;
   description: string;
   permissions: readonly string[];
-}> = [
+};
+
+/**
+ * Named workspace roles. These mirror the server catalog
+ * (`opengeni_private.workspace_member_role_permissions`, returned as the
+ * organization overview `roles`) exactly, labels and descriptions included;
+ * keep them in sync when a migration changes a preset.
+ */
+export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition> = [
   {
     role: "viewer",
     label: "Viewer",
-    description: "Can browse sessions and shared workspace content.",
+    description: "Can view shared workspace sessions, files, and approved knowledge.",
     permissions: [
       "workspace:read",
       "sessions:read",
@@ -277,13 +285,13 @@ export const workspaceAccessLevels: ReadonlyArray<{
   {
     role: "member",
     label: "Member",
-    description: "Can create sessions and work with the workspace's shared resources.",
+    description: "Can create sessions and contribute shared workspace content.",
     permissions: [...defaultWorkspaceMemberPermissions],
   },
   {
     role: "admin",
     label: "Workspace admin",
-    description: "Can manage this workspace, including its members and integrations.",
+    description: "Can manage shared workspace settings, access, and integrations.",
     permissions: [
       "workspace:read",
       "workspace:admin",

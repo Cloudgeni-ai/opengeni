@@ -745,6 +745,14 @@ describe("AiGatewayConnectionCard custom models", () => {
           ?.click();
         await flush();
       });
+      // Disconnect asks first; nothing is deleted until it is confirmed.
+      expect(deleteConnection).not.toHaveBeenCalled();
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent === "Disconnect Vercel AI Gateway")
+          ?.click();
+        await flush();
+      });
 
       expect(deleteConnection).toHaveBeenCalledWith("workspace-a", selected.id);
       expect(container.textContent).toContain("Not connected");
@@ -781,6 +789,14 @@ describe("AiGatewayConnectionCard custom models", () => {
       await act(async () => {
         [...container.querySelectorAll<HTMLButtonElement>("button")]
           .find((button) => button.textContent?.includes("Disconnect"))
+          ?.click();
+        await flush();
+      });
+      // Disconnect asks first; nothing is deleted until it is confirmed.
+      expect(deleteConnection).not.toHaveBeenCalled();
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent === "Disconnect Vercel AI Gateway")
           ?.click();
         await flush();
       });
@@ -825,6 +841,14 @@ describe("AiGatewayConnectionCard custom models", () => {
       await act(async () => {
         [...container.querySelectorAll<HTMLButtonElement>("button")]
           .find((button) => button.textContent?.includes("Disconnect"))
+          ?.click();
+        await flush();
+      });
+      // Disconnect asks first; nothing is deleted until it is confirmed.
+      expect(deleteConnection).not.toHaveBeenCalled();
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent === "Disconnect Vercel AI Gateway")
           ?.click();
         await flush();
       });

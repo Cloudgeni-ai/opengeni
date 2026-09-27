@@ -1767,6 +1767,9 @@ export async function bootstrapWorkspace(
           ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
           role: "owner",
           permissions: input.accountPermissions ?? allAccountPermissions,
+          // Same shape as managed grants, so clients show the organization's
+          // real name instead of an id fragment.
+          metadata: { accountName: account.name },
         },
       ],
       workspaceGrants: memberships.map((row) => ({
