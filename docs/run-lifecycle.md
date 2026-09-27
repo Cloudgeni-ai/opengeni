@@ -2358,6 +2358,15 @@ Because the newest message carries the changing bytes, persistent
 turn/queue projections and the standard timeline omit the field; full event and
 audit reads may return it, so it is never a secret boundary.
 
+The current time follows the same rule. Claim renders every accepted user-role
+message (human/API Send, Steer, realtime entries, goal continuations) with a
+separate `[Message sent Saturday 2026-09-26 07:51 UTC]` part taken from the
+turn's durable `created_at`, the acceptance time rather than the claim time, and
+persists it with the message. Delivered machine-input batches state their
+`deliveredAt` and each member's `createdAt` the same way. The model therefore
+knows the date without a tool call, nothing is computed at inference time, and
+recovery replays the stored bytes. The instructions never contain a clock.
+
 1. **`session_history_items` — conversation truth (the model-facing store).**
    Ordered, protocol-preserving SDK `AgentInputItem` JSON, exact for accepted
    content and RLS-scoped. Token-shaped strings, headers, assignments, URLs,

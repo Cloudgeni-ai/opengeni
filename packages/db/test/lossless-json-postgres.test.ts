@@ -7,6 +7,7 @@ import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { renderMessageSentAtForModel } from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -750,13 +751,17 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           ),
         ),
     );
-    expect(
-      fromPostgresLosslessJson(initialHistory!.item, initialHistory!.itemCodecVersion),
-    ).toEqual({
+    const initialUserItem = {
       type: "message",
       role: "user",
-      content: initialMessage,
-    });
+      content: [
+        { type: "input_text", text: renderMessageSentAtForModel(turn.createdAt) },
+        { type: "input_text", text: initialMessage },
+      ],
+    };
+    expect(
+      fromPostgresLosslessJson(initialHistory!.item, initialHistory!.itemCodecVersion),
+    ).toEqual(initialUserItem);
     expect(
       await appendSessionHistoryItems(app.db, {
         accountId: grant.accountId,
@@ -795,10 +800,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       session.id,
       1,
     );
-    expect(pagedHistory.map((entry) => entry.item)).toEqual([
-      { type: "message", role: "user", content: initialMessage },
-      historyItem,
-    ]);
+    expect(pagedHistory.map((entry) => entry.item)).toEqual([initialUserItem, historyItem]);
     expect(
       (await getActiveSessionHistoryItemsPaged(app.db, workspaceId, session.id)).map(
         (entry) => entry.item,
