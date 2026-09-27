@@ -18,6 +18,12 @@ before dispatch; restart settles a prepared operation as failed and a dispatched
 operation as `outcome_unknown`, without replaying either command. Session state is
 retained for restore unless its lifecycle owner explicitly ends and removes it.
 
+During profile restoration, saved `blob:` previews and `chrome-error:` documents
+become inert explanatory tabs: their old process-local contents cannot be reopened.
+They retain separate tabs and selection instead of failing the entire restore.
+Ordinary URLs and durable profile data restore normally; the immutable source
+checkpoint is unchanged. This does not turn other navigation failures into success.
+
 A batch is not a transaction. If an action completes and a later action has a
 definite failure, its receipt remains `outcome_unknown` and reports the completed
 action count and later error code; this is not evidence of controller loss.
