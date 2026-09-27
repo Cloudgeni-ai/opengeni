@@ -40,12 +40,18 @@ import assert from "node:assert/strict";
 const original = { ...fs };
 const ghost = "2147483647";
 const code = process.argv[2];
+let ownedForStatRace;
+let ownedStatReads = 0;
 mock.module("node:fs/promises", () => ({
   ...original,
   readdir: async (path, options) => path === "/proc"
     ? [{ name: ghost, isDirectory: () => true }, ...await original.readdir(path, options)]
     : original.readdir(path, options),
   readFile: async (path, ...args) => {
+    if (code === "ESRCH" && ownedForStatRace && path === "/proc/" + ownedForStatRace.pid + "/stat" && ++ownedStatReads > 1) {
+      await ownedForStatRace.exited;
+      throw Object.assign(new Error("process exited after procfs open"), { code });
+    }
     if (path === "/proc/" + ghost + "/cmdline") {
       throw Object.assign(new Error("synthetic procfs read failure"), { code });
     }
@@ -64,6 +70,7 @@ const runner = await AgentBrowserJsonRunner.create({
 });
 const spawn = (profile) => Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60000)", "--user-data-dir=" + profile], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 const owned = spawn(profileDirectory);
+ownedForStatRace = owned;
 const unrelated = spawn(join(root, "unrelated-profile"));
 try {
   if (code === "ESRCH") {

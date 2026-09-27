@@ -8858,8 +8858,8 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
-    // Pre-0522 attention probes (which still counted commentary) during a rolling
-    // deploy. Drop it in a later rolling migration once no pre-0522 API can run.
+    // Pre-0524 attention probes (which still counted commentary) during a rolling
+    // deploy. Drop it in a later rolling migration once no pre-0524 API can run.
     meaningfulAttention: index("session_events_meaningful_attention_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(commentaryInclusiveMeaningfulSessionEventSql("session_events")),
@@ -9370,6 +9370,10 @@ export const sandboxLeases = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     publicRecovery: jsonb("public_recovery").$type<Record<string, unknown>>(),
+    providerCreateAttempt: jsonb("provider_create_attempt").$type<Record<string, unknown>>(),
+    providerCreateRecoveryAfter: timestamp("provider_create_recovery_after", {
+      withTimezone: true,
+    }),
 
     unobservableCommandDrainIds: uuid("unobservable_command_drain_ids").array(),
     unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {

@@ -41453,7 +41453,7 @@ export async function appendSessionHistoryItems(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
-        await tx
+        const saved = await tx
           .insert(schema.sessionHistoryItems)
           .values(
             withLosslessContentWriteVersion(
@@ -41482,26 +41482,39 @@ export async function appendSessionHistoryItems(
               schema.sessionHistoryItems.sessionId,
               schema.sessionHistoryItems.position,
             ],
-          });
-        // A position conflict is idempotent only when the exact conversation
-        // item is already there. Never acknowledge a different item as saved.
-        const saved = await tx
-          .select({
+          })
+          .returning({
             position: schema.sessionHistoryItems.position,
             turnId: schema.sessionHistoryItems.turnId,
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              inArray(
-                schema.sessionHistoryItems.position,
-                input.items.map((entry) => entry.position),
-              ),
-            ),
+          });
+        // A position conflict is idempotent only when the exact conversation
+        // item is already there. Never acknowledge a different item as saved.
+        // Fresh inserts already return their durable representation. Re-reading
+        // numeric positions under RLS can scan the session's history while we
+        // hold its write fence, so only fetch rows skipped by ON CONFLICT.
+        const insertedPositions = new Set(saved.map((row) => row.position));
+        const conflictingPositions = input.items
+          .map((entry) => entry.position)
+          .filter((position) => !insertedPositions.has(position));
+        if (conflictingPositions.length > 0)
+          saved.push(
+            ...(await tx
+              .select({
+                position: schema.sessionHistoryItems.position,
+                turnId: schema.sessionHistoryItems.turnId,
+                item: schema.sessionHistoryItems.item,
+                itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+              })
+              .from(schema.sessionHistoryItems)
+              .where(
+                and(
+                  eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+                  eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+                  inArray(schema.sessionHistoryItems.position, conflictingPositions),
+                ),
+              )),
           );
         const byPosition = new Map(saved.map((row) => [row.position, row]));
         for (const entry of input.items) {
@@ -44140,12 +44153,29 @@ export type SandboxRecoveryState = {
   };
 };
 
+export type SandboxProviderCreateAttempt = {
+  version: 1;
+  operationId: string;
+  leaseEpoch: number;
+  providerBindingKey: string;
+  rematerializationId: string | null;
+  selectedRevision: string | null;
+  imageId: string | null;
+  imageRef: string | null;
+  appId: string;
+  providerName: string;
+  requestSha256: string;
+  startedAt: string;
+  instanceId: string | null;
+};
+
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
 // comes back as a number for an integer column, but we type it number|string
 // and Number()-coerce so the same code is correct regardless of column type.
 // Typed with an index signature so it satisfies db.execute<TRow extends
 // Record<string, unknown>>.
 type LeaseRow = {
+  provider_create_attempt?: SandboxProviderCreateAttempt | null;
   unobservable_command_drain_ids?: string[] | null;
   id: string;
   account_id: string;
@@ -44272,6 +44302,7 @@ export interface LeaseSnapshot {
    * lease liveness and epoch fields above. Legacy envelopes project to
    * conservative unknown/unverified values. */
   recovery: SandboxRecoveryState;
+  providerCreateAttempt?: SandboxProviderCreateAttempt | null;
   /** Conservative provider creation clock. Modal's hard timeout is measured
    * from this instant and cannot be extended by resume. */
   providerCreatedAt: Date | null;
@@ -44957,6 +44988,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
     recovery,
+    providerCreateAttempt: row.provider_create_attempt ?? null,
     providerCreatedAt:
       row.provider_created_at === null
         ? null
@@ -45021,6 +45053,20 @@ function leaseBackendRequiresResumableInstance(row: LeaseRow): boolean {
   // Fail closed for an unknown/new provider until its exact address contract is
   // registered. `none` is intentionally the sole providerless backend today.
   return fields === undefined || fields.length > 0;
+}
+
+function hasRearmableWorkspace(row: LeaseRow): boolean {
+  // Pre-recovery envelopes retain their existing provider-identity checks.
+  // Once readiness is recorded, an address alone cannot override that state:
+  // a creator may have died after attribution but before workspace verification.
+  if (row.resume_state?.opengeniRecovery === undefined) return true;
+  const recovery = recoveryStateFromLeaseRow(row);
+  return (
+    recovery.provider.status === "exists" &&
+    recovery.provider.instanceId === row.instance_id &&
+    recovery.workspace.status === "ready" &&
+    (recovery.restore.status === "not_required" || recovery.restore.status === "ready")
+  );
 }
 
 function archiveCaptureRemainingMs(
@@ -45709,16 +45755,16 @@ async function acquireLeaseOnce(
           };
         }
 
-        // A creator died after publishing an instance id but before publishing
-        // its resumable envelope. The attributed provider may still be live,
-        // but an arrival has no safe SDK state with which to attach. Keep this
+        // A creator died before publishing its resumable envelope or verifying
+        // the workspace. The attributed provider may still be live,
+        // but an arrival has no verified state with which to attach. Keep this
         // exceptional row transiently fenced until the reaper captures/settles
         // it; unlike an ordinary expired drain, re-arming it cannot restore
         // service and would strand an unmanageable provider.
         if (
           liveness === "draining" &&
-          leaseBackendRequiresResumableInstance(row) &&
-          !hasResumableLeaseInstance(row)
+          (!hasRearmableWorkspace(row) ||
+            (leaseBackendRequiresResumableInstance(row) && !hasResumableLeaseInstance(row)))
         ) {
           return {
             role: "fenced" as const,
@@ -47054,6 +47100,7 @@ export async function failSandboxRematerialization(
         const row = rows[0];
         if (
           !row ||
+          row.provider_create_attempt?.instanceId === null ||
           row.liveness !== "warming" ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           (
@@ -47450,6 +47497,194 @@ export async function commitWarmingToWarm(
   );
 }
 
+/** Persist before provider dispatch. This is deliberately not replayable: a
+ * timeout, absent running-name lookup, or expired lease cannot settle an
+ * unknown create. A later exact provider receipt may attribute the operation. */
+export async function beginModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    operationId: string;
+    providerBindingKey: string;
+    rematerializationId: string | null;
+    selectedRevision: string | null;
+    imageId: string | null;
+    imageRef: string | null;
+    appId: string;
+    providerName: string;
+    requestSha256: string;
+  },
+): Promise<void> {
+  if (
+    !input.operationId ||
+    !input.providerBindingKey ||
+    !input.appId ||
+    input.providerName !== `opengeni-create-${input.operationId}` ||
+    !/^[a-f0-9]{64}$/u.test(input.requestSha256)
+  ) {
+    throw new Error("Modal create requires operation and provider namespace identities");
+  }
+  await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`
+        select * from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        for update
+      `);
+      const row = rows[0];
+      if (
+        !row ||
+        row.backend !== "modal" ||
+        row.liveness !== "warming" ||
+        Number(row.lease_epoch) !== input.expectedEpoch ||
+        row.instance_id !== null
+      ) {
+        throw new Error("Modal create lease no longer owns an unbound warming epoch");
+      }
+      const current = recoveryStateFromLeaseRow(row);
+      if (
+        current.restore.rematerializationId !== input.rematerializationId ||
+        current.restore.selectedRevision !== input.selectedRevision
+      ) {
+        throw new Error("Modal create selected recovery revision changed before dispatch");
+      }
+      if (
+        row.provider_create_attempt?.instanceId === null ||
+        row.provider_create_attempt?.leaseEpoch === input.expectedEpoch
+      ) {
+        throw new Error("provider_create_outcome_unknown: provider attempt cannot be replayed");
+      }
+      const attempt: SandboxProviderCreateAttempt = {
+        version: 1,
+        operationId: input.operationId,
+        leaseEpoch: input.expectedEpoch,
+        providerBindingKey: input.providerBindingKey,
+        rematerializationId: input.rematerializationId,
+        selectedRevision: input.selectedRevision,
+        imageId: input.imageId,
+        imageRef: input.imageRef,
+        appId: input.appId,
+        providerName: input.providerName,
+        requestSha256: input.requestSha256,
+        startedAt: new Date().toISOString(),
+        instanceId: null,
+      };
+      await tx.execute(sql`
+        update sandbox_leases set provider_create_attempt = ${JSON.stringify(attempt)}::jsonb,
+          provider_create_recovery_after = null,
+          updated_at = now() where id = ${row.id}
+      `);
+    }),
+  );
+}
+
+export async function listPendingModalProviderCreates(
+  db: Database,
+): Promise<Array<{ workspaceId: string; sandboxGroupId: string }>> {
+  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string }>(
+    db,
+    sql`select * from opengeni_private.list_pending_modal_provider_creates()`,
+  );
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+  }));
+}
+
+/** Throttle positive discovery without extending the warming lease or changing
+ * its create authority. Old unresolved rows rotate behind the next batch. */
+export async function claimModalProviderCreateRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+  },
+): Promise<SandboxProviderCreateAttempt | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      provider_create_attempt: SandboxProviderCreateAttempt;
+    }>(sql`
+      update sandbox_leases set provider_create_recovery_after = now() + interval '30 seconds'
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and provider_create_attempt->'instanceId' = 'null'::jsonb
+        and expires_at < now()
+        and coalesce(provider_create_recovery_after, '-infinity'::timestamptz) <= now()
+      returning provider_create_attempt
+    `);
+    return rows[0]?.provider_create_attempt ?? null;
+  });
+}
+
+/** Attribute a positively identified late receipt, preserving expiry and every
+ * checkpoint. Ordinary holder/epoch-fenced draining owns all physical cleanup. */
+export async function recordRecoveredModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    attempt: SandboxProviderCreateAttempt;
+    instanceId: string;
+  },
+): Promise<boolean> {
+  if (!input.instanceId.startsWith("sb-") || input.attempt.instanceId !== null)
+    throw new Error("Modal create recovery requires an unresolved operation and exact provider id");
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and lease_epoch = ${input.attempt.leaseEpoch}
+        and provider_create_attempt = ${JSON.stringify(input.attempt)}::jsonb
+      for update`);
+      const row = rows[0];
+      if (!row) return false;
+      const current = recoveryStateFromLeaseRow(row);
+      if (
+        current.restore.rematerializationId !== input.attempt.rematerializationId ||
+        current.restore.selectedRevision !== input.attempt.selectedRevision
+      )
+        return false;
+      const recovery: SandboxRecoveryState = {
+        ...current,
+        provider: {
+          status: "creating",
+          instanceId: input.instanceId,
+          observedAt: new Date().toISOString(),
+        },
+        workspace: {
+          ...current.workspace,
+          status: "not_ready",
+          verifiedRevision: null,
+          verifiedAt: null,
+        },
+      };
+      await tx.execute(sql`update sandbox_leases set instance_id = ${input.instanceId},
+      provider_create_attempt = ${JSON.stringify({ ...input.attempt, instanceId: input.instanceId })}::jsonb,
+      resume_state = ${JSON.stringify(
+        resumeStateWithRecovery(
+          {
+            ...(resumeStateWithPreservedArchives(null, row.resume_state) ?? {}),
+            ...(row.resume_state?.opengeniWarmBilling
+              ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+              : {}),
+          },
+          recovery,
+        ),
+      )}::jsonb,
+      updated_at = now() where id = ${row.id}`);
+      return true;
+    }),
+  );
+}
+
 // §4.2a — leak-proof create attribution. The spawner calls this immediately
 // after the provider create returns, before display/readiness/setup work. It
 // intentionally does NOT bump lease_epoch or mark the lease warm; it only makes
@@ -47462,6 +47697,7 @@ export async function recordWarmingSandboxCreated(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    providerCreateOperationId?: string;
     /** Exact restore attempt elected before provider create. Null for a fresh
      *  archive-less create. Provider attribution is accepted only while the
      *  warming row still carries this same attempt as well as this epoch. */
@@ -47501,6 +47737,18 @@ export async function recordWarmingSandboxCreated(
         }
         const now = new Date().toISOString();
         const current = recoveryStateFromLeaseRow(row);
+        const createAttempt =
+          row.provider_create_attempt?.leaseEpoch === input.expectedEpoch
+            ? row.provider_create_attempt
+            : null;
+        if (
+          createAttempt &&
+          (createAttempt.leaseEpoch !== input.expectedEpoch ||
+            createAttempt.operationId !== input.providerCreateOperationId ||
+            (createAttempt.instanceId !== null && createAttempt.instanceId !== input.instanceId))
+        ) {
+          return { recorded: false, lease: mapLeaseRow(row) };
+        }
         if (current.restore.rematerializationId !== (input.rematerializationId ?? null)) {
           return { recorded: false, lease: mapLeaseRow(row) };
         }
@@ -47568,6 +47816,11 @@ export async function recordWarmingSandboxCreated(
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             instance_id       = ${input.instanceId},
+            provider_create_attempt = ${
+              createAttempt
+                ? JSON.stringify({ ...createAttempt, instanceId: input.instanceId })
+                : null
+            }::jsonb,
             resume_backend_id = ${input.resumeBackendId ?? null},
             resume_state      = ${resumeStateJson}::jsonb,
             provider_created_at = ${providerCreatedAt?.toISOString() ?? null}::timestamptz,
@@ -49686,6 +49939,7 @@ export async function failWarmingToCold(
         if (!row || row.liveness !== "warming" || Number(row.lease_epoch) !== input.expectedEpoch) {
           return;
         }
+        if (row.provider_create_attempt?.instanceId === null) return;
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
         const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
@@ -50604,6 +50858,9 @@ export async function reapStaleLeaseHolders(
       `);
         let warmingReset = 0;
         for (const row of expiredWarming) {
+          // A lost reply can still name a live provider. Keep the same epoch
+          // available for late attribution; time is not termination proof.
+          if (row.provider_create_attempt?.instanceId === null) continue;
           const current = recoveryStateFromLeaseRow(row);
           const hasArchive = current.archive.status !== "none";
           const resetAt = new Date().toISOString();
@@ -51249,7 +51506,9 @@ export async function reArmDrainingLease(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
         for update
       `);
-        if (!lease || lease.liveness !== "draining") return { rearmed: false };
+        if (!lease || lease.liveness !== "draining" || !hasRearmableWorkspace(lease)) {
+          return { rearmed: false };
+        }
         const snapshot = warmBillingSnapshot(lease);
         if (lease.resume_state?.opengeniWarmBilling && !snapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");

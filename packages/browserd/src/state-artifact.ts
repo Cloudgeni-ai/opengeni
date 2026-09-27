@@ -686,6 +686,9 @@ function entryHeader(path: string, size: number): Buffer {
 }
 
 function excluded(relativeDirectory: string, name: string, directory: boolean): boolean {
+  // Chrome's root-level local AI weights are a reconstructible component,
+  // not website state. Do not exclude a same-named website-owned directory.
+  if (directory && relativeDirectory === "" && name === "OptGuideOnDeviceModel") return true;
   if (EXCLUDED_NAMES.has(name) || name.startsWith("Singleton")) return true;
   if (directory && EXCLUDED_DIRECTORY_NAMES.has(name)) return true;
   const segments = relativeDirectory ? relativeDirectory.split("/") : [];

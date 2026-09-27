@@ -1877,6 +1877,9 @@
 :where(.og-root).max-h-80,:where(.og-root) .max-h-80 {
     max-height: calc(var(--spacing) * 80);
   }
+:where(.og-root).max-h-96,:where(.og-root) .max-h-96 {
+    max-height: calc(var(--spacing) * 96);
+  }
 :where(.og-root).max-h-\[32rem\],:where(.og-root) .max-h-\[32rem\] {
     max-height: 32rem;
   }
@@ -1885,6 +1888,9 @@
   }
 :where(.og-root).max-h-\[82vh\],:where(.og-root) .max-h-\[82vh\] {
     max-height: 82vh;
+  }
+:where(.og-root).max-h-\[calc\(100\%-3rem\)\],:where(.og-root) .max-h-\[calc\(100\%-3rem\)\] {
+    max-height: calc(100% - 3rem);
   }
 :where(.og-root).max-h-\[calc\(100dvh-2rem\)\],:where(.og-root) .max-h-\[calc\(100dvh-2rem\)\] {
     max-height: calc(100dvh - 2rem);
@@ -2077,6 +2083,9 @@
   }
 :where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
     max-width: calc(100% - 1.5rem);
+  }
+:where(.og-root).max-w-\[calc\(100\%-1rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1rem\)\] {
+    max-width: calc(100% - 1rem);
   }
 :where(.og-root).max-w-\[calc\(100vw-2rem\)\],:where(.og-root) .max-w-\[calc\(100vw-2rem\)\] {
     max-width: calc(100vw - 2rem);

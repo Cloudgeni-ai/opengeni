@@ -368,6 +368,8 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 Agents run directly on the user's Connected Machine (`selfhosted`); OpenGeni creates no sandbox.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
+Mac updates preserve signed bundles; writes check ACLs
+([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
 The machine owns its filesystem, Git authentication, environment, and long-lived
 platform credentials. OpenGeni neither clones repositories nor installs durable
@@ -380,12 +382,12 @@ can begin without contact. An offline machine never authorizes cold-creating a
 rival box, snapshotting it, or provider-terminating the user's computer.
 
 Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; canonical links and tree nodes share that namespace.
+directory as `FileSystem.root`; links and tree nodes share this namespace.
 Connected Machine reads accept external absolute paths under the machine account's
-OS permissions: working directories are browsing defaults, not read boundaries.
-Managed provider reads and structured mutations remain workspace-confined. Files
-requests carry capability epoch and root. The API binds one active route per
-request; target/root changes return retryable conflicts, never reinterpret paths
+OS permissions; working directories remain browsing defaults.
+Managed reads and structured mutations stay workspace-confined, including `/`.
+Requests carry capability epoch and root. The API binds one route per request;
+target/root changes return retryable conflicts instead of reinterpreting paths
 on another filesystem.
 
 Generated-session schedules follow the same explicit route: they persist an
@@ -495,26 +497,24 @@ Rotation recovery: [lifecycle](run-lifecycle.md).
 
 Archive capture/restore: [storage](workspace-archive-storage.md).
 
-Lease liveness, provider existence, route attachment, archive availability,
-workspace readiness, and operation availability are separate facts. A warm row
-or selected pointer alone is not proof that a command can run.
+Lease liveness, provider existence, route attachment, archives, workspace readiness,
+and operation availability are independent; a warm row does not prove executability.
 
-The effective backend behind a synthetic managed group is resolved once from
-the session policy and deployment backend. Fleet projection, swap readiness,
-viewer attachment, API-direct operations, and worker turns must use that same
-answer so a route cannot be advertised under one backend and established under
-another.
+Resolve synthetic groups' effective backend once from session policy and deployment
+configuration. Fleet, swaps, viewers, API operations and worker turns share that answer.
 
-The canonical backend enum currently contains `docker`, `modal`, `local`,
-`none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`,
-`selfhosted`, and `opensandbox`. The enum and provider registry—not this list—
-own exact membership and ordering.
+The contracts enum and provider registry own backend membership and ordering.
 
 Canonical: `packages/contracts/src/index.ts`,
 `packages/runtime/src/sandbox/providers/index.ts`,
 `packages/runtime/src/sandbox/routing/`,
 `apps/worker/src/activities/sandbox-lease.ts`, and
 [`connected-machines.md`](connected-machines.md).
+
+Modal creation: `sandbox/providers/modal-create-session.ts` and `modal-create-boundary.ts`
+persist an operation before dispatch and attribute its receipt before setup.
+Unknown outcomes fence replacement; historical discovery requires exact provider
+identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 
 ### 3.10 Client/server compatibility policy
 

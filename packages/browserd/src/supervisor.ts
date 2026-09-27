@@ -1,4 +1,5 @@
 import { EphemeralChromiumContextPool } from "./chromium-context-pool";
+import { restoredTabUrl } from "./restored-tab-url";
 import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
 import type { HeadlessSessionCookies } from "./headless-session-cookies";
 import { createHash, randomUUID } from "node:crypto";
@@ -2535,7 +2536,10 @@ async function restoreTabs(
   driver: BrowserSupervisorDriver,
   capturedTabs: BrowserRuntimeSnapshot["tabs"],
 ): Promise<void> {
-  const tabs = capturedTabs.length > 0 ? capturedTabs : [{ url: "about:blank", selected: true }];
+  const tabs =
+    capturedTabs.length > 0
+      ? capturedTabs.map((tab) => ({ ...tab, url: restoredTabUrl(tab.url) }))
+      : [{ url: "about:blank", selected: true }];
   const primaryIndex = Math.max(
     0,
     tabs.findIndex((tab) => tab.selected),

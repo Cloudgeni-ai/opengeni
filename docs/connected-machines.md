@@ -372,6 +372,15 @@ const samples = await client.machineMetricsSeries(workspaceId, enrollmentId, {
 
 ## Control liveness and backpressure
 
+`ERROR_CODE_DRAINING` is a pre-execution admission refusal, not proof that a
+machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
+means a verified self-update is draining accepted work; `queue_breaker` and
+`wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
+detail remains an unspecified admission refusal. The same distinction survives
+retry exhaustion and structured tool-error rendering. Update drains should be
+allowed to finish without interrupting accepted work; persistent refusals need
+admission/update-state diagnosis, not an inferred concurrency-limit increase.
+
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
 admission has no ordinary fixed concurrency or queue-wait limit: its only
@@ -645,6 +654,21 @@ installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
 
+Mac app installations update the complete signed application, including bundled
+browser/computer helpers. The updater selects the signed manifest's
+`universal-apple-darwin-app` ZIP, verifies its signature and checksum, stages it
+beside the installed application, and checks the sealed resources, bundle ID,
+signing-team continuity and executable version before an atomic directory
+exchange. A failed post-exchange verification or managed-receipt write exchanges
+the entire old app back. The successor receipt contains the installed executable
+digest, not the ZIP digest. Interrupted transactions retain their recovery copy.
+Standalone Mac executables retain the binary update path.
+
+Mac agents older than 0.1.29 require a one-time upgrade through the official
+whole-app installer. Their old updater would replace a single sealed executable;
+the Machines UI explains this limitation and the API refuses to dispatch that
+unsafe update. Do not run an older app's `update` command as a bootstrap shortcut.
+
 Because the binary is shared, the current installer refuses to replace a newer
 installed agent with an older verified release from a lagging deployment. Set
 `OPENGENI_ALLOW_DOWNGRADE=1` only for an intentional rollback.
@@ -749,7 +773,7 @@ machine, and does not prove that earlier operations failed.
 Transfers stage bounded chunks privately, verify the intended BLAKE3 digest and
 byte count, and publish only after the expected destination state is checked.
 Large Files-panel writes use provider byte transport instead of shell arguments.
-On capable Linux agents, raw replacements above 256 KiB use these same transfers,
+On capable Linux and macOS agents, raw replacements above 256 KiB use these same transfers,
 including binary files; an ambiguous write is never retried through a fallback.
 Every transfer request is reauthorized against the same physical connection.
 The runner pins each operation to its original nonzero session route epoch;
@@ -767,10 +791,12 @@ lost authority do not prove cleanup: private staging may remain until the link
 ends, and a process crash may leave an orphan. There is no automatic sweep or
 adoption of unknown transfers.
 
-The initial native implementation supports ordinary Linux regular files with
-existing parent directories. It fails closed on unsupported symlinks, hard links,
+The native implementation supports ordinary Linux and macOS APFS regular files
+with existing parent directories. It fails closed on unsupported symlinks, hard links,
 ownership, special modes, and extended metadata rather than silently discarding
 their semantics. Transactional editing does not implement `runAs` impersonation.
+macOS permits OS-generated provenance only when replacement preserves its exact
+bytes; extended ACLs, other attributes and inode flags remain unsupported.
 Expected-base checks detect observed changes but are not a filesystem
 compare-and-swap against unrelated concurrent writers.
 
@@ -786,6 +812,14 @@ Small moves retain the legacy direct-write path so they do not acquire a new
 read requirement on a write-only destination. They do not have transactional
 publication guarantees. Legacy agents without transactional support also retain
 their existing direct-write behavior; inspect the destination after any timeout.
+
+The Files and terminal API report an oversized native request as HTTP 413
+(`limit_exceeded`), without marking the machine offline. An oversized reply is
+HTTP 502 with the same code: the operation may already have completed, so inspect
+its result before repeating it. Both errors are non-retryable and include
+`details.code: machine_transport_payload_too_large` plus a bounded `direction`
+(`request` or `response`), without native paths or diagnostic contents. This
+reporting does not add transactional transfer support to unsupported platforms.
 
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.

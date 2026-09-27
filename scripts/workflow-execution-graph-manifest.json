@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "1a532e5004b6a09bafb34d77e83d67619470585718a70858778596ef21f28319"
+      "sha256": "dad9af393c6b793005a2911395f925669a29cc8c4347d7a234cb5cd31ca40006"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -317,7 +317,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "publish",
       "step": "Build and sign the stable update manifest",
-      "sha256": "5ab7a487c5f60332081350a17b61bf22edfb12172c1dbb0f7197b4168d896b54"
+      "sha256": "b7d30577e17094d0ea6011f9821ed2f123d7cf7f6715bb58a0de159319e62a33"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",

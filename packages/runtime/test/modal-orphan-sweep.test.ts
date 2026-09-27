@@ -44,6 +44,7 @@ function fakeModalClient(sandboxes: FakeSandboxInfo[]) {
       fromId: async (id: string) => ({
         terminate: async () => {
           terminated.push(id);
+          return 137;
         },
         setTags: async (tags: Record<string, string>) => {
           retagged.push({ id, tags });

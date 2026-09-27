@@ -1085,7 +1085,7 @@ function BrowserToolbar(props: {
   };
   return (
     <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-surface-0 px-2">
-      <details ref={detailsRef} className="relative min-w-0">
+      <details ref={detailsRef} className="min-w-0">
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
           <Globe2Icon className="size-3.5 shrink-0 text-og-muted" />
           <span className="truncate font-medium">{selected?.name ?? "Browser"}</span>
@@ -1094,24 +1094,26 @@ function BrowserToolbar(props: {
           ) : null}
           <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
         </summary>
-        <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
-          <BrowserSessionGroup
-            label="Current agent"
-            sessions={current}
-            identities={props.identities}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <BrowserSessionGroup
-            label="Workspace browsers"
-            sessions={others}
-            identities={props.identities}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
+        <div className="absolute left-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
+          <div className="min-h-0 max-h-96 overflow-y-auto overscroll-contain">
+            <BrowserSessionGroup
+              label="Current agent"
+              sessions={current}
+              identities={props.identities}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+            <BrowserSessionGroup
+              label="Workspace browsers"
+              sessions={others}
+              identities={props.identities}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+          </div>
+          <div className="mt-1 flex shrink-0 gap-1 border-t border-og-border pt-1">
             {current.length > 0 ? (
               <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
             ) : null}
@@ -1209,6 +1211,8 @@ function BrowserSessionGroup(props: {
           <button
             key={session.id}
             type="button"
+            aria-label={`${session.name}${identity ? ` · ${identity.name}` : ""} · ${placementLabel(session)}`}
+            aria-pressed={session.id === props.selectedId}
             onClick={() => props.onSelect(session.id)}
             className={cn(
               "flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",

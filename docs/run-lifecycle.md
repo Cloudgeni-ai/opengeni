@@ -19,6 +19,10 @@ checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append
 cursor; database position conflicts succeed only for the same turn and exact
 canonical item. Provider dispatch and successful settlement require this check.
+Fresh history inserts verify their persisted representation through `RETURNING`;
+only conflicting positions require a separate read. This keeps numeric-position
+RLS scans out of the ordinary append path without weakening retry verification
+or the exact-attempt write fence.
 
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
@@ -1670,7 +1674,41 @@ No cancellation/reaper protocol changes are included.
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
-their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
+their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+Filesystem snapshot recovery boots the exact selected immutable Image directly,
+attributes that single destination before verification, and rejects a missing
+snapshot without falling back to the base image or an older checkpoint. It does
+not create a temporary box and ask SDK hydration to replace it. Directory and tar
+archives still hydrate the elected destination. This removes the hidden second
+create. Migration 0523 adds a durable Modal creation receipt immediately before
+the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
+creation and retains the pinned SDK's public session implementation; its
+`modal-create-boundary.ts` hook runs after image/secret preparation and before
+provider dispatch. The receipt binds the lease epoch, authenticated provider
+namespace, actual app and image IDs, selected archive revision, operation name,
+and request digest. SDK retries are disabled for that mutation. Only the matching creator can
+attribute an exact returned instance. Until then, failure rollback and both
+lease reapers preserve the operation, epoch, and checkpoint; a database trigger
+also rejects erasure by older transition paths. Orphan deletion is postponed
+while any warming Modal lease lacks a provider identity. The operation name and
+tag are created atomically with the provider box; absence from the running-box
+inventory cannot prove that creation never happened. A returned instance is
+attributed before manifest setup, including after cancellation.
+
+This receipt is a fence, not a provider idempotency or replay guarantee. Losing
+the creator and its reply can leave the lease blocked; time, a missing named
+running sandbox, and termination of some other sandbox do not unblock it.
+Logical-image fallback is allowed after a missing-image preparation failure,
+before admission starts, and refused after admission starts. The maintenance
+sweep discovers expired unknown operations in bounded batches, including
+finished provider instances. It requires the same authenticated namespace and
+one exact app, image, operation name and tag match. An atomic tenant/epoch/receipt
+comparison attributes that instance without renewing the lease or publishing
+the workspace; ordinary holder-fenced draining then owns cleanup. Discovery
+absence, ambiguity or provider failure leaves the receipt unresolved. Never
+clear it or silently create another sandbox. Cleanup rechecks the persisted
+provider namespace before interpreting a missing instance or issuing a stop.
+Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
@@ -1734,6 +1772,19 @@ provider-deadline/operator rotation is retained by the DB release operation.
 Every fresh claim gets a new provider request ID; replacement attempts of an
 uninterrupted claim retain its stored ID. A workflow retry after release and
 intervening writes therefore cannot adopt an older snapshot as a newer generation.
+
+Re-arming a draining lease preserves its recorded workspace readiness. A provider
+address published during creation does not prove that workspace setup or restore
+verification completed. Both holder admission and explicit re-arm keep such a
+lease fenced until recovery settles it; they cannot promote recorded `not_ready`
+state to warm. Legacy envelopes without a recovery record retain the existing
+exact-provider-identity checks.
+
+Modal cleanup waits for the provider's terminal exit result. A stop request
+acknowledgement alone cannot settle SDK shutdown, by-ID rescue, or an orphan
+sweep. Failed or unavailable exit confirmation propagates to recovery (and is
+not reported as an orphan termination); borrowed SDK handles still leave their
+provider running. This does not establish the outcome of an unattributed create.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`

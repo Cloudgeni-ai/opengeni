@@ -354,6 +354,11 @@ operator procedure.
 
 ## Keeping these notes current
 
+Mac updates replace the complete verified signed bundle, retaining rollback.
+Pre-0.1.29 agents need the official installer: see `docs/connected-machines.md`.
+APFS transactional writes inspect ACLs through `opengeni-agent-files-ffi`;
+see `agent/TRANSACTIONAL-WRITES.md` for metadata preservation and refusal.
+
 Managed production package availability is reconciled automatically after the
 runtime becomes healthy; it does not wait for later acceptance. See
 `reconcile-production-packages.yml` and `docs/deployment.md`.
@@ -370,6 +375,14 @@ authorization and the sandbox proxy's permission ceiling still apply. See
 Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename files or packages, run `bun run check:docs-refs` and fix every current-tier reference it reports. A new package needs a package README plus the [`docs/architecture.md`](docs/architecture.md) package table. A new embed surface or port belongs in [`docs/embedding.md`](docs/embedding.md). A new process or command belongs in its canonical home from the docs map; link to that home instead of restating volatile details. The public product docs at docs.opengeni.ai are built by Mintlify from `docs-site/` on `main`; when a change alters user-facing behavior described there (quickstart, concepts, guides), update the matching page in the same change and preview it with `bunx mint dev` from that directory.
 
 ## Sandbox Notes
+
+Modal lease-owned physical creation uses `modal-create-session.ts` and the
+`modal-create-boundary.ts` RPC hook: persist one operation before dispatch,
+disable create retries, attribute the returned instance before manifest setup.
+An unknown outcome must retain its epoch/checkpoint even after expiry. Recovery
+requires positive historical provider identity in the same authenticated
+namespace; absence never licenses another create. Only ordinary holder-fenced
+draining may stop a recovered instance. See `docs/run-lifecycle.md`.
 
 Public historical checkpoint consent (0495) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy

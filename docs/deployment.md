@@ -1,8 +1,8 @@
 # Deployment
 
-## Assistant message phases (0522)
+## Assistant message phases (0524)
 
-`0522_session_attention_excludes_commentary.sql` is rolling: it builds the
+`0524_session_attention_excludes_commentary.sql` is rolling: it builds the
 commentary-free attention index concurrently, and the 0503 index keeps serving
 older API processes. The same predicate admits a `turn.completed` whose
 `reply` records the answer a human's message received before its turn waited
@@ -13,7 +13,7 @@ activity. While an older API process still runs next to a newer worker, it can
 post up to three progress notes per Slack interaction, wake `session_wait`
 change mode on each note, and mark a session unread for a note. Roll the API
 before the workers to avoid that window; nothing is stored wrongly either way.
-Once no API image older than 0522 can run, a later rolling migration drops
+Once no API image older than 0524 can run, a later rolling migration drops
 `session_events_meaningful_attention_idx` (the 0503 index) and its schema entry.
 
 ## Verified signup trial runtime switch (0521)

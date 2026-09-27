@@ -249,6 +249,47 @@ describe("MachineCard — attach/swap affordance", () => {
     await r.unmount();
   });
 
+  test("legacy Mac app explains the installer requirement without offering an unsafe update", async () => {
+    const m = machine({
+      sandboxId: "legacy-mac",
+      state: "online",
+      os: "macos",
+      runtime: {
+        installedVersion: "0.1.28",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+        desiredVersion: "0.1.29",
+        versionState: "outdated",
+        updateBlockedReason: "Use the official Mac installer to preserve the signed app.",
+        capabilities: {
+          exec: true,
+          filesystem: true,
+          git: true,
+          pty: true,
+          desktop: true,
+          opStream: true,
+          browserBridge: true,
+          operationResourcePolicy: true,
+          operationCpuQuota: true,
+          transactionalFsWrite: true,
+        },
+        update: null,
+      },
+    });
+    const r = await renderComponent(
+      <MachineCard
+        machine={m}
+        onUpdateAgent={() => {
+          throw Error("must not dispatch");
+        }}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("official Mac installer");
+    expect(r.container.querySelector("[data-update-agent]")).toBeNull();
+    await r.unmount();
+  });
+
   test("a draining update is truthful and cannot be started twice", async () => {
     const m = machine({
       sandboxId: "sh-updating",
