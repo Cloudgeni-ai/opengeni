@@ -802,6 +802,14 @@ read requirement on a write-only destination. They do not have transactional
 publication guarantees. Legacy agents without transactional support also retain
 their existing direct-write behavior; inspect the destination after any timeout.
 
+The Files and terminal API report an oversized native request as HTTP 413
+(`limit_exceeded`), without marking the machine offline. An oversized reply is
+HTTP 502 with the same code: the operation may already have completed, so inspect
+its result before repeating it. Both errors are non-retryable and include
+`details.code: machine_transport_payload_too_large` plus a bounded `direction`
+(`request` or `response`), without native paths or diagnostic contents. This
+reporting does not add transactional transfer support to unsupported platforms.
+
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.
 
