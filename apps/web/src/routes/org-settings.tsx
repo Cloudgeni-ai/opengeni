@@ -1,4 +1,4 @@
-import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
+import { OrganizationModelsPage } from "@/components/models/organization-models-page";
 // Organization settings (formerly "Account"): identity, organization API
 // keys, account-wide billing usage, plan entitlements, and members.
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -13,9 +13,8 @@ import {
   OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
-import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
+import type { ModelsView } from "@/lib/models-route";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { SettingsSection } from "@/components/settings/settings-layout";
 import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
@@ -312,10 +311,16 @@ export function OrgSettingsRoute({
   workspaceId,
   checkout,
   section = "overview",
+  modelsAccount,
+  modelsView,
 }: {
   workspaceId: string;
   checkout?: "success" | "cancelled";
   section?: OrganizationAdminSection;
+  /** Models: the account page that is open. */
+  modelsAccount?: string | undefined;
+  /** Models: the form page that is open. */
+  modelsView?: ModelsView | undefined;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
@@ -568,6 +573,7 @@ export function OrgSettingsRoute({
       organizationLabel={organizationLabel}
       section={section}
       showModels={canManageOrganizationModels}
+      hideHeader={section === "models" && Boolean(modelsAccount || modelsView)}
     >
       <div className="grid min-w-0 gap-8 text-left">
         {section === "overview" ? (
@@ -625,27 +631,14 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "models" && canManageOrganizationModels ? (
-          <SettingsSection
-            id="organization-model-connections-heading"
-            title="Connections"
-            description="Choose which workspaces and models each connected account can serve. Codex and SuperGrok subscriptions can also be made available to Personal workspaces."
-          >
-            <div className="min-w-0">
-              <OrganizationCodexSubscriptions
-                key={`${identityKey}:organization-codex`}
-                organizationId={accountId}
-              />
-              <SuperGrokSubscriptionsCard organizationId={accountId} canManage />
-              <OrganizationModelProviderConnection
-                organizationId={accountId}
-                providerKind="vercel_gateway"
-              />
-              <OrganizationModelProviderConnection
-                organizationId={accountId}
-                providerKind="openrouter"
-              />
-            </div>
-          </SettingsSection>
+          <OrganizationModelsPage
+            key={`${identityKey}:models`}
+            workspaceId={workspaceId}
+            organizationId={accountId}
+            organizationName={organizationLabel}
+            account={modelsAccount}
+            view={modelsView}
+          />
         ) : null}
 
         {section === "models" && !canManageOrganizationModels ? (

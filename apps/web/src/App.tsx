@@ -44,6 +44,7 @@ import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
 import {
   parseRootWorkspaceSearch,
   readLastWorkspaceId,
@@ -428,7 +429,9 @@ const workspaceMemoryRoute = createRoute({
 const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "settings",
-  validateSearch: (search: Record<string, unknown>): { section?: WorkspaceSettingsSection } => {
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { section?: WorkspaceSettingsSection; account?: string; view?: ModelsView } => {
     const section =
       search.section === "general" ||
       search.section === "learning" ||
@@ -441,7 +444,13 @@ const workspaceSettingsRoute = createRoute({
         : search.section === "capabilities"
           ? "plugins"
           : undefined;
-    return section ? { section } : {};
+    const account = section === "models" ? parseModelsAccount(search.account) : undefined;
+    const view = section === "models" ? parseModelsView(search.view) : undefined;
+    return {
+      ...(section ? { section } : {}),
+      ...(account ? { account } : {}),
+      ...(view ? { view } : {}),
+    };
   },
   component: WorkspaceSettings,
 });
@@ -490,7 +499,12 @@ const workspaceOrganizationRoute = createRoute({
   // redirect so the organization page can confirm the top-up.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { checkout?: CheckoutOutcome; section?: OrganizationAdminSection } => {
+  ): {
+    checkout?: CheckoutOutcome;
+    section?: OrganizationAdminSection;
+    account?: string;
+    view?: ModelsView;
+  } => {
     const checkout = parseCheckoutOutcome(search);
     const section =
       search.section === "overview" ||
@@ -504,7 +518,14 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "billing"
         ? search.section
         : undefined;
-    return { ...(checkout ? { checkout } : {}), ...(section ? { section } : {}) };
+    const account = section === "models" ? parseModelsAccount(search.account) : undefined;
+    const view = section === "models" ? parseModelsView(search.view) : undefined;
+    return {
+      ...(checkout ? { checkout } : {}),
+      ...(section ? { section } : {}),
+      ...(account ? { account } : {}),
+      ...(view ? { view } : {}),
+    };
   },
   component: Organization,
 });
@@ -762,8 +783,15 @@ function Memory() {
 
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
-  const { section } = workspaceSettingsRoute.useSearch();
-  return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} section={section ?? "general"} />;
+  const { section, account, view } = workspaceSettingsRoute.useSearch();
+  return (
+    <LazyWorkspaceSettingsRoute
+      workspaceId={workspaceId}
+      section={section ?? "general"}
+      modelsAccount={account}
+      modelsView={view}
+    />
+  );
 }
 
 function WorkspaceState() {
@@ -810,8 +838,16 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
-  const { checkout, section } = workspaceOrganizationRoute.useSearch();
-  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} section={section} />;
+  const { checkout, section, account, view } = workspaceOrganizationRoute.useSearch();
+  return (
+    <LazyOrgSettingsRoute
+      workspaceId={workspaceId}
+      checkout={checkout}
+      section={section}
+      modelsAccount={account}
+      modelsView={view}
+    />
+  );
 }
 
 function AccountRedirect() {

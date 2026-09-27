@@ -12,7 +12,6 @@ import {
   PencilIcon,
   PlusIcon,
   SearchCodeIcon,
-  ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
   UserIcon,
@@ -21,14 +20,7 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { CodexSubscriptionsCard } from "@/components/codex-connection";
-import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
-import { ModelAccessPolicySection } from "@/components/model-access-policy";
-import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
-import {
-  AiGatewayConnectionCard,
-  OpenRouterConnectionCard,
-} from "@/components/ai-gateway-connection";
+import { WorkspaceModelsPage } from "@/components/models/workspace-models-page";
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
@@ -42,7 +34,7 @@ import {
   useOrganizationWorkspaceAdministration,
   type OrganizationWorkspaceAdministration,
 } from "@/components/settings/organization-workspace-administration";
-import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
+import { VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -62,6 +54,7 @@ import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
+import type { ModelsView } from "@/lib/models-route";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
@@ -81,9 +74,15 @@ import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 export function WorkspaceSettingsRoute({
   workspaceId,
   section,
+  modelsAccount,
+  modelsView,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
+  /** Settings > Models: the account page that is open. */
+  modelsAccount?: string | undefined;
+  /** Settings > Models: the form page that is open. */
+  modelsView?: ModelsView | undefined;
 }) {
   const context = useAppContext();
   const administration = useOrganizationWorkspaceAdministration();
@@ -93,15 +92,26 @@ export function WorkspaceSettingsRoute({
       <OrganizationManagedWorkspaceSettings section={section} administration={administration} />
     );
   }
-  return <OperationalWorkspaceSettingsRoute workspaceId={workspaceId} section={section} />;
+  return (
+    <OperationalWorkspaceSettingsRoute
+      workspaceId={workspaceId}
+      section={section}
+      modelsAccount={modelsAccount}
+      modelsView={modelsView}
+    />
+  );
 }
 
 function OperationalWorkspaceSettingsRoute({
   workspaceId,
   section,
+  modelsAccount,
+  modelsView,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
+  modelsAccount?: string | undefined;
+  modelsView?: ModelsView | undefined;
 }) {
   const context = useAppContext();
   const client = context.client;
@@ -142,6 +152,15 @@ function OperationalWorkspaceSettingsRoute({
     workspaceId,
     "connections:write",
   );
+  // Same rule as Organization settings > Models: owners and admins in an
+  // organization administrator session (or the single local user).
+  const organizationRole =
+    context.accessContext.accountGrants.find((grant) => grant.accountId === accountId)?.role ??
+    null;
+  const canManageOrganizationModels =
+    (context.clientConfig.auth.mode === "managedSession" ||
+      context.clientConfig.productAccessMode === "local") &&
+    (organizationRole === "owner" || organizationRole === "admin");
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
   const isOnlyWorkspaceInAccount =
@@ -346,7 +365,11 @@ function OperationalWorkspaceSettingsRoute({
   const activeApiKeyCount = apiKeys.filter((key) => !key.revokedAt).length;
 
   return (
-    <WorkspaceSettingsContent section={section}>
+    <WorkspaceSettingsContent
+      section={section}
+      // An account page or a form page under Models has its own title and back link.
+      hideHeader={section === "models" && Boolean(modelsAccount || modelsView)}
+    >
       <div className="grid min-w-0 gap-9 text-left">
         {section === "general" ? (
           <>
@@ -467,10 +490,6 @@ function OperationalWorkspaceSettingsRoute({
                   canManage={canManageSettings}
                   refreshKey={gatewayRevision}
                 />
-                <CodexCompactionPreferenceRow
-                  workspaceId={workspaceId}
-                  canManage={canManageSettings}
-                />
                 <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
               </div>
             </SettingsSection>
@@ -516,61 +535,18 @@ function OperationalWorkspaceSettingsRoute({
         ) : null}
 
         {section === "models" ? (
-          <>
-            <div className="border-b border-border/70 pb-3">
-              <DefaultSessionModelPreferenceRow
-                key={`default-model:${workspaceId}:${gatewayRevision}`}
-                workspaceId={workspaceId}
-                canManage={canManageSettings}
-              />
-            </div>
-            <SettingsSection
-              id="model-connections-heading"
-              title="Connections"
-              description="Connect subscriptions or provider accounts for this workspace. Your organization can also make connections available here. Choose model access on each connected account."
-              action={
-                <Link
-                  to="/workspaces/$workspaceId/organization"
-                  params={{ workspaceId }}
-                  search={{ section: "models" }}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-                >
-                  Manage organization connections <ArrowUpRightIcon className="size-3.5" />
-                </Link>
-              }
-            >
-              <div className="min-w-0">
-                {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
-                <CodexSubscriptionsCard
-                  key={`codex-subscriptions:${workspaceId}`}
-                  workspaceId={workspaceId}
-                  canManage={canManageConnections}
-                />
-                <SuperGrokSubscriptionsCard
-                  key={`supergrok:${workspaceId}`}
-                  workspaceId={workspaceId}
-                  canManage={canManageConnections}
-                />
-                <AiGatewayConnectionCard
-                  workspaceId={workspaceId}
-                  canManageConnection={canManageConnections}
-                  canManageCustomModels={canManageSettings}
-                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-                />
-                <OpenRouterConnectionCard
-                  workspaceId={workspaceId}
-                  canManageConnection={canManageConnections}
-                  canManageCustomModels={canManageSettings}
-                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-                />
-              </div>
-            </SettingsSection>
-            <ModelAccessPolicySection
-              key={`model-access:${workspaceId}:${gatewayRevision}`}
-              workspaceId={workspaceId}
-              canManage={canManageSettings}
-            />
-          </>
+          <WorkspaceModelsPage
+            key={`models:${workspaceId}`}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationName={organizationLabel}
+            canManageSettings={canManageSettings}
+            canManageConnections={canManageConnections}
+            canManageOrganizationModels={canManageOrganizationModels}
+            account={modelsAccount}
+            view={modelsView}
+            onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+          />
         ) : null}
 
         {section === "api-keys" ? (
@@ -1225,55 +1201,6 @@ function MembersSectionFallback() {
       <Skeleton className="h-16 rounded-lg" />
       <Skeleton className="h-16 rounded-lg" />
     </div>
-  );
-}
-
-/**
- * Default for NEW Codex sessions. Off (= remote_v2): best ChatGPT compaction,
- * Codex-only. On (= portable): can switch to other models mid-session.
- */
-function CodexCompactionPreferenceRow({
-  workspaceId,
-  canManage,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const portable = workspace?.settings?.codexCompactionDefault === "portable";
-  const [saving, setSaving] = useState(false);
-
-  async function toggle(nextPortable: boolean) {
-    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    setSaving(true);
-    try {
-      const updated = await context.updateWorkspaceSettings(workspaceId, {
-        codexCompactionDefault: nextPortable ? "portable" : "remote_v2",
-      });
-      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        toast.success(
-          nextPortable
-            ? "New Codex sessions can switch to other providers"
-            : "New Codex sessions stay on Codex",
-        );
-      }
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <PreferenceToggleRow
-      icon={<ShrinkIcon className="size-3.5 text-brand" />}
-      label="Allow other providers (Codex only)"
-      description="On: switch from Codex models to other providers mid-session. Off (recommended): better compaction."
-      checked={portable}
-      disabled={saving || !canManage}
-      saving={saving}
-      onToggle={() => void toggle(!portable)}
-    />
   );
 }
 

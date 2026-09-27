@@ -1,0 +1,558 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import type {
+  CodexAccount,
+  CodexAccountsResponse,
+  CodexOverviewResponse,
+  WorkspaceCodexSubscriptionSource,
+} from "@opengeni/sdk";
+import { act, useState, type ReactNode } from "react";
+import { createRoot, type Root } from "react-dom/client";
+
+import type { ModelsView } from "@/lib/models-route";
+
+/* ----------------------------------------------------------------------------
+   Settings > Models in a workspace: rows, the account page, and the source,
+   pick and per-account controls, against a mocked client. Navigation is the
+   URL (account/view search params), driven here by a fake navigate.
+   -------------------------------------------------------------------------- */
+
+const source: WorkspaceCodexSubscriptionSource = {
+  accountId: "organization-a",
+  workspaceId: "workspace-a",
+  workspaceKind: "shared",
+  mode: "automatic",
+  effectiveSource: "workspace",
+  workspaceAvailable: true,
+  organizationAvailable: true,
+};
+
+function codexAccount(overrides: Partial<CodexAccount> = {}): CodexAccount {
+  return {
+    id: "acct-1",
+    source: "workspace",
+    label: "Team plan",
+    email: "team@example.com",
+    plan: "pro",
+    status: "active",
+    active: true,
+    allocatorEnabled: true,
+    allocatorVersion: 3,
+    appsDesignated: false,
+    canEnableApps: false,
+    ...overrides,
+  };
+}
+
+const cachedWindow = {
+  used: 90,
+  limit: 100,
+  remaining: 10,
+  percent: 90,
+  resetAt: null,
+  resetAfterSeconds: null,
+  limitWindowSeconds: 604800,
+};
+
+function overviewFor(id: string, remaining: number | null): CodexOverviewResponse {
+  return {
+    accounts: {
+      [id]: {
+        accountId: id,
+        usage: {
+          source: "provider",
+          fetchedAt: new Date().toISOString(),
+          stale: false,
+          error: null,
+          value:
+            remaining === null
+              ? null
+              : {
+                  status: "ok",
+                  planType: null,
+                  fiveHour: null,
+                  weekly: {
+                    ...cachedWindow,
+                    remaining,
+                    used: 100 - remaining,
+                    percent: 100 - remaining,
+                  },
+                  limitReached: false,
+                  fetchedAt: new Date().toISOString(),
+                },
+        },
+        resetCredits: {
+          source: "none",
+          fetchedAt: null,
+          stale: false,
+          error: null,
+          detailState: "unknown",
+          detailsComplete: false,
+          availableCount: null,
+          credits: [],
+        },
+        canRedeem: false,
+        canResumeRedemption: false,
+        redemptions: [],
+        redemptionAccess: { ownership: "unowned", canClaimUnownedViaReconnect: false },
+      },
+    },
+  };
+}
+
+let accounts: CodexAccountsResponse = {
+  accounts: [codexAccount({ weekly: cachedWindow })],
+  activeAccountId: "acct-1",
+  source,
+  settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: "acct-1" },
+};
+
+const client = {
+  listCodexAccounts: mock(async (_workspaceId: string) => accounts),
+  codexOverview: mock(async (_workspaceId: string) => overviewFor("acct-1", 75)),
+  codexConnectStart: mock(async (_workspaceId: string) => {
+    throw new Error("Device authorization unavailable in fixture");
+  }),
+  setCodexAccountAllocator: mock(async () => ({})),
+  setCodexRotationSettings: mock(async () => ({})),
+  disconnectCodexAccount: mock(async () => ({})),
+  requestJson: mock(
+    async (_method: string, _path: string, _body?: unknown): Promise<unknown> => ({}),
+  ),
+  getModelConnectionAccess: mock(async () => {
+    throw new Error("must not read access for this account");
+  }),
+  listSuperGrokAccounts: mock(
+    async (): Promise<unknown> => ({
+      accounts: [],
+      activeAccountId: null,
+      settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: null },
+    }),
+  ),
+  listConnections: mock(async () => []),
+  listWorkspaceGatewayCustomModels: mock(async () => ({ models: [] })),
+  listWorkspaceOpenRouterCustomModels: mock(async () => ({ models: [] })),
+  getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
+  getWorkspaceModelAccessPolicy: mock(async () => ({
+    allowedProviders: null,
+    allowedModels: null,
+  })),
+};
+
+const context = {
+  client,
+  workspaces: [],
+  captureWorkspaceInvocation: () => null,
+  ownsWorkspaceInvocation: () => false,
+  updateWorkspaceSettings: async () => null,
+};
+
+let navigateTo: (search: { account?: string; view?: ModelsView }) => void = () => {};
+
+mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("sonner", () => ({
+  toast: { success: mock(() => undefined), error: mock(() => undefined) },
+}));
+mock.module("@tanstack/react-router", () => ({
+  useNavigate: () => (options: { search: { account?: string; view?: ModelsView } }) =>
+    navigateTo(options.search),
+  Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
+}));
+mock.module("@/components/default-session-model", () => ({
+  DefaultSessionModelPreferenceRow: () => <div>Default model</div>,
+}));
+// Menus and confirms as plain buttons: the real ones are Radix portals.
+mock.module("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuItem: ({ children, onSelect }: { children: ReactNode; onSelect?: () => void }) => (
+    <button type="button" data-menu-item="" onClick={() => onSelect?.()}>
+      {children}
+    </button>
+  ),
+}));
+mock.module("@/components/ui/destructive-confirm", () => ({
+  DestructiveConfirm: ({
+    open,
+    title,
+    consequences,
+    confirmLabel,
+    onConfirm,
+    onOpenChange,
+  }: {
+    open: boolean;
+    title: ReactNode;
+    consequences?: ReactNode[];
+    confirmLabel?: string;
+    onConfirm?: () => unknown;
+    onOpenChange: (open: boolean) => void;
+  }) =>
+    open ? (
+      <div data-testid="confirm">
+        <p>{title}</p>
+        <ul>
+          {consequences?.map((item, index) => (
+            // oxlint-disable-next-line react/no-array-index-key -- fixed list
+            <li key={index}>{item}</li>
+          ))}
+        </ul>
+        <button
+          type="button"
+          data-confirm=""
+          onClick={() =>
+            void (async () => {
+              await onConfirm?.();
+              onOpenChange(false);
+            })()
+          }
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    ) : null,
+}));
+
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+
+const { WorkspaceModelsPage } = await import("./workspace-models-page");
+
+afterAll(() => {
+  mock.restore();
+  GlobalRegistrator.unregister();
+});
+
+beforeAll(() => undefined);
+
+beforeEach(() => {
+  for (const fn of Object.values(client)) fn.mockClear();
+  accounts = {
+    accounts: [codexAccount({ weekly: cachedWindow })],
+    activeAccountId: "acct-1",
+    source,
+    settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: "acct-1" },
+  };
+  client.listCodexAccounts.mockImplementation(async () => accounts);
+  client.codexOverview.mockImplementation(async () => overviewFor("acct-1", 75));
+  client.listSuperGrokAccounts.mockImplementation(async () => ({
+    accounts: [],
+    activeAccountId: null,
+    settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: null },
+  }));
+  client.requestJson.mockImplementation(async () => ({}));
+});
+
+function Harness({ canManage }: { canManage: boolean }) {
+  const [search, setSearch] = useState<{ account?: string; view?: ModelsView }>({});
+  navigateTo = setSearch;
+  return (
+    <WorkspaceModelsPage
+      workspaceId="workspace-a"
+      workspaceName="Design preview"
+      organizationName="Acme"
+      canManageSettings={canManage}
+      canManageConnections={canManage}
+      canManageOrganizationModels={false}
+      account={search.account}
+      view={search.view}
+      onConnectionChange={() => undefined}
+    />
+  );
+}
+
+async function flush(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+async function render(canManage = true): Promise<{ container: HTMLElement; root: Root }> {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => root.render(<Harness canManage={canManage} />));
+  await flush();
+  await flush();
+  return { container, root };
+}
+
+async function cleanup({ container, root }: { container: HTMLElement; root: Root }) {
+  await act(async () => root.unmount());
+  container.remove();
+}
+
+function button(container: HTMLElement, text: string | RegExp): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) =>
+    typeof text === "string"
+      ? candidate.textContent?.trim() === text || candidate.getAttribute("aria-label") === text
+      : text.test(candidate.textContent ?? ""),
+  );
+}
+
+describe("Codex rows", () => {
+  for (const outcome of ["weekly", "empty", "error"] as const) {
+    test(`waits for the live overview without flashing cached limits: ${outcome}`, async () => {
+      let resolve!: (value: CodexOverviewResponse) => void;
+      let reject!: (error: Error) => void;
+      client.codexOverview.mockImplementation(
+        () =>
+          new Promise<CodexOverviewResponse>((yes, no) => {
+            resolve = yes;
+            reject = no;
+          }),
+      );
+      const view = await render();
+      try {
+        expect(view.container.textContent).toContain("Team plan");
+        expect(view.container.textContent).not.toContain("10% left");
+        await act(async () => {
+          if (outcome === "error") reject(new Error("Provider unavailable"));
+          else resolve(overviewFor("acct-1", outcome === "empty" ? null : 75));
+        });
+        await flush();
+        expect(view.container.textContent).not.toContain("10% left");
+        if (outcome === "weekly") expect(view.container.textContent).toContain("75% left");
+        else
+          expect(view.container.textContent).toContain(
+            outcome === "error" ? "Usage unavailable" : "No usage yet",
+          );
+      } finally {
+        await cleanup(view);
+      }
+    });
+  }
+
+  test("a failed read is not an empty list, and Try again reloads", async () => {
+    let failed = true;
+    client.listCodexAccounts.mockImplementation(async () => {
+      if (failed) throw new Error("Connection request failed");
+      return { ...accounts, accounts: [] };
+    });
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain("Couldn't load Codex accounts.");
+      expect(view.container.textContent).not.toContain("No Codex accounts yet");
+      failed = false;
+      await act(async () => button(view.container, "Try again")!.click());
+      await flush();
+      expect(client.listCodexAccounts).toHaveBeenCalledTimes(2);
+      expect(view.container.textContent).not.toContain("Couldn't load Codex accounts.");
+      expect(view.container.textContent).toContain("No Codex accounts yet");
+      expect(button(view.container, "Connect Codex")).toBeDefined();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("hides SuperGrok when the deployment has it turned off", async () => {
+    const { OpenGeniApiError } = await import("@opengeni/sdk/browser");
+    client.listSuperGrokAccounts.mockImplementation(async () => {
+      throw new OpenGeniApiError(
+        404,
+        JSON.stringify({ error: "SuperGrok subscriptions are not enabled" }),
+      );
+    });
+    const view = await render();
+    try {
+      expect(view.container.textContent).not.toContain("SuperGrok");
+      expect(view.container.textContent).not.toContain("not enabled");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a SuperGrok read failure shows an error with Try again", async () => {
+    client.listSuperGrokAccounts.mockImplementation(async () => {
+      throw new Error("xAI unavailable");
+    });
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain("Couldn't load SuperGrok accounts.");
+    } finally {
+      await cleanup(view);
+    }
+  });
+});
+
+describe("Codex pool controls", () => {
+  test("Use switches the source only after an explicit choice", async () => {
+    const view = await render();
+    try {
+      const group = view.container.querySelector('[role="radiogroup"]');
+      expect(group).not.toBeNull();
+      expect(client.requestJson).not.toHaveBeenCalled();
+      await act(async () => button(view.container, "Organization")!.click());
+      await flush();
+      expect(client.requestJson).toHaveBeenCalledWith(
+        "PATCH",
+        "/v1/workspaces/workspace-a/codex/source",
+        { mode: "organization" },
+      );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Use is hidden when the organization shares no account, and for members", async () => {
+    accounts = { ...accounts, source: { ...source, organizationAvailable: false } };
+    let view = await render();
+    try {
+      expect(view.container.textContent).not.toContain("This workspace");
+    } finally {
+      await cleanup(view);
+    }
+    accounts = { ...accounts, source };
+    view = await render(false);
+    try {
+      expect(view.container.textContent).not.toContain("This workspace");
+      expect(button(view.container, "Connect account")).toBeUndefined();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Pick maps to rotationEnabled and only shows with two accounts", async () => {
+    let view = await render();
+    try {
+      expect(view.container.textContent).not.toContain("Spread work");
+    } finally {
+      await cleanup(view);
+    }
+    accounts = {
+      ...accounts,
+      accounts: [
+        codexAccount(),
+        codexAccount({ id: "acct-2", label: "Backup plan", active: false }),
+      ],
+    };
+    view = await render();
+    try {
+      expect(view.container.textContent).toContain("Primary");
+      await act(async () => button(view.container, "Spread work")!.click());
+      await flush();
+      expect(client.setCodexRotationSettings).toHaveBeenCalledWith("workspace-a", {
+        rotationEnabled: true,
+      });
+    } finally {
+      await cleanup(view);
+    }
+  });
+});
+
+describe("Codex account page", () => {
+  test("opens from the row, maps Use for new work to the allocator, and goes back", async () => {
+    const view = await render();
+    try {
+      const row = view.container.querySelector<HTMLElement>("[data-row-action]")!;
+      await act(async () => row.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
+      const toggle = view.container.querySelector<HTMLButtonElement>(
+        'button[role="switch"][aria-label="Use Team plan for new work"]',
+      )!;
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
+      await act(async () => toggle.click());
+      await flush();
+      expect(client.setCodexAccountAllocator).toHaveBeenCalledWith("workspace-a", "acct-1", {
+        enabled: false,
+        expectedVersion: 3,
+      });
+      await act(async () => button(view.container, "Models")!.click());
+      await flush();
+      expect(view.container.textContent).toContain("Model accounts");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Disconnect asks first, then disconnects and returns to the list", async () => {
+    const view = await render();
+    try {
+      await act(async () =>
+        view.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
+      );
+      await flush();
+      await act(async () => button(view.container, /Disconnect/)!.click());
+      expect(client.disconnectCodexAccount).not.toHaveBeenCalled();
+      expect(view.container.textContent).toContain("Disconnect Team plan?");
+      expect(view.container.textContent).toContain(
+        "Team plan stops paying for new work in Design preview.",
+      );
+      await act(async () =>
+        view.container.querySelector<HTMLButtonElement>("[data-confirm]")!.click(),
+      );
+      await flush();
+      expect(client.disconnectCodexAccount).toHaveBeenCalledWith("workspace-a", "acct-1");
+      expect(view.container.textContent).toContain("Model accounts");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("an organization account is read-only and never reads workspace access", async () => {
+    accounts = {
+      ...accounts,
+      source: { ...source, effectiveSource: "organization", workspaceAvailable: false },
+      accounts: [codexAccount({ source: "organization" })],
+    };
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain("Organization");
+      await act(async () =>
+        view.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
+      );
+      await flush();
+      expect(view.container.textContent).toContain("Shared by Acme.");
+      expect(view.container.querySelector('button[role="switch"]')).toBeNull();
+      expect(button(view.container, /Disconnect/)).toBeUndefined();
+      expect(client.getModelConnectionAccess).not.toHaveBeenCalled();
+    } finally {
+      await cleanup(view);
+    }
+  });
+});
+
+describe("Connect Codex", () => {
+  for (const mode of ["automatic", "organization"] as const) {
+    test(`asks which subscriptions to use while the organization's are in use (${mode})`, async () => {
+      accounts = {
+        ...accounts,
+        accounts: [],
+        source: { ...source, mode, effectiveSource: "organization", workspaceAvailable: false },
+      };
+      const view = await render();
+      try {
+        await act(async () => navigateTo({ view: "connect:codex" }));
+        await flush();
+        expect(view.container.textContent).toContain(
+          "Use this account instead of the organization's subscriptions?",
+        );
+        const submit = button(view.container, "Sign in with ChatGPT")!;
+        await act(async () => submit.click());
+        await flush();
+        expect(client.codexConnectStart).not.toHaveBeenCalled();
+        expect(view.container.textContent).toContain(
+          "Choose which subscriptions new work should use.",
+        );
+        const keep = [...view.container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+          (radio) => radio.textContent?.includes("Keep the organization's subscriptions"),
+        )!;
+        await act(async () => keep.click());
+        await act(async () => button(view.container, "Sign in with ChatGPT")!.click());
+        await flush();
+        expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a");
+        // Keeping the organization's pins an automatic source first; an explicit one stays.
+        const patches = client.requestJson.mock.calls.filter(([method]) => method === "PATCH");
+        expect(patches).toEqual(
+          mode === "automatic"
+            ? [["PATCH", "/v1/workspaces/workspace-a/codex/source", { mode: "organization" }]]
+            : [],
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+  }
+});

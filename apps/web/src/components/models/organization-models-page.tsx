@@ -1,0 +1,681 @@
+import type { CodexAccount } from "@opengeni/sdk";
+import {
+  BuildingIcon,
+  CheckIcon,
+  CircleCheckIcon,
+  LoaderCircleIcon,
+  PencilIcon,
+  PlusIcon,
+  UnplugIcon,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+
+import {
+  ProviderAccessPage,
+  ProviderConnectPage,
+  ProviderConnectionPage,
+  ProviderConnectionRow,
+  providerStatus,
+  type ProviderConnection,
+} from "@/components/ai-gateway-connection";
+import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
+import {
+  ConnectionAccessFormPage,
+  ConnectionAccessRows,
+  useConnectionAccess,
+  workspacesSummary,
+} from "@/components/connection-access-settings";
+import { ACCOUNT_COLUMNS, PAGE_CLASS } from "@/components/models/codex-models";
+import {
+  LabelledControl,
+  ModelsFormPage,
+  MoreMenu,
+  ProviderGroupHeader,
+  ProviderTile,
+  RenameAccountDialog,
+  RowButton,
+  useModelsNavigation,
+} from "@/components/models/models-ui";
+import {
+  SuperGrokAccessPage,
+  SuperGrokAccountPage,
+  SuperGrokConnectPage,
+  SuperGrokGroup,
+  type SuperGrokPlaces,
+} from "@/components/models/supergrok-models";
+import { ConnectPickerPage } from "@/components/models/workspace-models-page";
+import {
+  useOrganizationCodexSubscriptions,
+  type OrganizationCodexSubscriptions,
+} from "@/components/organization-codex-subscriptions";
+import { useOrganizationProviderConnection } from "@/components/organization-model-provider-connection";
+import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
+import { Button } from "@/components/ui/button";
+import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import {
+  DetailAside,
+  DetailAsideItem,
+  DetailPage,
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ErrorMessage } from "@/components/ui/error-message";
+import { FieldStack } from "@/components/ui/field";
+import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
+import { Section, SectionStack } from "@/components/ui/section";
+import { SegmentedControl } from "@/components/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { useAppContext } from "@/context";
+import { accountKeyOf, type ModelsView } from "@/lib/models-route";
+
+/* ----------------------------------------------------------------------------
+   Organization settings > Models: the subscriptions and API keys the
+   organization pays for, and which workspaces can use them. Same rows, account
+   pages and forms as a workspace's Models page.
+   -------------------------------------------------------------------------- */
+
+export function OrganizationModelsPage({
+  workspaceId,
+  organizationId,
+  organizationName,
+  account,
+  view,
+}: {
+  workspaceId: string;
+  organizationId: string;
+  organizationName: string;
+  account: string | undefined;
+  view: ModelsView | undefined;
+}) {
+  const client = useAppContext().client;
+  const nav = useModelsNavigation(
+    useMemo(() => ({ kind: "organization" as const, workspaceId }), [workspaceId]),
+    { account, view },
+  );
+  const codex = useOrganizationCodexSubscriptions({ client, organizationId });
+  const grok = useSuperGrokSubscriptions({ client, organizationId, canManage: true });
+  const vercel = useOrganizationProviderConnection({
+    client,
+    organizationId,
+    providerKind: "vercel_gateway",
+  });
+  const openrouter = useOrganizationProviderConnection({
+    client,
+    organizationId,
+    providerKind: "openrouter",
+  });
+  const gateways: Record<"vercel" | "openrouter", ProviderConnection> = { vercel, openrouter };
+
+  const backToList = () => nav.openAccount(undefined);
+  const codexPlaces: OrgCodexPlaces = {
+    organizationName,
+    openAccount: (id) => nav.openAccount(`codex:${id}`),
+    openConnect: () => nav.openView("connect:codex"),
+    openAccess: (id) => nav.openView("model-access", `codex:${id}`),
+    backToList,
+  };
+  const grokPlaces: SuperGrokPlaces = {
+    scopeName: organizationName,
+    organizationName,
+    openAccount: (id) => nav.openAccount(`supergrok:${id}`),
+    openConnect: () => nav.openView("connect:supergrok"),
+    openAccess: (id) => nav.openView("model-access", `supergrok:${id}`),
+    backToList,
+  };
+
+  const key = accountKeyOf(account);
+  let page: ReactNode;
+  if (view === "connect") {
+    page = (
+      <ConnectPickerPage
+        codexAvailable
+        grokAvailable={!grok.unavailable}
+        gateways={gateways}
+        scopeName={`${organizationName}'s shared workspaces`}
+        onClose={backToList}
+        onPick={(provider) => nav.openView(`connect:${provider}`)}
+      />
+    );
+  } else if (view === "connect:codex") {
+    page = <OrgCodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} />;
+  } else if (view === "connect:supergrok") {
+    page = <SuperGrokConnectPage grok={grok} places={grokPlaces} onClose={backToList} />;
+  } else if (view === "connect:vercel" || view === "connect:openrouter") {
+    const id = view === "connect:vercel" ? "vercel" : "openrouter";
+    page = (
+      <ProviderConnectPage
+        state={gateways[id]}
+        onClose={backToList}
+        onConnected={() => nav.openAccount(`gateway:${id}`)}
+      />
+    );
+  } else if (view === "model-access" && key) {
+    const back = () => nav.openAccount(account);
+    page =
+      key.provider === "codex" ? (
+        <OrgCodexAccessPage codex={codex} accountId={key.id} onClose={back} />
+      ) : key.provider === "supergrok" ? (
+        <SuperGrokAccessPage grok={grok} accountId={key.id} client={client} onClose={back} />
+      ) : (
+        <ProviderAccessPage state={gateways[key.id as "vercel" | "openrouter"]} onClose={back} />
+      );
+  } else if (key?.provider === "codex") {
+    page = <OrgCodexAccountPage codex={codex} accountId={key.id} places={codexPlaces} />;
+  } else if (key?.provider === "supergrok") {
+    page = (
+      <SuperGrokAccountPage grok={grok} accountId={key.id} places={grokPlaces} client={client} />
+    );
+  } else if (key?.provider === "gateway") {
+    page = (
+      <ProviderConnectionPage
+        state={gateways[key.id]}
+        scopeName={organizationName}
+        onBack={backToList}
+        onConnect={() => nav.openView(`connect:${key.id}`)}
+        onEditAccess={() => nav.openView("model-access", account)}
+      />
+    );
+  } else {
+    page = (
+      <SectionStack>
+        <Section
+          title="Shared model accounts"
+          description="Each workspace chooses whether new work uses these or its own accounts."
+          action={
+            <RowButton onClick={() => nav.openView("connect")}>
+              <PlusIcon aria-hidden="true" />
+              Connect account
+            </RowButton>
+          }
+        >
+          <RowList label="Shared subscriptions" columns={ACCOUNT_COLUMNS}>
+            <OrgCodexGroup codex={codex} places={codexPlaces} />
+            <SuperGrokGroup grok={grok} places={grokPlaces} />
+          </RowList>
+          <RowList label="Shared API keys" className="mt-2 border-t border-border">
+            <ProviderGroupHeader title="API keys" subtitle="Pay the provider per token" />
+            {[...(["openrouter", "vercel"] as const)]
+              .sort(
+                (a, b) =>
+                  Number(providerStatus(gateways[b]).status === "connected") -
+                  Number(providerStatus(gateways[a]).status === "connected"),
+              )
+              .map((id) => (
+                <ProviderConnectionRow
+                  key={id}
+                  state={gateways[id]}
+                  onOpen={() => nav.openAccount(`gateway:${id}`)}
+                  onConnect={() => nav.openView(`connect:${id}`)}
+                />
+              ))}
+          </RowList>
+        </Section>
+      </SectionStack>
+    );
+  }
+  const root = useRef<HTMLDivElement>(null);
+  const pageKey = `${view ?? ""}|${account ?? ""}`;
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    const heading = root.current?.querySelector<HTMLElement>("h1");
+    if (heading && pageKey !== "|") {
+      if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+      heading.focus({ preventScroll: true });
+    }
+  }, [pageKey]);
+  return (
+    <div ref={root} className="min-w-0">
+      {page}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   The organization's Codex accounts.
+   -------------------------------------------------------------------------- */
+
+interface OrgCodexPlaces {
+  organizationName: string;
+  openAccount: (accountId: string) => void;
+  openConnect: () => void;
+  openAccess: (accountId: string) => void;
+  backToList: () => void;
+}
+
+function OrgCodexGroup({
+  codex,
+  places,
+}: {
+  codex: OrganizationCodexSubscriptions;
+  places: OrgCodexPlaces;
+}) {
+  const { accounts } = codex;
+  let rows: ReactNode;
+  if (codex.loading) {
+    rows = <ListRowSkeleton count={1} />;
+  } else if (codex.loadError) {
+    rows = (
+      <li className="list-none px-3 py-3">
+        <ErrorMessage
+          variant="inline"
+          title="Couldn't load the organization's Codex accounts."
+          action={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void codex.refresh()}
+              className="rounded-[10px] pointer-coarse:h-11"
+            >
+              Try again
+            </Button>
+          }
+        >
+          {codex.loadError}
+        </ErrorMessage>
+      </li>
+    );
+  } else {
+    rows = (
+      <>
+        {accounts.map((account) => (
+          <OrgCodexRow
+            key={account.id}
+            codex={codex}
+            account={account}
+            onOpen={() => places.openAccount(account.id)}
+          />
+        ))}
+        {codex.pending ? (
+          <ListRow
+            leading={<ProviderTile provider="codex" />}
+            title="Signing in to ChatGPT…"
+            description="The account appears here once you finish signing in."
+            indicator="loading"
+            control={<RowButton onClick={places.openConnect}>Show code</RowButton>}
+          />
+        ) : accounts.length === 0 ? (
+          <ListRow
+            leading={<ProviderTile provider="codex" />}
+            title="No shared Codex accounts yet"
+            description="Share a ChatGPT Plus or Pro plan with your workspaces."
+            control={
+              <RowButton onClick={places.openConnect} aria-label="Connect Codex">
+                Connect
+              </RowButton>
+            }
+          />
+        ) : null}
+      </>
+    );
+  }
+  return (
+    <>
+      <ProviderGroupHeader
+        first
+        title="Codex"
+        subtitle="ChatGPT plan"
+        controls={
+          accounts.length >= 2 ? (
+            <LabelledControl
+              label="Pick"
+              help="Spread work sends new work to the account with the most room left. Primary only uses the primary account and waits when its limit runs out."
+            >
+              {(labelId) => (
+                <SegmentedControl<"spread" | "primary">
+                  aria-labelledby={labelId}
+                  size="sm"
+                  pending={codex.working === "rotation"}
+                  disabled={codex.busy && codex.working !== "rotation"}
+                  value={codex.rotationEnabled ? "spread" : "primary"}
+                  onValueChange={(value) => void codex.setRotation(value === "spread")}
+                  options={[
+                    { value: "spread", label: "Spread work" },
+                    { value: "primary", label: "Primary only" },
+                  ]}
+                />
+              )}
+            </LabelledControl>
+          ) : null
+        }
+      />
+      {rows}
+    </>
+  );
+}
+
+function OrgCodexRow({
+  codex,
+  account,
+  onOpen,
+}: {
+  codex: OrganizationCodexSubscriptions;
+  account: CodexAccount;
+  onOpen: () => void;
+}) {
+  const access = useConnectionAccess({
+    client: codex.client,
+    organizationId: codex.organizationId,
+    kind: "codex",
+    connectionId: account.id,
+  });
+  const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
+  return (
+    <ListRow
+      leading={<ProviderTile provider="codex" />}
+      title={codexAccountName(account)}
+      titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
+      meta={[
+        planLabel(account.plan, "ChatGPT"),
+        access.data
+          ? `Available in ${workspacesSummary(access.data.policy, access.data.personalWorkspacesSupported).replace(/^All/, "all")}`
+          : null,
+      ]}
+      indicator={
+        account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
+      }
+      onOpen={onOpen}
+    />
+  );
+}
+
+function OrgCodexAccountPage({
+  codex,
+  accountId,
+  places,
+}: {
+  codex: OrganizationCodexSubscriptions;
+  accountId: string;
+  places: OrgCodexPlaces;
+}) {
+  const account = codex.accounts.find((candidate) => candidate.id === accountId) ?? null;
+  const back = { label: "Models", onClick: places.backToList };
+  if (codex.loading) {
+    return (
+      <DetailPage back={back} className={PAGE_CLASS}>
+        <DetailSkeleton />
+      </DetailPage>
+    );
+  }
+  if (!account) {
+    return (
+      <DetailPage back={back} className={PAGE_CLASS}>
+        <EmptyState
+          variant="page"
+          icon={<UnplugIcon />}
+          title="This account isn't connected"
+          description="It may have been disconnected."
+          action={<RowButton onClick={places.backToList}>Back to Models</RowButton>}
+        />
+      </DetailPage>
+    );
+  }
+  return <OrgCodexAccountDetail codex={codex} account={account} places={places} />;
+}
+
+function OrgCodexAccountDetail({
+  codex,
+  account,
+  places,
+}: {
+  codex: OrganizationCodexSubscriptions;
+  account: CodexAccount;
+  places: OrgCodexPlaces;
+}) {
+  const [renaming, setRenaming] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const name = codexAccountName(account);
+  const access = useConnectionAccess({
+    client: codex.client,
+    organizationId: codex.organizationId,
+    kind: "codex",
+    connectionId: account.id,
+  });
+  const reconnect = account.status !== "active";
+  return (
+    <DetailPage back={{ label: "Models", onClick: places.backToList }} className={PAGE_CLASS}>
+      <DetailPageHeader
+        leading={<ProviderTile provider="codex" />}
+        title={name}
+        chips={
+          <StatusBadge status={reconnect ? "needs_reconnect" : "connected"} variant="outline" />
+        }
+        meta={[
+          planLabel(account.plan, "ChatGPT"),
+          account.email && account.email !== name ? account.email : null,
+          "Organization account",
+        ]}
+        actions={
+          <MoreMenu label={`More actions for ${name}`}>
+            <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
+              <UnplugIcon />
+              Disconnect
+            </DropdownMenuItem>
+          </MoreMenu>
+        }
+      />
+      <DetailPageBody
+        aside={
+          <DetailAside label={`About ${name}`}>
+            <DetailAsideItem label="Belongs to" icon={<BuildingIcon />}>
+              {places.organizationName}
+            </DetailAsideItem>
+            <DetailAsideItem label="Plan">{planLabel(account.plan, "ChatGPT")}</DetailAsideItem>
+          </DetailAside>
+        }
+      >
+        {reconnect ? (
+          <DetailSection>
+            <Notice
+              tone="waiting"
+              title="Sign in to ChatGPT again"
+              action={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={places.openConnect}
+                  className="rounded-[10px] pointer-coarse:h-11"
+                >
+                  Sign in again
+                </Button>
+              }
+            >
+              {account.lastError ?? "This account can't be used until someone signs in again."}
+            </Notice>
+          </DetailSection>
+        ) : null}
+        <DetailSection title="Settings">
+          <SettingRowGroup className="-my-3">
+            {codex.accounts.length > 1 ? (
+              <SettingRow
+                label="Primary account"
+                description={
+                  account.id === codex.activeAccountId
+                    ? "New work in workspaces that use the organization's accounts starts here."
+                    : "Make this the account new work starts with."
+                }
+                control={
+                  account.id === codex.activeAccountId ? (
+                    <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
+                      <CheckIcon aria-hidden="true" className="size-4 text-status-idle" />
+                      Primary
+                    </span>
+                  ) : (
+                    <RowButton
+                      disabled={codex.busy || reconnect}
+                      onClick={() => void codex.activate(account)}
+                    >
+                      Make primary
+                    </RowButton>
+                  )
+                }
+              />
+            ) : null}
+            <SettingRow
+              label="Name"
+              description={name}
+              control={
+                <RowButton aria-label={`Rename ${name}`} onClick={() => setRenaming(true)}>
+                  <PencilIcon aria-hidden="true" />
+                  Rename
+                </RowButton>
+              }
+            />
+            <ConnectionAccessRows
+              access={access}
+              organization
+              canManage
+              onEdit={() => places.openAccess(account.id)}
+            />
+          </SettingRowGroup>
+        </DetailSection>
+        <DetailSection>
+          <p className="text-xs leading-4.5 text-fg-muted">
+            Usage shows on the Models page of each workspace that uses this account.
+          </p>
+        </DetailSection>
+      </DetailPageBody>
+      <RenameAccountDialog
+        open={renaming}
+        onOpenChange={setRenaming}
+        name={name}
+        label={account.label}
+        provider="ChatGPT"
+        onSave={(label) => codex.rename(account, label)}
+      />
+      <DestructiveConfirm
+        open={disconnecting}
+        onOpenChange={setDisconnecting}
+        title={`Disconnect ${name}?`}
+        consequences={[
+          `Workspaces that use ${name} stop using it for new work.`,
+          "Work already running finishes first.",
+          "You'll need to sign in to ChatGPT again to reconnect it.",
+        ]}
+        confirmLabel="Disconnect"
+        pendingLabel="Disconnecting…"
+        onConfirm={async () => {
+          await codex.disconnect(account);
+          places.backToList();
+        }}
+      />
+    </DetailPage>
+  );
+}
+
+function OrgCodexAccessPage({
+  codex,
+  accountId,
+  onClose,
+}: {
+  codex: OrganizationCodexSubscriptions;
+  accountId: string;
+  onClose: () => void;
+}) {
+  const account = codex.accounts.find((candidate) => candidate.id === accountId);
+  const access = useConnectionAccess({
+    client: codex.client,
+    organizationId: codex.organizationId,
+    kind: "codex",
+    connectionId: accountId,
+  });
+  return (
+    <ConnectionAccessFormPage
+      access={access}
+      organization
+      canManage
+      name={account ? codexAccountName(account) : "this account"}
+      onClose={onClose}
+    />
+  );
+}
+
+function OrgCodexConnectPage({
+  codex,
+  places,
+  onClose,
+}: {
+  codex: OrganizationCodexSubscriptions;
+  places: OrgCodexPlaces;
+  onClose: () => void;
+}) {
+  const [connected, setConnected] = useState(false);
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
+  const signingIn = Boolean(codex.pending);
+  return (
+    <ModelsFormPage
+      title="Connect Codex"
+      description={`Sign in with the ChatGPT account whose plan ${places.organizationName} shares with its workspaces.`}
+      onClose={onClose}
+      submitLabel={signingIn ? "Open ChatGPT again" : "Sign in with ChatGPT"}
+      pendingLabel="Opening ChatGPT…"
+      submitDisabled={codex.busy || connected}
+      onSubmit={async () => {
+        if (signingIn && codex.pending) {
+          window.open(codex.pending.verificationUri, "_blank", "noopener,noreferrer");
+          return false;
+        }
+        await codex.connect({
+          onConnected: (accountId) => {
+            if (!active.current) return;
+            setConnected(true);
+            if (accountId) places.openAccount(accountId);
+            else places.backToList();
+          },
+        });
+        return false;
+      }}
+    >
+      <FieldStack>
+        <p className="text-sm text-fg-muted">
+          ChatGPT opens in a new tab and asks for a code, which shows here. OpenGeni never sees your
+          password. Every shared workspace can use the account until you limit it.
+        </p>
+        {codex.pending ? (
+          <CodexDeviceCodePanel
+            userCode={codex.pending.userCode}
+            verificationUri={codex.pending.verificationUri}
+          />
+        ) : null}
+        {signingIn || connected ? (
+          <p
+            role="status"
+            className="flex min-w-0 items-center gap-2 rounded-[10px] bg-surface-2 px-3 py-2.5 text-sm text-fg-muted"
+          >
+            {connected ? (
+              <>
+                <CircleCheckIcon aria-hidden="true" className="size-4 shrink-0 text-status-idle" />
+                Connected
+              </>
+            ) : (
+              <>
+                <LoaderCircleIcon
+                  aria-hidden="true"
+                  className="size-4 shrink-0 text-fg-subtle motion-safe:animate-spin"
+                />
+                Waiting for you to sign in…
+              </>
+            )}
+          </p>
+        ) : null}
+      </FieldStack>
+    </ModelsFormPage>
+  );
+}

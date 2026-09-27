@@ -18,7 +18,13 @@ const organizationModelProviderSource = await Bun.file(
   `${import.meta.dir}/components/organization-model-provider-connection.tsx`,
 ).text();
 const workspaceCodexSource = await Bun.file(
-  `${import.meta.dir}/components/codex-connection.tsx`,
+  `${import.meta.dir}/components/models/codex-models.tsx`,
+).text();
+const organizationModelsSource = await Bun.file(
+  `${import.meta.dir}/components/models/organization-models-page.tsx`,
+).text();
+const providerPageSource = await Bun.file(
+  `${import.meta.dir}/components/ai-gateway-connection.tsx`,
 ).text();
 const normalizedRecoverySource = recoverySource.replace(/\s+/gu, " ");
 const workspaceSettingsSource = await Bun.file(
@@ -33,9 +39,9 @@ const tenancyDocs = await Bun.file(
 
 describe("organization administration surface", () => {
   test("manages Gateway and OpenRouter as peer organization BYOK providers", () => {
-    expect(routeSource).toContain("<OrganizationModelProviderConnection");
-    expect(routeSource).toContain('providerKind="vercel_gateway"');
-    expect(routeSource).toContain('providerKind="openrouter"');
+    expect(routeSource).toContain("<OrganizationModelsPage");
+    expect(organizationModelsSource).toContain('providerKind: "vercel_gateway"');
+    expect(organizationModelsSource).toContain('providerKind: "openrouter"');
     for (const method of [
       "getOrganizationModelProviderConnection",
       "upsertOrganizationModelProviderConnection",
@@ -46,14 +52,12 @@ describe("organization administration surface", () => {
     ]) {
       expect(organizationModelProviderSource).toContain(`client.${method}(`);
     }
-    expect(organizationModelProviderSource).toContain('type="password"');
+    // Keys are write-only secret fields; disconnect and model removal both confirm first.
+    expect(providerPageSource).toContain("<SecretInput");
     expect(organizationModelProviderSource).not.toContain("localStorage");
-    expect(organizationModelProviderSource.replace(/\s+/g, " ")).toContain(
-      "current and future shared workspace",
-    );
-    expect(organizationModelProviderSource).toContain("Personal workspaces do not");
-    expect(organizationModelProviderSource).toContain("<ConfirmDialog");
-    expect(organizationModelProviderSource).toContain("OpenGeni credits are not used");
+    expect(organizationModelProviderSource).toContain("in shared workspaces");
+    expect(providerPageSource).toContain("<DestructiveConfirm");
+    expect(providerPageSource).toContain("<ConfirmDialog");
   });
 
   test("routes accessible overview, knowledge, people, recovery, retention, developer, and billing sections", () => {
@@ -86,11 +90,14 @@ describe("organization administration surface", () => {
     expect(routeSource).toContain('actorRole === "owner" || actorRole === "admin"');
     expect(routeSource).toContain("showModels={canManageOrganizationModels}");
     expect(shellSource).toContain('item.id !== "models" || showModels');
-    expect(organizationCodexSource).toContain("setLoadError(message)");
-    expect(organizationCodexSource).toContain('role="alert"');
-    expect(organizationCodexSource).toContain("Retry");
-    expect(workspaceCodexSource).toContain("<CodexSourceSettings");
+    expect(organizationCodexSource).toContain("setLoadError(");
+    expect(organizationModelsSource).toContain("<ErrorMessage");
+    expect(organizationModelsSource).toContain("Try again");
+    // Workspace Codex: one "Use" choice instead of the source select; the only
+    // link to organization settings is on a shared account's page, for org admins.
+    expect(workspaceCodexSource).toContain('label="Use"');
     expect(workspaceCodexSource).toContain("Manage in organization settings");
+    expect(workspaceCodexSource).toContain("manageInOrganization");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(routeSource).toContain('accountGrant?.role === "owner"');
     expect(routeSource).toContain('"account:admin"');

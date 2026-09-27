@@ -53,7 +53,8 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
   },
   models: {
     title: "Models",
-    description: "Manage subscriptions and provider accounts shared with your workspaces.",
+    description:
+      "Subscriptions and API keys the organization pays for, and which workspaces can use them.",
   },
   integrations: {
     title: "Integrations",
@@ -86,12 +87,15 @@ export function OrganizationSettingsShell({
   organizationLabel,
   section,
   showModels,
+  hideHeader = false,
   children,
 }: {
   workspaceId: string;
   organizationLabel: string;
   section: OrganizationAdminSection;
   showModels: boolean;
+  /** A sub-page (an account's page, a form) brings its own back link and title. */
+  hideHeader?: boolean;
   children: ReactNode;
 }) {
   const copy = COPY[section];
@@ -145,12 +149,14 @@ export function OrganizationSettingsShell({
 
       <main id="organization-settings-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
         <ContentPage width="standard">
-          <SettingsPageHeader
-            title={copy.title}
-            description={copy.description}
-            context={organizationLabel}
-          />
-          <div className="py-7">{children}</div>
+          {hideHeader ? null : (
+            <SettingsPageHeader
+              title={copy.title}
+              description={copy.description}
+              context={organizationLabel}
+            />
+          )}
+          <div className={hideHeader ? "pb-7" : "py-7"}>{children}</div>
         </ContentPage>
       </main>
     </div>

@@ -1,17 +1,24 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { ConnectionAccessSettings } from "./connection-access-settings";
 
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
+mock.module("sonner", () => ({
+  toast: { success: mock(() => undefined), error: mock(() => undefined) },
+}));
+
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+
+const { ConnectionAccessFormPage, ConnectionAccessRows, useConnectionAccess } =
+  await import("./connection-access-settings");
+
+afterAll(() => {
+  mock.restore();
+  GlobalRegistrator.unregister();
 });
-afterAll(() => GlobalRegistrator.unregister());
 
 for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as const) {
   test(`${kind} saves individual workspace and model choices on the connection`, async () => {
@@ -44,42 +51,68 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
         };
       },
     });
+    let closed = 0;
+    function Page({ editing }: { editing: boolean }) {
+      const access = useConnectionAccess({
+        client,
+        organizationId: "org",
+        kind,
+        connectionId: "account",
+      });
+      return editing ? (
+        <ConnectionAccessFormPage
+          access={access}
+          organization
+          canManage
+          name="Team plan"
+          onClose={() => {
+            closed += 1;
+          }}
+        />
+      ) : (
+        <ConnectionAccessRows access={access} organization canManage onEdit={() => undefined} />
+      );
+    }
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const clickLabel = async (text: string) =>
+    const choose = async (text: string) =>
       act(async () => {
+        const radio = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+          (candidate) => candidate.textContent?.includes(text),
+        );
         const label = [...container.querySelectorAll("label")].find(
           (candidate) => candidate.textContent === text,
         );
-        expect(label).toBeDefined();
-        label!.querySelector<HTMLInputElement>("input")!.click();
+        const target =
+          radio ?? (label ? (document.getElementById(label.htmlFor) ?? undefined) : undefined);
+        expect(target).toBeDefined();
+        target!.click();
       });
     try {
-      await act(async () =>
-        root.render(
-          <ConnectionAccessSettings
-            client={client}
-            organizationId="org"
-            kind={kind}
-            connectionId="account"
-            canManage
-          />,
-        ),
-      );
+      await act(async () => root.render(<Page editing={false} />));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(container.textContent).toContain("All shared workspaces");
+      expect(container.textContent).toContain("All models, including new ones");
+      if (kind === "codex" || kind === "supergrok")
+        expect(container.textContent).toContain("+ Personal");
+
+      await act(async () => root.render(<Page editing />));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
       expect(container.textContent).not.toContain("Engineering");
-      await act(async () => {
-        container.querySelector<HTMLButtonElement>("button")!.click();
-      });
-      await clickLabel("All shared workspaces, including new ones");
-      await clickLabel("Finance");
-      await clickLabel("All supported models, including new ones");
-      await clickLabel("Model B");
-      await act(async () =>
-        [...container.querySelectorAll("button")]
-          .find((button) => button.textContent === "Save access")!
-          .click(),
+      await choose("Only the workspaces I choose");
+      expect(container.textContent).toContain("Finance");
+      await choose("Finance");
+      const modelsOnly = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].filter(
+        (radio) => radio.textContent?.includes("Only the models I choose"),
       );
+      await act(async () => modelsOnly[0]!.click());
+      await choose("Model B");
+      const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Save",
+      )!;
+      await act(async () => save.closest("form")!.requestSubmit());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
       expect(writes).toEqual([
         {
           allowedModels: ["model-a"],
@@ -88,7 +121,7 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
           version: 1,
         },
       ]);
-      expect(container.textContent).toContain("1 models enabled");
+      expect(closed).toBe(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();

@@ -76,7 +76,7 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   },
   models: {
     title: "Models",
-    description: "Control which models can run in this workspace.",
+    description: "How new work in this workspace is paid for and which models it may use.",
   },
   "api-keys": {
     title: "API keys",
@@ -323,16 +323,19 @@ export function WorkspaceManagementShell({
 
 export function WorkspaceSettingsContent({
   section,
+  hideHeader = false,
   children,
 }: {
   section: WorkspaceSettingsSection;
+  /** A sub-page (an account's page, a form) brings its own back link and title. */
+  hideHeader?: boolean;
   children: ReactNode;
 }) {
   const copy = SECTION_COPY[section];
   return (
     <ContentPage width="standard">
-      <SettingsPageHeader title={copy.title} description={copy.description} />
-      <div className="py-7">{children}</div>
+      {hideHeader ? null : <SettingsPageHeader title={copy.title} description={copy.description} />}
+      <div className={hideHeader ? "pb-7" : "py-7"}>{children}</div>
     </ContentPage>
   );
 }

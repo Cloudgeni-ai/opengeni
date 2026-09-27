@@ -1,12 +1,11 @@
-import { ConnectionAccessSettings } from "@/components/connection-access-settings";
-import { SubscriptionConnectAction } from "@/components/subscription-connect-action";
 import { trackModelConnection } from "@/lib/analytics-observer";
 
-// Codex (ChatGPT) subscriptions card for workspace settings: connect MULTIPLE
-// ChatGPT accounts via device code, list them with an ACTIVE radio (the account
-// unpinned sessions use), inline rename, per-account refresh/disconnect, and
-// "connect another". A connected `codex/*` model run uses the active/pinned
-// subscription instead of spending API credits.
+// Codex (ChatGPT) subscriptions for Settings > Models: the data and every
+// mutation (useCodexSubscriptions), the usage-limit reset list, the device-code
+// panel and the redemption confirm. The list rows, the account page and the
+// Connect page that present them live in components/models/codex-models.tsx.
+// A connected `codex/*` model run uses the active/pinned subscription instead
+// of spending API credits.
 import type {
   CodexAccount,
   CodexAccountOverview,
@@ -14,63 +13,27 @@ import type {
   CodexOverviewResponse,
   CodexResetCredit,
   CodexResetRedemptionRecovery,
-  CodexUsage,
   CodexUsageMap,
   CodexUsageWindow,
   WorkspaceCodexSubscriptionMode,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { Link } from "@tanstack/react-router";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
-import {
-  Loader2Icon,
-  RefreshCwIcon,
-  TicketCheckIcon,
-  Trash2Icon,
-  TriangleAlertIcon,
-} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelConnectionSection } from "@/components/model-connection-section";
-import { CodexSourceSettings } from "@/components/codex-source-settings";
-import { ChatGptMark } from "@/components/chatgpt-mark";
 import { Button } from "@/components/ui/button";
-import { SubscriptionAccountRow } from "@/components/subscription-account-row";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { useAppContext } from "@/context";
+import { formatAbsoluteTime } from "@/components/ui/relative-time";
+import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import type { UsageWindowReading } from "@/components/ui/usage-meter";
 import {
   ApiError,
   prepareCodexResetRedemption,
   redeemCodexResetCredit,
   type CodexResetRedemptionPreparation,
 } from "@/api";
-import { cn } from "@/lib/utils";
-
-function relativeTimestamp(value: string | number | null | undefined, now: number): string {
-  if (value == null) return "";
-  const timestamp = typeof value === "number" ? value * 1000 : new Date(value).getTime();
-  if (!Number.isFinite(timestamp)) return "";
-  const delta = timestamp - now;
-  const future = delta >= 0;
-  const absolute = Math.abs(delta);
-  const minutes = Math.max(1, Math.round(absolute / 60_000));
-  const amount =
-    minutes >= 1440
-      ? `${Math.round(minutes / 1440)}d`
-      : minutes >= 60
-        ? `${Math.round(minutes / 60)}h`
-        : `${minutes}m`;
-  return future ? `in ${amount}` : `${amount} ago`;
-}
-
-function absoluteTimestamp(value: string | number | null | undefined): string {
-  if (value == null) return "";
-  const date = new Date(typeof value === "number" ? value * 1000 : value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
-}
 
 type StoredRedemptionAttempt = {
   attemptId: string;
@@ -79,29 +42,10 @@ type StoredRedemptionAttempt = {
   expiresAt: number | null;
 };
 
-type RedemptionAttemptView = StoredRedemptionAttempt & {
+export type RedemptionAttemptView = StoredRedemptionAttempt & {
   status: "local" | CodexResetRedemptionRecovery["status"];
   outcome: CodexResetRedemptionRecovery["outcome"];
 };
-
-function redemptionOutcomeCopy(outcome: NonNullable<CodexResetRedemptionRecovery["outcome"]>) {
-  return {
-    reset: "Usage limits reset.",
-    alreadyRedeemed: "The earlier redemption succeeded; usage was refreshed.",
-    nothingToReset: "The provider found no eligible usage window to reset.",
-    noCredit: "The provider found no reset credit to use.",
-  }[outcome];
-}
-
-function managedRedemptionErrorStatus(error: unknown): string | null {
-  if (!(error instanceof ApiError)) return null;
-  try {
-    const parsed = JSON.parse(error.body) as { status?: unknown };
-    return typeof parsed.status === "string" ? parsed.status : null;
-  } catch {
-    return null;
-  }
-}
 
 function redemptionAttemptStoragePrefix(workspaceId: string, accountId: string): string {
   return `opengeni.codexResetAttempt:${workspaceId}:${accountId}:`;
@@ -234,220 +178,139 @@ function redemptionAttemptViews(
   ].sort((left, right) => left.creditId.localeCompare(right.creditId));
 }
 
-export function resetLabel(seconds: number | null | undefined): string {
-  if (typeof seconds !== "number" || seconds <= 0) return "";
-  const h = Math.floor(seconds / 3600);
-  const d = Math.floor(h / 24);
-  if (d >= 1) return `resets in ~${d}d`;
-  if (h >= 1) return `resets in ~${h}h`;
-  return `resets in ~${Math.max(1, Math.round(seconds / 60))}m`;
+function redemptionOutcomeCopy(outcome: NonNullable<CodexResetRedemptionRecovery["outcome"]>) {
+  return {
+    reset: "Usage limits reset.",
+    alreadyRedeemed: "The earlier redemption succeeded; usage was refreshed.",
+    nothingToReset: "ChatGPT found no usage limit to reset.",
+    noCredit: "ChatGPT found no reset to use.",
+  }[outcome];
 }
+
+function managedRedemptionErrorStatus(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  try {
+    const parsed = JSON.parse(error.body) as { status?: unknown };
+    return typeof parsed.status === "string" ? parsed.status : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Unix seconds or an ISO string, as a Date. */
+function toDate(value: string | number): Date {
+  return new Date(typeof value === "number" ? value * 1000 : value);
+}
+
+function expiryLabel(expiresAt: number | null): string {
+  return expiresAt == null ? "Doesn't expire" : `Expires ${formatAbsoluteTime(toDate(expiresAt))}`;
+}
+
+/* ----------------------------------------------------------------------------
+   Usage.
+   -------------------------------------------------------------------------- */
 
 // Seconds until reset, computed CLIENT-SIDE off the absolute resetAt (skew-free,
-// preferred) and falling back to the snapshot's resetAfterSeconds. Driven by the
-// row's `now` tick so the countdown ticks without re-hitting the backend.
-function secondsUntilReset(window: CodexUsageWindow, now: number): number | null {
+// preferred) and falling back to the snapshot's resetAfterSeconds.
+function resetDate(window: CodexUsageWindow, now: number): Date | null {
   if (window.resetAt) {
-    const ms = new Date(window.resetAt).getTime() - now;
-    if (!Number.isNaN(ms)) return Math.max(0, Math.round(ms / 1000));
+    const date = new Date(window.resetAt);
+    if (!Number.isNaN(date.getTime())) return date;
   }
-  return window.resetAfterSeconds;
-}
-
-function resetTimestamp(window: CodexUsageWindow, now: number): string {
-  if (window.resetAt) {
-    const absolute = absoluteTimestamp(window.resetAt);
-    const relative = relativeTimestamp(window.resetAt, now);
-    if (absolute && relative) return `resets ${absolute} (${relative})`;
+  if (typeof window.resetAfterSeconds === "number" && window.resetAfterSeconds > 0) {
+    return new Date(now + window.resetAfterSeconds * 1000);
   }
-  const seconds = secondsUntilReset(window, now);
-  return seconds == null ? "" : resetLabel(seconds);
+  return null;
 }
 
-export function UsageBar({
-  label,
-  window,
-  now,
-}: {
-  label: string;
-  window: CodexUsageWindow | null;
-  now: number;
-}) {
-  if (!window) return null;
-  const pct = Math.min(100, Math.max(0, window.remaining));
-  const danger = pct <= 10;
-  const limitReached = pct <= 0;
-  const reset = resetTimestamp(window, now);
-  return (
-    <div className="grid gap-1">
-      <div className="flex flex-wrap items-center justify-between gap-x-2 text-xs text-fg-muted">
-        <span>{label}</span>
-        <span className="min-w-0 text-right">
-          {`${pct}% remaining`}
-          {limitReached ? " · limit reached" : ""}
-          {reset ? ` · ${reset}` : ""}
-        </span>
-      </div>
-      <div
-        className="h-1.5 overflow-hidden rounded-full bg-surface-2"
-        role="progressbar"
-        aria-label={`${label} remaining`}
-        aria-valuetext={`${pct}% remaining`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={pct}
-      >
-        <div
-          className={`h-full rounded-full ${danger ? "bg-status-waiting" : "bg-brand"}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-/** Compact inline meter for the collapsed subscription row. */
-export function CompactUsageMeter({
-  label,
-  window,
-}: {
-  label: string;
-  window: CodexUsageWindow | null;
-}) {
-  if (!window) return null;
-  const remaining = Math.min(100, Math.max(0, window.remaining));
-  const pct = Math.round(remaining);
-  const danger = remaining <= 10;
-  return (
-    <div
-      className="flex items-center gap-1.5 text-2xs text-fg-muted"
-      title={`${label}: ${pct}% remaining`}
-    >
-      <span className="shrink-0">{label}</span>
-      <div
-        className="h-1 w-14 overflow-hidden rounded-full bg-surface-2"
-        role="progressbar"
-        aria-label={`${label} remaining`}
-        aria-valuetext={`${pct}% remaining`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={pct}
-      >
-        <div
-          className={`h-full rounded-full ${danger ? "bg-status-waiting" : "bg-brand"}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <span className="shrink-0 whitespace-nowrap tabular-nums text-fg-subtle">
-        {pct}% remaining
-      </span>
-    </div>
-  );
-}
-
-function accountUsageWindows(live: CodexUsage | undefined): {
-  fiveHour: CodexUsageWindow | null;
-  weekly: CodexUsageWindow | null;
-  status?: string;
-} {
+/** One provider window as a meter reading: percent LEFT, and when it resets. */
+export function codexUsageReading(
+  label: string,
+  window: CodexUsageWindow | null | undefined,
+  now: number,
+): UsageWindowReading {
+  if (!window) return { label, percent: null };
+  const reset = resetDate(window, now);
   return {
-    status: live?.status,
-    fiveHour: live?.usage?.fiveHour ?? null,
-    weekly: live?.usage?.weekly ?? null,
+    label,
+    percent: Math.round(Math.min(100, Math.max(0, window.remaining))),
+    ...(reset ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
   };
 }
 
-/** Short 5h + weekly meters for the collapsed row. */
-function CompactAccountUsage({
-  live,
-  refreshing,
-  onRetry,
-}: {
-  live: CodexUsage | undefined;
-  refreshing: boolean;
-  onRetry: () => void;
-}) {
-  const { fiveHour, weekly, status } = accountUsageWindows(live);
-  if (refreshing && !live) {
-    return (
-      <div role="status" aria-label="Checking usage" className="min-h-4 w-48">
-        <div className="h-3 w-full animate-pulse rounded bg-surface-2" />
-      </div>
-    );
+/** Weekly first (the limit people run out of), then the 5-hour window. */
+export function codexUsageReadings(
+  usage: { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null } | null | undefined,
+  now: number,
+): UsageWindowReading[] {
+  return [
+    codexUsageReading("Weekly", usage?.weekly, now),
+    codexUsageReading("5-hour", usage?.fiveHour, now),
+  ];
+}
+
+/* ----------------------------------------------------------------------------
+   Usage limit resets.
+   -------------------------------------------------------------------------- */
+
+/** One muted line: who can redeem, or why the list is view only. */
+export function resetAuthorityNote(overview: CodexAccountOverview): string | null {
+  const reset = overview.resetCredits;
+  const count = reset.availableCount ?? 0;
+  const detail: Record<typeof reset.detailState, string | null> = {
+    detailed: null,
+    count_only: `ChatGPT reports ${count} reset${count === 1 ? "" : "s"} but no details, so they are view only.`,
+    capped: "ChatGPT returned fewer details than its count, so these are view only.",
+    unsupported: "This plan doesn't report usage limit resets.",
+    unknown: "ChatGPT returned reset data OpenGeni doesn't recognize, so these are view only.",
+    error: "Couldn't check usage limit resets. Refresh usage to try again.",
+  };
+  if (detail[reset.detailState]) return detail[reset.detailState];
+  if (count === 0) return null;
+  if (overview.canRedeem) {
+    return "Each gives this account a fresh usage limit. Only you can redeem them, as the person who connected it.";
   }
-  if (!fiveHour && !weekly) {
-    return (
-      <button
-        type="button"
-        className="text-2xs text-fg-subtle underline hover:text-fg"
-        onClick={onRetry}
-      >
-        {status === "no-data" ? "Usage not reported · Retry" : "Usage unavailable · Retry"}
-      </button>
-    );
+  switch (overview.redemptionAccess.ownership) {
+    case "unowned":
+      return "No one is recorded as the owner of this older connection, so its resets are view only. Reconnect the same ChatGPT account while signed in as yourself to claim it.";
+    case "managed_human_unavailable":
+      return "Resets are view only here: OpenGeni couldn't confirm who is signed in to this browser, so ownership can't be claimed or changed.";
+    case "different_human":
+      return "Only the person who connected this account can redeem its resets. Disconnecting it is the only way to change who owns it.";
+    default:
+      return null;
   }
+}
+
+/** True when the reset list has anything worth a section. */
+export function hasResetInventory(
+  overview: CodexAccountOverview | undefined,
+  recoveryAttempts: readonly RedemptionAttemptView[],
+): boolean {
+  if (!overview) return false;
+  const reset = overview.resetCredits;
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1" aria-live="polite">
-      <CompactUsageMeter label="5h" window={fiveHour} />
-      <CompactUsageMeter label="Wk" window={weekly} />
-    </div>
+    (reset.availableCount ?? 0) > 0 ||
+    reset.credits.length > 0 ||
+    reset.detailState === "error" ||
+    (overview.canResumeRedemption && recoveryAttempts.length > 0)
   );
 }
 
-/** Expanded-only usage meta (timestamps / limit-reached); bars stay on the row. */
-function AccountUsageMeta({
-  live,
-  overview,
-  now,
-}: {
-  live: CodexUsage | undefined;
-  overview: CodexAccountOverview | undefined;
-  now: number;
-}) {
-  const { fiveHour, weekly, status } = accountUsageWindows(live);
-  if (!overview && !fiveHour && !weekly) return null;
-  const limitReached =
-    status === "limit_reached" || (fiveHour?.percent ?? 0) >= 100 || (weekly?.percent ?? 0) >= 100;
-  return (
-    <div className="grid gap-1.5" aria-live="polite">
-      {overview ? (
-        <div className="text-2xs text-fg-subtle">
-          {overview.usage.source === "provider" ? "Provider reported" : "Cached by OpenGeni"}
-          {overview.usage.fetchedAt
-            ? ` · ${absoluteTimestamp(overview.usage.fetchedAt)} (${relativeTimestamp(overview.usage.fetchedAt, now)})`
-            : " · never checked"}
-          {overview.usage.stale ? " · stale" : ""}
-        </div>
-      ) : null}
-      {fiveHour ? (
-        <div className="text-2xs text-fg-subtle">
-          5-hour · {resetTimestamp(fiveHour, now) || "reset unknown"}
-        </div>
-      ) : null}
-      {weekly ? (
-        <div className="text-2xs text-fg-subtle">
-          Weekly · {resetTimestamp(weekly, now) || "reset unknown"}
-        </div>
-      ) : null}
-      {limitReached ? (
-        <div className="flex items-center gap-1.5 text-xs text-status-waiting">
-          <TriangleAlertIcon className="size-3.5" /> Usage limit reached
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
+/**
+ * Flat list of usage limit resets: one row per reset with its expiry, and a
+ * Redeem button only when it can actually be redeemed by this person.
+ */
 export function ResetCreditInventory({
   overview,
-  now,
   busy,
   recoveryAttempts,
   onRedeem,
   onReconnectSameAccount,
 }: {
   overview: CodexAccountOverview | undefined;
-  now: number;
+  /** Kept for callers that tick a clock; expiry labels use the absolute time. */
+  now?: number;
   busy: boolean;
   recoveryAttempts: RedemptionAttemptView[];
   onRedeem: (credit: CodexResetCredit, recovery?: RedemptionAttemptView) => void;
@@ -455,85 +318,39 @@ export function ResetCreditInventory({
 }) {
   if (!overview) return null;
   const reset = overview.resetCredits;
-  const count = reset.availableCount;
-  const authorityCopy: Record<typeof reset.detailState, string> = {
-    detailed: count === 0 ? "No usage limit resets available." : "Provider detail is complete.",
-    count_only: `Provider reports ${count ?? 0} reset${count === 1 ? "" : "s"}, but individual details are unavailable. View only.`,
-    capped: "The provider returned fewer details than its count. View only.",
-    unsupported: "This subscription does not expose reset-credit details.",
-    unknown: "The provider returned reset data OpenGeni does not recognize. View only.",
-    error: "Reset-credit inventory is unavailable. Refresh to retry.",
-  };
+  const note = resetAuthorityNote(overview);
   const visibleCreditIds = new Set(reset.credits.map((credit) => credit.id));
-  const hiddenRecoveries = recoveryAttempts.filter(
-    (attempt) => !visibleCreditIds.has(attempt.creditId),
-  );
-  const viewOnlyOwnership =
-    count !== null && count > 0 && !overview.canRedeem ? overview.redemptionAccess.ownership : null;
+  const hiddenRecoveries = overview.canResumeRedemption
+    ? recoveryAttempts.filter((attempt) => !visibleCreditIds.has(attempt.creditId))
+    : [];
+  const canClaim =
+    !overview.canRedeem &&
+    (reset.availableCount ?? 0) > 0 &&
+    overview.redemptionAccess.ownership === "unowned" &&
+    overview.redemptionAccess.canClaimUnownedViaReconnect;
   return (
-    <div className="grid min-w-0 gap-2 rounded-md border border-border/70 bg-surface/60 p-2.5">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium">
-          <TicketCheckIcon className="size-3.5 shrink-0 text-brand" />
-          Usage limit resets
-          {count != null ? <span className="text-fg-muted">· {count} available</span> : null}
-        </div>
-        <span className="text-2xs text-fg-subtle">
-          {reset.source === "provider"
-            ? "Provider reported"
-            : reset.source === "cache"
-              ? "OpenGeni cache"
-              : "No provider data"}
-          {reset.stale ? " · stale" : ""}
-        </span>
-      </div>
-      <p className="text-2xs text-fg-subtle" aria-live="polite">
-        {authorityCopy[reset.detailState]}
-        {reset.fetchedAt
-          ? ` Checked ${absoluteTimestamp(reset.fetchedAt)} (${relativeTimestamp(reset.fetchedAt, now)}).`
-          : ""}
-      </p>
-      {viewOnlyOwnership === "unowned" ? (
-        <div
-          className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded border border-status-waiting/30 bg-status-waiting/10 p-2"
-          role="status"
-        >
-          <p className="min-w-0 flex-1 text-2xs text-fg-muted">
-            This legacy connection has no recorded human owner, so its resets are view only.
-            Reconnect the same ChatGPT account while signed in as yourself to claim it safely.
-          </p>
-          {overview.redemptionAccess.canClaimUnownedViaReconnect ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              className="min-h-11 shrink-0"
-              disabled={busy}
-              onClick={onReconnectSameAccount}
-            >
-              <RefreshCwIcon className="size-3.5" /> Reconnect same account
-            </Button>
-          ) : null}
-        </div>
-      ) : viewOnlyOwnership === "managed_human_unavailable" ? (
-        <p
-          className="rounded border border-border/70 bg-surface-2/50 p-2 text-2xs text-fg-muted"
-          role="status"
-        >
-          OpenGeni could not verify a managed human for this browser session. Reset credits are view
-          only, and ownership cannot be claimed or changed here.
-        </p>
-      ) : viewOnlyOwnership === "different_human" ? (
-        <p
-          className="rounded border border-border/70 bg-surface-2/50 p-2 text-2xs text-fg-muted"
-          role="status"
-        >
-          This connection belongs to another person. Only that person can redeem its resets;
-          disconnecting it is the explicit ownership-reset boundary.
+    <div className="flex min-w-0 flex-col gap-3" aria-live="polite">
+      {note ? (
+        <p role="status" className="text-xs leading-4.5 text-fg-muted">
+          {note}
         </p>
       ) : null}
-      {reset.credits.length > 0 ? (
-        <div className="grid min-w-0 gap-1.5">
+      {canClaim ? (
+        <div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="rounded-[10px] pointer-coarse:h-11"
+            disabled={busy}
+            onClick={onReconnectSameAccount}
+          >
+            Reconnect same account
+          </Button>
+        </div>
+      ) : null}
+      {reset.credits.length > 0 || hiddenRecoveries.length > 0 ? (
+        <SettingRowGroup role="list" aria-label="Usage limit resets" className="-mb-3">
           {reset.credits.map((credit) => {
             const recovery = recoveryAttempts.find((attempt) => attempt.creditId === credit.id);
             const resumable = Boolean(
@@ -549,140 +366,109 @@ export function ResetCreditInventory({
               (recovery.outcome === "nothingToReset" || recovery.outcome === "noCredit")
                 ? redemptionOutcomeCopy(recovery.outcome)
                 : null;
-            const expiry =
-              credit.expiresAt == null
-                ? "Does not expire"
-                : `Expires ${absoluteTimestamp(credit.expiresAt)} (${relativeTimestamp(credit.expiresAt, now)})`;
+            const state =
+              credit.status === "redeeming"
+                ? "Being redeemed"
+                : credit.status === "redeemed"
+                  ? "Redeemed"
+                  : null;
+            const description = [
+              state,
+              priorNonConsumingOutcome
+                ? `Earlier attempt: ${priorNonConsumingOutcome}${credit.actionable ? " It's available again." : ""}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ");
             return (
-              <div
+              <SettingRow
                 key={credit.id}
-                className="flex min-w-0 flex-wrap items-start justify-between gap-2 rounded border border-border/70 bg-bg p-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="break-words text-xs font-medium">
-                    {credit.title ?? "Full usage limit reset"}
-                  </div>
-                  <div className="mt-0.5 break-words text-2xs text-fg-subtle">
-                    {expiry} · {credit.status.replaceAll("_", " ")}
-                  </div>
-                  {credit.description ? (
-                    <div className="mt-1 break-words text-2xs text-fg-muted">
-                      {credit.description}
-                    </div>
-                  ) : null}
-                  {priorNonConsumingOutcome ? (
-                    <div className="mt-1 break-words text-2xs text-fg-muted" aria-live="polite">
-                      Earlier attempt: {priorNonConsumingOutcome}
-                      {credit.actionable
-                        ? " The provider currently lists this reset as available again."
-                        : ""}
-                    </div>
-                  ) : null}
-                </div>
-                {completedSuccessfulOutcome ? (
-                  <div
-                    className="max-w-56 text-right text-2xs text-status-success"
-                    aria-live="polite"
-                  >
-                    {completedSuccessfulOutcome}
-                  </div>
-                ) : credit.actionable || resumable ? (
+                role="listitem"
+                label={expiryLabel(credit.expiresAt)}
+                description={description || undefined}
+                control={
+                  completedSuccessfulOutcome ? (
+                    <span className="text-xs text-status-idle">{completedSuccessfulOutcome}</span>
+                  ) : credit.actionable || resumable ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="rounded-[10px] pointer-coarse:h-11"
+                      disabled={busy}
+                      aria-label={`${resumable ? "Resume redemption of" : "Redeem"} ${credit.title ?? "usage limit reset"}`}
+                      onClick={() =>
+                        onRedeem(
+                          credit,
+                          resumable || priorNonConsumingOutcome ? recovery : undefined,
+                        )
+                      }
+                    >
+                      {resumable ? "Resume" : "Redeem"}
+                    </Button>
+                  ) : null
+                }
+              />
+            );
+          })}
+          {hiddenRecoveries.map((attempt) => (
+            <SettingRow
+              key={attempt.attemptId}
+              role="listitem"
+              label={
+                attempt.expiresAt != null ? expiryLabel(attempt.expiresAt) : "Usage limit reset"
+              }
+              description={
+                attempt.status === "completed" && attempt.outcome
+                  ? redemptionOutcomeCopy(attempt.outcome)
+                  : "ChatGPT no longer lists this reset. Resume only the same uncertain attempt; OpenGeni never starts a new one for it."
+              }
+              control={
+                attempt.status !== "completed" ? (
                   <Button
                     type="button"
                     size="sm"
-                    variant="secondary"
-                    className="min-h-11 shrink-0"
+                    variant="outline"
+                    className="rounded-[10px] pointer-coarse:h-11"
                     disabled={busy}
-                    aria-label={`${resumable ? "Resume redemption of" : "Redeem"} ${credit.title ?? "usage limit reset"}`}
+                    aria-label={`Resume uncertain redemption of ${attempt.title ?? "usage limit reset"}`}
                     onClick={() =>
-                      onRedeem(credit, resumable || priorNonConsumingOutcome ? recovery : undefined)
+                      onRedeem(
+                        {
+                          id: attempt.creditId,
+                          resetType: "codexRateLimits",
+                          status: "redeeming",
+                          grantedAt: 0,
+                          expiresAt: attempt.expiresAt,
+                          title: attempt.title,
+                          description: null,
+                          actionable: false,
+                        },
+                        attempt,
+                      )
                     }
                   >
-                    {resumable ? "Resume uncertain attempt" : "Redeem"}
+                    Resume
                   </Button>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
-      {overview.canResumeRedemption && hiddenRecoveries.length > 0 ? (
-        <div className="grid min-w-0 gap-1.5">
-          {hiddenRecoveries.map((attempt) => (
-            <div
-              key={attempt.attemptId}
-              className="flex min-w-0 flex-wrap items-start justify-between gap-2 rounded border border-status-waiting/30 bg-status-waiting/10 p-2"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="break-words text-xs font-medium">
-                  {attempt.title ?? "Usage limit reset"}
-                </div>
-                <div className="mt-0.5 break-words text-2xs text-fg">
-                  {attempt.status === "completed" && attempt.outcome
-                    ? redemptionOutcomeCopy(attempt.outcome)
-                    : "The provider no longer lists this reset. Resume only the same uncertain attempt; OpenGeni will never mint a replacement key."}
-                </div>
-              </div>
-              {attempt.status !== "completed" ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  className="min-h-11 shrink-0"
-                  disabled={busy}
-                  aria-label={`Resume uncertain redemption of ${attempt.title ?? "usage limit reset"}`}
-                  onClick={() =>
-                    onRedeem(
-                      {
-                        id: attempt.creditId,
-                        resetType: "codexRateLimits",
-                        status: "redeeming",
-                        grantedAt: 0,
-                        expiresAt: attempt.expiresAt,
-                        title: attempt.title,
-                        description: null,
-                        actionable: false,
-                      },
-                      attempt,
-                    )
-                  }
-                >
-                  Resume uncertain attempt
-                </Button>
-              ) : null}
-            </div>
+                ) : null
+              }
+            />
           ))}
-        </div>
+        </SettingRowGroup>
       ) : null}
     </div>
   );
 }
 
-function accountDisplay(account: CodexAccount): string {
+export function codexAccountName(account: CodexAccount): string {
   // Never fall back to the raw chatgpt account id as a display label.
   return account.label ?? account.email ?? account.plan ?? "Codex account";
 }
 
-const RESET_URGENT_MS = 2 * 24 * 60 * 60 * 1000;
-const RESET_SOON_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** Soonest reset-credit expiry among listed credits (unix-seconds → ms remaining). */
-function soonestResetExpiryMs(credits: CodexResetCredit[], now: number): number | null {
-  let soonest: number | null = null;
-  for (const credit of credits) {
-    if (credit.expiresAt == null) continue;
-    if (credit.status !== "available" && !credit.actionable) continue;
-    const remaining = credit.expiresAt * 1000 - now;
-    if (soonest == null || remaining < soonest) soonest = remaining;
-  }
-  return soonest;
-}
-
-function resetBadgeTone(remainingMs: number | null): "urgent" | "soon" | "ok" {
-  if (remainingMs == null) return "ok";
-  if (remainingMs < RESET_URGENT_MS) return "urgent";
-  if (remainingMs < RESET_SOON_MS) return "soon";
-  return "ok";
+/** Plans come back lowercase ("pro"); show them as the plan name. */
+export function planLabel(plan: string | null | undefined, provider: string): string {
+  if (!plan) return `${provider} plan`;
+  return `${provider} ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`;
 }
 
 type ClipboardModule = {
@@ -715,50 +501,65 @@ export function CodexDeviceCodePanel({
   );
 }
 
-export function CodexSubscriptionsCard(props: { workspaceId: string; canManage: boolean }) {
-  const client = useAppContext().client;
-  return <CodexSubscriptionsCardWithClient key={props.workspaceId} {...props} client={client} />;
-}
+/* ----------------------------------------------------------------------------
+   The data and every mutation. One instance per Models page mount: the list
+   and the account pages share it, so opening an account never re-reads the
+   provider, and a device-code sign-in keeps polling while you navigate.
+   -------------------------------------------------------------------------- */
 
-/** Isolated product fixture seam; production callers use CodexSubscriptionsCard. */
-export function CodexSubscriptionsCardWithClient({
+export type CodexRedemption = {
+  accountId: string;
+  credit: CodexResetCredit;
+  preparation: CodexResetRedemptionPreparation;
+  /** True after a POST failure where provider acceptance may be ambiguous. */
+  uncertain: boolean;
+};
+
+export type CodexWorking =
+  | "source"
+  | "rotation"
+  | `allocator:${string}`
+  | `apps:${string}`
+  | `activate:${string}`
+  | `rename:${string}`
+  | `disconnect:${string}`;
+
+export type CodexSubscriptions = ReturnType<typeof useCodexSubscriptions>;
+
+export function useCodexSubscriptions({
+  client,
   workspaceId,
   canManage,
-  client,
-}: { workspaceId: string; canManage: boolean } & { client: OpenGeniBrowserClient }) {
+}: {
+  client: OpenGeniBrowserClient;
+  workspaceId: string;
+  canManage: boolean;
+}) {
   const [data, setData] = useState<CodexAccountsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [working, setWorking] = useState<CodexWorking | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
   } | null>(null);
-  // The row whose label is being edited + its draft value.
-  // True while a LIVE batched usage refresh is in flight (drives the bar skeleton).
+  // True while a LIVE batched usage refresh is in flight (drives the meter skeleton).
   const [refreshingUsage, setRefreshingUsage] = useState(true);
   // The latest LIVE usage per account (carries the explicit ok/limit/error/no-data
   // status the cached columns can't). Never merge it with cached account windows.
   const [usageMap, setUsageMap] = useState<CodexUsageMap>({});
   const [overviewMap, setOverviewMap] = useState<CodexOverviewResponse["accounts"]>({});
-  // The row whose single-account live refresh is in flight (per-row spinner).
+  // The last live overview read failed as a whole (not one account's usage).
+  const [usageError, setUsageError] = useState(false);
+  // The account whose single-account live refresh is in flight (per-page spinner).
   const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
   const [preparingReset, setPreparingReset] = useState<string | null>(null);
-  const [redemption, setRedemption] = useState<{
-    accountId: string;
-    credit: CodexResetCredit;
-    preparation: CodexResetRedemptionPreparation;
-    /** True after a POST failure where provider acceptance may be ambiguous. */
-    uncertain: boolean;
-  } | null>(null);
+  const [redemption, setRedemption] = useState<CodexRedemption | null>(null);
   const cancelled = useRef(false);
   const usageRefreshedRef = useRef(false);
-  // A monotonic clock the rows tick off for the reset countdown — one timer for
-  // the whole card, never a backend re-hit.
+  // A clock for reset times and usage labels - one timer, never a backend re-hit.
   const [now, setNow] = useState(() => Date.now());
-  // One expanded subscription at a time; healthy rows stay collapsed by default.
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const autoExpandedReloginRef = useRef(false);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
@@ -795,17 +596,20 @@ export function CodexSubscriptionsCardWithClient({
             ]),
           ) as CodexUsageMap,
         );
+        setNow(Date.now());
+        setUsageError(false);
       }
     } catch {
-      /* per-account errors are surfaced as the row's "usage unavailable" state */
+      // Per-account errors are each account's own "usage unavailable" state.
+      if (!cancelled.current) setUsageError(true);
     } finally {
       await refreshAccounts();
       if (!cancelled.current) setRefreshingUsage(false);
     }
   }, [client, workspaceId, refreshAccounts]);
 
-  // Explicit row retry still uses the independently-settled batch so reset
-  // detail authority and usage can never drift.
+  // Explicit retry still uses the independently-settled batch so reset detail
+  // authority and usage can never drift.
   const refreshAccountUsage = useCallback(
     async (accountId: string) => {
       setRefreshingRow(accountId);
@@ -818,9 +622,10 @@ export function CodexSubscriptionsCardWithClient({
             ...prev,
             [accountId]: { status: usage?.status ?? "no-data", usage: usage ?? null },
           }));
+          setNow(Date.now());
         }
       } catch {
-        /* surfaced as the row's "usage unavailable" state */
+        /* surfaced as the account's "usage unavailable" state */
       } finally {
         await refreshAccounts();
         if (!cancelled.current) setRefreshingRow(null);
@@ -847,99 +652,168 @@ export function CodexSubscriptionsCardWithClient({
     if (data.accounts.length > 0) {
       usageRefreshedRef.current = true;
       void refreshUsage();
+    } else {
+      setRefreshingUsage(false);
     }
   }, [loading, data, refreshUsage]);
 
-  const connect = useCallback(async () => {
-    const recordOutcome = trackModelConnection("codex", workspaceId);
-    setBusy(true);
-    try {
-      const start = await client.codexConnectStart(workspaceId);
-      setPending({
-        userCode: start.userCode,
-        verificationUri: start.verificationUri,
-      });
-      window.open(start.verificationUri, "_blank", "noopener,noreferrer");
-      // Preserve server-side completion after this card unmounts, but bound it
-      // by the provider's 15-minute device window. Shared headless pacing has no
-      // UI dependency and never blindly retries an uncertain token exchange.
-      void pollDeviceAuthorization({
-        poll: () => client.codexConnectPoll(workspaceId, start.state),
-        expired: { status: "expired" } as Awaited<ReturnType<typeof client.codexConnectPoll>>,
-        initialIntervalSeconds: Math.max(2, start.intervalSeconds),
-        expiresAtMs: Date.now() + 15 * 60_000,
-        signal: new AbortController().signal,
-      })
-        .then(async (result) => {
-          if (!result) return;
-          if (result.status === "connected") {
-            recordOutcome("connected");
-            if (!cancelled.current) {
-              setPending(null);
-              toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
-              await refreshUsage();
-            }
-            return;
-          }
-          if (result.status === "expired") {
-            recordOutcome("expired");
-            if (!cancelled.current) {
-              setPending(null);
-              toast.error("The code expired before it was authorized. Try again.");
-            }
-            return;
-          }
-        })
-        .catch((error) => {
-          recordOutcome("outcome_unknown");
-          if (!cancelled.current) {
-            setPending(null);
-            toast.error(
-              error instanceof Error
-                ? error.message
-                : "Failed to verify Codex authorization. Try again.",
-            );
-          }
-        });
-    } catch (error) {
-      recordOutcome("outcome_unknown");
-      setPending(null);
-      toast.error(error instanceof Error ? error.message : "Failed to start Codex login");
-    } finally {
-      setBusy(false);
-    }
-  }, [client, workspaceId, refreshUsage]);
-
-  const activate = useCallback(
-    async (accountId: string) => {
+  const setSourceMode = useCallback(
+    async (mode: WorkspaceCodexSubscriptionMode, success?: string): Promise<boolean> => {
       setBusy(true);
+      setWorking("source");
       try {
-        await client.activateCodexAccount(workspaceId, accountId);
+        await client.requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, { mode });
+        usageRefreshedRef.current = false;
         await refreshAccounts();
-        toast.success("Active subscription updated");
+        if (success) toast.success(success);
+        return true;
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to switch active subscription",
-        );
+        toast.error(error instanceof Error ? error.message : "Couldn't change the Codex source");
+        return false;
       } finally {
         setBusy(false);
+        setWorking(null);
       }
     },
     [client, workspaceId, refreshAccounts],
   );
 
-  // Enable or disable auto-rotation, then re-read effective settings.
+  /**
+   * Start a device-code sign-in. `useFor` answers "use this account instead of
+   * the organization's subscriptions?" when the organization pool is in use:
+   * "organization" pins the source first so connecting doesn't switch it;
+   * "workspace" switches to this workspace's accounts once the account exists.
+   */
+  const connect = useCallback(
+    async (options?: {
+      useFor?: "workspace" | "organization";
+      onConnected?: (accountId: string | null) => void;
+    }) => {
+      const recordOutcome = trackModelConnection("codex", workspaceId);
+      const mode = data?.source?.mode;
+      if (options?.useFor === "organization" && mode === "automatic") {
+        const kept = await setSourceMode("organization");
+        if (!kept) return;
+      }
+      setBusy(true);
+      try {
+        const start = await client.codexConnectStart(workspaceId);
+        setPending({
+          userCode: start.userCode,
+          verificationUri: start.verificationUri,
+        });
+        window.open(start.verificationUri, "_blank", "noopener,noreferrer");
+        // Preserve server-side completion after this page unmounts, but bound it
+        // by the provider's 15-minute device window. Shared headless pacing has no
+        // UI dependency and never blindly retries an uncertain token exchange.
+        void pollDeviceAuthorization({
+          poll: () => client.codexConnectPoll(workspaceId, start.state),
+          expired: { status: "expired" } as Awaited<ReturnType<typeof client.codexConnectPoll>>,
+          initialIntervalSeconds: Math.max(2, start.intervalSeconds),
+          expiresAtMs: Date.now() + 15 * 60_000,
+          signal: new AbortController().signal,
+        })
+          .then(async (result) => {
+            if (!result) return;
+            if (result.status === "connected") {
+              recordOutcome("connected");
+              if (options?.useFor === "workspace" && mode === "organization") {
+                await client
+                  .requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, {
+                    mode: "workspace",
+                  })
+                  .catch((error: unknown) =>
+                    toast.error(
+                      error instanceof Error
+                        ? error.message
+                        : "Connected, but couldn't switch to this workspace's accounts",
+                    ),
+                  );
+                usageRefreshedRef.current = false;
+              }
+              if (!cancelled.current) {
+                setPending(null);
+                toast.success(
+                  `Codex connected${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
+                );
+                await refreshUsage();
+                options?.onConnected?.(
+                  "accountId" in result && typeof result.accountId === "string"
+                    ? result.accountId
+                    : null,
+                );
+              }
+              return;
+            }
+            if (result.status === "expired") {
+              recordOutcome("expired");
+              if (!cancelled.current) {
+                setPending(null);
+                toast.error("The code expired before it was used. Try again.");
+              }
+              return;
+            }
+          })
+          .catch((error) => {
+            recordOutcome("outcome_unknown");
+            if (!cancelled.current) {
+              setPending(null);
+              toast.error(
+                error instanceof Error
+                  ? error.message
+                  : "Couldn't confirm the ChatGPT sign-in. Try again.",
+              );
+            }
+          });
+      } catch (error) {
+        recordOutcome("outcome_unknown");
+        setPending(null);
+        toast.error(error instanceof Error ? error.message : "Couldn't start the ChatGPT sign-in");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, workspaceId, refreshUsage, data?.source?.mode, setSourceMode],
+  );
+
+  const activate = useCallback(
+    async (account: CodexAccount) => {
+      setBusy(true);
+      setWorking(`activate:${account.id}`);
+      try {
+        await client.activateCodexAccount(workspaceId, account.id);
+        await refreshAccounts();
+        toast.success(`${codexAccountName(account)} is now the primary account`);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Couldn't change the primary account");
+      } finally {
+        setBusy(false);
+        setWorking(null);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
+
+  // Spread work across accounts (rotation on) or use the primary only (off).
   const setRotation = useCallback(
     async (patch: { rotationEnabled: boolean }) => {
       setBusy(true);
+      setWorking("rotation");
       try {
         await client.setCodexRotationSettings(workspaceId, patch);
         await refreshAccounts();
-        toast.success("Rotation settings updated");
+        toast.success(
+          patch.rotationEnabled
+            ? "New work is spread across accounts"
+            : "New work uses the primary account only",
+        );
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to update rotation settings");
+        toast.error(
+          error instanceof Error ? error.message : "Couldn't change how accounts are picked",
+        );
       } finally {
         setBusy(false);
+        setWorking(null);
       }
     },
     [client, workspaceId, refreshAccounts],
@@ -948,6 +822,7 @@ export function CodexSubscriptionsCardWithClient({
   const setAllocator = useCallback(
     async (account: CodexAccount, enabled: boolean) => {
       setBusy(true);
+      setWorking(`allocator:${account.id}`);
       try {
         await client.setCodexAccountAllocator(workspaceId, account.id, {
           enabled,
@@ -956,16 +831,15 @@ export function CodexSubscriptionsCardWithClient({
         await refreshAccounts();
         toast.success(
           enabled
-            ? "Subscription enabled for new automatic turns"
-            : "Subscription paused for new automatic turns",
+            ? `${codexAccountName(account)} is used for new work again`
+            : `${codexAccountName(account)} won't be used for new work`,
         );
       } catch (error) {
         await refreshAccounts();
-        toast.error(
-          error instanceof Error ? error.message : "Failed to update automatic-turn eligibility",
-        );
+        toast.error(error instanceof Error ? error.message : "Couldn't change this account");
       } finally {
         setBusy(false);
+        setWorking(null);
       }
     },
     [client, workspaceId, refreshAccounts],
@@ -975,20 +849,22 @@ export function CodexSubscriptionsCardWithClient({
     async (account: CodexAccount, enabled: boolean) => {
       if (!data?.apps) return;
       setBusy(true);
+      setWorking(`apps:${account.id}`);
       try {
         if (enabled) {
           await client.designateCodexAppsAccount(workspaceId, account.id, data.apps.version);
-          toast.success("Codex Apps credential enabled");
+          toast.success(`Codex Apps uses ${codexAccountName(account)}`);
         } else {
           await client.clearCodexAppsAccount(workspaceId, data.apps.version);
-          toast.success("Codex Apps credential disabled");
+          toast.success("Codex Apps turned off");
         }
         await refreshAccounts();
       } catch (error) {
         await refreshAccounts();
-        toast.error(error instanceof Error ? error.message : "Failed to update Codex Apps");
+        toast.error(error instanceof Error ? error.message : "Couldn't change Codex Apps");
       } finally {
         setBusy(false);
+        setWorking(null);
       }
     },
     [client, data, workspaceId, refreshAccounts],
@@ -1032,7 +908,7 @@ export function CodexSubscriptionsCardWithClient({
         });
         if (resumableRecovery && !preparation.resumable) {
           removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
-          toast.error("This reset was not sent to the provider and is no longer actionable.");
+          toast.error("This reset was not sent to ChatGPT and can't be redeemed any more.");
           await refreshUsage();
           return;
         }
@@ -1045,7 +921,7 @@ export function CodexSubscriptionsCardWithClient({
         if (createdLocalAttempt) {
           removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
         }
-        toast.error(error instanceof Error ? error.message : "Could not prepare reset redemption");
+        toast.error(error instanceof Error ? error.message : "Couldn't prepare the reset");
       } finally {
         setPreparingReset(null);
       }
@@ -1080,7 +956,7 @@ export function CodexSubscriptionsCardWithClient({
         removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
         setRedemption(null);
         await refreshUsage();
-        toast.error(error instanceof Error ? error.message : "Redemption was not sent");
+        toast.error(error instanceof Error ? error.message : "The reset was not sent");
         return false;
       }
       // Preserve only genuinely ambiguous provider work under the same logical
@@ -1089,473 +965,159 @@ export function CodexSubscriptionsCardWithClient({
       toast.error(
         error instanceof Error
           ? error.message
-          : "Redemption outcome is uncertain. Retry this same attempt.",
+          : "The outcome is uncertain. Retry this same attempt.",
       );
       return false;
     }
   }, [redemption, workspaceId, refreshUsage]);
 
+  const closeRedemption = useCallback(() => {
+    setRedemption((current) => {
+      if (!current) return current;
+      // Cancel before the first POST has no durable/provider side effect,
+      // so clear the local UUID instead of presenting it as uncertain.
+      // Once a prior attempt is resumable or a POST failed, preserve the
+      // exact logical id for ambiguity-safe retry after close/reload.
+      if (!current.preparation.resumable && !current.uncertain) {
+        removeStoredRedemptionAttempt(workspaceId, current.accountId, current.credit.id);
+      }
+      return null;
+    });
+  }, [workspaceId]);
+
+  /** Throws with a user-facing message so the confirm dialog can show it. */
   const disconnect = useCallback(
-    async (accountId: string) => {
+    async (account: CodexAccount): Promise<void> => {
       setBusy(true);
+      setWorking(`disconnect:${account.id}`);
       try {
-        await client.disconnectCodexAccount(workspaceId, accountId);
+        await client.disconnectCodexAccount(workspaceId, account.id);
         await refreshAccounts();
-        toast.success("Subscription disconnected");
+        toast.success(`Disconnected ${codexAccountName(account)}`);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to disconnect subscription");
+        throw new Error(
+          error instanceof Error && error.message
+            ? error.message
+            : `Couldn't disconnect ${codexAccountName(account)}. Try again.`,
+          { cause: error },
+        );
       } finally {
         setBusy(false);
+        setWorking(null);
       }
     },
     [client, workspaceId, refreshAccounts],
   );
 
-  const commitRename = useCallback(
-    async (accountId: string, label: string) => {
+  /** Throws with a user-facing message so the rename prompt can show it. */
+  const rename = useCallback(
+    async (account: CodexAccount, label: string): Promise<void> => {
       setBusy(true);
+      setWorking(`rename:${account.id}`);
       try {
         await client.renameCodexAccount(
           workspaceId,
-          accountId,
+          account.id,
           label.trim() === "" ? null : label.trim(),
         );
         await refreshAccounts();
+        toast.success("Name saved");
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to rename subscription");
+        throw new Error(
+          error instanceof Error && error.message ? error.message : "Couldn't save the name.",
+          { cause: error },
+        );
       } finally {
         setBusy(false);
+        setWorking(null);
       }
     },
     [client, workspaceId, refreshAccounts],
   );
 
-  const setSourceMode = async (mode: WorkspaceCodexSubscriptionMode): Promise<void> => {
-    setBusy(true);
-    try {
-      await client.requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, { mode });
-      usageRefreshedRef.current = false;
-      await refreshAccounts();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to update Codex source");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const accounts = data?.accounts ?? [];
-  const activeAccountId = data?.activeAccountId ?? null;
-  const rotationEnabled = data?.settings?.rotationEnabled ?? false;
   const source = data?.source;
-  const workspaceManaged = source?.effectiveSource !== "organization";
-  const sourceDisabled = source?.effectiveSource === "disabled";
+  const accounts = data?.accounts ?? [];
+  return {
+    client,
+    workspaceId,
+    canManage,
+    data,
+    accounts,
+    source,
+    activeAccountId: data?.activeAccountId ?? null,
+    rotationEnabled: data?.settings?.rotationEnabled ?? false,
+    /** Accounts here are this workspace's own and can be changed here. */
+    workspaceManaged: source?.effectiveSource !== "organization",
+    sourceDisabled: source?.effectiveSource === "disabled",
+    loading,
+    loadError,
+    busy,
+    working,
+    pending,
+    refreshingUsage,
+    usageError,
+    usageMap,
+    overviewMap,
+    refreshingRow,
+    preparingReset,
+    redemption,
+    now,
+    refreshAccounts,
+    refreshAccountUsage,
+    setSourceMode,
+    connect,
+    activate,
+    setRotation,
+    setAllocator,
+    setAppsCredential,
+    beginRedemption,
+    confirmRedemption,
+    closeRedemption,
+    disconnect,
+    rename,
+    redemptionAttempts: (accountId: string) =>
+      redemptionAttemptViews(workspaceId, accountId, overviewMap[accountId]),
+  };
+}
 
-  useEffect(() => {
-    autoExpandedReloginRef.current = false;
-    setExpandedId(null);
-  }, [workspaceId]);
-
-  // Burying reconnect behind a click is worse than one auto-open; healthy rows stay closed.
-  useEffect(() => {
-    if (autoExpandedReloginRef.current || expandedId != null || !data) return;
-    const needsRelogin = data.accounts.find(
-      (account) => account.status !== "active" && account.lastError != null,
-    );
-    if (!needsRelogin) return;
-    autoExpandedReloginRef.current = true;
-    setExpandedId(needsRelogin.id);
-  }, [data, expandedId]);
-
+/** The irreversible "redeem a reset" confirm. Mount once per page. */
+export function CodexRedemptionDialog({ codex }: { codex: CodexSubscriptions }) {
+  const { redemption, now } = codex;
   return (
-    <ModelConnectionSection
-      testId="codex-connection-card"
-      title="Codex"
-      description={
-        source?.effectiveSource === "organization"
-          ? "ChatGPT subscription · From your organization"
-          : "ChatGPT subscription · Workspace account"
-      }
-      mark={<ChatGptMark className="size-4" />}
-      status={
-        loading
-          ? "Loading…"
-          : loadError
-            ? "Unavailable"
-            : sourceDisabled
-              ? "Turned off"
-              : pending
-                ? "Awaiting sign-in"
-                : accounts.length === 0
-                  ? "Not connected"
-                  : accounts.some((account) => account.status === "active")
-                    ? "Connected"
-                    : "Needs attention"
-      }
+    <ConfirmDialog
+      open={redemption != null}
+      onOpenChange={(open) => {
+        if (!open) codex.closeRedemption();
+      }}
+      title="Redeem this usage limit reset?"
+      description="This uses one usage limit reset from ChatGPT. It can reset this account's 5-hour and weekly limits, and can't be undone."
+      confirmLabel="Redeem reset"
+      cancelLabel="Cancel"
+      cancelAutoFocus
+      onConfirm={codex.confirmRedemption}
     >
-      <p className="text-xs leading-5 text-fg-subtle">
-        Use Codex models with a ChatGPT subscription. Usage is included in the connected plan.
-      </p>
-
-      {canManage && source ? (
-        <CodexSourceSettings
-          source={source}
-          busy={busy}
-          onChange={(mode) => void setSourceMode(mode)}
-        />
+      {redemption ? (
+        <dl className="m-0 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-[10px] bg-surface-2 px-3 py-2.5 text-xs">
+          <dt className="text-fg-muted">Reset</dt>
+          <dd className="m-0 break-words text-fg">
+            {redemption.credit.title ?? "Full usage limit reset"}
+          </dd>
+          <dt className="text-fg-muted">Expires</dt>
+          <dd className="m-0 text-fg">
+            {redemption.credit.expiresAt == null
+              ? "Doesn't expire"
+              : formatAbsoluteTime(toDate(redemption.credit.expiresAt), { now })}
+          </dd>
+          <dt className="text-fg-muted">Note</dt>
+          <dd className="m-0 break-words text-fg-muted">
+            {redemption.uncertain
+              ? "The outcome is uncertain. Retry only this same attempt; OpenGeni reuses its original request so it can't be redeemed twice."
+              : redemption.preparation.resumable
+                ? "This resumes the same uncertain attempt; OpenGeni reuses its original request so it can't be redeemed twice."
+                : `This confirmation expires ${formatAbsoluteTime(toDate(redemption.preparation.expiresAt), { now })}.`}
+          </dd>
+        </dl>
       ) : null}
-      {source?.effectiveSource === "organization" ? (
-        <Link
-          to="/workspaces/$workspaceId/organization"
-          params={{ workspaceId }}
-          search={{ section: "models" }}
-          className="w-fit text-xs font-medium text-brand hover:underline"
-        >
-          Manage in organization settings
-        </Link>
-      ) : null}
-      {accounts.length > 1 && canManage && workspaceManaged ? (
-        <label
-          className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2"
-          title="Each session sticks to one plan for prompt-cache reuse; a capped plan hands sessions to others, never mid-turn."
-        >
-          <span className="text-xs font-medium">Auto-rotate subscriptions</span>
-          <input
-            type="checkbox"
-            className="size-4 accent-brand"
-            checked={rotationEnabled}
-            disabled={busy}
-            onChange={(e) => void setRotation({ rotationEnabled: e.target.checked })}
-          />
-        </label>
-      ) : null}
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-xs text-fg-subtle">
-          <Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…
-        </div>
-      ) : loadError ? (
-        <div role="alert" className="flex items-center justify-between gap-3">
-          <p className="text-xs text-destructive">{loadError}</p>
-          <Button size="sm" variant="secondary" onClick={() => void refreshAccounts()}>
-            Retry
-          </Button>
-        </div>
-      ) : pending ? (
-        <CodexDeviceCodePanel
-          userCode={pending.userCode}
-          verificationUri={pending.verificationUri}
-        />
-      ) : accounts.length === 0 ? (
-        !canManage || !workspaceManaged || sourceDisabled ? (
-          <p className="text-xs text-fg-subtle">
-            {sourceDisabled
-              ? "Codex is disabled for this workspace."
-              : "No Codex subscriptions connected."}
-          </p>
-        ) : null
-      ) : (
-        <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
-          {accounts.map((account) => {
-            const isActive = account.id === activeAccountId;
-            const needsRelogin = account.status !== "active" && account.lastError != null;
-            const resetOverview = overviewMap[account.id]?.resetCredits;
-            const resetCount = resetOverview?.availableCount;
-            const resetRemainingMs = soonestResetExpiryMs(resetOverview?.credits ?? [], now);
-            const resetTone = resetBadgeTone(resetRemainingMs);
-            const expanded = expandedId === account.id;
-            const coolingSecs = account.exhaustedUntil
-              ? Math.max(0, Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000))
-              : 0;
-            return (
-              <SubscriptionAccountRow
-                key={account.id}
-                provider="Codex"
-                name={accountDisplay(account)}
-                label={account.label}
-                email={account.email}
-                plan={account.plan}
-                group={`codex-active-${workspaceId}`}
-                selected={isActive}
-                disabled={!canManage || !workspaceManaged || busy}
-                unavailable={account.status !== "active"}
-                selectionLabel={`Use ${accountDisplay(account)} as active subscription`}
-                expanded={expanded}
-                onExpandedChange={(open) => setExpandedId(open ? account.id : null)}
-                onSelect={() => void activate(account.id)}
-                onRename={
-                  canManage && workspaceManaged
-                    ? (label) => void commitRename(account.id, label)
-                    : undefined
-                }
-                meta={
-                  <>
-                    {account.appsDesignated ? (
-                      <MetaChip dot="running" rounded="full">
-                        Apps
-                      </MetaChip>
-                    ) : null}
-                    {!needsRelogin ? (
-                      <div onClick={(event) => event.stopPropagation()}>
-                        <CompactAccountUsage
-                          live={usageMap[account.id]}
-                          refreshing={refreshingUsage || refreshingRow === account.id}
-                          onRetry={() => void refreshAccountUsage(account.id)}
-                        />
-                      </div>
-                    ) : (
-                      <span className="flex items-center gap-1 text-2xs text-status-waiting">
-                        <TriangleAlertIcon className="size-3" /> Reconnect
-                      </span>
-                    )}
-                    {typeof resetCount === "number" && resetCount > 0 ? (
-                      <span
-                        className={cn(
-                          "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-2xs",
-                          resetTone === "urgent" &&
-                            "border-status-failed/40 bg-status-failed/10 text-status-failed",
-                          resetTone === "soon" &&
-                            "border-status-waiting/40 bg-status-waiting/10 text-status-waiting",
-                          resetTone === "ok" && "border-border/70 bg-surface/60 text-fg-muted",
-                        )}
-                        title={
-                          resetRemainingMs == null
-                            ? `${resetCount} usage limit reset${resetCount === 1 ? "" : "s"} available`
-                            : `${resetCount} usage limit reset${resetCount === 1 ? "" : "s"} · soonest expires ${
-                                resetRemainingMs <= 0
-                                  ? "now"
-                                  : relativeTimestamp((now + resetRemainingMs) / 1000, now)
-                              }`
-                        }
-                      >
-                        <TicketCheckIcon
-                          className={cn(
-                            "size-3",
-                            resetTone === "urgent" && "text-status-failed",
-                            resetTone === "soon" && "text-status-waiting",
-                            resetTone === "ok" && "text-brand",
-                          )}
-                        />
-                        {resetCount}
-                      </span>
-                    ) : null}
-                  </>
-                }
-              >
-                <div className="truncate text-2xs text-fg-subtle">
-                  {account.status === "active"
-                    ? "Token valid"
-                    : account.status.replaceAll("_", " ")}
-                  {account.expiresAt
-                    ? ` · expires ${new Date(account.expiresAt).toLocaleString()}`
-                    : ""}
-                  {coolingSecs > 0
-                    ? ` · cooling down ${resetLabel(coolingSecs)}`
-                    : isActive
-                      ? rotationEnabled
-                        ? " · active default when idle"
-                        : " · active"
-                      : ""}
-                </div>
-                <label
-                  className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5"
-                  title="Pausing affects only new automatic selection. A current live lease continues; quota, cooldown, and relogin state still gate eligibility."
-                >
-                  <span className="text-xs font-medium">Use for new automatic turns</span>
-                  <span className="flex items-center gap-2 text-xs text-fg-muted">
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-brand"
-                      checked={account.allocatorEnabled}
-                      disabled={!canManage || !workspaceManaged || busy}
-                      aria-label={`Use ${accountDisplay(account)} for new automatic turns`}
-                      onChange={(event) => void setAllocator(account, event.target.checked)}
-                    />
-                    <span aria-hidden="true">
-                      {account.allocatorEnabled ? "Enabled" : "Paused"}
-                    </span>
-                  </span>
-                </label>
-                {data?.apps?.available ? (
-                  <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5 py-1.5">
-                    <div className="min-w-0">
-                      <div className="text-xs font-medium">Use for Codex Apps</div>
-                      <div className="text-2xs text-fg-subtle">
-                        Independent of inference, usage limits, rotation, and active selection.
-                      </div>
-                    </div>
-                    <input
-                      type="checkbox"
-                      className="size-4 shrink-0 accent-brand"
-                      checked={account.appsDesignated}
-                      disabled={
-                        busy ||
-                        (account.appsDesignated ? !data.apps.canDisable : !account.canEnableApps)
-                      }
-                      aria-label={`Use ${accountDisplay(account)} for Codex Apps`}
-                      onChange={(event) => void setAppsCredential(account, event.target.checked)}
-                    />
-                  </label>
-                ) : null}
-                {needsRelogin ? (
-                  <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
-                    <TriangleAlertIcon className="size-3.5" />{" "}
-                    {account.lastError ?? "Reconnect needed."}
-                  </div>
-                ) : (
-                  <AccountUsageMeta
-                    live={usageMap[account.id]}
-                    overview={overviewMap[account.id]}
-                    now={now}
-                  />
-                )}
-                {account.source !== "organization" ? (
-                  <ResetCreditInventory
-                    overview={overviewMap[account.id]}
-                    now={now}
-                    busy={busy || preparingReset != null}
-                    recoveryAttempts={redemptionAttemptViews(
-                      workspaceId,
-                      account.id,
-                      overviewMap[account.id],
-                    )}
-                    onRedeem={(credit, recovery) =>
-                      void beginRedemption(account.id, credit, recovery)
-                    }
-                    onReconnectSameAccount={() => void connect()}
-                  />
-                ) : null}
-                {canManage ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy || refreshingRow === account.id}
-                      onClick={() => void refreshAccountUsage(account.id)}
-                    >
-                      {refreshingRow === account.id ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCwIcon className="size-3.5" />
-                      )}{" "}
-                      Refresh
-                    </Button>
-                    {workspaceManaged ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => void disconnect(account.id)}
-                      >
-                        <Trash2Icon className="size-3.5" /> Disconnect
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
-                {workspaceManaged && account.source !== "organization" ? (
-                  <ConnectionAccessSettings
-                    client={client}
-                    workspaceId={workspaceId}
-                    kind="codex"
-                    connectionId={account.id}
-                    canManage={canManage}
-                  />
-                ) : null}
-              </SubscriptionAccountRow>
-            );
-          })}
-        </div>
-      )}
-      {canManage && !pending && !loading && !loadError ? (
-        <SubscriptionConnectAction
-          analyticsAction="connect_codex"
-          provider="Codex"
-          count={accounts.length}
-          busy={busy}
-          onConnect={() => void connect()}
-          actionLabel={
-            !workspaceManaged || sourceDisabled ? "Connect workspace account" : undefined
-          }
-          description={
-            sourceDisabled
-              ? "Connecting an account keeps Codex turned off."
-              : !workspaceManaged
-                ? source?.mode === "automatic"
-                  ? "Connect a workspace account to use it for new work."
-                  : "Organization subscriptions remain selected."
-                : undefined
-          }
-        />
-      ) : null}
-      {accounts.length > 0 && !pending && !loading ? (
-        <div className="grid gap-1 text-2xs text-fg-subtle">
-          <p>
-            {rotationEnabled ? (
-              <>
-                New work is spread across all {accounts.length} subscriptions, keeping account
-                affinity for prompt-cache reuse. Pinned sessions stay on their pin.
-              </>
-            ) : (
-              <>
-                New work uses the <span className="font-medium">active</span> subscription unless
-                the session is pinned to a specific one.
-              </>
-            )}
-          </p>
-          {data?.apps?.available ? (
-            <p>
-              Codex Apps uses only the separately marked Apps subscription. With none marked, Apps
-              tools are unavailable.
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-      <ConfirmDialog
-        open={redemption != null}
-        onOpenChange={(open) => {
-          if (!open && redemption) {
-            // Cancel before the first POST has no durable/provider side effect,
-            // so clear the local UUID instead of presenting it as uncertain.
-            // Once a prior attempt is resumable or a POST failed, preserve the
-            // exact logical id for ambiguity-safe retry after close/reload.
-            if (!redemption.preparation.resumable && !redemption.uncertain) {
-              removeStoredRedemptionAttempt(
-                workspaceId,
-                redemption.accountId,
-                redemption.credit.id,
-              );
-            }
-            setRedemption(null);
-          }
-        }}
-        title="Redeem this usage limit reset?"
-        description="This consumes one provider rate-limit reset credit. It may reset eligible 5-hour and weekly usage windows, is irreversible, and cannot be undone."
-        confirmLabel="Redeem usage limit reset"
-        cancelLabel="Cancel"
-        cancelAutoFocus
-        onConfirm={confirmRedemption}
-      >
-        {redemption ? (
-          <div className="grid min-w-0 gap-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-3 text-xs">
-            <div className="break-words font-medium">
-              {redemption.credit.title ?? "Full usage limit reset"}
-            </div>
-            <div className="break-words text-fg-muted">
-              {redemption.credit.expiresAt == null
-                ? "The provider reports no expiry."
-                : `Expires ${absoluteTimestamp(redemption.credit.expiresAt)} (${relativeTimestamp(redemption.credit.expiresAt, now)}).`}
-            </div>
-            <div className="break-words text-fg-subtle">
-              {redemption.uncertain
-                ? "The provider outcome is uncertain. Retry only this same attempt; OpenGeni will reuse its original idempotency key."
-                : redemption.preparation.resumable
-                  ? "This resumes the same uncertain provider attempt; OpenGeni will reuse its original idempotency key."
-                  : `Confirmation expires ${absoluteTimestamp(redemption.preparation.expiresAt)} (${relativeTimestamp(redemption.preparation.expiresAt, now)}).`}
-            </div>
-          </div>
-        ) : null}
-      </ConfirmDialog>
-    </ModelConnectionSection>
+    </ConfirmDialog>
   );
 }
