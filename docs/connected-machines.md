@@ -146,6 +146,13 @@ to another window or screen. `macos_autorelease` exercises the actual helper wit
 Objective-C missing-pool diagnostics enabled; run this ignored test explicitly
 in an unlocked local GUI session.
 
+Accessibility notifications invalidate the snapshots that registered the changed
+element, so one observed window's value changes do not discard an unrelated
+window's observation. Application-wide focus/layout events, unrecognized event
+sources, and overflow of the bounded 64-notification queue still invalidate all
+snapshots for that process. Every semantic action continues to verify the target,
+element identity and observed state immediately before dispatch.
+
 Native window and screen pointer input uses the exact painted frame's encoded
 dimensions. Continuous capture retains superseded frame metadata for at most
 two seconds, bounded to 32 frames per target and 512 per adapter, so a newer
