@@ -764,7 +764,7 @@ machine, and does not prove that earlier operations failed.
 Transfers stage bounded chunks privately, verify the intended BLAKE3 digest and
 byte count, and publish only after the expected destination state is checked.
 Large Files-panel writes use provider byte transport instead of shell arguments.
-On capable Linux agents, raw replacements above 256 KiB use these same transfers,
+On capable Linux and macOS agents, raw replacements above 256 KiB use these same transfers,
 including binary files; an ambiguous write is never retried through a fallback.
 Every transfer request is reauthorized against the same physical connection.
 The runner pins each operation to its original nonzero session route epoch;
@@ -782,10 +782,12 @@ lost authority do not prove cleanup: private staging may remain until the link
 ends, and a process crash may leave an orphan. There is no automatic sweep or
 adoption of unknown transfers.
 
-The initial native implementation supports ordinary Linux regular files with
-existing parent directories. It fails closed on unsupported symlinks, hard links,
+The native implementation supports ordinary Linux and macOS APFS regular files
+with existing parent directories. It fails closed on unsupported symlinks, hard links,
 ownership, special modes, and extended metadata rather than silently discarding
 their semantics. Transactional editing does not implement `runAs` impersonation.
+macOS permits OS-generated provenance only when replacement preserves its exact
+bytes; extended ACLs, other attributes and inode flags remain unsupported.
 Expected-base checks detect observed changes but are not a filesystem
 compare-and-swap against unrelated concurrent writers.
 

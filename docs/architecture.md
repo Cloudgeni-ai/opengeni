@@ -368,7 +368,8 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 Agents run directly on the user's Connected Machine (`selfhosted`); OpenGeni creates no sandbox.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
-Mac updates preserve signed bundles ([details](connected-machines.md)).
+Mac updates preserve signed bundles; writes check ACLs
+([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
 The machine owns its filesystem, Git authentication, environment, and long-lived
 platform credentials. OpenGeni neither clones repositories nor installs durable

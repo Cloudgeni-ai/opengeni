@@ -445,7 +445,7 @@ impl Upload {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use opengeni_agent_platform::NativePlatform;
@@ -493,7 +493,8 @@ mod tests {
     }
     impl Rig {
         fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
+            let dir =
+                tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
             Self {
                 platform: NativePlatform::with_root(dir.path()),
                 dir,
