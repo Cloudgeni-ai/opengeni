@@ -120,6 +120,7 @@ import {
   readSkillMetadata,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
+  storedBundledSkillSelectionIdentity,
   type BundledSkillId,
   type SkillRecord,
 } from "@opengeni/contracts";
@@ -33095,7 +33096,7 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (
-    stableJson(bundledSkillSelectionFromMetadata(existing.metadata) ?? null) !==
+    stableJson(storedBundledSkillSelectionIdentity(existing.metadata) ?? null) !==
     stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
   ) {
     throw new SessionCreateIdempotencyConflictError();
@@ -81602,6 +81603,7 @@ function mapSession(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string; activated: boolean },
 ): Session {
+  const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
     id: row.id,
     accountId: row.accountId,
@@ -81618,9 +81620,7 @@ function mapSession(
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
     skills: StoredSessionSkills.parse(row.skills ?? []),
-    ...(bundledSkillSelectionFromMetadata(row.metadata) !== undefined
-      ? { bundledSkillIds: bundledSkillSelectionFromMetadata(row.metadata) }
-      : {}),
+    ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),

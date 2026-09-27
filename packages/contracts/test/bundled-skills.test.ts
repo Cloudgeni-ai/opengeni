@@ -7,6 +7,7 @@ import {
   resolveBundledSkillSelection,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
+  storedBundledSkillSelectionIdentity,
 } from "../src";
 
 const documents = "builtin:opengeni-documents" as const;
@@ -114,6 +115,14 @@ test("stored selection drops ids this build does not know, while input stays str
   expect(bundledSkillSelectionFromMetadata({ [key]: [unknown] })).toEqual([]);
   expect(bundledSkillSelectionFromMetadata({})).toBeUndefined();
   expect(() => bundledSkillSelectionFromMetadata({ [key]: "not a list" })).toThrow();
+  // Only unknown id strings are tolerated; a non-string entry is not an id.
+  expect(() => bundledSkillSelectionFromMetadata({ [key]: [sites, null] })).toThrow();
+  // Replay identity keeps the exact stored value, including unknown ids.
+  expect(storedBundledSkillSelectionIdentity({ [key]: [unknown, sites] })).toEqual([
+    unknown,
+    sites,
+  ]);
+  expect(storedBundledSkillSelectionIdentity({})).toBeUndefined();
   expect(BundledSkillSelection.safeParse([documents, unknown]).success).toBe(false);
   expect(() => withBundledSkillSelectionMetadata({}, [unknown as typeof documents])).toThrow();
   expect(

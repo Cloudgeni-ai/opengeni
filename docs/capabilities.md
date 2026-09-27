@@ -430,7 +430,7 @@ Uninstalled entries are not advertised in Skill search: `skill_search` returns n
 
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
-- Entries are immutable. A changed artifact is a new version and hash; install requires the exact reviewed version and whole-artifact hash and returns `409` if the reviewed artifact changed.
+- Entries are immutable. A changed artifact is a new version and hash. The human install endpoint requires the exact reviewed version and whole-artifact hash and returns `409` if the reviewed artifact changed; the agent `library:<id>` source installs the entry's current reviewed version.
 - Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach a Variable Set, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The installed Skill joins the workspace Skill index like any other workspace Skill and is read server-side through `skill_read`.
 - Installation loads the library artifact and verifies its whole-artifact hash; a missing entry, unavailable artifact, or hash mismatch fails closed and never substitutes a different version. Turns then read the installed revision's exact files from the Skill ledger, not from the runtime library.
 

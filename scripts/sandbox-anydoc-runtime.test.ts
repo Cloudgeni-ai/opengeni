@@ -52,10 +52,15 @@ describe("sandbox AnyDoc runtime", () => {
 
   test("bundled guidance adapted from AnyDoc ships the upstream MIT notice and sources", async () => {
     const directory = "packages/runtime/src/bundled_default_skills/document-parsing";
-    const [skill, license, sources] = await Promise.all([
+    const [skill, license, sources, curated, notices] = await Promise.all([
       readFile(resolve(root, directory, "SKILL.md"), "utf8"),
       readFile(resolve(root, directory, "LICENSE"), "utf8"),
       readFile(resolve(root, directory, "SOURCES.md"), "utf8"),
+      readFile(
+        resolve(root, "packages/runtime/src/curated_skill_library/document-parsing/SKILL.md"),
+        "utf8",
+      ),
+      readFile(resolve(root, "packages/runtime/THIRD_PARTY_NOTICES"), "utf8"),
     ]);
     const upstreamCommit = "4e3089b1ed43404241a303109f81e2c7933040b2";
     expect(skill).toContain("license: MIT");
@@ -69,5 +74,11 @@ describe("sandbox AnyDoc runtime", () => {
       `https://github.com/firecrawl/anydoc/blob/${upstreamCommit}/skills/convert-documents-to-markdown/SKILL.md`,
     );
     expect(sources).toContain("Modified by OpenGeni");
+    // The hash-pinned curated copy is the same adapted text; the package notice
+    // covers both copies without changing the reviewed library artifact.
+    expect(curated).toBe(skill);
+    expect(notices).toContain(upstreamCommit);
+    expect(notices).toContain("src/bundled_default_skills/document-parsing/LICENSE");
+    expect(notices).toContain("- src/curated_skill_library/document-parsing");
   });
 });

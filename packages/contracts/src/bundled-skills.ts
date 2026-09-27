@@ -47,10 +47,19 @@ export function withBundledSkillSelectionMetadata(
  * Stored-data read. Ids are permanent, but a row written by a newer (or
  * rolled-back-from) release can hold an id this build lacks. Such ids are
  * dropped rather than failing the session read; dropping only narrows the
- * stored selection and never turns it back into defaults. Input stays strict.
+ * stored selection and never turns it back into defaults. Input stays strict,
+ * and a value that is not a list of id strings still fails.
  */
-const StoredBundledSkillSelection = z.array(z.unknown());
-const knownBundledSkillIds: ReadonlySet<unknown> = new Set(BundledSkillId.options);
+const StoredBundledSkillSelection = z.array(z.string());
+const knownBundledSkillIds: ReadonlySet<string> = new Set(BundledSkillId.options);
+/**
+ * Exact stored selection for keyed create replay identity. Unlike the
+ * tolerant read, it keeps ids this build does not know: a retry must match
+ * what was stored, not the narrowed projection of it.
+ */
+export function storedBundledSkillSelectionIdentity(metadata: Record<string, unknown>): unknown {
+  return metadata[BUNDLED_SKILL_SELECTION_KEY];
+}
 export function bundledSkillSelectionFromMetadata(
   metadata: Record<string, unknown>,
 ): BundledSkillId[] | undefined {
