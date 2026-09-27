@@ -106,6 +106,9 @@ returns a short `alreadyInContext` receipt only while an active, call-paired
 result in the session's own history holds the same identity and exact text as
 the current model receives it (after this turn's tool-output bound);
 compacted-away reads count as absent and explicit `paths` always return content.
+Skill-read telemetry (`opengeni_skill_reads_total` and the content-free
+`opengeni/skillUse` `_meta` fact) never changes what the model receives; keep it
+out of result text, `structuredContent`, instructions, and the Skill index.
 Preserve repository-file discovery independently; it still uses the sandbox SDK
 instruction source.
 See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.

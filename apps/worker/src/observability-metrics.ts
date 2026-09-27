@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
-import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
+import {
+  BundledSkillId,
+  SandboxBackend,
+  type SessionEventType,
+  type SkillReadKind,
+  type SkillUseSource,
+} from "@opengeni/contracts";
 import type { SessionEventAppendPhaseObservation } from "@opengeni/db";
 import {
   natsSubscriptionTerminationCounter,
@@ -2399,4 +2405,42 @@ export function recordCodeSearchCall(
       amount: Math.round(input.jevCostUsd * 1_000_000),
     });
   }
+}
+
+/**
+ * One skill_read call. Labels are closed sets: `skill` is a built-in id or
+ * `custom` for every other Skill, so tenant Skill ids, names, and requested
+ * identifiers never become labels. `source` is `unknown` when the read was
+ * refused before a Skill resolved.
+ */
+export function recordSkillRead(
+  observability: Observability,
+  read: {
+    caller: "model" | "codemode";
+    kind: SkillReadKind;
+    source: SkillUseSource | null;
+    /** The resolved Skill id, or the requested identifier when none resolved. */
+    skill: string;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_skill_reads_total",
+    help: "skill_read calls by Skill source, built-in Skill id (custom for any other Skill), result kind, and caller.",
+    labels: {
+      source: read.source ?? "unknown",
+      skill: skillReadMetricLabel(read.source, read.skill),
+      kind: read.kind,
+      caller: read.caller,
+    },
+  });
+}
+
+function skillReadMetricLabel(source: SkillUseSource | null, skill: string): string {
+  if (source !== null && source !== "builtin") return "custom";
+  // A refused read may name a built-in by its plain name.
+  for (const candidate of source === null ? [skill, `builtin:${skill}`] : [skill]) {
+    const parsed = BundledSkillId.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+  }
+  return "custom";
 }

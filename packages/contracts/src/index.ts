@@ -8,6 +8,7 @@ import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
+export * from "./skill-use";
 import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";

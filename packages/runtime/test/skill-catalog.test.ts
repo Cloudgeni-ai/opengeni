@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import { inspectPersistentAgentInstructions } from "../src/index";
-import { formatSkillCatalog, SKILL_CATALOG_MAX_BYTES } from "../src/skill-catalog";
+import {
+  formatSkillCatalog,
+  SKILL_CATALOG_MAX_BYTES,
+  SKILL_CATALOG_MAX_ENTRIES,
+  skillCatalogEntryIds,
+} from "../src/skill-catalog";
 
 describe("sandbox-independent Skill catalog", () => {
   test("includes management guidance and short descriptors, never bodies or paths", () => {
@@ -39,6 +44,25 @@ describe("sandbox-independent Skill catalog", () => {
     expect(Buffer.byteLength(catalog)).toBeLessThanOrEqual(SKILL_CATALOG_MAX_BYTES);
     expect(catalog).toContain("additional Skills are omitted");
     expect(catalog).not.toContain("builtin:opengeni-skills");
+  });
+
+  test("reads back exactly the ids a rendered catalog lists", () => {
+    const entries = Array.from({ length: SKILL_CATALOG_MAX_ENTRIES + 3 }, (_, index) => ({
+      id: `workspace:${String(index).padStart(3, "0")}`,
+      name: `skill-${String(index).padStart(3, "0")}`,
+      description: 'Line one\nline two with "quotes" and - { braces',
+    }));
+    const catalog = formatSkillCatalog([
+      { id: "builtin:opengeni-skills", name: "opengeni-skills", description: "Manage Skills" },
+      ...entries,
+    ]);
+    const ids = skillCatalogEntryIds(catalog);
+    expect(catalog).toContain("4 additional Skills are omitted");
+    expect(ids.size).toBe(SKILL_CATALOG_MAX_ENTRIES);
+    expect(ids.has("builtin:opengeni-skills")).toBe(true);
+    expect(ids.has(entries.at(-1)!.id)).toBe(false);
+    expect([...skillCatalogEntryIds(formatSkillCatalog([]))]).toEqual([]);
+    expect([...skillCatalogEntryIds('- {not json\n- plain text\n- {"id":7}')]).toEqual([]);
   });
 
   test("an empty host selection does not inject hidden management guidance", () => {
