@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { assistantMessagePhase, isStreamedAssistantMessageCompletion } from "../src/index";
+import {
+  assistantMessagePhase,
+  isStreamedAssistantMessageCompletion,
+  turnCompletedReply,
+} from "../src/index";
 
 const completed = (payload: unknown) => ({ type: "agent.message.completed", payload });
 
@@ -26,5 +30,14 @@ describe("assistant message phase helpers", () => {
     expect(
       isStreamedAssistantMessageCompletion({ type: "turn.completed", payload: { messageId: "x" } }),
     ).toBe(false);
+  });
+
+  test("a wait-ended turn's reply is a nonblank string beside its empty output", () => {
+    expect(turnCompletedReply({ output: "", reply: "Two of ten are done." })).toBe(
+      "Two of ten are done.",
+    );
+    for (const payload of [{ output: "" }, { output: "", reply: " \n" }, { reply: 1 }, null, []]) {
+      expect(turnCompletedReply(payload)).toBeNull();
+    }
   });
 });

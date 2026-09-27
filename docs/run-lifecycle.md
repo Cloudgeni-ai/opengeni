@@ -2077,6 +2077,16 @@ or accepted waits are retained across the retry. Durable input/deadline
 arbitration remains in the existing session wait transaction and workflow;
 this does not resume a paused session.
 
+A yielded turn settles with an empty `turn.completed.output`: the wait, not an
+answer, ended it. When a human or API message started the turn (`source` `user`
+or `api`), settlement also records the turn's latest completed assistant
+message as `turn.completed.payload.reply`, for example a status answer given
+before waiting again on work in flight. That answer shares its model response
+with the `wait_for_input` call, so it streams as commentary; the recorded reply
+makes it unread-worthy and lets Slack post it without relabelling the stored
+history item or its provider-declared `phase`. A reply is not a result: child
+result joins still read `output`. Turns that machine input started record none.
+
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace
 deletion takes a separate transaction-scoped background-command advisory prefix
@@ -2462,9 +2472,12 @@ audit reads may return it, so it is never a secret boundary.
    worker publishes the phase-less settlement copy with `turn.completed` only
    when the stream did not already complete the final text. Commentary is activity, not an answer: it creates no unread
    attention, never wakes `session_wait` change mode or becomes a Slack post, and
-   stays out of the SDK chat reply. `assistantMessagePhase` and
-   `isStreamedAssistantMessageCompletion` in `@opengeni/contracts` are the shared
-   classifiers; `phase` stays optional for older events.
+   stays out of the SDK chat reply. The exception is the reply a human's message
+   received before its turn waited for input, which settlement records on
+   `turn.completed` (see the `wait_for_input` boundary above).
+   `assistantMessagePhase`, `isStreamedAssistantMessageCompletion` and
+   `turnCompletedReply` in `@opengeni/contracts` are the shared classifiers;
+   `phase` stays optional for older events.
 
 Retained screenshots have a separate database/object lifecycle, not a fourth
 conversation store. Preparation creates a deterministic pending file/artifact

@@ -7966,6 +7966,58 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
   }, 60_000);
 
+  test("posts the reply to a message whose turn waits for input and stays open for the result", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_WAIT_REPLY_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_WAIT_REPLY",
+        ts: "1746000000.000002",
+        text: "How far along are the reviews?",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const status = "Two of the ten reviews are done; the rest are still running.";
+
+    // The status answer shares its response with the wait_for_input call, so
+    // it streams as commentary; the settlement records it as the reply.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: status, messageId: "msg_status", phase: "commentary" },
+      },
+      { type: "turn.completed", payload: { output: "", reply: status } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([status]);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      progress_count: 0,
+      terminal_delivery_state: "open",
+    });
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+
+    const result = "All ten reviews are done: two modules need changes.";
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: result, messageId: "msg_result", phase: "final_answer" },
+      },
+      { type: "turn.completed", payload: { output: result } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([status, result]);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "completed",
+    });
+  }, 60_000);
+
   test("terminalizes permanent Slack delivery errors without retrying", async () => {
     if (!available) return;
     const value = await fixture();

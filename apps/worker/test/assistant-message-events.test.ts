@@ -6,11 +6,12 @@ import {
   initializeSessionStartAtomically,
   listSessionEvents,
 } from "@opengeni/db";
-import { OpenAIResponsesModel, type Model } from "@openai/agents";
+import { OpenAIResponsesModel, tool, type Model } from "@openai/agents";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
   assistantMessage,
+  functionCall,
   MemoryEventBus,
   ScriptedModel,
   testSettings,
@@ -88,7 +89,11 @@ describe("assistant message events from a real agent turn", () => {
     await shared?.release();
   }, 60_000);
 
-  async function runTurn(model: Model, api: "chat" | "responses") {
+  async function runTurn(
+    model: Model,
+    api: "chat" | "responses",
+    options: { waitForInputTool?: boolean } = {},
+  ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -133,6 +138,25 @@ describe("assistant message events from a real agent turn", () => {
     const runtime: OpenGeniRuntime = {
       ...productionRuntime,
       configure: () => undefined,
+      // The first-party wait_for_input tool lives behind the MCP gateway; a
+      // local tool accepts the wait through the same attempt gate.
+      buildAgent: (agentSettings, resources, agentOptions) => {
+        const agent = productionRuntime.buildAgent(agentSettings, resources, agentOptions);
+        if (options.waitForInputTool) {
+          agent.tools.push(
+            tool({
+              name: "wait_for_input",
+              parameters: { type: "object", properties: {}, additionalProperties: false },
+              strict: false,
+              execute: () => {
+                agentOptions?.inputWaitYield?.beginWait()(true);
+                return { status: "waiting_for_input" };
+              },
+            }),
+          );
+        }
+        return agent;
+      },
       resolveTurnModel: () =>
         catalogued
           ? { ...catalogued, model }
@@ -211,6 +235,34 @@ describe("assistant message events from a real agent turn", () => {
     );
     expect(events.find((event) => event.type === "turn.completed")?.payload).toEqual({
       output: answer,
+    });
+  }, 60_000);
+
+  test("a status answer before the turn waits for input is recorded as the reply", async () => {
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    const events = await runTurn(
+      new ScriptedModel([
+        {
+          output: [
+            { ...assistantMessage(status, "msg_status"), phase: "commentary" },
+            functionCall("wait_for_input", {}, "call_wait"),
+          ] as never,
+        },
+        { error: new Error("a yielded wait must not reach another inference") },
+      ]),
+      "chat",
+      { waitForInputTool: true },
+    );
+    expect(
+      events
+        .filter((event) => event.type === "agent.message.completed")
+        .map((event) => event.payload),
+    ).toEqual([{ text: status, messageId: "msg_status", phase: "commentary" }]);
+    // The wait leaves the output empty; the reply to the human's message rides
+    // beside it. Stored history keeps the provider's commentary phase.
+    expect(events.find((event) => event.type === "turn.completed")?.payload).toEqual({
+      output: "",
+      reply: status,
     });
   }, 60_000);
 

@@ -38,6 +38,7 @@ import {
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   compactSessionEventResult,
   isStreamedAssistantMessageCompletion,
+  turnCompletedReply,
   type SessionSystemUpdateKind,
 } from "@opengeni/contracts";
 import { SESSION_EVENT_MCP_MAX_BYTES, capPayloadValue } from "./session-view";
@@ -540,8 +541,11 @@ export function summarizeSessionWaitEvent(
   }
   // Other wait summaries may omit actionable fields (e.g. human-input
   // questions); absence of a truncation marker is not proof of full content.
+  // Neither is the empty output of a turn that ended waiting for input while
+  // it records the reply a human's message received.
   summary.contentComplete =
     ["turn.completed", "agent.message.completed"].includes(event.type) &&
+    turnCompletedReply(event.payload) === null &&
     !compact.truncation.truncated &&
     text === compact.text &&
     JSON.stringify(failure) === JSON.stringify(compact.failure) &&

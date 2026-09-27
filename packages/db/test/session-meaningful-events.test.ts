@@ -65,7 +65,7 @@ describe("meaningful event frontier contract", () => {
       expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
     }
   });
-  test("rolling concurrent index uses exactly the runtime predicate, without commentary", async () => {
+  test("rolling concurrent index uses exactly the runtime predicate: no commentary, wait replies", async () => {
     const migration = await readFile(
       new URL("../drizzle/0522_session_attention_excludes_commentary.sql", import.meta.url),
       "utf8",
@@ -78,16 +78,28 @@ describe("meaningful event frontier contract", () => {
         "-- deployment-mode: rolling\n-- opengeni:concurrent-index lock-timeout=5s\n",
       ),
     ).toBe(true);
-    // The runtime predicate is the 0503 one plus the commentary exclusion, so
-    // pre-0522 API processes keep their own index during the rollout.
+    // The runtime predicate is the 0503 one with exactly two changes, so
+    // pre-0522 API processes keep their own index during the rollout:
+    // commentary is excluded, and a turn that ended waiting for input counts
+    // when it records the reply a human or API message received.
     const inclusive = normalizePredicate(
       new PgDialect().sqlToQuery(commentaryInclusiveMeaningfulSessionEventSql("meaningful")).sql,
     );
+    const turnResult = "coalesce(nullif(payload -> 'output', 'null'::jsonb), payload -> 'result')";
+    const resultBearing = `${turnResult} is not null and ${turnResult} not in ('null'::jsonb, '""'::jsonb)`;
+    expect(normalizePredicate(predicate)).toContain(
+      `and ((${resultBearing}) or coalesce(payload ->> 'reply', '') <> '')`,
+    );
     expect(
-      normalizePredicate(predicate).replace(
-        " and (type <> 'agent.message.completed' or coalesce(payload ->> 'phase', '') <> 'commentary')",
-        "",
-      ),
+      normalizePredicate(predicate)
+        .replace(
+          " and (type <> 'agent.message.completed' or coalesce(payload ->> 'phase', '') <> 'commentary')",
+          "",
+        )
+        .replace(
+          `and ((${resultBearing}) or coalesce(payload ->> 'reply', '') <> '')`,
+          `and ${resultBearing}`,
+        ),
     ).toBe(inclusive);
   });
   test("lifecycle evidence bounds indexed candidates before inspecting oversized payloads", () => {

@@ -513,6 +513,41 @@ describe("Chat.stream", () => {
     ]);
   });
 
+  test("a status answer given before the turn waits again is the reply", async () => {
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.delta",
+          payload: { text: status, messageId: "msg_status", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: status, messageId: "msg_status", phase: "commentary" },
+        },
+        {
+          type: "agent.toolCall.created",
+          payload: { id: "call_wait", name: "opengeni__wait_for_input" },
+        },
+        {
+          type: "agent.toolCall.output",
+          payload: { id: "call_wait", output: { status: "waiting_for_input" } },
+        },
+        { type: "turn.completed", payload: { output: "", reply: status } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "status-reply" });
+    const chunks = await collect(chat.stream("How far along are the reviews?"));
+    expect(chunks.filter((chunk) => chunk.type === "text")).toEqual([
+      { type: "text", text: status },
+    ]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: status } });
+    expect((await chat.history()).map((message) => [message.role, message.text])).toEqual([
+      ["user", "How far along are the reviews?"],
+      ["assistant", status],
+    ]);
+  });
+
   test("yields tool and text chunks in order and ends with done", async () => {
     const server = fakeServer({
       reply: () => [

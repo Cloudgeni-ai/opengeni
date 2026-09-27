@@ -2231,6 +2231,56 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     );
   });
 
+  test("a reply to a human message that ends waiting for input marks the session unread", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const target = await session({ ...workspace, message: "status reply target" });
+    const subject = "user:status-reader";
+    await grantMember(workspace, subject);
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    let expectedVersion = 0;
+    const markRead = async () => {
+      const read = await setSessionAttention(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId: subject,
+        sessionId: target.id,
+        unread: false,
+        expectedVersion,
+      });
+      expect(read).toMatchObject({ unread: false });
+      expectedVersion = read!.attentionVersion;
+    };
+    const unread = async () =>
+      (await getSessionForSubject(db, workspace.workspaceId, target.id, subject))?.unread;
+
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      { type: "agent.message.completed", payload: { text: "Started ten reviewers." } },
+    ]);
+    await markRead();
+
+    // A turn that machine input started narrates and waits again: activity.
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "Three reviews came back.", messageId: "msg_note", phase: "commentary" },
+      },
+      { type: "turn.completed", payload: { output: "" } },
+    ]);
+    expect(await unread()).toBe(false);
+
+    // The human asks for status. The answer shares its response with the
+    // wait_for_input call, so it streams as commentary and the turn output
+    // stays empty; the settlement records the reply for attention.
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: status, messageId: "msg_status", phase: "commentary" },
+      },
+      { type: "turn.completed", payload: { output: "", reply: status } },
+    ]);
+    expect(await unread()).toBe(true);
+  });
+
   test("archives a root chat personally, hides its tree, and restores it", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

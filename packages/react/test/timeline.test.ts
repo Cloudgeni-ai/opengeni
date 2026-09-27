@@ -3256,6 +3256,51 @@ describe("groupTimeline", () => {
     });
   });
 
+  test("shows a status reply recorded on a wait-ended turn once, outside the work", () => {
+    reset();
+    const reason = "Eight reviews are still running.";
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", {
+          text: status,
+          messageId: "msg_status",
+          phase: "commentary",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-06-10T13:00:00.000Z",
+          reason,
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("turn.completed", { output: "", reply: status }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: status,
+    });
+    expect(
+      groups.filter(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === status,
+      ),
+    ).toHaveLength(1);
+  });
+
   test.each([
     ["an explicit final answer", "final_answer"],
     ["a phase-less legacy final answer", undefined],

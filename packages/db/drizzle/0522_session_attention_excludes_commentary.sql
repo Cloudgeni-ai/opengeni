@@ -16,6 +16,8 @@ AND (type <> 'agent.message.completed' OR coalesce(payload ->> 'text', '') <> ''
 AND (type <> 'agent.message.completed' OR coalesce(payload ->> 'phase', '') <> 'commentary')
 AND (type <> 'turn.completed' OR (
   NOT (payload ?| array['maintenance', 'segmentLimit'])
-  AND coalesce(nullif(payload -> 'output', 'null'::jsonb), payload -> 'result') IS NOT NULL
-  AND coalesce(nullif(payload -> 'output', 'null'::jsonb), payload -> 'result') NOT IN ('null'::jsonb, '""'::jsonb)
+  AND ((
+    coalesce(nullif(payload -> 'output', 'null'::jsonb), payload -> 'result') IS NOT NULL
+    AND coalesce(nullif(payload -> 'output', 'null'::jsonb), payload -> 'result') NOT IN ('null'::jsonb, '""'::jsonb)
+  ) OR coalesce(payload ->> 'reply', '') <> '')
 ));

@@ -9,6 +9,7 @@ import {
   PrepareSlackUserLinkAccessRequest,
   evaluateSlackTaskPolicy,
   isStreamedAssistantMessageCompletion,
+  turnCompletedReply,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
   SlackChannelRouteListResponse,
@@ -4557,6 +4558,15 @@ async function deliverSlackSessionEvents(
       // and delivery open for the eventual response; never promote commentary
       // or invent a success message for these boundaries.
       if (!hasPublishableOutput || safePayloadText(event.payload, "segmentLimit")) {
+        // The one exception is the reply the worker recorded for a human's
+        // message before the turn waited again (for example a status answer):
+        // it answers that message, so it is posted, and delivery stays open.
+        const reply = safePayloadText(event.payload, "segmentLimit")
+          ? null
+          : turnCompletedReply(event.payload);
+        if (reply) {
+          await postDelivery(client, interaction, event, `${requester.mention}${reply}`, "reply");
+        }
         terminal = null;
         continue;
       }

@@ -33,9 +33,15 @@ export const MEANINGFUL_SESSION_EVENT_TYPES = [
   "session.event.envelope_omitted",
 ] as const;
 
-/** `include` is the migration 0503 index predicate; `exclude` is migration 0522's. */
-function attentionSessionEventSql(alias: string, commentary: "include" | "exclude"): SQL {
+/**
+ * `0503` is that migration's index predicate. `0522` adds two changes: completed
+ * commentary is activity, and a `turn.completed` recording the `reply` a human
+ * or API message received before its turn waited for input is an answer even
+ * though its `output` is empty.
+ */
+function attentionSessionEventSql(alias: string, revision: "0503" | "0522"): SQL {
   const e = sql.identifier(alias);
+  const turnResult = sql`coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result')`;
   // These are code-owned literals, not request values. Literal predicates let
   // PostgreSQL use the matching partial index even with a generic cached plan.
   return sql`${e}.type in (${sql.join(
@@ -45,25 +51,34 @@ function attentionSessionEventSql(alias: string, commentary: "include" | "exclud
     and ${e}.duplicate_of_event_id is null
     and (${e}.turn_association is null or ${e}.turn_association = 'current')
     and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'text', '') <> '')${
-      commentary === "exclude"
+      revision === "0522"
         ? sql`
-    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'phase', '') <> 'commentary')`
-        : sql``
-    }
+    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'phase', '') <> 'commentary')
     and (${e}.type <> 'turn.completed' or (
       not (${e}.payload ?| array['maintenance', 'segmentLimit'])
-      and coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result') is not null
-      and coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result') not in ('null'::jsonb, '""'::jsonb)
-    ))`;
+      and ((
+        ${turnResult} is not null
+        and ${turnResult} not in ('null'::jsonb, '""'::jsonb)
+      ) or coalesce(${e}.payload ->> 'reply', '') <> '')
+    ))`
+        : sql`
+    and (${e}.type <> 'turn.completed' or (
+      not (${e}.payload ?| array['maintenance', 'segmentLimit'])
+      and ${turnResult} is not null
+      and ${turnResult} not in ('null'::jsonb, '""'::jsonb)
+    ))`
+    }`;
 }
 
 /**
  * Completed commentary is progress narrating the work, not an answer, so it
  * never creates attention on its own; the answer or turn outcome that follows
- * does. Exactly the migration 0522 partial-index predicate.
+ * does. A turn that ends waiting for input has no output, but when a human or
+ * API message started it, the `reply` it records is that answer. Exactly the
+ * migration 0522 partial-index predicate.
  */
 export function meaningfulSessionEventSql(alias: string): SQL {
-  return attentionSessionEventSql(alias, "exclude");
+  return attentionSessionEventSql(alias, "0522");
 }
 
 /**
@@ -71,7 +86,7 @@ export function meaningfulSessionEventSql(alias: string): SQL {
  * during a rolling deploy; nothing current queries it.
  */
 export function commentaryInclusiveMeaningfulSessionEventSql(alias: string): SQL {
-  return attentionSessionEventSql(alias, "include");
+  return attentionSessionEventSql(alias, "0503");
 }
 
 /** A stored audit preview can still need attention, but cannot stand in for

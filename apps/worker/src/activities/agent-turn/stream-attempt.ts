@@ -136,6 +136,7 @@ import {
   assertSuccessfulAgentStreamCompletion,
   requireAgentStreamFinalOutput,
 } from "./quiescence";
+import { inputWaitReply } from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 
@@ -569,6 +570,9 @@ export async function runTurnStreamAttempt(
   // calling runStreamAttempt again; resetting this state there would reuse
   // the first no-response-ID fallback key and suppress a real model call.
   const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
+  // Text of the newest assistant message any stream of this activity completed
+  // durably: the reply a wait-ended human turn records on turn.completed.
+  let latestAssistantMessageText: string | null = null;
   let workerPreparationTotalRecorded = false;
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
@@ -1337,6 +1341,7 @@ export async function runTurnStreamAttempt(
           if (event.type === "agent.message.completed") {
             // Completed messages are structural: push returns once durable.
             latestStreamedAssistantText = (event.payload as { text: string }).text;
+            latestAssistantMessageText = latestStreamedAssistantText;
           }
         }
         // Structural tool-output events await their durable append before
@@ -1717,6 +1722,13 @@ export async function runTurnStreamAttempt(
     // durable with its provider identity and phase. A phase-less settlement
     // copy is published only when this stream did not complete that text.
     const finalOutputAlreadyCompleted = latestStreamedAssistantText === finalOutput;
+    // A wait ends the turn with empty output; a human's message still gets
+    // its answer recorded for unread attention and Slack.
+    const reply = inputWaitReply({
+      inputWaitYielded,
+      turnSource: turn.source,
+      latestAssistantMessageText,
+    });
     await historySink.reconcileConversationTruth({ requireDurable: true });
     // Op-stream durability fence: the tool outputs are now durably in the
     // history store (a redispatch would NOT re-execute them), so this
@@ -1732,7 +1744,10 @@ export async function runTurnStreamAttempt(
           ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
             : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
-          { type: "turn.completed", payload: { output: finalOutput } },
+          {
+            type: "turn.completed",
+            payload: { output: finalOutput, ...(reply === null ? {} : { reply }) },
+          },
           { type: "session.status.changed", payload: { status: "idle" } },
         ],
         turnStatus: "completed",

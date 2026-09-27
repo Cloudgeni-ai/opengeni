@@ -12728,6 +12728,21 @@ export function assistantMessagePhase(payload: unknown): AssistantMessagePhase |
 }
 
 /**
+ * The reply a human or API message received from a turn that ended waiting for
+ * input. Such a turn settles with an empty `output` (the wait, not an answer,
+ * ended it), and its answer shares a model response with the `wait_for_input`
+ * call, so it streams as commentary. Settlement records that latest assistant
+ * message on `turn.completed` as `reply` so unread attention and Slack treat it
+ * as the answer (SDK chat and the timeline already show a wait-ended turn's
+ * latest message). It is not a result: a parent joining a child result still
+ * reads `output`. Machine-started turns never carry one.
+ */
+export function turnCompletedReply(payload: unknown): string | null {
+  const reply = sessionEventPayloadRecord(payload)?.reply;
+  return typeof reply === "string" && reply.trim().length > 0 ? reply : null;
+}
+
+/**
  * A completion the worker streamed for one provider message: it always carries
  * a `phase`, and the provider `messageId` when the provider sent one. The
  * phase-less, id-less shape is the settlement copy published with

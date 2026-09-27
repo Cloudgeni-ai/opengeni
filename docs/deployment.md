@@ -4,7 +4,9 @@
 
 `0522_session_attention_excludes_commentary.sql` is rolling: it builds the
 commentary-free attention index concurrently, and the 0503 index keeps serving
-older API processes. Workers from this release stream one
+older API processes. The same predicate admits a `turn.completed` whose
+`reply` records the answer a human's message received before its turn waited
+for input. Workers from this release stream one
 `agent.message.completed` per assistant message, including progress notes
 (`phase: "commentary"`). Only API processes from the same release treat those as
 activity. While an older API process still runs next to a newer worker, it can

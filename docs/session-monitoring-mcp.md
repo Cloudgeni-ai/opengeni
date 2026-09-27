@@ -6,8 +6,13 @@ Unread is based on completed assistant messages, substantive final answers,
 and actionable failures/input/goal facts, not the raw event cursor. The same
 predicate drives child rows and ancestor counts. Completed commentary
 (`phase: "commentary"`) is progress, so it never creates a dot on its own; the
-answer or outcome that follows does. Migration 0522 indexes exactly that
-predicate; the 0503 index only serves older API processes during the rollout.
+answer or outcome that follows does. A turn that a human or API message started
+and that ended waiting for input (`wait_for_input`) has no output, but the
+`reply` its `turn.completed` records answers that message, so it does create a
+dot. Migration 0522 indexes exactly that predicate; the 0503 index only serves
+older API processes during the rollout. A `session_wait` summary of such a
+`turn.completed` shows only the empty output, so it never counts as consuming
+the reply.
 Raw deltas, status snapshots,
 `sandbox.box.terminated`, `workspace.revision.captured`, rejected late events,
 duplicates and maintenance/continuation completion markers do not create dots.
