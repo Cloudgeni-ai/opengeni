@@ -164,10 +164,10 @@ Docker/local SDK processes expose turn-scoped handles after a bounded wait.
 They remain on the turn cancellation fence and stop before finalization, letting
 agents test preview servers without awaiting exit.
 
-`wait_for_input` persists a turn and deadline; input or timeout resumes execution.
+`wait_for_input` persists its turn and deadline until input or timeout.
 Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
 drives working/recheck UI separately from unread. `session_wait`/`command_wait`
-are in-turn reads; idle child results carry final answers. See
+are in-turn reads; child results carry final answers. See
 [durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,

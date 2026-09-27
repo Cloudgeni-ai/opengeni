@@ -60,7 +60,11 @@ wait keeps its declaring turn, reason, and deadline. The exception is a queued
 person's turn that claims pending `immediate` machine input as coalesced
 context, for example a child result that arrived just before the question ran:
 it consumed what the wait was for, so it retires the wait like the system turn
-it replaced. Coalesced `deferred` notices alone do not retire it.
+it replaced. The same holds when the person's turn read a child's complete
+answer and that child's result was superseded as `consumed_by_parent_read`:
+the result never wakes the parent, so the read retires the wait. Re-reading an
+answer that a completed attempt had already read when the wait was declared
+leaves it held. Coalesced `deferred` notices alone do not retire it.
 This is what lets a status question asked while a child runs get its answer and
 still leave the child's later result able to wake a goalless parent; without
 it, the answer turn retired the wait and the result stayed pending with nothing

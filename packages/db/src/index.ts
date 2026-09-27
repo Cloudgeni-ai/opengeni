@@ -35066,11 +35066,31 @@ const SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS = (
  * decides the disposition; if that is not the declaring turn, the wait is
  * superseded. Worker settlement, peek/claim/wake admission, public projections,
  * and descendant counts all use this so they cannot drift apart.
+ *
+ * A person's turn consumes awaited machine input in two ways: its claim
+ * delivered a pending immediate-class update to it, or its model read a
+ * child's complete answer (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`) whose child
+ * result was then superseded as `consumed_by_parent_read`. That result never
+ * wakes the parent, so without the second rule the wait would stay held until
+ * its deadline. An answer that a completed attempt had already read by the
+ * time the declaring turn finished is not what the wait is for, so re-reading
+ * it leaves the wait held. Turns are compared by `finished_at`, the same order
+ * that picks the deciding turn.
  */
 function sessionInputWaitDecidingTurnSql(
-  turn: { id: SQLWrapper; source: SQLWrapper; workspaceId: SQLWrapper; sessionId: SQLWrapper },
+  turn: {
+    id: SQLWrapper;
+    source: SQLWrapper;
+    workspaceId: SQLWrapper;
+    sessionId: SQLWrapper;
+    metadata: SQLWrapper;
+  },
   waitTurnId: SQLWrapper | string,
 ): SQL {
+  const consumedAnswersKey = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
+  const consumedAnswers = (metadata: SQLWrapper) =>
+    sql`jsonb_array_elements(case when jsonb_typeof(${metadata} -> ${consumedAnswersKey}) = 'array'
+      then ${metadata} -> ${consumedAnswersKey} else '[]'::jsonb end)`;
   return sql`(${turn.id} = ${waitTurnId} or ${turn.source} not in (${sql.join(
     SESSION_INPUT_WAIT_PERSON_TURN_SOURCES.map((source) => sql`${source}`),
     sql`, `,
@@ -35084,6 +35104,38 @@ function sessionInputWaitDecidingTurnSql(
         SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS.map((kind) => sql`${kind}`),
         sql`, `,
       )})
+  ) or exists (
+    select 1 from ${schema.sessionSystemUpdates} consumed_read
+    where consumed_read.workspace_id = ${turn.workspaceId}
+      and consumed_read.session_id = ${turn.sessionId}
+      and consumed_read.kind = 'child_terminal_result'
+      and consumed_read.state = 'superseded'
+      and exists (
+        select 1 from ${consumedAnswers(turn.metadata)} consumed_answer
+        where consumed_answer ->> 'childSessionId' = consumed_read.payload ->> 'childSessionId'
+          and consumed_answer -> 'sequence' = consumed_read.payload -> 'finalAnswer' -> 'sequence'
+      )
+      and not exists (
+        select 1 from ${schema.sessionTurns} earlier
+        cross join lateral ${consumedAnswers(sql`earlier.metadata`)} earlier_answer
+        join ${schema.sessionTurnAttempts} earlier_attempt
+          on earlier_attempt.workspace_id = earlier.workspace_id
+            and earlier_attempt.session_id = earlier.session_id
+            and earlier_attempt.turn_id = earlier.id
+            and earlier_attempt.id = case when earlier_answer ->> 'attemptId' ~ ${UUID_TEXT_PATTERN_SQL}
+              then (earlier_answer ->> 'attemptId')::uuid end
+            and earlier_attempt.outcome = 'completed'
+        where earlier.workspace_id = ${turn.workspaceId}
+          and earlier.session_id = ${turn.sessionId}
+          and earlier.finished_at <= (
+            select declaring.finished_at from ${schema.sessionTurns} declaring
+            where declaring.workspace_id = ${turn.workspaceId}
+              and declaring.session_id = ${turn.sessionId}
+              and declaring.id = ${waitTurnId}
+          )
+          and earlier_answer ->> 'childSessionId' = consumed_read.payload ->> 'childSessionId'
+          and earlier_answer -> 'sequence' = consumed_read.payload -> 'finalAnswer' -> 'sequence'
+      )
   ))`;
 }
 
@@ -35531,6 +35583,7 @@ export async function sessionTreeStatsForSessions(
                           source: sql`finished.source`,
                           workspaceId: sql`finished.workspace_id`,
                           sessionId: sql`finished.session_id`,
+                          metadata: sql`finished.metadata`,
                         },
                         sql`waiting_session.input_wait_turn_id`,
                       )}
