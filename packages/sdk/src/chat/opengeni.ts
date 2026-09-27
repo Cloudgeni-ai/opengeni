@@ -279,6 +279,18 @@ export class Chat {
     let status = this.session.status;
     const messages: ChatMessage[] = [];
     let lastAssistantTurn: string | null = null;
+    // Commentary is activity, not history. Like the live fold, a turn that
+    // settles without an answer keeps only its latest commentary.
+    let heldCommentary: { turnId: string | null; text: string; sequence: number } | null = null;
+    const releaseHeldCommentary = (turnId: string | null) => {
+      if (!heldCommentary || heldCommentary.turnId !== turnId) return;
+      const held = heldCommentary;
+      heldCommentary = null;
+      const index = messages.findIndex((message) => message.sequence > held.sequence);
+      const message: ChatMessage = { role: "assistant", text: held.text, sequence: held.sequence };
+      if (index === -1) messages.push(message);
+      else messages.splice(index, 0, message);
+    };
     let after = 0;
     while (true) {
       const result = await this.client.listEventPage(this.workspaceId, this.sessionId, {
@@ -302,6 +314,16 @@ export class Chat {
           const next = asRecord(event.payload).status;
           if (typeof next === "string") status = next as Session["status"];
         }
+        const turnId = typeof event.turnId === "string" ? event.turnId : null;
+        if (
+          event.type === "turn.completed" ||
+          event.type === "turn.failed" ||
+          event.type === "turn.cancelled" ||
+          event.type === "session.requiresAction" ||
+          event.type === "session.humanInput.requested"
+        ) {
+          releaseHeldCommentary(turnId);
+        }
         const text = stringValue(asRecord(event.payload).text);
         if (!text) continue;
         if (event.type === "user.message") {
@@ -310,7 +332,11 @@ export class Chat {
           continue;
         }
         if (event.type !== "agent.message.completed") continue;
-        const turnId = typeof event.turnId === "string" ? event.turnId : null;
+        if (asRecord(event.payload).phase === "commentary") {
+          heldCommentary = { turnId, text, sequence: event.sequence };
+          continue;
+        }
+        if (heldCommentary?.turnId === turnId) heldCommentary = null;
         const last = messages.at(-1);
         if (
           last?.role === "assistant" &&

@@ -89,7 +89,11 @@ export type AgentMessageItem = {
   id: string;
   turnId: string | null;
   text: string;
-  /** Provider-declared assistant channel. Absent on legacy and non-Responses events. */
+  /**
+   * Assistant channel: provider-declared, or `commentary` when the model asked
+   * for tool work in the same response. Absent on legacy events and on
+   * undeclared final messages. Known from the first delta for Responses models.
+   */
   phase?: "commentary" | "final_answer" | undefined;
   /** Still receiving deltas (no completed/turn-end seen yet). */
   streaming: boolean;

@@ -34,7 +34,17 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(output = "Whole final answer") {
+type ChildEvent = Parameters<typeof appendSessionEvents>[3][number];
+
+async function fixture(
+  output = "Whole final answer",
+  childEvents: ChildEvent[] = [
+    { type: "agent.message.completed", payload: { text: "Inspecting the implementation" } },
+    { type: "goal.progress", payload: { text: "Validation in progress" } },
+    { type: "agent.message.completed", payload: { text: "Tests have finished" } },
+    { type: "turn.completed", payload: { output } },
+  ],
+) {
   const human = `user:child-read-${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -97,12 +107,7 @@ async function fixture(output = "Whole final answer") {
       executionGeneration: claimed.turn.executionGeneration,
     },
   });
-  await appendSessionEvents(client.db, workspaceId, child.id, [
-    { type: "agent.message.completed", payload: { text: "Inspecting the implementation" } },
-    { type: "goal.progress", payload: { text: "Validation in progress" } },
-    { type: "agent.message.completed", payload: { text: "Tests have finished" } },
-    { type: "turn.completed", payload: { output } },
-  ]);
+  await appendSessionEvents(client.db, workspaceId, child.id, childEvents);
   const grant: AccessGrant = {
     accountId,
     workspaceId,
@@ -264,4 +269,27 @@ test("actual results-only final consumes earlier commentary through its exact wa
   });
   expect(await f.unread()).toBe(false);
   expect(await f.ancestorUnread()).toBe(0);
+}, 60_000);
+
+test("a compact latest terminal read of a waiting turn's empty output cannot clear its unseen reply", async () => {
+  const reply = "Two of the ten reviews are done; the rest are still running.";
+  const f = await fixture("", [
+    {
+      type: "agent.message.completed",
+      payload: { text: reply, messageId: "msg_status", phase: "commentary" },
+    },
+    { type: "turn.completed", payload: { output: "", reply } },
+  ]);
+  expect(await f.unread()).toBe(true);
+  // latest=terminal skips the commentary and returns the turn.completed, whose
+  // compact text is the empty output: the reader never saw the reply.
+  const result = await f.call("session_events", {
+    sessionId: f.child.id,
+    view: "debug",
+    latest: "terminal",
+    resultMode: "compact",
+  });
+  expect(result.type).toBe("turn.completed");
+  expect(result.text).toBe("");
+  expect(await f.unread()).toBe(true);
 }, 60_000);

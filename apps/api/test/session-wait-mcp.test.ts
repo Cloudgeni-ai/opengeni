@@ -29,6 +29,7 @@ import {
   SESSION_WAIT_EVENT_TYPES,
   SESSION_WAIT_EVENTS_PER_TARGET,
   SESSION_WAIT_MAX_SECONDS,
+  sessionWaitChangeEventMatches,
   sessionWaitCompletionEventMatches,
 } from "../src/mcp/session-wait";
 
@@ -389,6 +390,64 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       ),
     ).toBeTrue();
     expect(sessionWaitCompletionEventMatches(resultEvents[1]!)).toBe(true);
+  }, 30_000);
+
+  test("change mode sleeps through streamed messages and returns the settled turn", async () => {
+    const target = await newSession(workspaceId, "streamed-commentary child fixture");
+    const cursor = await lastSequence(target);
+    // More progress notes than one durable read returns: they must neither
+    // wake the waiter nor fill its page ahead of the outcome.
+    const streamed = await appendSessionEvents(client.db, workspaceId, target, [
+      ...Array.from({ length: SESSION_WAIT_EVENTS_PER_TARGET + 5 }, (_, index) => ({
+        type: "agent.message.completed" as const,
+        payload: {
+          text: `Progress note ${index + 1}`,
+          messageId: `msg_progress_${index + 1}`,
+          phase: "commentary",
+        },
+      })),
+      {
+        type: "agent.message.completed",
+        payload: { text: "The child answer.", messageId: "msg_answer", phase: "final_answer" },
+      },
+    ]);
+    await bus.publish(workspaceId, target, streamed);
+    expect(streamed.some(sessionWaitChangeEventMatches)).toBe(false);
+
+    const early = await callSessionWait({
+      targets: [{ sessionId: target, afterSequence: cursor }],
+      includeOwnPendingUpdates: false,
+      maxWaitSeconds: 1,
+    });
+    expect(early.timedOut).toBe(true);
+    expect(early.changed).toEqual([]);
+
+    const settled = await appendSessionEvents(client.db, workspaceId, target, [
+      { type: "turn.completed", payload: { output: "The child answer." } },
+    ]);
+    await bus.publish(workspaceId, target, settled);
+    const result = await callSessionWait({
+      targets: [{ sessionId: target, afterSequence: cursor }],
+      includeOwnPendingUpdates: false,
+      maxWaitSeconds: SESSION_WAIT_MAX_SECONDS,
+    });
+    expect(result.timedOut).toBe(false);
+    expect(result.changed[0]!.events).toEqual([
+      expect.objectContaining({
+        sequence: settled[0]!.sequence,
+        type: "turn.completed",
+        text: "The child answer.",
+      }),
+    ]);
+    expect(result.changed[0]!.latestSequence).toBe(settled[0]!.sequence);
+    // The settlement copy older workers publish beside turn.completed still wakes.
+    expect(
+      sessionWaitChangeEventMatches({
+        ...settled[0]!,
+        type: "agent.message.completed",
+        payload: { text: "The child answer." },
+      }),
+    ).toBe(true);
   }, 30_000);
 
   test("ignores non-wait event types and times out truthfully at the deadline", async () => {

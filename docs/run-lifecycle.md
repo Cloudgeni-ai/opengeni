@@ -1335,7 +1335,8 @@ dependent work. `goal.completed` is a durable goal fact, not proof that the
 child has emitted its final result. Completed commentary messages, maintenance
 turns, and continuation segment settlements are also ignored until an ordinary
 result-bearing turn settles. The ordinary `waitFor: "change"` mode remains
-available for progress monitoring.
+available for monitoring settled changes; it does not wake on streamed
+commentary or on a final message before its turn settles.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -2169,6 +2170,24 @@ or accepted waits are retained across the retry. Durable input/deadline
 arbitration remains in the existing session wait transaction and workflow;
 this does not resume a paused session.
 
+A yielded turn settles with an empty `turn.completed.output`: the wait, not an
+answer, ended it. When a human or API message started the turn (`source` `user`
+or `api`), settlement also records the turn's latest completed assistant
+message as `turn.completed.payload.reply`, for example a status answer given
+before waiting again on work in flight. That answer shares its model response
+with the `wait_for_input` call, so it streams as commentary; the recorded reply
+makes it unread-worthy and lets Slack post it without relabelling the stored
+history item or its provider-declared `phase`. A reply is not a result: child
+result joins still read `output`. The source alone does not decide it, because
+every session's first turn is `user`. Turns that machine input started record
+none, and neither does a turn whose initiator context carries agent provenance
+(`via`: a child an agent spawned, or an agent's API call) or the first turn of
+a session a worker-owned producer created (the `scheduler`, an
+`automation:<trigger>` or `site-auth-maintenance` service). The message the
+settling activity completed last is the reply; an activity that resumed the
+turn after an approval, a human-input answer or a recovery and completed none
+reads the turn's newest current durable `agent.message.completed` instead.
+
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace
 deletion takes a separate transaction-scoped background-command advisory prefix
@@ -2554,6 +2573,25 @@ recovery replays the stored bytes. The instructions never contain a clock.
    reconstruct the target session's model conversation. A manager can inspect an
    independently bounded cross-session monitoring projection as ordinary tool
    output; that does not turn audit events into conversation truth.
+   `packages/runtime/src/run-events.ts` emits one `agent.message.completed` per
+   provider message, with its `messageId` (when the provider sent one) and
+   `phase`: `commentary` or `final_answer` as a Responses provider declares it
+   (deltas carry the phase declared in `response.output_item.added`), or else
+   the SDK's own rule: `commentary` when the same response asks for client tool
+   work or ends with a later message, since the SDK never returns such a message
+   as the final output, and `final_answer` for the message it returns. A
+   Responses message completes at its own `response.output_item.done`, before
+   the next message streams, rather than with the SDK's run items after the
+   whole response; an undeclared one waits only until its phase is known. The
+   worker publishes the phase-less settlement copy with `turn.completed` only
+   when the stream did not already complete the final text. Commentary is activity, not an answer: it creates no unread
+   attention, never wakes `session_wait` change mode or becomes a Slack post, and
+   stays out of the SDK chat reply. The exception is the reply a human's message
+   received before its turn waited for input, which settlement records on
+   `turn.completed` (see the `wait_for_input` boundary above).
+   `assistantMessagePhase`, `isStreamedAssistantMessageCompletion` and
+   `turnCompletedReply` in `@opengeni/contracts` are the shared classifiers;
+   `phase` stays optional for older events.
 
 Retained screenshots have a separate database/object lifecycle, not a fourth
 conversation store. Preparation creates a deterministic pending file/artifact

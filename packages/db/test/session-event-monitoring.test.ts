@@ -452,6 +452,35 @@ describe("session event monitoring (real PostgreSQL)", () => {
       turnAssociation: "current",
     });
 
+    // The next turn narrates progress. A note is not its latest result, and a
+    // reader of settled changes does not page through streamed messages.
+    await shared.admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload,
+        turn_id, turn_generation, turn_association, duplicate_of_event_id, duplicate_reason
+      ) values (
+        ${session!.accountId}, ${workspaceId}, ${sessionId}, 200013,
+        'agent.message.completed',
+        ${shared.admin.json({ text: "Still checking.", messageId: "msg_note", phase: "commentary" })},
+        ${newerTurnId}, 1, 'current', null, null
+      )`;
+    const pastCommentary = await listSessionEventPage(client.db, workspaceId, sessionId, {
+      direction: "before",
+      limit: 1,
+      includeClasses: ["terminal"],
+      payloadMode: "full",
+      authoritativeLatest: true,
+    });
+    expect(pastCommentary.events[0]).toMatchObject({ sequence: 200012 });
+    const settledOnly = await listSessionEventPage(client.db, workspaceId, sessionId, {
+      after: 200009,
+      includeTypes: ["agent.message.completed", "turn.completed"],
+      payloadMode: "full",
+      excludeStreamedAssistantMessages: true,
+    });
+    // The phase-less, id-less legacy completion stays; the streamed note does not.
+    expect(settledOnly.events.map((event) => event.sequence)).toEqual([200010, 200012]);
+
     const nullGenerationFallback = await listSessionEventPage(client.db, workspaceId, sessionId, {
       direction: "before",
       limit: 1,

@@ -529,6 +529,7 @@ export {
 } from "./model-input";
 export type { ContextRobustnessFilterOptions, ModelInputProjectionPolicy } from "./model-input";
 export {
+  AssistantMessagePhaseTracker,
   HUMAN_INPUT_TOOL_NAME,
   modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromResponse,
