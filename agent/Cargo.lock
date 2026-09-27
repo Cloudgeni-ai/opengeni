@@ -2026,6 +2026,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengeni-agent-files-ffi"
+version = "0.1.29"
+
+[[package]]
 name = "opengeni-agent-harness"
 version = "0.0.0"
 dependencies = [
@@ -2082,6 +2086,7 @@ dependencies = [
  "command-group",
  "image",
  "nix 0.29.0",
+ "opengeni-agent-files-ffi",
  "opengeni-agent-linux-ffi",
  "opengeni-agent-macos-ffi",
  "opengeni-agent-proto",

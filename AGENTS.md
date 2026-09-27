@@ -354,10 +354,10 @@ operator procedure.
 
 ## Keeping these notes current
 
-Signed macOS application updates must replace the entire verified bundle and
-retain it for rollback; never overwrite only `Contents/MacOS/opengeni-agent`.
-Pre-0.1.29 Mac agents require the official installer for that one-time bootstrap.
-See `docs/connected-machines.md` for release selection and receipt semantics.
+Mac updates replace the complete verified signed bundle, retaining rollback.
+Pre-0.1.29 agents need the official installer: see `docs/connected-machines.md`.
+APFS transactional writes inspect ACLs through `opengeni-agent-files-ffi`;
+see `agent/TRANSACTIONAL-WRITES.md` for metadata preservation and refusal.
 
 Managed production package availability is reconciled automatically after the
 runtime becomes healthy; it does not wait for later acceptance. See
