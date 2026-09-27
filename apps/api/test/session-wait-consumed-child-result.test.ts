@@ -246,6 +246,15 @@ async function answerThenCompleteGoal(
   remark: string,
 ): Promise<{ answer: number; remark: number }> {
   await settleChildAnswer(ws, child, answer);
+  await continueGoalWithRemark(ws, child, remark);
+  const answers = await shared.admin<Array<{ sequence: number }>>`
+    select sequence from session_events
+    where session_id = ${child.sessionId} and type = 'turn.completed' order by sequence`;
+  return { answer: answers[0]!.sequence, remark: answers[1]!.sequence };
+}
+
+/** The goal-owned child's next turn only continues its goal and completes it. */
+async function continueGoalWithRemark(ws: Workspace, child: Attempt, remark: string) {
   const materialized = await materializeGoalContinuation(client.db, {
     accountId: ws.accountId,
     workspaceId: ws.workspaceId,
@@ -289,10 +298,6 @@ async function answerThenCompleteGoal(
     },
     remark,
   );
-  const answers = await shared.admin<Array<{ sequence: number }>>`
-    select sequence from session_events
-    where session_id = ${child.sessionId} and type = 'turn.completed' order by sequence`;
-  return { answer: answers[0]!.sequence, remark: answers[1]!.sequence };
 }
 
 /** The child's idle boundary commits its result and delivers it to the parent. */
@@ -564,11 +569,175 @@ describe("a parent read that returns a child's whole answer consumes its pending
     expect(partial.supersededUpdateIds).toEqual([]);
     expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
 
-    const whole = await supersedeConsumedChildTerminalResults(client.db, {
+    // A later read of the continuation completes what this attempt received.
+    const rest = await supersedeConsumedChildTerminalResults(client.db, {
       ...input,
-      children: [{ sessionId: child.sessionId, sequences: [sequences.answer, sequences.remark] }],
+      children: [{ sessionId: child.sessionId, sequences: [sequences.remark] }],
     });
-    expect(whole.supersededUpdateIds).toHaveLength(1);
+    expect(rest.supersededUpdateIds).toHaveLength(1);
     expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    const [turn] = await shared.admin<Array<{ metadata: Record<string, unknown> }>>`
+      select metadata from session_turns where id = ${parent.turnId}`;
+    expect(turn?.metadata.consumedChildAnswers).toEqual([
+      { childSessionId: child.sessionId, sequence: sequences.answer, attemptId: parent.attemptId },
+      { childSessionId: child.sessionId, sequence: sequences.remark, attemptId: parent.attemptId },
+    ]);
+  });
+});
+
+describe("a result committed after the parent already read the answer", () => {
+  /** The child answers; its idle boundary has not committed a result yet. */
+  async function childAnswered(ws: Workspace, parent: Attempt, answer: string) {
+    const child = await start(ws, "Look this up.", parent);
+    await settleChildAnswer(ws, child, answer);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, ws.workspaceId, parent.sessionId),
+    ).toEqual([]);
+    return child;
+  }
+
+  async function joinChild(ws: Workspace, parent: Attempt, child: Attempt, answer: string) {
+    const result = await callTool(agentMcp(ws, parent), "session_wait", {
+      targets: [{ sessionId: child.sessionId, afterSequence: 0 }],
+      waitFor: "completion",
+      maxWaitSeconds: 1,
+    });
+    const changed = result.changed as Array<{ events: Array<{ type: string; text: string }> }>;
+    expect(changed[0]!.events.map((event) => [event.type, event.text])).toContainEqual([
+      "turn.completed",
+      answer,
+    ]);
+  }
+
+  async function consumedEvents(sessionId: string) {
+    return await shared.admin<Array<{ payload: { reason: string; updateIds: string[] } }>>`
+      select payload from session_events
+      where session_id = ${sessionId} and type = 'system.update.cancelled'
+        and payload ->> 'reason' = 'consumed_by_parent_read'`;
+  }
+
+  test("arrives already consumed while the reading turn is still running", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Find the owner.");
+    const answer = "The owner is the platform team.";
+    const child = await childAnswered(ws, parent, answer);
+    await joinChild(ws, parent, child, answer);
+
+    await deliverIdleResult(ws, child);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, ws.workspaceId, parent.sessionId),
+    ).toEqual([]);
+    const [update] = await shared.admin<Array<{ id: string }>>`
+      select id from session_system_updates
+      where session_id = ${parent.sessionId} and kind = 'child_terminal_result'`;
+    const events = await consumedEvents(parent.sessionId);
+    expect(events.map((event) => event.payload.updateIds)).toEqual([[update!.id]]);
+  });
+
+  test("arrives already consumed after the reading turn completed, without waking the parent", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Find the owner and wait for the audit.");
+    const answer = "The owner is the platform team.";
+    const child = await childAnswered(ws, parent, answer);
+    await joinChild(ws, parent, child, answer);
+    // The parent integrates the answer and waits for other work.
+    await callTool(agentMcp(ws, parent), "wait_for_input", {
+      reason: "Waiting for the audit to finish.",
+      timeoutSeconds: 600,
+    });
+    const settled = await applySessionTurnSettlement(client.db, ws.workspaceId, {
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      triggerEventId: parent.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed" as const, payload: { output: "" } }],
+    });
+    expect(settled.action).toBe("settled");
+    const wakeRevision = async () =>
+      Number(
+        (
+          await shared.admin<Array<{ wake_revision: number }>>`
+            select wake_revision from session_workflow_wake_outbox
+            where session_id = ${parent.sessionId}`
+        )[0]?.wake_revision ?? 0,
+      );
+    const before = await wakeRevision();
+
+    await deliverIdleResult(ws, child);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+    const [session] = await shared.admin<Array<{ status: string }>>`
+      select status from sessions where id = ${parent.sessionId}`;
+    expect(session?.status).toBe("idle");
+    expect(await wakeRevision()).toBe(before);
+  });
+
+  test("stays pending when the reading attempt did not survive", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Find the owner.");
+    const answer = "The owner is the platform team.";
+    const child = await childAnswered(ws, parent, answer);
+    await joinChild(ws, parent, child, answer);
+    // The read's tool output may never have become durable parent history.
+    await applySessionTurnSettlement(client.db, ws.workspaceId, {
+      sessionId: parent.sessionId,
+      turnId: parent.turnId,
+      triggerEventId: parent.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "expected test failure" } }],
+    });
+
+    await deliverIdleResult(ws, child);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+    expect(await consumedEvents(parent.sessionId)).toEqual([]);
+  });
+
+  test("stays pending when a goal continuation followed the answer the parent read", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Count the users.");
+    const child = await start(ws, "Count them.", parent, "Count the users");
+    const answer = "28 distinct users in the window.";
+    await settleChildAnswer(ws, child, answer);
+    await joinChild(ws, parent, child, answer);
+    // Only after the join does the child run a turn that continues its goal.
+    const [goal] = await shared.admin<Array<{ status: string }>>`
+      select status from session_goals where session_id = ${child.sessionId}`;
+    expect(goal?.status).toBe("active");
+    await continueGoalWithRemark(ws, child, "The goal is complete. A fresh check confirmed it.");
+
+    await deliverIdleResult(ws, child);
+
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "pending" }]);
+  });
+
+  test("stays pending when the parent read an older answer than the one reported", async () => {
+    const ws = await workspace();
+    const parent = await start(ws, "Run both checks.");
+    const first = "Check A passed.";
+    const child = await childAnswered(ws, parent, first);
+    await joinChild(ws, parent, child, first);
+    await deliverIdleResult(ws, child);
+    expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+
+    await answerAndDeliver(
+      ws,
+      await nextChildTask(ws, child, "Now run check B."),
+      "Check B failed on the replica.",
+    );
+
+    const states = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates
+      where session_id = ${parent.sessionId} and kind = 'child_terminal_result'
+      order by created_at`;
+    expect(states).toEqual([{ state: "superseded" }, { state: "pending" }]);
   });
 });

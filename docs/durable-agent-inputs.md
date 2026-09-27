@@ -187,12 +187,27 @@ appends `system.update.cancelled` with
 `reason: consumed_by_parent_read`. A pending result for an answer the parent
 did not receive, such as an older one skipped by a later cursor, stays pending. `session_wait` then reports the remaining
 own pending input, so the parent is not told to end its turn only to receive
-the answer it already has. This mirrors a terminal `command_read`, including
-its window: when the answer was joined before the child's idle boundary
-committed its row (the child closes its run a few seconds after its final
-turn), the row arrives later and still wakes an obligated parent, now with the
-answer included. Suppressing that later row would need a durable per-child
-consumption fact that a delivery can check; it is not implemented.
+the answer it already has. This mirrors a terminal `command_read`.
+
+The answer is usually joined before the child's idle boundary commits its row:
+the child closes its run a few seconds after its final turn. So the same
+transaction also records each consumed answer on the reading turn, under the
+turn row lock, as `metadata.consumedChildAnswers` entries
+(`childSessionId`, `sequence`, `attemptId`; the newest 64 are kept). When the
+child's successful idle result is later inserted into the parent (under the
+parent session lock, so it serializes with the read), it arrives already
+consumed if every part it carries (the answer and each goal continuation) is
+recorded on one of the parent's 16 newest turns by an attempt that is still
+live or completed its turn: the row is inserted
+`superseded`, keeps its `system.update.pending` event for replay, and appends
+`system.update.cancelled` with `reason: consumed_by_parent_read`, with no goal
+auto-resume, wake, or queued status. A completed attempt's tool output is
+durable parent history; a live attempt carries the same window as the
+read-time supersession. A read by an attempt that failed, was interrupted, or
+was replaced proves nothing, so that result is delivered normally, as is a
+result reporting any answer or continuation the parent did not read. The record
+only ever suppresses a duplicate: an older writer or a lost record delivers the
+result as before, and older workers ignore the metadata key.
 
 When a child's `child_terminal_result` is delivered, that child's still-pending
 `child_progress` and `child_waiting_capacity` notices on the parent are

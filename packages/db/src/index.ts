@@ -66955,6 +66955,83 @@ export async function acknowledgeConsumedChildEvents(
 }
 
 /**
+ * Turn metadata key recording each direct child answer (`turn.completed`
+ * sequence) that one exact attempt of the turn received whole from a read
+ * tool. It is bounded, append-only per turn, and only ever suppresses a
+ * duplicate: losing it delivers the child's result normally.
+ */
+export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
+const CONSUMED_CHILD_ANSWERS_MAX = 64;
+const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
+
+type ConsumedChildAnswerEntry = { childSessionId: string; sequence: number; attemptId: string };
+
+function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const entries = (metadata as Record<string, unknown>)[CONSUMED_CHILD_ANSWERS_METADATA_KEY];
+  if (!Array.isArray(entries)) return [];
+  return entries.filter(
+    (entry): entry is ConsumedChildAnswerEntry =>
+      entry !== null &&
+      typeof entry === "object" &&
+      typeof entry.childSessionId === "string" &&
+      typeof entry.attemptId === "string" &&
+      Number.isSafeInteger(entry.sequence),
+  );
+}
+
+/**
+ * Whether the parent already received every part of this successful idle
+ * child result (the answer and each goal continuation) whole, through a read
+ * by one of its turn attempts that is still live or completed its turn. A completed attempt's
+ * tool output is durable parent history; a live one carries the same window as
+ * the read-time supersession. An attempt that failed, was interrupted, or was
+ * replaced proves nothing, so the result is delivered normally.
+ */
+async function childTerminalResultConsumedByParentReadTx(
+  tx: Database,
+  input: { workspaceId: string; parentSessionId: string; payload: unknown },
+): Promise<boolean> {
+  const parsed = SessionSystemUpdatePayload.safeParse(input.payload);
+  if (
+    !parsed.success ||
+    parsed.data.type !== "child_terminal_result" ||
+    parsed.data.status !== "idle" ||
+    !parsed.data.finalAnswer
+  ) {
+    return false;
+  }
+  const answer = parsed.data.finalAnswer;
+  const parts = [answer.sequence, ...(answer.goalContinuations ?? []).map((part) => part.sequence)];
+  // The reading turn is one of the parent's newest: the child commits its idle
+  // result seconds after the answer. A record outside this window, like a lost
+  // one, only means the result is delivered normally.
+  const rows = await rawRows<{ sequence: string | number }>(
+    tx,
+    sql`select distinct (entry ->> 'sequence')::numeric as sequence
+      from (
+        select recent.id, recent.metadata from session_turns recent
+        where recent.workspace_id = ${input.workspaceId}::uuid
+          and recent.session_id = ${input.parentSessionId}::uuid
+        order by recent.position desc limit ${CONSUMED_CHILD_ANSWERS_TURN_WINDOW}
+      ) turn
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(turn.metadata -> ${CONSUMED_CHILD_ANSWERS_METADATA_KEY}) = 'array'
+          then turn.metadata -> ${CONSUMED_CHILD_ANSWERS_METADATA_KEY} else '[]'::jsonb end
+      ) as entry
+      join session_turn_attempts attempt
+        on attempt.workspace_id = ${input.workspaceId}::uuid
+          and attempt.session_id = ${input.parentSessionId}::uuid
+          and attempt.turn_id = turn.id and attempt.id::text = entry ->> 'attemptId'
+      where entry ->> 'childSessionId' = ${parsed.data.childSessionId}
+        and jsonb_typeof(entry -> 'sequence') = 'number'
+        and (attempt.state in ('claimed', 'running') or attempt.outcome = 'completed')`,
+  );
+  const consumed = new Set(rows.map((row) => Number(row.sequence)));
+  return parts.every((sequence) => consumed.has(sequence));
+}
+
+/**
  * The parent's exact live attempt has just received a direct child's complete
  * final answer from a read tool. A still-pending idle `child_terminal_result`
  * reporting exactly that answer would only start another inference that
@@ -66964,8 +67041,13 @@ export async function acknowledgeConsumedChildEvents(
  * row stays as audit truth; claimed history is never touched. The caller proves
  * the read returned whole content; this transaction proves the attempt is still
  * the session's current one and that each sequence is a result-bearing answer.
- * It is best effort: a busy workspace control prefix skips it, and the result
- * is then delivered normally.
+ *
+ * The child usually commits its idle result a few seconds after the answer the
+ * parent joined, so the same transaction also records each consumed answer on
+ * the reading turn (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`). A result that
+ * arrives later for exactly those answers is then inserted already consumed
+ * (see `childTerminalResultConsumedByParentReadTx`). It is best effort: a busy
+ * workspace control prefix skips it, and the result is then delivered normally.
  */
 export async function supersedeConsumedChildTerminalResults(
   db: Database,
@@ -66993,22 +67075,32 @@ export async function supersedeConsumedChildTerminalResults(
     .filter((child) => UUID_PATTERN.test(child.sessionId) && child.sequences.length > 0)
     .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
   if (children.length === 0) return { supersededUpdateIds: [], events: [] };
-  // Most complete reads find nothing to consume. Probe without the canonical
+  // Most complete reads return no child answer. Probe without the canonical
   // write prefix first so they never contend with the caller's own writer.
   const candidate = await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     const [row] = await tx
-      .select({ id: schema.sessionSystemUpdates.id })
-      .from(schema.sessionSystemUpdates)
+      .select({ sequence: schema.sessionEvents.sequence })
+      .from(schema.sessionEvents)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
+          eq(schema.sessions.id, schema.sessionEvents.sessionId),
+          eq(schema.sessions.parentSessionId, input.sessionId),
+        ),
+      )
       .where(
         and(
-          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-          eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
-          eq(schema.sessionSystemUpdates.state, "pending"),
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
           inArray(
-            schema.sessionSystemUpdates.sourceId,
+            schema.sessionEvents.sessionId,
             children.map((child) => child.sessionId),
           ),
+          eq(schema.sessionEvents.type, "turn.completed"),
+          inArray(schema.sessionEvents.sequence, [
+            ...new Set(children.flatMap((child) => child.sequences)),
+          ]),
+          completeMeaningfulSessionEventSql("session_events"),
         ),
       )
       .limit(1);
@@ -67034,10 +67126,14 @@ export async function supersedeConsumedChildTerminalResults(
             workspaceId: input.workspaceId,
             controlLock: "none",
             sessionIds: [input.sessionId],
+            turnIds: [input.turnId],
           });
           const session = locks.sessions[0];
+          const turn = locks.turns[0];
           if (
             !session ||
+            !turn ||
+            turn.sessionId !== input.sessionId ||
             session.accountId !== input.accountId ||
             session.activeTurnId !== input.turnId
           ) {
@@ -67058,6 +67154,8 @@ export async function supersedeConsumedChildTerminalResults(
             )
             .limit(1);
           if (!attempt) return { supersededUpdateIds: [], events: [] };
+          const recorded = consumedChildAnswerEntries(turn.metadata);
+          const newlyRecorded: ConsumedChildAnswerEntry[] = [];
           const supersededUpdateIds: string[] = [];
           for (const child of children) {
             // Only a returned result-bearing answer proves consumption; a
@@ -67082,8 +67180,24 @@ export async function supersedeConsumedChildTerminalResults(
                   completeMeaningfulSessionEventSql("session_events"),
                 ),
               );
-            const consumed = answers.map((answer) => Number(answer.sequence));
-            if (consumed.length === 0) continue;
+            const read = answers.map((answer) => Number(answer.sequence));
+            if (read.length === 0) continue;
+            // This attempt may have returned the answer and a later goal
+            // continuation in separate reads; both count as consumed.
+            const earlier = recorded.filter(
+              (entry) =>
+                entry.childSessionId === child.sessionId && entry.attemptId === input.attemptId,
+            );
+            for (const sequence of read) {
+              if (!earlier.some((entry) => entry.sequence === sequence)) {
+                newlyRecorded.push({
+                  childSessionId: child.sessionId,
+                  sequence,
+                  attemptId: input.attemptId,
+                });
+              }
+            }
+            const consumed = [...new Set([...read, ...earlier.map((entry) => entry.sequence)])];
             const consumedList = sql.join(
               consumed.map((sequence) => sql`${sequence}`),
               sql`, `,
@@ -67118,6 +67232,23 @@ export async function supersedeConsumedChildTerminalResults(
               )
               .returning({ id: schema.sessionSystemUpdates.id });
             supersededUpdateIds.push(...rows.map((row) => row.id));
+          }
+          if (newlyRecorded.length > 0) {
+            // Under the turn row lock: only this key changes, the rest of the
+            // turn metadata stays exactly as committed.
+            const entries = [...recorded, ...newlyRecorded].slice(-CONSUMED_CHILD_ANSWERS_MAX);
+            await tx
+              .update(schema.sessionTurns)
+              .set({
+                metadata: sql`jsonb_set(coalesce(${schema.sessionTurns.metadata}, '{}'::jsonb), ${`{${CONSUMED_CHILD_ANSWERS_METADATA_KEY}}`}::text[], ${JSON.stringify(entries)}::jsonb)`,
+              })
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.id, input.turnId),
+                ),
+              );
           }
           if (supersededUpdateIds.length === 0) return { supersededUpdateIds, events: [] };
           supersededUpdateIds.sort();
@@ -78366,6 +78497,17 @@ export async function addSessionSystemUpdateWithSourceMutation<
           ...(input.lineage ?? {}),
           ...(prepared?.lineage ?? {}),
         };
+        // The parent's own attempt may already have read this exact answer
+        // before the child's idle boundary committed it. Such a result stays
+        // canonical but arrives consumed: no pending input, no wake.
+        const consumedByParentRead =
+          input.kind === "child_terminal_result" &&
+          input.classification === "success" &&
+          (await childTerminalResultConsumedByParentReadTx(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            parentSessionId: input.sessionId,
+            payload: input.payload,
+          }));
 
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
@@ -78389,7 +78531,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
                     input.xaiProviderAccountAuthoritySnapshot ??
                     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
-                  state: "pending",
+                  state: consumedByParentRead ? "superseded" : "pending",
                 },
                 "summary",
                 "summaryCodecVersion",
@@ -78484,7 +78626,34 @@ export async function addSessionSystemUpdateWithSourceMutation<
         if (supersededUpdateIds.length > 0 && !supersededEvent) {
           throw new Error("Failed to append system-update supersession event");
         }
-        const supersessionSequences = supersededEvent ? 1 : 0;
+        const [consumedEvent] = consumedByParentRead
+          ? await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 2 + (supersededEvent ? 1 : 0),
+                    type: "system.update.cancelled",
+                    payload: {
+                      updateIds: [inserted.id],
+                      count: 1,
+                      reason: "consumed_by_parent_read",
+                    },
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning()
+          : [];
+        if (consumedByParentRead && !consumedEvent) {
+          throw new Error("Failed to append consumed child result event");
+        }
+        const supersessionSequences = (supersededEvent ? 1 : 0) + (consumedEvent ? 1 : 0);
         const realtimeActive = await sessionRealtimeIsActiveInTransaction(
           tx as unknown as Database,
           input.workspaceId,
@@ -78505,6 +78674,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // wakes one. A deferred notice never resumes a goal by itself: a goal
         // resumed without a workflow wake would strand its obligation.
         const externalGoalInput =
+          !consumedByParentRead &&
           wakeClass === "immediate" &&
           commandMayWake &&
           input.kind !== "goal_continuation" &&
@@ -78580,6 +78750,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           !childLifecycleKind ||
           (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
         const shouldWake =
+          !consumedByParentRead &&
           wakeClass === "immediate" &&
           !session.admissionBlock &&
           commandMayWake &&
@@ -78621,6 +78792,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
             ...(prepared?.events ?? []),
             mapEvent(event),
             ...(supersededEvent ? [mapEvent(supersededEvent)] : []),
+            ...(consumedEvent ? [mapEvent(consumedEvent)] : []),
             ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
           ],
         };
