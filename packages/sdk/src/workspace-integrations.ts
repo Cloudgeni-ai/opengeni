@@ -2,10 +2,9 @@ import {
   OPENGENI_DELIVERY_ID_HEADER,
   OPENGENI_EVENT_ID_HEADER,
   OPENGENI_SIGNATURE_HEADER,
-  WorkspaceWebhookEvent,
   verifyOpenGeniSignature,
-  type CredentialProviderRequest,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/workspace-integration-wire";
+import type { CredentialProviderRequest, WorkspaceWebhookEvent } from "@opengeni/contracts";
 
 export type {
   CreateWorkspaceWebhookRequest,
@@ -31,7 +30,7 @@ export {
   WORKSPACE_WEBHOOK_EVENT_TYPES,
   signOpenGeniPayload,
   verifyOpenGeniSignature,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/workspace-integration-wire";
 
 export type WorkspaceSandboxImages = { images: string[]; selected: string | null };
 
@@ -54,13 +53,14 @@ function header(headers: SignedRequest["headers"], name: string): string | null 
   if (headers instanceof Headers) return headers.get(name);
   const wanted = name.toLowerCase();
   for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === wanted)
+    if (key.toLowerCase() === wanted) {
       return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
+    }
   }
   return null;
 }
 
-async function verifiedJson(input: SignedRequest): Promise<unknown> {
+async function verifiedObject(input: SignedRequest): Promise<Record<string, unknown>> {
   const valid = await verifyOpenGeniSignature({
     secret: input.secret,
     body: input.body,
@@ -68,7 +68,11 @@ async function verifiedJson(input: SignedRequest): Promise<unknown> {
     ...(input.toleranceSeconds !== undefined ? { toleranceSeconds: input.toleranceSeconds } : {}),
   });
   if (!valid) throw new OpenGeniSignatureError();
-  return JSON.parse(input.body);
+  const parsed: unknown = JSON.parse(input.body);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new OpenGeniSignatureError();
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /**
@@ -79,9 +83,17 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
   event: WorkspaceWebhookEvent;
   deliveryId: string | null;
 }> {
-  const event = WorkspaceWebhookEvent.parse(await verifiedJson(input));
+  const event = await verifiedObject(input);
+  if (
+    typeof event.id !== "string" ||
+    typeof event.type !== "string" ||
+    typeof event.workspaceId !== "string" ||
+    typeof event.sessionId !== "string"
+  ) {
+    throw new OpenGeniSignatureError();
+  }
   return {
-    event,
+    event: event as WorkspaceWebhookEvent,
     deliveryId: header(input.headers, OPENGENI_DELIVERY_ID_HEADER),
   };
 }
@@ -90,14 +102,14 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
 export async function verifyCredentialProviderRequest(
   input: SignedRequest,
 ): Promise<CredentialProviderRequest> {
-  const parsed = (await verifiedJson(input)) as Partial<CredentialProviderRequest>;
-  if (parsed?.type !== "credentials.request" || typeof parsed.workspaceId !== "string") {
+  const parsed = await verifiedObject(input);
+  if (parsed.type !== "credentials.request" || typeof parsed.workspaceId !== "string") {
     throw new OpenGeniSignatureError();
   }
   return parsed as CredentialProviderRequest;
 }
 
-/** Identity header names, re-exported for receivers that log or dedupe. */
+/** Identity header names, for receivers that log or dedupe. */
 export const OPENGENI_WEBHOOK_HEADERS = {
   signature: OPENGENI_SIGNATURE_HEADER,
   eventId: OPENGENI_EVENT_ID_HEADER,

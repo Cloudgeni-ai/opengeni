@@ -126,6 +126,10 @@
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
     },
+    "./workspace-integration-wire": {
+      "types": "./src/workspace-integration-wire.ts",
+      "default": "./src/workspace-integration-wire.ts"
+    },
     "./code-search": {
       "types": "./src/code-search.ts",
       "default": "./src/code-search.ts"

@@ -534,6 +534,12 @@ const effectiveBudgets = {
     // Keep the established 1.5 KiB headroom; initial, per-file, lazy, and CSS
     // caps stay fixed.
     wholeKibEnvelope(2_475_118, 1.5 * kib),
+    // Workspace webhook, credential provider, and sandbox image SDK methods on
+    // the shared client (their settings UI stays lazy): base 9649fcca9 measures
+    // 2,476,971 raw / 700,619 gzip across 35 files; the candidate 2,480,000 /
+    // 701,213 across 36 (Bun 1.4 Linux/x64). Keep the established 1.5 KiB
+    // headroom; gzip, file-count, initial, per-file, lazy, and CSS caps stay fixed.
+    wholeKibEnvelope(2_480_000, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
