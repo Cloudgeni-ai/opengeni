@@ -70,6 +70,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
+  FIRST_PARTY_MCP_CALLER_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -5176,10 +5177,7 @@ async function prepareToolGatewayDefinitionsFromServers(
               await server.executeCatalogTool(
                 toolName,
                 args,
-                {
-                  ...(context.transportMeta ?? {}),
-                  opengeniOperationId: context.operationId,
-                },
+                attemptToolCallMeta(server.registryId, context),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                 },
@@ -5212,6 +5210,29 @@ async function prepareToolGatewayDefinitionsFromServers(
     },
   );
   return { servers: preparedServers, definitions: perServerDefinitions.flat() };
+}
+
+/**
+ * MCP `_meta` for one gateway call. The first-party server also learns which
+ * attempt surface issued it, so it can tell a read whose output reached the
+ * model from one a Codemode script kept to itself. Set last, so transport
+ * metadata can never claim another caller. Third-party servers never see it.
+ */
+export function attemptToolCallMeta(
+  serverId: string,
+  context: {
+    operationId: string;
+    caller: Pick<ToolGatewayCaller, "kind">;
+    transportMeta?: Record<string, unknown> | null;
+  },
+): Record<string, unknown> {
+  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
+    context.transportMeta ?? {};
+  return {
+    ...transportMeta,
+    opengeniOperationId: context.operationId,
+    ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
+  };
 }
 
 function attemptToolCodemodePath(serverId: string, toolName: string): readonly string[] {

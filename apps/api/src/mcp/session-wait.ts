@@ -144,6 +144,36 @@ export function ownPendingKindWakes(kind: string): boolean {
   return wakeClass === undefined || wakeClass === "immediate";
 }
 
+function ownPendingUpdateFacts(
+  kinds: readonly string[],
+): Pick<
+  SessionWaitResult,
+  | "ownPendingUpdates"
+  | "ownPendingUpdateKinds"
+  | "ownPendingImmediateUpdates"
+  | "ownPendingDeferredUpdateKinds"
+> {
+  const ownKinds = [...new Set(kinds)].sort();
+  return {
+    ownPendingUpdates: kinds.length,
+    ownPendingUpdateKinds: ownKinds,
+    ownPendingImmediateUpdates: kinds.filter((kind) => ownPendingKindWakes(kind)).length,
+    ownPendingDeferredUpdateKinds: ownKinds.filter((kind) => !ownPendingKindWakes(kind)),
+  };
+}
+
+/**
+ * Re-derive the caller's own pending-input facts after the returned content
+ * consumed some of that input, keeping the same byte bound.
+ */
+export function withOwnPendingUpdateKinds(
+  result: SessionWaitResult,
+  kinds: readonly string[],
+): SessionWaitResult {
+  const { truncated: _truncated, bytes: _bytes, maxBytes, ...rest } = result;
+  return boundSessionWaitResult({ ...rest, ...ownPendingUpdateFacts(kinds) }, maxBytes);
+}
+
 const SEMANTIC_CLASS_PRIORITY: readonly SessionEventSemanticClass[] = [
   "terminal",
   "failure",
@@ -351,16 +381,10 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     if (waited && read.changed.length > 0 && input.source.reauthorizeTargets) {
       await input.source.reauthorizeTargets(read.changed.map((target) => target.sessionId));
     }
-    const ownKinds = [...new Set(read.ownPendingUpdateKinds)].sort();
     return boundSessionWaitResult(
       {
         changed: read.changed,
-        ownPendingUpdates: read.ownPendingUpdateKinds.length,
-        ownPendingUpdateKinds: ownKinds,
-        ownPendingImmediateUpdates: read.ownPendingUpdateKinds.filter((kind) =>
-          ownPendingKindWakes(kind),
-        ).length,
-        ownPendingDeferredUpdateKinds: ownKinds.filter((kind) => !ownPendingKindWakes(kind)),
+        ...ownPendingUpdateFacts(read.ownPendingUpdateKinds),
         waitedMs: Math.max(0, now() - startedAt),
         timedOut: outcome.timedOut,
         aborted: outcome.aborted,

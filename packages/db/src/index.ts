@@ -7,6 +7,10 @@ export {
 } from "./session-file-attachments";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
+  childTerminalResultFinalAnswer,
+  childTerminalResultFinalAnswerSequences,
+  childTerminalResultFinalAnswerWithGoalContinuations,
+  type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
   SandboxRecoverySelection,
   SandboxRecoveryResponse,
@@ -25,6 +29,7 @@ import {
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
+  childRecentTurnOutcomesSql,
   childLifecycleEvidenceCandidatesSql,
   completeMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
@@ -66767,6 +66772,23 @@ function consumedChildLifecycleSessionIds(
     // The row's kind and its payload discriminator are written together; narrow
     // on the discriminator so the shared field access is typed rather than cast.
     if (!payload || !isChildLifecycleSystemUpdatePayload(payload)) continue;
+    // An untruncated final answer, and each goal continuation after it, is
+    // exact content of one child answer event; claim still verifies every part
+    // against its retained event before acknowledging.
+    if (payload.type === "child_terminal_result") {
+      const answer = payload.finalAnswer;
+      if (answer && answer.truncated === false) {
+        for (const part of [answer, ...(answer.goalContinuations ?? [])]) {
+          if (part.sequence <= 0 || part.sequence > POSTGRES_INT_MAX) continue;
+          children.push({
+            sessionId: payload.childSessionId,
+            sequence: part.sequence,
+            type: "turn.completed",
+            payload: { output: part.text },
+          });
+        }
+      }
+    }
     const evidence = payload.childEventEvidence;
     if (!Array.isArray(evidence) || evidence.length > 32) continue;
     for (const event of evidence) {
@@ -66931,6 +66953,479 @@ export async function acknowledgeConsumedChildEvents(
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     await acknowledgeConsumedChildSequencesInTransaction(tx, input);
   });
+}
+
+/**
+ * Turn metadata key recording each direct child answer (`turn.completed`
+ * sequence) that one exact attempt of the turn returned whole to its model
+ * from a read tool. It is bounded, append-only per turn, and only ever
+ * suppresses a duplicate: a lost or unproven record delivers the child's
+ * result normally.
+ */
+export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
+const CONSUMED_CHILD_ANSWERS_MAX = 64;
+const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
+/** Any hex UUID shape, so a stored attempt id is cast only when castable. */
+const UUID_TEXT_PATTERN_SQL =
+  "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+type ConsumedChildAnswerEntry = { childSessionId: string; sequence: number; attemptId: string };
+
+function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const entries = (metadata as Record<string, unknown>)[CONSUMED_CHILD_ANSWERS_METADATA_KEY];
+  if (!Array.isArray(entries)) return [];
+  return entries.filter(
+    (entry): entry is ConsumedChildAnswerEntry =>
+      entry !== null &&
+      typeof entry === "object" &&
+      typeof entry.childSessionId === "string" &&
+      typeof entry.attemptId === "string" &&
+      Number.isSafeInteger(entry.sequence),
+  );
+}
+
+/** Every child answer an idle success `child_terminal_result` reports on, or
+ * null when it carries no final answer. */
+function childTerminalResultAnswerParts(
+  payload: unknown,
+): { childSessionId: string; sequences: number[] } | null {
+  const parsed = SessionSystemUpdatePayload.safeParse(payload);
+  if (
+    !parsed.success ||
+    parsed.data.type !== "child_terminal_result" ||
+    parsed.data.status !== "idle" ||
+    !parsed.data.finalAnswer
+  ) {
+    return null;
+  }
+  return {
+    childSessionId: parsed.data.childSessionId,
+    sequences: childTerminalResultFinalAnswerSequences(parsed.data.finalAnswer),
+  };
+}
+
+/**
+ * The child answers the parent's model received whole, per child. A record
+ * counts when its recording attempt completed its turn: the tool output that
+ * carried the answer is then durable parent history. The parent's newest
+ * completed turns hold such records (a child commits its result seconds after
+ * the answer); a record outside that window, like a lost one, only means the
+ * result is delivered normally. `attempt` also counts the records one exact
+ * attempt made on its own turn: its caller proves that attempt is live, or has
+ * just completed its turn in the same transaction. A record of an attempt that
+ * failed, was interrupted, or was replaced proves nothing.
+ */
+async function consumedChildAnswerSequencesTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    parentSessionId: string;
+    childSessionIds: readonly string[];
+    attempt?: { turnId: string; attemptId: string };
+  },
+): Promise<Map<string, Set<number>>> {
+  const consumed = new Map<string, Set<number>>();
+  const childSessionIds = [...new Set(input.childSessionIds)].filter((id) => UUID_PATTERN.test(id));
+  if (childSessionIds.length === 0) return consumed;
+  const attempt =
+    input.attempt &&
+    UUID_PATTERN.test(input.attempt.turnId) &&
+    UUID_PATTERN.test(input.attempt.attemptId)
+      ? input.attempt
+      : null;
+  const key = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
+  const rows = await rawRows<{ childSessionId: string; sequence: string | number }>(
+    tx,
+    sql`select entry ->> 'childSessionId' as "childSessionId",
+        (entry ->> 'sequence')::numeric as sequence
+      from (
+        (select recent.id, recent.metadata from session_turns recent
+          where recent.workspace_id = ${input.workspaceId}::uuid
+            and recent.session_id = ${input.parentSessionId}::uuid
+            and recent.status = 'completed'
+          order by recent.position desc limit ${CONSUMED_CHILD_ANSWERS_TURN_WINDOW})
+        ${
+          attempt
+            ? sql`union
+        (select own.id, own.metadata from session_turns own
+          where own.workspace_id = ${input.workspaceId}::uuid
+            and own.session_id = ${input.parentSessionId}::uuid
+            and own.id = ${attempt.turnId}::uuid)`
+            : sql``
+        }
+      ) turn
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(turn.metadata -> ${key}) = 'array'
+          then turn.metadata -> ${key} else '[]'::jsonb end
+      ) as entry
+      join session_turn_attempts attempt
+        on attempt.workspace_id = ${input.workspaceId}::uuid
+          and attempt.session_id = ${input.parentSessionId}::uuid
+          and attempt.turn_id = turn.id
+          and attempt.id = case when entry ->> 'attemptId' ~ ${UUID_TEXT_PATTERN_SQL}
+            then (entry ->> 'attemptId')::uuid end
+      where entry ->> 'childSessionId' in (${sql.join(
+        childSessionIds.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+        and jsonb_typeof(entry -> 'sequence') = 'number'
+        and (attempt.outcome = 'completed'${
+          attempt
+            ? sql` or (turn.id = ${attempt.turnId}::uuid and attempt.id = ${attempt.attemptId}::uuid)`
+            : sql``
+        })`,
+  );
+  for (const row of rows) {
+    const sequences = consumed.get(row.childSessionId) ?? new Set<number>();
+    sequences.add(Number(row.sequence));
+    consumed.set(row.childSessionId, sequences);
+  }
+  return consumed;
+}
+
+function childResultConsumed(
+  parts: { childSessionId: string; sequences: readonly number[] },
+  consumed: ReadonlyMap<string, ReadonlySet<number>>,
+): boolean {
+  const sequences = consumed.get(parts.childSessionId);
+  return sequences !== undefined && parts.sequences.every((sequence) => sequences.has(sequence));
+}
+
+/**
+ * Whether the parent's model already received every part of this successful
+ * idle child result (the answer and each goal continuation it reports on)
+ * whole, through a read by an attempt that completed its turn. Such a result is
+ * inserted already consumed. A result that arrives while the reading attempt
+ * still runs is inserted pending; that attempt's completion supersedes it.
+ */
+async function childTerminalResultConsumedByParentReadTx(
+  tx: Database,
+  input: { workspaceId: string; parentSessionId: string; payload: unknown },
+): Promise<boolean> {
+  const parts = childTerminalResultAnswerParts(input.payload);
+  if (!parts) return false;
+  return childResultConsumed(
+    parts,
+    await consumedChildAnswerSequencesTx(tx, {
+      workspaceId: input.workspaceId,
+      parentSessionId: input.parentSessionId,
+      childSessionIds: [parts.childSessionId],
+    }),
+  );
+}
+
+/** Ids of this parent's pending idle child results its model already received
+ * whole (see `consumedChildAnswerSequencesTx`). */
+async function pendingChildResultsConsumedTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    parentSessionId: string;
+    attempt?: { turnId: string; attemptId: string };
+  },
+): Promise<string[]> {
+  const pending = await tx
+    .select({
+      id: schema.sessionSystemUpdates.id,
+      payload: schema.sessionSystemUpdates.payload,
+      payloadCodecVersion: schema.sessionSystemUpdates.payloadCodecVersion,
+    })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, input.parentSessionId),
+        eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+        eq(schema.sessionSystemUpdates.classification, "success"),
+      ),
+    );
+  const candidates = pending.flatMap((row) => {
+    const parts = childTerminalResultAnswerParts(
+      fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+    );
+    return parts ? [{ id: row.id, parts }] : [];
+  });
+  if (candidates.length === 0) return [];
+  const consumed = await consumedChildAnswerSequencesTx(tx, {
+    workspaceId: input.workspaceId,
+    parentSessionId: input.parentSessionId,
+    childSessionIds: candidates.map((candidate) => candidate.parts.childSessionId),
+    ...(input.attempt ? { attempt: input.attempt } : {}),
+  });
+  return candidates
+    .filter((candidate) => childResultConsumed(candidate.parts, consumed))
+    .map((candidate) => candidate.id)
+    .sort();
+}
+
+/**
+ * Inside the successful completion settlement of a turn attempt that recorded
+ * a consumed child answer: supersede each still-pending idle child result the
+ * parent's model has now received whole, before the next claim could start an
+ * inference that only repeats it. The tool output that carried each answer is
+ * durable history once the attempt completes. The canonical row stays as
+ * audit truth; the caller appends the `system.update.cancelled` event.
+ */
+async function supersedeChildResultsConsumedByCompletedAttemptTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    turnMetadata: unknown;
+  },
+): Promise<string[]> {
+  if (
+    !consumedChildAnswerEntries(input.turnMetadata).some(
+      (entry) => entry.attemptId === input.attemptId,
+    )
+  ) {
+    return [];
+  }
+  const consumed = await pendingChildResultsConsumedTx(tx, {
+    workspaceId: input.workspaceId,
+    parentSessionId: input.sessionId,
+    attempt: { turnId: input.turnId, attemptId: input.attemptId },
+  });
+  if (consumed.length === 0) return [];
+  await tx
+    .update(schema.sessionSystemUpdates)
+    .set({ state: "superseded" })
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+        inArray(schema.sessionSystemUpdates.id, consumed),
+      ),
+    );
+  return consumed;
+}
+
+/**
+ * The parent's exact live attempt has just returned a direct child's complete
+ * final answer to its model from a read tool. Record each such result-bearing
+ * answer on the reading turn (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`). Nothing
+ * is superseded here: the tool output is not durable parent history until the
+ * attempt completes its turn. That completion supersedes each still-pending
+ * idle result whose every part was received, and a result that arrives after
+ * it is inserted already consumed. A read by an attempt that then fails, is
+ * interrupted, or is replaced suppresses nothing.
+ *
+ * The caller proves the read returned whole content to the model; this proves
+ * the attempt is still the session's current one and that each sequence is a
+ * direct child's result-bearing answer. Only the reading turn's row is locked,
+ * never the session write prefix, and a read whose answers this attempt
+ * already recorded writes nothing. It is best effort: a busy turn row skips it
+ * and the result is then delivered normally.
+ */
+export async function recordConsumedChildAnswers(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    children: readonly { sessionId: string; sequences: readonly number[] }[];
+  },
+): Promise<{ recorded: number }> {
+  const children = input.children
+    .map((child) => ({
+      sessionId: child.sessionId,
+      sequences: [
+        ...new Set(
+          child.sequences.filter(
+            (value) => Number.isSafeInteger(value) && value > 0 && value <= POSTGRES_INT_MAX,
+          ),
+        ),
+      ],
+    }))
+    .filter((child) => UUID_PATTERN.test(child.sessionId) && child.sequences.length > 0);
+  if (
+    children.length === 0 ||
+    !UUID_PATTERN.test(input.sessionId) ||
+    !UUID_PATTERN.test(input.turnId) ||
+    !UUID_PATTERN.test(input.attemptId)
+  ) {
+    return { recorded: 0 };
+  }
+  // Most complete reads return no child answer, and a repeated read returns
+  // one this attempt already recorded. Decide both without any lock.
+  const probe = await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const answers = await tx
+      .select({
+        sessionId: schema.sessionEvents.sessionId,
+        sequence: schema.sessionEvents.sequence,
+      })
+      .from(schema.sessionEvents)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
+          eq(schema.sessions.id, schema.sessionEvents.sessionId),
+          eq(schema.sessions.parentSessionId, input.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          inArray(
+            schema.sessionEvents.sessionId,
+            children.map((child) => child.sessionId),
+          ),
+          eq(schema.sessionEvents.type, "turn.completed"),
+          inArray(schema.sessionEvents.sequence, [
+            ...new Set(children.flatMap((child) => child.sequences)),
+          ]),
+          // Only a returned result-bearing answer proves consumption; a
+          // commentary message or goal fact read alongside it does not.
+          completeMeaningfulSessionEventSql("session_events"),
+        ),
+      );
+    const [turn] = await tx
+      .select({ metadata: schema.sessionTurns.metadata })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+        ),
+      )
+      .limit(1);
+    return { answers, metadata: turn?.metadata };
+  });
+  const readByChild = new Map(children.map((child) => [child.sessionId, child.sequences]));
+  const unrecorded = (metadata: unknown) => {
+    const recorded = consumedChildAnswerEntries(metadata);
+    return probe.answers
+      .map((answer) => ({ childSessionId: answer.sessionId, sequence: Number(answer.sequence) }))
+      .filter(
+        (answer) =>
+          readByChild.get(answer.childSessionId)?.includes(answer.sequence) === true &&
+          !recorded.some(
+            (entry) =>
+              entry.attemptId === input.attemptId &&
+              entry.childSessionId === answer.childSessionId &&
+              entry.sequence === answer.sequence,
+          ),
+      );
+  };
+  if (unrecorded(probe.metadata).length === 0) return { recorded: 0 };
+  try {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          // A request-scoped writer never waits long on the turn row.
+          await tx.execute(
+            sql`select set_config('lock_timeout', ${`${Math.max(1, workspaceControlRequestLockTimeoutMs())}ms`}, true)`,
+          );
+          // The turn row alone: settlement locks the session and then this
+          // row, so while it is held the attempt below cannot close.
+          const [turn] = await tx
+            .select({
+              accountId: schema.sessionTurns.accountId,
+              metadata: schema.sessionTurns.metadata,
+            })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!turn || turn.accountId !== input.accountId) return { recorded: 0 };
+          const [current] = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
+            .innerJoin(
+              schema.sessions,
+              and(
+                eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+                eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+                eq(schema.sessions.activeTurnId, input.turnId),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                eq(schema.sessionTurnAttempts.turnId, input.turnId),
+                eq(schema.sessionTurnAttempts.id, input.attemptId),
+                eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
+                inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+              ),
+            )
+            .limit(1);
+          if (!current) return { recorded: 0 };
+          const newlyRecorded = unrecorded(turn.metadata).map((answer) => ({
+            ...answer,
+            attemptId: input.attemptId,
+          }));
+          if (newlyRecorded.length === 0) return { recorded: 0 };
+          // Under the turn row lock: only this key changes, the rest of the
+          // turn metadata stays exactly as committed.
+          const entries = [...consumedChildAnswerEntries(turn.metadata), ...newlyRecorded].slice(
+            -CONSUMED_CHILD_ANSWERS_MAX,
+          );
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: sql`jsonb_set(coalesce(${schema.sessionTurns.metadata}, '{}'::jsonb), ${`{${CONSUMED_CHILD_ANSWERS_METADATA_KEY}}`}::text[], ${JSON.stringify(entries)}::jsonb)`,
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            );
+          return { recorded: newlyRecorded.length };
+        }),
+    );
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "55P03") return { recorded: 0 };
+    throw error;
+  }
+}
+
+/**
+ * This session's pending machine input, less each idle child result its model
+ * already received whole: through a completed turn, or through a read by the
+ * given exact live attempt, whose completion will supersede it. Such a result
+ * would only repeat an answer the caller holds, so it is not input to wait for.
+ */
+export async function listOutstandingSessionSystemUpdatesForAttempt(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  attempt: { turnId: string; attemptId: string },
+): Promise<SessionSystemUpdate[]> {
+  const pending = await listOutstandingSessionSystemUpdates(db, workspaceId, sessionId);
+  if (!pending.some((update) => update.kind === "child_terminal_result")) return pending;
+  const consumed = new Set(
+    await withWorkspaceRls(
+      db,
+      workspaceId,
+      async (tx) =>
+        await pendingChildResultsConsumedTx(tx, {
+          workspaceId,
+          parentSessionId: sessionId,
+          attempt,
+        }),
+    ),
+  );
+  return pending.filter((update) => !consumed.has(update.id));
 }
 
 /** Bounded operator reconciliation, dry-run by default. No timestamps, session
@@ -73060,6 +73555,14 @@ export async function settleSessionIdleWithParentOutbox(
         } as const;
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
+      // Freeze the child's answer with the boundary that reports it, so the
+      // parent's wake is the result itself and a reaper-delivered row carries
+      // the same content as an immediately delivered one.
+      const finalAnswer = await childFinalAnswerTx(
+        tx as unknown as Database,
+        workspaceId,
+        session.id,
+      );
       await enqueueChildLifecycleNoticeOutboxTx(tx as unknown as Database, workspaceId, session, {
         dedupeKey,
         kind: "child_terminal_result",
@@ -73069,6 +73572,7 @@ export async function settleSessionIdleWithParentOutbox(
           type: "child_terminal_result",
           childSessionId: session.id,
           status: "idle",
+          ...(finalAnswer ? { finalAnswer } : {}),
         },
       });
       return {
@@ -73082,13 +73586,111 @@ export async function settleSessionIdleWithParentOutbox(
   });
 }
 
-export function buildChildCompletionDigest(summaries: string[], trailing: string): string {
-  if (summaries.length <= 1) {
-    return [summaries[0] ?? "", "", trailing].join("\n");
+/** How many of the child's newest turn outcomes the final answer may walk
+ * back through past goal-continuation turns before giving up. */
+const CHILD_FINAL_ANSWER_OUTCOME_WINDOW = 16;
+
+/**
+ * The child's current final answer for its idle terminal result. Null when its
+ * newest turn ended without an answer (including one that stopped at a segment
+ * limit), when it has no answer text, or when a stored answer row is itself
+ * only a retained preview: the parent then reads the child's events instead of
+ * receiving an older answer or a partial copy presented as the result.
+ *
+ * A turn claimed only to continue the child's goal (typically to confirm and
+ * complete it after the answer) does not replace the answer. The walk goes
+ * back past such turns to the newest outcome that had any other input and
+ * reports that answer, followed by the continuation output. It also stops, as
+ * at such a turn, at an earlier outcome that is not a readable answer (a
+ * failure, a cancellation, a segment limit) and at the child's newest goal
+ * activation, so it never reaches output an earlier result reported. When the
+ * window holds only continuations, the result is the newest answer alone, as
+ * if no walk were made. A copy that cannot fit whole is the newest part,
+ * marked truncated, pointing at every part (see
+ * `childTerminalResultFinalAnswerWithGoalContinuations`).
+ */
+async function childFinalAnswerTx(
+  tx: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<ChildTerminalResultFinalAnswer | null> {
+  const outcomes = await rawRows<{
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payloadCodecVersion: number | null;
+    goalContinuationOnly: boolean;
+    goalActivatedAt: number | string;
+  }>(
+    tx,
+    childRecentTurnOutcomesSql(
+      sql`${workspaceId}::uuid`,
+      sql`${childSessionId}::uuid`,
+      CHILD_FINAL_ANSWER_OUTCOME_WINDOW,
+    ),
+  );
+  const readable = (outcome: (typeof outcomes)[number]) =>
+    outcome.type === "turn.completed" ? completedTurnAnswerOutput(outcome) : null;
+  const [newest] = outcomes;
+  const newestOutput = newest ? readable(newest) : null;
+  if (!newest || newestOutput === null) return null;
+  const goalActivatedAt = Number(newest.goalActivatedAt);
+  // Newest first; reversed into oldest-first parts below.
+  const parts: { sequence: number; output: string }[] = [];
+  let started = false;
+  for (const [index, outcome] of outcomes.entries()) {
+    const output = readable(outcome);
+    // The run's first turn is behind this one: a non-answer outcome, or the
+    // goal (re)activation that began the goal-continuation run.
+    if (output === null || (index > 0 && Number(outcome.sequence) < goalActivatedAt)) {
+      started = true;
+      break;
+    }
+    if (output.length > 0) parts.push({ sequence: Number(outcome.sequence), output });
+    if (!outcome.goalContinuationOnly) {
+      started = true;
+      break;
+    }
   }
-  const header = `${summaries.length} worker sessions you spawned reached a terminal state:`;
-  const numbered = summaries.map((summary, index) => `${index + 1}. ${summary}`).join("\n\n");
-  return [header, "", numbered, "", trailing].join("\n");
+  // Fewer outcomes than the window: the walk reached the child's first turn.
+  if (outcomes.length < CHILD_FINAL_ANSWER_OUTCOME_WINDOW) started = true;
+  if (!started) {
+    // Only goal continuations in the window: the run's first answer is not
+    // proven here, so report the newest answer alone.
+    return newestOutput.length > 0
+      ? childTerminalResultFinalAnswer({
+          childSessionId,
+          sequence: Number(newest.sequence),
+          output: newestOutput,
+        })
+      : null;
+  }
+  const [answer, ...goalContinuations] = parts.reverse();
+  if (!answer) return null;
+  return childTerminalResultFinalAnswerWithGoalContinuations({
+    childSessionId,
+    sequence: answer.sequence,
+    output: answer.output,
+    goalContinuations,
+  });
+}
+
+/** The whole answer a `turn.completed` carries ("" when it has none), or null
+ * when the stored row cannot stand in for that turn's result: a retained
+ * preview, or a turn that stopped at a segment limit. */
+function completedTurnAnswerOutput(outcome: {
+  payload: unknown;
+  payloadCodecVersion: number | null;
+}): string | null {
+  const payload = logicalChildReadEvent(outcome).payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const truncation = record.truncation as { truncated?: unknown } | null | undefined;
+  if (truncation?.truncated === true || record.sourceOmitted === true) return null;
+  if (Object.hasOwn(record, "segmentLimit")) return null;
+  if (typeof record.output === "string") return record.output;
+  // No output at all is "no answer"; any other shape is not a readable copy.
+  return (record.output ?? null) === null && (record.result ?? null) === null ? "" : null;
 }
 
 export async function setTemporalWorkflowId(
@@ -74396,11 +74998,36 @@ export async function applySessionTurnSettlement(
               },
             }
           : null;
+      // The model now durably holds each child answer this attempt returned
+      // to it whole. A pending result repeating only those answers would start
+      // an inference that repeats them, so it is superseded before any claim.
+      const consumedChildResultIds =
+        input.turnStatus === "completed"
+          ? await supersedeChildResultsConsumedByCompletedAttemptTx(tx as unknown as Database, {
+              workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              attemptId: input.attemptId,
+              turnMetadata: turn.metadata,
+            })
+          : [];
+      const consumedChildResultEvent: AppendEventInput | null =
+        consumedChildResultIds.length > 0
+          ? {
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: consumedChildResultIds,
+                count: consumedChildResultIds.length,
+                reason: "consumed_by_parent_read",
+              },
+            }
+          : null;
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
+        ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
         ...input.events,
       ];
       const values = settlementEvents.map((event) => {
@@ -76641,16 +77268,24 @@ async function enqueueChildLifecycleNoticeOutboxTx(
   // Oversized evidence is omitted, not truncated and then called consumed.
   // Bound index candidates before payload filters, and prefer the newest complete
   // result within the total budget. Explicit reads handle omitted evidence.
-  const candidates = await rawRows<{
-    sequence: number;
-    type: string;
-    payload: unknown;
-    payloadCodecVersion: number | null;
-  }>(tx, childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`));
-  const noticePayload = {
-    ...input.payload,
-    childEventEvidence: boundedChildLifecycleEvidence(candidates),
-  };
+  // A terminal result that carries the child's final answer needs no second
+  // copy: an untruncated answer is itself the consumption evidence.
+  const carriesFinalAnswer =
+    input.kind === "child_terminal_result" && input.payload.finalAnswer !== undefined;
+  const candidates = carriesFinalAnswer
+    ? []
+    : await rawRows<{
+        sequence: number;
+        type: string;
+        payload: unknown;
+        payloadCodecVersion: number | null;
+      }>(
+        tx,
+        childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`),
+      );
+  const noticePayload = carriesFinalAnswer
+    ? input.payload
+    : { ...input.payload, childEventEvidence: boundedChildLifecycleEvidence(candidates) };
   const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -77658,6 +78293,28 @@ export async function getOrCreateSessionSystemUpdateOutbox(
         "System-update outbox source and target sessions must exist in the same workspace",
       );
     }
+    // The producing lifecycle transaction may already have committed this row
+    // with content only it could freeze (the child's final answer, or its
+    // consumption evidence). Enrichment adds facts on top of that content and
+    // never replaces it, under the same row lock the upsert takes.
+    const [committed] = await scopedDb
+      .select({
+        kind: schema.sessionSystemUpdateOutbox.kind,
+        payload: schema.sessionSystemUpdateOutbox.payload,
+        payloadCodecVersion: schema.sessionSystemUpdateOutbox.payloadCodecVersion,
+      })
+      .from(schema.sessionSystemUpdateOutbox)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdateOutbox.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdateOutbox.dedupeKey, input.dedupeKey),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const payload = committed
+      ? withCommittedChildResultContent(committed, input.payload)
+      : input.payload;
     const [row] = await scopedDb
       .insert(schema.sessionSystemUpdateOutbox)
       .values(
@@ -77673,7 +78330,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               classification: input.classification,
               sourceId: input.sourceId,
               summary: input.summary,
-              payload: input.payload,
+              payload,
               lineage: input.lineage,
               personalConnectionDelegations: input.personalConnectionDelegations,
               mcpAccountBindings: input.mcpAccountBindings,
@@ -77698,7 +78355,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               classification: input.classification,
               sourceId: input.sourceId,
               summary: input.summary,
-              payload: input.payload,
+              payload,
               updatedAt: new Date(),
             },
             "summary",
@@ -77759,6 +78416,32 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       ),
     };
   });
+}
+
+/** Content the child's own lifecycle transaction froze into its terminal
+ * result. A committed payload that no longer parses is rewritten from the
+ * enrichment alone, as before this content existed. */
+const COMMITTED_CHILD_RESULT_CONTENT_KEYS = ["finalAnswer", "childEventEvidence"] as const;
+
+function withCommittedChildResultContent(
+  committed: { kind: string; payload: unknown; payloadCodecVersion: number | null },
+  enrichment: ChildLifecycleOutboxPayload,
+): ChildLifecycleOutboxPayload {
+  let stored: Record<string, unknown>;
+  try {
+    stored = parseChildLifecycleOutboxPayload(
+      fromPostgresLosslessJson(committed.payload, committed.payloadCodecVersion),
+      committed.kind,
+    ).payload as Record<string, unknown>;
+  } catch {
+    return enrichment;
+  }
+  if (stored.type !== enrichment.type) return enrichment;
+  const merged: Record<string, unknown> = { ...enrichment };
+  for (const key of COMMITTED_CHILD_RESULT_CONTENT_KEYS) {
+    if (Object.hasOwn(stored, key) && !Object.hasOwn(merged, key)) merged[key] = stored[key];
+  }
+  return merged as ChildLifecycleOutboxPayload;
 }
 
 export async function markSessionSystemUpdateOutboxFailed(
@@ -78001,6 +78684,17 @@ export async function addSessionSystemUpdateWithSourceMutation<
           ...(input.lineage ?? {}),
           ...(prepared?.lineage ?? {}),
         };
+        // The parent's own attempt may already have read this exact answer
+        // before the child's idle boundary committed it. Such a result stays
+        // canonical but arrives consumed: no pending input, no wake.
+        const consumedByParentRead =
+          input.kind === "child_terminal_result" &&
+          input.classification === "success" &&
+          (await childTerminalResultConsumedByParentReadTx(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            parentSessionId: input.sessionId,
+            payload: input.payload,
+          }));
 
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
@@ -78024,7 +78718,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
                     input.xaiProviderAccountAuthoritySnapshot ??
                     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
-                  state: "pending",
+                  state: consumedByParentRead ? "superseded" : "pending",
                 },
                 "summary",
                 "summaryCodecVersion",
@@ -78119,7 +78813,34 @@ export async function addSessionSystemUpdateWithSourceMutation<
         if (supersededUpdateIds.length > 0 && !supersededEvent) {
           throw new Error("Failed to append system-update supersession event");
         }
-        const supersessionSequences = supersededEvent ? 1 : 0;
+        const [consumedEvent] = consumedByParentRead
+          ? await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 2 + (supersededEvent ? 1 : 0),
+                    type: "system.update.cancelled",
+                    payload: {
+                      updateIds: [inserted.id],
+                      count: 1,
+                      reason: "consumed_by_parent_read",
+                    },
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning()
+          : [];
+        if (consumedByParentRead && !consumedEvent) {
+          throw new Error("Failed to append consumed child result event");
+        }
+        const supersessionSequences = (supersededEvent ? 1 : 0) + (consumedEvent ? 1 : 0);
         const realtimeActive = await sessionRealtimeIsActiveInTransaction(
           tx as unknown as Database,
           input.workspaceId,
@@ -78140,6 +78861,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // wakes one. A deferred notice never resumes a goal by itself: a goal
         // resumed without a workflow wake would strand its obligation.
         const externalGoalInput =
+          !consumedByParentRead &&
           wakeClass === "immediate" &&
           commandMayWake &&
           input.kind !== "goal_continuation" &&
@@ -78215,6 +78937,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           !childLifecycleKind ||
           (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
         const shouldWake =
+          !consumedByParentRead &&
           wakeClass === "immediate" &&
           !session.admissionBlock &&
           commandMayWake &&
@@ -78256,6 +78979,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
             ...(prepared?.events ?? []),
             mapEvent(event),
             ...(supersededEvent ? [mapEvent(supersededEvent)] : []),
+            ...(consumedEvent ? [mapEvent(consumedEvent)] : []),
             ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
           ],
         };
