@@ -41,7 +41,11 @@ mock.module("@/components/rail/workspace-config-link", () => ({
 }));
 
 const client = { listKnowledgeEntries: async () => ({ entries: [] }) };
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+mock.module("@/context", () => ({
+  useAppContext: () => ({ client, accessContext: { workspaceGrants: [] } }),
+}));
+/** Agents, Schedules, Artifacts, Knowledge, Capabilities and Settings; Insights is for admins. */
+const MEMBER_SHORTCUTS = 6;
 
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -118,7 +122,7 @@ describe("session-first rail density", () => {
       expect(rendered.container.textContent).toContain("For you");
       expect(rendered.container.textContent).toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        4,
+        MEMBER_SHORTCUTS,
       );
       expect(rendered.container.querySelector("button[aria-expanded]")).toBeNull();
     } finally {
@@ -133,7 +137,9 @@ describe("session-first rail density", () => {
       expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
       await act(async () => moreDisclosure(first.container).click());
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(4);
+      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
+        MEMBER_SHORTCUTS,
+      );
       expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
       await act(async () => lessButton(first.container).click());
       expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
@@ -167,7 +173,7 @@ describe("session-first rail density", () => {
     try {
       expect(workspace.container.textContent).toContain("For you");
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        4,
+        MEMBER_SHORTCUTS,
       );
       expect(railShell).toMatch(
         /id="mobile-nav-panel-workspace"[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,

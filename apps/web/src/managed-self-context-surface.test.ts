@@ -51,7 +51,9 @@ describe("managed self-context surfaces", () => {
     expect(settingsSource).toContain("personal ? (");
     expect(settingsSource).toContain("administrators and other members do not gain access");
     expect(settingsSource).toContain('import("./workspace-members-section")');
-    expect(settingsSource).toContain("<LazyMembersSection workspaceId={workspaceId}");
+    expect(settingsSource).toContain(
+      "<LazyMembersSection\n              workspaceId={workspaceId}",
+    );
   });
 
   test("separates organization administration from Personal content", () => {

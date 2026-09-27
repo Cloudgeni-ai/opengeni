@@ -1,4 +1,4 @@
-// Workspace destination catalog (routes, labels, icon keys). Rendering lives in
+// Main rail destination catalog (routes, labels, icon keys). Rendering lives in
 // `workspace-config-link.tsx`.
 
 export type WorkspaceConfigTarget =
@@ -16,6 +16,8 @@ export type WorkspaceConfigTarget =
 
 export type WorkspaceConfigIcon =
   | "gauge"
+  | "bar-chart"
+  | "network"
   | "box"
   | "server-cog"
   | "laptop"
@@ -35,25 +37,17 @@ export type WorkspaceConfigItem = {
   requiresAdmin?: boolean;
 };
 
-export type WorkspaceConfigGroup = {
-  id: string;
-  label: string;
-  items: WorkspaceConfigItem[];
-};
-
-/** Product destinations promoted to the primary rail beside New session. */
+/**
+ * The main rail beside New session and For you. Every destination once, with
+ * one name and one icon (the same icon as its page header). Settings is the
+ * last entry; the settings sub-nav opens inside the content area.
+ */
 export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
-    to: "/workspaces/$workspaceId/plugins",
-    icon: "plug",
-    label: "Capabilities",
-    description: "Plugins, Skills, and integrations",
-  },
-  {
-    to: "/workspaces/$workspaceId/state",
-    icon: "brain-circuit",
-    label: "Agent Knowledge",
-    description: "Knowledge, instructions, and skills",
+    to: "/workspaces/$workspaceId/agents",
+    icon: "network",
+    label: "Agents",
+    description: "Every workstream in this workspace, live",
   },
   {
     to: "/workspaces/$workspaceId/schedules",
@@ -67,93 +61,46 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     label: "Artifacts",
     description: "Sites, images, documents, and files built with Geni",
   },
-];
-
-export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
   {
-    id: "overview",
-    label: "Overview",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/agents",
-        icon: "map",
-        label: "Agents",
-        description: "Live agent trees and spawned work",
-      },
-      {
-        to: "/workspaces/$workspaceId/insights",
-        icon: "gauge",
-        label: "Insights",
-        description: "Spend, blockers, automation, and outcomes",
-        requiresAdmin: true,
-      },
-    ],
+    to: "/workspaces/$workspaceId/state",
+    icon: "brain-circuit",
+    label: "Agent Knowledge",
+    description: "Knowledge, instructions, and skills",
   },
   {
-    id: "runtime",
-    label: "Runtime",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/variable-sets",
-        icon: "box",
-        label: "Variable sets",
-        description: "Secret variableSets for sandboxes",
-      },
-      {
-        to: "/workspaces/$workspaceId/rigs",
-        icon: "server-cog",
-        label: "Sandbox Environments",
-        description: "Custom sandbox setup and health checks",
-      },
-      {
-        to: "/workspaces/$workspaceId/machines",
-        icon: "laptop",
-        label: "Machines",
-        description: "Your own connected computers",
-      },
-    ],
+    to: "/workspaces/$workspaceId/plugins",
+    icon: "plug",
+    label: "Capabilities",
+    description: "Plugins, Skills, and integrations",
   },
   {
-    id: "knowledge",
-    label: "Knowledge",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/memory",
-        icon: "brain-circuit",
-        label: "Memory",
-        description: "Durable facts agents carry across sessions",
-      },
-    ],
+    to: "/workspaces/$workspaceId/insights",
+    icon: "bar-chart",
+    label: "Insights",
+    description: "Usage and spend for this workspace",
+    requiresAdmin: true,
   },
   {
-    id: "admin",
-    label: "Admin",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/settings",
-        icon: "settings",
-        label: "Workspace settings",
-        description: "Members, permissions, models, keys, and defaults",
-      },
-    ],
+    to: "/workspaces/$workspaceId/settings",
+    icon: "settings",
+    label: "Settings",
+    description: "General, access, models, API keys and runtime",
   },
 ];
 
-/** Destinations shown in the Browse workspace strip (excludes the settings page itself). */
-export const WORKSPACE_BROWSE_ITEMS: WorkspaceConfigItem[] = WORKSPACE_CONFIG_GROUPS.flatMap(
-  (group) => group.items,
-).filter((item) => item.to !== "/workspaces/$workspaceId/settings");
+/** Rail entries this viewer can open: Insights is for workspace admins. */
+export function primaryWorkspaceItemsFor(canReadInsights: boolean): WorkspaceConfigItem[] {
+  return PRIMARY_WORKSPACE_ITEMS.filter((item) => !item.requiresAdmin || canReadInsights);
+}
 
-export function filterWorkspaceConfigGroups(
-  groups: WorkspaceConfigGroup[],
-  canReadInsights: boolean,
-): WorkspaceConfigGroup[] {
-  return groups
-    .map((group) => ({
-      ...group,
-      items: group.items.filter((item) => !item.requiresAdmin || canReadInsights),
-    }))
-    .filter((group) => group.items.length > 0);
+/** Routes that open inside the settings frame, so the rail's Settings entry is current. */
+const SETTINGS_FRAME_SEGMENTS = ["settings", "variable-sets", "rigs", "machines", "organization"];
+
+export function isWorkspaceSettingsPath(pathname: string, workspaceId: string): boolean {
+  const prefix = `/workspaces/${workspaceId}/`;
+  if (!pathname.startsWith(prefix)) return false;
+  const rest = pathname.slice(prefix.length).split("/")[0] ?? "";
+  return SETTINGS_FRAME_SEGMENTS.includes(rest);
 }
 
 function configPathSuffix(to: WorkspaceConfigTarget): string {
@@ -161,20 +108,14 @@ function configPathSuffix(to: WorkspaceConfigTarget): string {
   return parts[parts.length - 1] ?? "";
 }
 
-export function isWorkspaceConfigPath(pathname: string, workspaceId: string): boolean {
-  const prefix = `/workspaces/${workspaceId}/`;
-  if (!pathname.startsWith(prefix)) return false;
-  const rest = pathname.slice(prefix.length).split("/")[0] ?? "";
-  return WORKSPACE_CONFIG_GROUPS.some((group) =>
-    group.items.some((item) => configPathSuffix(item.to) === rest),
-  );
-}
-
 export function isConfigItemActive(
   pathname: string,
   workspaceId: string,
   to: WorkspaceConfigTarget,
 ): boolean {
+  if (to === "/workspaces/$workspaceId/settings") {
+    return isWorkspaceSettingsPath(pathname, workspaceId);
+  }
   const destination = `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
   return pathname === destination || pathname.startsWith(`${destination}/`);
 }

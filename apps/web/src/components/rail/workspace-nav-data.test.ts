@@ -2,43 +2,43 @@ import { describe, expect, test } from "bun:test";
 
 import {
   PRIMARY_WORKSPACE_ITEMS,
-  WORKSPACE_CONFIG_GROUPS,
   isConfigItemActive,
-  isWorkspaceConfigPath,
+  isWorkspaceSettingsPath,
+  primaryWorkspaceItemsFor,
 } from "./workspace-nav-data";
 
-const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`).text();
-
-describe("workspace rail destinations", () => {
-  test("labels the settings entry without changing its destination", () => {
-    expect(workspaceNavSource).toContain('aria-label="Settings"');
-    expect(workspaceNavSource).toContain(
-      '<TooltipContent side={rail.collapsed ? "right" : "top"}>Settings</TooltipContent>',
-    );
-    expect(workspaceNavSource).toContain('<span className="min-w-0 truncate">Settings</span>');
-    expect(workspaceNavSource).toContain('to="/workspaces/$workspaceId/settings"');
-    expect(workspaceNavSource).toContain('search={{ section: "general" }}');
-  });
-
-  test("keeps primary product destinations out of workspace administration", () => {
-    const primaryTargets = PRIMARY_WORKSPACE_ITEMS.map((item) => item.to);
-    const settingsTargets = WORKSPACE_CONFIG_GROUPS.flatMap((group) => group.items).map(
-      (item) => item.to,
-    );
-
-    expect(primaryTargets).toEqual([
-      "/workspaces/$workspaceId/plugins",
-      "/workspaces/$workspaceId/state",
+describe("main rail destinations", () => {
+  test("lists every destination once, with Settings last and no settings pages", () => {
+    expect(PRIMARY_WORKSPACE_ITEMS.map((item) => item.to)).toEqual([
+      "/workspaces/$workspaceId/agents",
       "/workspaces/$workspaceId/schedules",
       "/workspaces/$workspaceId/artifacts",
+      "/workspaces/$workspaceId/state",
+      "/workspaces/$workspaceId/plugins",
+      "/workspaces/$workspaceId/insights",
+      "/workspaces/$workspaceId/settings",
     ]);
-    expect(PRIMARY_WORKSPACE_ITEMS.map((item) => item.label)).not.toContain("Documents");
-    expect(settingsTargets.filter((target) => primaryTargets.includes(target))).toEqual([]);
-    expect(isWorkspaceConfigPath("/workspaces/ws-1/schedules", "ws-1")).toBe(false);
-    expect(isWorkspaceConfigPath("/workspaces/ws-1/artifacts", "ws-1")).toBe(false);
-    expect(isWorkspaceConfigPath("/workspaces/ws-1/documents", "ws-1")).toBe(false);
-    expect(isWorkspaceConfigPath("/workspaces/ws-1/state", "ws-1")).toBe(false);
-    expect(isWorkspaceConfigPath("/workspaces/ws-1/settings", "ws-1")).toBe(true);
+    const labels = PRIMARY_WORKSPACE_ITEMS.map((item) => item.label);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(new Set(PRIMARY_WORKSPACE_ITEMS.map((item) => item.icon)).size).toBe(labels.length);
+    expect(labels).not.toContain("Memory");
+    expect(labels).not.toContain("Documents");
+  });
+
+  test("shows Insights to workspace admins only", () => {
+    expect(primaryWorkspaceItemsFor(false).map((item) => item.label)).not.toContain("Insights");
+    expect(primaryWorkspaceItemsFor(true).map((item) => item.label)).toContain("Insights");
+  });
+
+  test("marks Settings current on every page inside the settings frame", () => {
+    const settings = "/workspaces/$workspaceId/settings" as const;
+    for (const path of ["settings", "variable-sets", "rigs", "rigs/rig-1", "machines"]) {
+      expect(isWorkspaceSettingsPath(`/workspaces/ws-1/${path}`, "ws-1")).toBe(true);
+      expect(isConfigItemActive(`/workspaces/ws-1/${path}`, "ws-1", settings)).toBe(true);
+    }
+    for (const path of ["schedules", "artifacts", "state", "agents", "insights", "rigs-archive"]) {
+      expect(isWorkspaceSettingsPath(`/workspaces/ws-1/${path}`, "ws-1")).toBe(false);
+    }
     expect(
       isConfigItemActive(
         "/workspaces/ws-1/artifacts/site-1",

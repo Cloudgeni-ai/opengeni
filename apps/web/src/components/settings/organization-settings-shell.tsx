@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import {
   BlocksIcon,
   CodeIcon,
@@ -10,17 +10,11 @@ import {
   SquareStackIcon,
   UsersIcon,
 } from "lucide-react";
-import type { ComponentType, ReactNode } from "react";
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { OrganizationSettingsSwitcher } from "./organization-settings-switcher";
-import {
-  SettingsSidebar,
-  SETTINGS_SHELL_CLASS,
-  SETTINGS_NAV_CLASS,
-  settingsNavItemClass,
-} from "./settings-sidebar";
-import { ContentPage } from "@/components/ui/content-layout";
-import { PageHeader } from "@/components/ui/page-header";
+import { SettingsFrame, SettingsFrameOutLink } from "./settings-frame";
 import { useAppContext } from "@/context";
 import { organizationsForSubject } from "@/lib/org";
 import type { OrganizationAdminSection } from "@/lib/organization-admin";
@@ -28,7 +22,7 @@ import type { OrganizationAdminSection } from "@/lib/organization-admin";
 type OrganizationSettingsItem = {
   id: OrganizationAdminSection;
   label: string;
-  icon: ComponentType<{ className?: string }>;
+  icon: LucideIcon;
 };
 
 export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = [
@@ -87,74 +81,72 @@ export function OrganizationSettingsShell({
   children: ReactNode;
 }) {
   const context = useAppContext();
+  const rawSection = useRouterState({
+    select: (state) => (state.location.search as { section?: unknown }).section,
+  });
   const organizationCount = organizationsForSubject(
     context.accessContext,
     context.workspaces,
   ).length;
   const items = ORGANIZATION_SETTINGS_ITEMS.filter((item) => visibleSections.has(item.id));
   const current = ORGANIZATION_SETTINGS_ITEMS.find((item) => item.id === section)!;
+  const workspaceName =
+    context.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "Workspace";
   return (
-    <div data-workspace-scroll-owner="self-managed" className={SETTINGS_SHELL_CLASS}>
-      <a
-        href="#organization-settings-content"
-        className="sr-only z-50 rounded-md bg-bg px-3 py-2 text-sm font-medium text-fg focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus-visible:ring-2 focus-visible:ring-brand"
-      >
-        Skip to organization settings
-      </a>
-      <SettingsSidebar
-        workspaceId={workspaceId}
-        backToWorkspaceSettings
-        label="Organization"
-        currentPage={current.label}
-        identity={
-          organizationCount > 1 ? (
-            <div className="mt-2 min-w-0">
-              <OrganizationSettingsSwitcher
-                workspaceId={workspaceId}
-                organizationLabel={organizationLabel}
-                section={section}
-              />
-            </div>
-          ) : (
-            <p className="mt-1 truncate text-sm leading-5 font-semibold text-fg">
-              {organizationLabel}
-            </p>
-          )
-        }
-      >
-        <nav aria-label="Organization settings" className={SETTINGS_NAV_CLASS}>
-          {items.map((item) => {
-            const Icon = item.icon;
-            const selected = item.id === section;
-            return (
+    <SettingsFrame
+      label="Organization settings"
+      heading="Organization"
+      subheading={organizationCount > 1 ? undefined : organizationLabel}
+      header={
+        organizationCount > 1 ? (
+          <OrganizationSettingsSwitcher
+            workspaceId={workspaceId}
+            organizationLabel={organizationLabel}
+            section={section}
+          />
+        ) : undefined
+      }
+      groups={[
+        {
+          items: items.map((item) => ({
+            id: item.id,
+            label: item.label,
+            icon: item.icon,
+            link: (
               <Link
-                key={item.id}
                 to="/workspaces/$workspaceId/organization"
                 params={{ workspaceId }}
                 search={{ section: item.id }}
-                aria-current={selected ? "page" : undefined}
-                className={settingsNavItemClass(selected)}
-              >
-                <Icon aria-hidden="true" className="size-4 shrink-0" />
-                <span className="truncate">{item.label}</span>
-              </Link>
-            );
-          })}
-        </nav>
-      </SettingsSidebar>
-
-      <main id="organization-settings-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <ContentPage width="standard">
-          {hideHeader ? null : (
-            <PageHeader
-              title={current.label}
-              description={description(section, organizationLabel)}
-              actions={actions}
+              />
+            ),
+          })),
+        },
+      ]}
+      activeId={section}
+      indexRequested={rawSection === undefined}
+      indexLink={<Link to="/workspaces/$workspaceId/organization" params={{ workspaceId }} />}
+      footer={
+        <SettingsFrameOutLink
+          groupLabel="Workspace"
+          label={workspaceName}
+          icon={SlidersHorizontalIcon}
+          link={
+            <Link
+              to="/workspaces/$workspaceId/settings"
+              params={{ workspaceId }}
+              aria-label={`Workspace settings for ${workspaceName}`}
             />
-          )}
-          <div className={hideHeader ? "pb-7" : "py-7"}>{children}</div>
-        </ContentPage>
-      </main>
-    </div>
+          }
+        />
+      }
+      page={
+        hideHeader
+          ? null
+          : { title: current.label, description: description(section, organizationLabel), actions }
+      }
+      ownBackLink={hideHeader}
+    >
+      {children}
+    </SettingsFrame>
   );
 }

@@ -22,6 +22,7 @@ import {
   MailIcon,
   MoreHorizontalIcon,
   RotateCcwIcon,
+  SlidersHorizontalIcon,
   UserMinusIcon,
   XIcon,
 } from "lucide-react";
@@ -101,6 +102,11 @@ export interface AccessListProps<R extends string = string> {
     scopeId?: string,
   ) => void | Promise<unknown>;
   onRemove?: (member: AccessMember<R>) => void;
+  /**
+   * Opens the hand-picked permission editor ("Custom permissions…" in the ⋯
+   * menu). Optional: most places only offer roles.
+   */
+  onCustomize?: (member: AccessMember<R>) => void;
   /** Replaces a legacy custom grant with `member.resetRole`. */
   onResetToRole?: (member: AccessMember<R>) => void | Promise<unknown>;
   /** Text variant: opens the person sheet. */
@@ -260,6 +266,7 @@ function RowMenu({
   member,
   removeLabel,
   onRemove,
+  onCustomize,
   onResetToRole,
   onResendInvite,
   onRevokeInvite,
@@ -268,6 +275,7 @@ function RowMenu({
   member: AccessMember<string>;
   removeLabel: string;
   onRemove?: (member: AccessMember<string>) => void;
+  onCustomize?: (member: AccessMember<string>) => void;
   onResetToRole?: (member: AccessMember<string>) => void | Promise<unknown>;
   onResendInvite?: (member: AccessMember<string>) => void;
   onRevokeInvite?: (member: AccessMember<string>) => void;
@@ -276,9 +284,11 @@ function RowMenu({
   const invite = isInvite(member);
   const blocked = removeBlockedReason(member);
   const canReset = member.role === "custom" && member.resetRole && onResetToRole;
+  // Custom permissions follow the same rule as the role: never your own.
+  const canCustomize = Boolean(onCustomize) && !member.isYou && !member.isOwner;
   const hasItems = invite
     ? Boolean(onResendInvite || onRevokeInvite)
-    : Boolean((onRemove && !blocked) || canReset);
+    : Boolean((onRemove && !blocked) || canReset || canCustomize);
   if (!hasItems) return <span aria-hidden="true" className="size-8" />;
   return (
     <DropdownMenu modal={false}>
@@ -316,7 +326,13 @@ function RowMenu({
                 Reset to {roleLabel(roles, member.resetRole!)}
               </DropdownMenuItem>
             ) : null}
-            {canReset && onRemove && !blocked ? <DropdownMenuSeparator /> : null}
+            {canCustomize ? (
+              <DropdownMenuItem onSelect={() => onCustomize!(member)}>
+                <SlidersHorizontalIcon />
+                Custom permissions…
+              </DropdownMenuItem>
+            ) : null}
+            {(canReset || canCustomize) && onRemove && !blocked ? <DropdownMenuSeparator /> : null}
             {onRemove && !blocked ? (
               <DropdownMenuItem variant="destructive" onSelect={() => onRemove(member)}>
                 <UserMinusIcon />
@@ -435,6 +451,7 @@ function InlineRow({ member, props }: RowProps) {
             roles={roles}
             removeLabel={props.removeLabel ?? "Remove from workspace"}
             onRemove={props.onRemove}
+            onCustomize={props.onCustomize}
             onResetToRole={props.onResetToRole}
             onResendInvite={props.onResendInvite}
             onRevokeInvite={props.onRevokeInvite}

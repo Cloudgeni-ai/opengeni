@@ -89,7 +89,11 @@ const context = {
 
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
+  Link: ({ children, className }: { children: ReactNode; className?: string }) => (
+    <a href="#organization" className={className}>
+      {children}
+    </a>
+  ),
   useNavigate: () => () => undefined,
 }));
 
@@ -116,13 +120,21 @@ beforeEach(() => {
   listSlackUserLinkAccessRequests.mockImplementation(async () => [slackRequest]);
 });
 
-async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
+type AccessViewProp = import("./workspace-members-section").AccessView;
+
+async function renderMembers(canManage: boolean, workspaceId = workspaceA, view?: AccessViewProp) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   const render = async (nextWorkspaceId: string, nextCanManage: boolean) => {
     await act(async () => {
-      root.render(<MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />);
+      root.render(
+        <MembersSection
+          workspaceId={nextWorkspaceId}
+          canManage={nextCanManage}
+          {...(view !== undefined ? { view, onViewChange: () => undefined } : {})}
+        />,
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   };
@@ -138,58 +150,76 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
 }
 
 describe("workspace access settings convergence", () => {
-  test("shows the workspace-scoped member manager", async () => {
+  test("lists everyone with access on the shared access list", async () => {
     const rendered = await renderMembers(true);
     try {
-      expect(
-        rendered.container.querySelector('section[aria-labelledby="workspace-members-heading"] h2')
-          ?.textContent,
-      ).toBe("People with access");
-      expect(rendered.container.textContent).toContain("owner@example.com");
-      expect(rendered.container.textContent).toContain("Ada Member");
-      expect(rendered.container.textContent).toContain("Add member");
-      expect(rendered.container.textContent).toContain("Fine-tune");
-      expect(rendered.container.textContent).toContain("Remove");
-      expect(rendered.container.textContent).toContain(
-        "This workspace is permanently owned by its organization",
-      );
-      expect(rendered.container.textContent).toContain("Open organization settings");
+      const list = rendered.container.querySelector('ul[aria-label^="People with access"]');
+      expect(list).not.toBeNull();
+      expect(list?.textContent).toContain("owner@example.com");
+      expect(list?.textContent).toContain("Ada Member");
+      expect(rendered.container.textContent).toContain("People come from");
+      expect(rendered.container.textContent).toContain("Organization > People");
+      expect(rendered.container.textContent).not.toContain("Fine-tune");
+      expect(rendered.container.textContent).not.toContain("permanently owned");
       expect(listWorkspaceMembers).toHaveBeenCalledWith(workspaceA);
       expect(updateWorkspaceMember).not.toHaveBeenCalled();
       expect(removeWorkspaceMember).not.toHaveBeenCalled();
-      expect(rendered.container.textContent).not.toContain("organization-admin action");
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("selects an existing organization member instead of asking for an email", async () => {
+  test("always lists owners, and never as custom access", async () => {
+    listWorkspaceMembers.mockImplementationOnce(async () => [
+      {
+        subjectId: "dev",
+        subjectLabel: "Local dev",
+        role: "owner",
+        permissions: ["workspace:read", "workspace:admin", "members:manage", "billing:manage"],
+        createdAt: "2026-08-10T12:00:00.000Z",
+      },
+      { ...collaboratorMember },
+      {
+        subjectId: "api_key:ci",
+        subjectLabel: "CI key",
+        role: "member",
+        permissions: ["workspace:read"],
+        createdAt: "2026-08-10T12:00:00.000Z",
+      },
+    ]);
     const rendered = await renderMembers(true);
     try {
-      const addButton = Array.from(rendered.container.querySelectorAll("button")).find(
-        (candidate) => candidate.textContent?.trim() === "Add member",
-      );
+      const text = rendered.container.textContent ?? "";
+      expect(text).toContain("Local dev");
+      expect(text).toContain("Owner");
+      expect(text).not.toContain("Custom");
+      // API keys live on the API keys page.
+      expect(text).not.toContain("CI key");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("adds existing organization members from the Add people page", async () => {
+    const rendered = await renderMembers(true, workspaceA, { kind: "add" });
+    try {
       await act(async () => {
-        addButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 10));
       });
-
       expect(listWorkspaceMemberCandidates).toHaveBeenCalledWith(workspaceA);
       expect(document.body.textContent).toContain("Grace Hopper");
       expect(document.body.textContent).toContain("grace@example.com");
-      expect(document.body.textContent).not.toContain("Enter their email");
       expect(document.body.querySelector('input[type="email"]')).toBeNull();
-      expect(document.body.querySelector('input[type="search"]')).not.toBeNull();
 
-      const option = document.body.querySelector<HTMLButtonElement>('[role="option"]');
-      await act(async () => option?.click());
+      const checkbox = document.body.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      await act(async () => checkbox?.click());
       const submit = Array.from(document.body.querySelectorAll("button")).find(
-        (candidate) => candidate.textContent?.trim() === "Add to workspace",
+        (candidate) => candidate.textContent?.trim() === "Add 1 person",
       );
-      expect(submit?.disabled).toBe(false);
+      expect(submit).toBeDefined();
       await act(async () => {
         submit?.click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 10));
       });
 
       expect(addWorkspaceMember).toHaveBeenCalledWith(
@@ -204,12 +234,13 @@ describe("workspace access settings convergence", () => {
     }
   });
 
-  test("preserves the separate manager-only Slack access-request queue", async () => {
+  test("shows manager-only Slack access requests above the people", async () => {
     const rendered = await renderMembers(true);
     try {
       expect(listSlackUserLinkAccessRequests).toHaveBeenCalledWith(workspaceA);
-      expect(rendered.container.textContent).toContain("Pending Slack access requests");
+      expect(rendered.container.textContent).toContain("Requests");
       expect(rendered.container.textContent).toContain("Slack Requester");
+      expect(rendered.container.textContent).toContain("Review");
     } finally {
       await rendered.unmount();
     }
@@ -220,8 +251,9 @@ describe("workspace access settings convergence", () => {
     try {
       expect(listSlackUserLinkAccessRequests).not.toHaveBeenCalled();
       expect(listWorkspaceMembers).toHaveBeenCalledWith(workspaceA);
-      expect(rendered.container.textContent).not.toContain("Add member");
+      expect(rendered.container.textContent).toContain("Only workspace admins can change");
       expect(rendered.container.textContent).not.toContain("Slack Requester");
+      expect(rendered.container.querySelector('[aria-label^="More actions"]')).toBeNull();
     } finally {
       await rendered.unmount();
     }

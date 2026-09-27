@@ -22,7 +22,7 @@
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
-//   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
+//   /workspaces/:id/settings                 → workspace settings (general, access, models, API keys)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
@@ -51,6 +51,12 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
+import { parseApiKeyParam } from "@/lib/api-keys-route";
+import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
+import {
+  workspaceSettingsSectionFromSearch,
+  type WorkspaceSettingsSection,
+} from "@/lib/workspace-management-location";
 import {
   parseOrganizationSection,
   type LegacyOrganizationAdminSection,
@@ -73,15 +79,6 @@ import type { DocumentAuthorityKind } from "@opengeni/sdk";
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
 type OrganizationAdminSection = OrganizationSettingsSection | LegacyOrganizationAdminSection;
-
-type WorkspaceSettingsSection =
-  | "learning"
-  | "general"
-  | "members"
-  | "plugins"
-  | "models"
-  | "api-keys"
-  | "danger";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
 
@@ -499,25 +496,29 @@ const workspaceSettingsRoute = createRoute({
   path: "settings",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { section?: WorkspaceSettingsSection; account?: string; view?: ModelsView } => {
+  ): {
+    section?: WorkspaceSettingsSection | "plugins";
+    account?: string;
+    view?: ModelsView | AccessUrlView;
+    key?: string;
+    member?: string;
+  } => {
+    // Older sections still parse: Members is Access, Danger zone lives in
+    // General, and the Capabilities stub opens the Capabilities page.
     const section =
-      search.section === "general" ||
-      search.section === "learning" ||
-      search.section === "members" ||
-      search.section === "plugins" ||
-      search.section === "models" ||
-      search.section === "api-keys" ||
-      search.section === "danger"
-        ? search.section
-        : search.section === "capabilities"
-          ? "plugins"
-          : undefined;
+      search.section === "plugins" || search.section === "capabilities"
+        ? ("plugins" as const)
+        : (workspaceSettingsSectionFromSearch(search.section) ?? undefined);
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
     const view = section === "models" ? parseModelsView(search.view) : undefined;
+    const key = section === "api-keys" ? parseApiKeyParam(search.key) : undefined;
+    const access = section === "access" ? parseAccessSearch(search) : {};
     return {
       ...(section ? { section } : {}),
       ...(account ? { account } : {}),
       ...(view ? { view } : {}),
+      ...(key ? { key } : {}),
+      ...access,
     };
   },
   component: WorkspaceSettings,
@@ -889,13 +890,22 @@ function Memory() {
 
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
-  const { section, account, view } = workspaceSettingsRoute.useSearch();
+  const { section, account, view, key, member } = workspaceSettingsRoute.useSearch();
+  if (section === "plugins") {
+    return <Navigate to="/workspaces/$workspaceId/plugins" params={{ workspaceId }} replace />;
+  }
   return (
     <LazyWorkspaceSettingsRoute
       workspaceId={workspaceId}
       section={section ?? "general"}
       modelsAccount={account}
-      modelsView={view}
+      modelsView={section === "models" ? (view as ModelsView | undefined) : undefined}
+      apiKey={key}
+      access={
+        section === "access"
+          ? { ...(view ? { view: view as AccessUrlView } : {}), ...(member ? { member } : {}) }
+          : undefined
+      }
     />
   );
 }

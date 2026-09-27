@@ -27,10 +27,6 @@ export async function loadRailFooterMenuHarness() {
     }),
   }));
 
-  mock.module("@/components/rail/workspace-nav", () => ({
-    WorkspaceNav: () => null,
-  }));
-
   mock.module("@/context", () => ({
     useAppContext: () => ({
       client: {},

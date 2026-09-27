@@ -7,8 +7,14 @@ import { ForYouLink } from "@/components/rail/for-you-link";
 import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
-import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
+import {
+  isConfigItemActive,
+  PRIMARY_WORKSPACE_ITEMS,
+  primaryWorkspaceItemsFor,
+} from "@/components/rail/workspace-nav-data";
 import { Button } from "@/components/ui/button";
+import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { workspacePriorityPath } from "@/lib/routes";
 import { cn } from "@/lib/utils";
@@ -36,11 +42,12 @@ export function WorkspaceShortcutLinks({
   const fetchedPending = useKnowledgeReviewIndicator(rail.workspaceId, pending === undefined);
   const pendingKnowledge = pending ?? fetchedPending;
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const items = usePrimaryWorkspaceItems(rail.workspaceId);
 
   return (
     <div className={cn("grid gap-0.5", className)}>
       <ForYouLink embedded />
-      {PRIMARY_WORKSPACE_ITEMS.map((item) => (
+      {items.map((item) => (
         <WorkspaceConfigLink
           key={item.to}
           item={item}
@@ -56,13 +63,21 @@ export function WorkspaceShortcutLinks({
   );
 }
 
-/** Primary product navigation, kept separate from workspace administration. */
+function usePrimaryWorkspaceItems(workspaceId: string) {
+  const context = useAppContext();
+  return primaryWorkspaceItemsFor(
+    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin"),
+  );
+}
+
+/** Primary product navigation: New session, For you, the workspace pages and Settings. */
 export function PrimaryNav() {
   const rail = useRail();
   const pendingKnowledge = useKnowledgeReviewIndicator(rail.workspaceId);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
-  const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
+  const items = usePrimaryWorkspaceItems(rail.workspaceId);
+  const activeWorkspaceItem = items.find((item) =>
     isConfigItemActive(pathname, rail.workspaceId, item.to),
   );
   const activeWorkspaceSection =

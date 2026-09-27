@@ -551,21 +551,25 @@ function AuthorizedWorkspaceShell({
         }
       }}
     >
-      {usesOrganizationShell ? (
-        children
-      ) : managementLocation ? (
-        <WorkspaceManagementShell
-          workspaceId={workspaceId}
-          organizationName={organizationName}
-          location={managementLocation}
-        >
-          {children}
-        </WorkspaceManagementShell>
-      ) : (
-        <RailProvider workspaceId={workspaceId}>
-          <RailShell>{children}</RailShell>
-        </RailProvider>
-      )}
+      <RailProvider workspaceId={workspaceId}>
+        <RailShell>
+          {/* Settings open inside the content area; the main rail never swaps. */}
+          {usesOrganizationShell ? (
+            children
+          ) : managementLocation ? (
+            <WorkspaceManagementShell
+              workspaceId={workspaceId}
+              workspaceName={activeWorkspace?.name}
+              organizationName={organizationName}
+              location={managementLocation}
+            >
+              {children}
+            </WorkspaceManagementShell>
+          ) : (
+            children
+          )}
+        </RailShell>
+      </RailProvider>
     </OpenGeniProvider>
   );
 }
