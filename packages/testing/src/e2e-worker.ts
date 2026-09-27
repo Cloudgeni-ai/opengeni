@@ -71,6 +71,10 @@ try {
 
 function scriptedModelForScenario(scenario: string): Model {
   if (scenario === "child-wait-boundary") return new ChildWaitBoundaryModel();
+  if (scenario === "held-wait-person-turn") return new HeldWaitPersonTurnModel();
+  if (scenario === "held-wait-consumed-by-person-turn") {
+    return new HeldWaitConsumedByPersonTurnModel();
+  }
   if (scenario === "sandbox") {
     return new SandboxScriptedModel();
   }
@@ -358,5 +362,118 @@ class ChildWaitBoundaryModel implements Model {
   }
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     yield* new ScriptedModel([this.step(request)]).getStreamedResponse(request);
+  }
+}
+
+/**
+ * A goalless root spawns a child and waits for it. A person's question was
+ * queued before the spawn, so it runs right after the wait and is answered
+ * without waiting again. The child finishes only after its own 30 s wait
+ * deadline, so its result always arrives after that answer turn has ended.
+ */
+class HeldWaitPersonTurnModel implements Model {
+  private async step(request: ModelRequest): Promise<ScriptedModelStep> {
+    const body = JSON.stringify(request.input);
+    const name = (suffix: string) =>
+      request.tools.find((tool) => tool.name?.endsWith(suffix))?.name ?? `opengeni__${suffix}`;
+    if (body.includes("HELD_WAIT_ROOT_FIXTURE")) {
+      if (!body.includes("opengeni__session_create")) {
+        // Keep the first turn busy long enough for the person's question to be
+        // queued before the child exists.
+        await Bun.sleep(3_000);
+        return {
+          output: [
+            functionCall(name("session_create"), {
+              initialMessage: "HELD_WAIT_CHILD_FIXTURE",
+              sandboxBackend: "none",
+            }),
+          ],
+        };
+      }
+      if (!body.includes("opengeni__wait_for_input"))
+        return {
+          output: [
+            functionCall(name("wait_for_input"), {
+              reason: "Waiting for the child's count",
+              timeoutSeconds: 600,
+            }),
+          ],
+        };
+      if (body.includes("worker session you spawned") || body.includes("child_terminal_result"))
+        return { outputText: "HELD_WAIT_ROOT_FINAL: the child counted 25 customers." };
+      return { outputText: "HELD_WAIT_STATUS_REPLY: the child is still counting." };
+    }
+    if (!body.includes("opengeni__wait_for_input"))
+      return {
+        output: [
+          functionCall(name("wait_for_input"), {
+            reason: "Controlled child delay before reporting",
+            timeoutSeconds: 30,
+          }),
+        ],
+      };
+    return { outputText: "HELD_WAIT_CHILD_RESULT: 25 customers." };
+  }
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return new ScriptedModel([await this.step(request)]).getResponse(request);
+  }
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([await this.step(request)]).getStreamedResponse(request);
+  }
+}
+
+/**
+ * The reverse ordering: the child's result is already pending when a person's
+ * queued question is claimed, so the question turn consumes it. The root's
+ * first turn spawns the child, then holds before `wait_for_input` until the
+ * test writes the marker file named in the root prompt, which it does only
+ * after the child result is pending and the question is queued.
+ */
+class HeldWaitConsumedByPersonTurnModel implements Model {
+  private async step(request: ModelRequest): Promise<ScriptedModelStep> {
+    const body = JSON.stringify(request.input);
+    const name = (suffix: string) =>
+      request.tools.find((tool) => tool.name?.endsWith(suffix))?.name ?? `opengeni__${suffix}`;
+    if (body.includes("CONSUMED_WAIT_ROOT_FIXTURE")) {
+      if (!body.includes("opengeni__session_create")) {
+        return {
+          output: [
+            functionCall(name("session_create"), {
+              initialMessage: "CONSUMED_WAIT_CHILD_FIXTURE",
+              sandboxBackend: "none",
+            }),
+          ],
+        };
+      }
+      if (!body.includes("opengeni__wait_for_input")) {
+        const marker = /CONSUMED_WAIT_MARKER=([^\s"\\]+)/u.exec(body)?.[1];
+        if (!marker) throw new Error("CONSUMED_WAIT_ROOT_FIXTURE requires a marker path");
+        const deadline = Date.now() + 120_000;
+        while (!(await Bun.file(marker).exists())) {
+          if (Date.now() > deadline) throw new Error(`marker ${marker} was never written`);
+          await Bun.sleep(250);
+        }
+        return {
+          output: [
+            functionCall(name("wait_for_input"), {
+              reason: "Waiting for the child's count",
+              timeoutSeconds: 45,
+            }),
+          ],
+        };
+      }
+      if (body.includes("session_wait_timeout"))
+        return { outputText: "CONSUMED_WAIT_TIMEOUT_TURN: the wait timed out." };
+      if (body.includes("worker session you spawned") || body.includes("child_terminal_result"))
+        return { outputText: "CONSUMED_WAIT_ROOT_FINAL: the child counted 25 customers." };
+      return { outputText: "CONSUMED_WAIT_STATUS_REPLY: the child is still counting." };
+    }
+    return { outputText: "CONSUMED_WAIT_CHILD_RESULT: 25 customers." };
+  }
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return new ScriptedModel([await this.step(request)]).getResponse(request);
+  }
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([await this.step(request)]).getStreamedResponse(request);
   }
 }
