@@ -1474,6 +1474,18 @@ export const codexSubscriptionCredentials = pgTable(
     chatgptAccountId: text("chatgpt_account_id"), // plaintext ChatGPT-Account-ID header value (non-secret)
     scopes: text("scopes"), // space-delimited, as granted
     planType: text("plan_type"),
+    // When a provider plan observation (connect, token refresh id_token, or
+    // /wham/usage plan_type) last confirmed plan_type. Null for legacy rows.
+    planCheckedAt: timestamp("plan_checked_at", { withTimezone: true }),
+    // The most recent plan change a provider observation recorded: the plan
+    // before it and when it was seen. An observation of the same plan never
+    // overwrites it, so it stays evidence for a later ambiguous refusal.
+    planPreviousType: text("plan_previous_type"),
+    planChangedAt: timestamp("plan_changed_at", { withTimezone: true }),
+    // {planType, models: [{modelId, excludedAt}]}: models the CURRENT plan was
+    // proven not to include. Retired once plan_type no longer matches
+    // planType; each entry expires for allocation after a TTL. Never user policy.
+    planEntitlementExclusion: jsonb("plan_entitlement_exclusion"),
     isFedramp: boolean("is_fedramp").notNull().default(false),
     expiresAt: timestamp("expires_at", { withTimezone: true }), // derived from access-token JWT exp
     lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
@@ -9362,6 +9374,10 @@ export const sandboxLeases = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     publicRecovery: jsonb("public_recovery").$type<Record<string, unknown>>(),
+    providerCreateAttempt: jsonb("provider_create_attempt").$type<Record<string, unknown>>(),
+    providerCreateRecoveryAfter: timestamp("provider_create_recovery_after", {
+      withTimezone: true,
+    }),
 
     unobservableCommandDrainIds: uuid("unobservable_command_drain_ids").array(),
     unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {

@@ -26,13 +26,13 @@ describe("managed browser profile cryptography", () => {
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
     expect(browserProfileCryptoPolicy("win32")).toBe("platform_bound");
     expect(browserLaunchArguments("linux")).toBe(
-      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--test-type,--password-store=basic",
+      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--test-type,--password-store=basic",
     );
     expect(browserLaunchArguments("darwin")).toBe(
-      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--use-mock-keychain",
+      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--use-mock-keychain",
     );
     expect(browserLaunchArguments("win32")).toBe(
-      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding",
+      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864",
     );
   });
 

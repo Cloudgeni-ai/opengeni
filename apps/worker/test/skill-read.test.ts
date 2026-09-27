@@ -2,6 +2,10 @@ import { buildOpenGeniAgent } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import { Capability, Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { describe, expect, test } from "bun:test";
+import {
+  boundModelToolOutputItem,
+  DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+} from "@opengeni/codex";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { createSkillReadAttemptToolDefinition } from "../src/activities/agent-turn/skill-read";
 import { loadConfiguredBundledSkills } from "../src/activities/agent-turn/skill-selection";
@@ -348,6 +352,171 @@ describe("skill_read gateway definition", () => {
     expect(calls).toEqual(["authorize", "deploy"]);
     expect(output.structuredContent).toEqual({
       files: [{ path: "references/a.md", content: "reference" }],
+    });
+  });
+
+  describe("repeated reads while the text is in active history", () => {
+    const identity = { skillId: "workspace-skill", revisionId: "revision-1", scopeVersion: 4 };
+    // The shape the SDK persists for a local MCP result.
+    const historyResult = (output: unknown) => ({
+      type: "function_call_result",
+      name: "skill_read",
+      callId: `call-${crypto.randomUUID()}`,
+      output: [{ type: "input_text", text: JSON.stringify(output) }],
+    });
+
+    function historyReader(
+      load: Parameters<typeof createSkillReadAttemptToolDefinition>[0]["load"],
+      history: Record<string, unknown>[],
+      options: {
+        toolOutputTruncationTokens?: () => number;
+        readResults?: () => Promise<Record<string, unknown>[]>;
+        onLookupFailed?: (error: unknown) => void;
+      } = {},
+    ) {
+      let lookups = 0;
+      const definition = createSkillReadAttemptToolDefinition({
+        authorize: async () => {},
+        load,
+        activeHistory: {
+          readResults: async () => {
+            lookups++;
+            return options.readResults ? await options.readResults() : history;
+          },
+          toolOutputTruncationTokens:
+            options.toolOutputTruncationTokens ??
+            (() => DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS),
+          ...(options.onLookupFailed ? { onLookupFailed: options.onLookupFailed } : {}),
+        },
+      });
+      const environment = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [definition],
+      });
+      return {
+        definition,
+        lookups: () => lookups,
+        read: async (args: Record<string, unknown>) =>
+          (
+            await environment.callModel({
+              modelName: "skill_read",
+              arguments: { skill: "deploy", ...args },
+              subjectId: "agent:test",
+            })
+          ).structuredContent,
+      };
+    }
+
+    test("only the default read is replaced, and only after the same text was returned", async () => {
+      const history: Record<string, unknown>[] = [];
+      const skill = historyReader(async () => files, history);
+      const full = { files: [files[0]] };
+      expect(await skill.read({})).toEqual(full);
+      history.push(historyResult(full));
+      expect(await skill.read({})).toEqual({
+        alreadyInContext: true,
+        message:
+          'Already in context: SKILL.md of "deploy" was returned earlier in this conversation and is unchanged. Use that copy. Re-read only if you need a fresh copy: call skill_read with paths ["SKILL.md"].',
+      });
+      expect(skill.lookups()).toBe(2);
+      // An explicit path is the fresh-copy request, and inventory has no body.
+      expect(await skill.read({ paths: ["SKILL.md"] })).toEqual(full);
+      expect(await skill.read({ listFiles: true })).toEqual({
+        paths: ["SKILL.md", "references/a.md"],
+      });
+      expect(skill.lookups()).toBe(2);
+    });
+
+    test("a different identity, different text, or partial output is not in context", async () => {
+      const versioned = { ...identity, installationVersion: 7 };
+      const skill = (history: Record<string, unknown>[]) =>
+        historyReader(async () => ({ ...versioned, files }), history);
+      const entry = { ...versioned, files: [files[0]] };
+      for (const previous of [
+        { ...entry, revisionId: "revision-0" },
+        { ...entry, scopeVersion: 3 },
+        { ...identity, files: [files[0]] },
+        { ...entry, files: [{ path: "SKILL.md", content: "older main" }] },
+        { ...entry, files: [files[1]] },
+        { ...versioned, alreadyInContext: true, message: "Already in context" },
+      ]) {
+        expect(await skill([historyResult(previous)]).read({})).toEqual(entry);
+      }
+      const text = JSON.stringify(entry);
+      for (const partial of [
+        { ...historyResult(entry), output: [{ type: "input_text", text: text.slice(0, 40) }] },
+        { ...historyResult(entry), output: [] },
+        {
+          ...historyResult(entry),
+          output: [...historyResult(entry).output, { type: "input_text", text }],
+        },
+        { ...historyResult(entry), output: { type: "image", image: "data:" } },
+      ]) {
+        expect(await skill([partial]).read({})).toEqual(entry);
+      }
+      // A multi-file read that included SKILL.md counts, in every SDK output shape.
+      for (const previous of [
+        historyResult({ ...versioned, files }),
+        { ...historyResult(entry), output: text },
+        { ...historyResult(entry), output: { type: "text", text } },
+      ]) {
+        expect(await skill([previous]).read({})).toEqual({
+          ...versioned,
+          alreadyInContext: true,
+          message:
+            'Already in context: SKILL.md of "deploy" revision revision-1 was returned earlier in this conversation and is unchanged. Use that copy. Re-read only if you need a fresh copy: call skill_read with paths ["SKILL.md"].',
+        });
+      }
+    });
+
+    test("a copy this turn's model receives truncated is not in context", async () => {
+      // Stored complete under the default bound, as the history sink does.
+      const large = {
+        path: "SKILL.md",
+        content: `# Deploy\n${"Run the release checklist.\n".repeat(900)}`,
+      };
+      const entry = { ...identity, files: [large] };
+      const stored = boundModelToolOutputItem(historyResult(entry));
+      expect(JSON.parse((stored.output as Array<{ text: string }>)[0]!.text)).toEqual(entry);
+      let tokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS;
+      const skill = historyReader(async () => ({ ...identity, files: [large] }), [stored], {
+        toolOutputTruncationTokens: () => tokens,
+      });
+      expect(await skill.read({})).toEqual({
+        ...identity,
+        alreadyInContext: true,
+        message:
+          'Already in context: SKILL.md of "deploy" revision revision-1 was returned earlier in this conversation and is unchanged. Use that copy. Re-read only if you need a fresh copy: call skill_read with paths ["SKILL.md"].',
+      });
+      // A model with a lower bound received only a middle-truncated copy.
+      tokens = 2_000;
+      const seen = boundModelToolOutputItem(stored, tokens);
+      expect((seen.output as Array<{ text: string }>)[0]!.text).toContain("tokens truncated");
+      expect(await skill.read({})).toEqual(entry);
+    });
+
+    test("a failed history lookup returns the full text", async () => {
+      const failures: unknown[] = [];
+      const lookupError = new Error("statement timeout");
+      const skill = historyReader(async () => files, [], {
+        readResults: async () => {
+          throw lookupError;
+        },
+        onLookupFailed: (error) => failures.push(error),
+      });
+      expect(await skill.read({})).toEqual({ files: [files[0]] });
+      expect(failures).toEqual([lookupError]);
+    });
+
+    test("a Codemode program always receives the text and never reads model history", async () => {
+      const skill = historyReader(async () => files, [historyResult({ files: [files[0]] })]);
+      const output = await skill.definition.execute(
+        { skill: "deploy" },
+        { operationId: crypto.randomUUID(), caller: { kind: "codemode", subjectId: "agent:test" } },
+      );
+      expect(output.structuredContent).toEqual({ files: [files[0]] });
+      expect(skill.lookups()).toBe(0);
     });
   });
 

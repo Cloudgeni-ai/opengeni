@@ -1,5 +1,42 @@
 # @opengeni/api-router
 
+## 5.1.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+
+### Patch Changes
+
+- e18f72b: Allow explicitly selected headless Lightpanda BrowserSessions on Connected Machines with a provisioned, digest-verified native executable. Preserve Chromium as the default and reject engine substitution on attached or external placements.
+- Updated dependencies [74e0dfb]
+- Updated dependencies [1fa1216]
+- Updated dependencies [1842911]
+- Updated dependencies [d83d5d0]
+- Updated dependencies [9d0c1bb]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [a63a029]
+- Updated dependencies [b9482ea]
+- Updated dependencies [4124c7c]
+- Updated dependencies [82fa577]
+- Updated dependencies [3aab8f9]
+- Updated dependencies [2563950]
+  - @opengeni/config@3.1.0
+  - @opengeni/runtime@4.2.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/db@6.1.1
+  - @opengeni/observability@0.8.34
+  - @opengeni/core@4.0.5
+  - @opengeni/documents@0.8.36
+  - @opengeni/github@0.7.18
+  - @opengeni/storage@0.2.135
+  - @opengeni/artifact-tool@0.3.34
+  - @opengeni/codemode@0.6.4
+  - @opengeni/codex@0.2.28
+  - @opengeni/events@0.4.34
+  - @opengeni/tool-gateway@0.1.15
+
 ## 5.0.0
 
 ### Major Changes

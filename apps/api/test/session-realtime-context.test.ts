@@ -3,6 +3,7 @@ import {
   CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT,
   CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS,
 } from "@opengeni/codex";
+import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
 import { projectSessionRealtimeInitialItems } from "../src/session-realtime-context";
 
 describe("ordinary-session realtime context projection", () => {
@@ -77,6 +78,31 @@ describe("ordinary-session realtime context projection", () => {
         },
       ]),
     ).toEqual([{ role: "user", text: "visible text" }]);
+  });
+
+  test("keeps separate user message parts on separate lines", () => {
+    const sentAt = renderMessageSentAtForModel("2026-09-26T07:51:30.000Z");
+    expect(
+      projectSessionRealtimeInitialItems([
+        {
+          position: 0,
+          item: {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nPage: Users` },
+              { type: "input_text", text: sentAt },
+              { type: "input_text", text: "Which users signed up today?" },
+            ],
+          },
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "user",
+        text: `${MODEL_CONTEXT_LABEL}\nPage: Users\n${sentAt}\nWhich users signed up today?`,
+      },
+    ]);
   });
 
   test("adds prior voice continuity as inert role-labeled context", () => {

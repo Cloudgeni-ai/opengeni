@@ -541,6 +541,12 @@ workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
 
+A managed browser's attachment authority error keeps a same-browser **Reconnect**
+action available. It obtains a fresh server-authorized attachment without creating
+a replacement browser or replaying input. The fresh Connected Chrome instruction
+is reserved for the selected extension-attached browser's generation loss; a
+different lost browser in the workspace cannot change that recovery path.
+
 The browser viewer negotiates bounded typing batches from the active controller's
 short-lived attachment. Supporting helpers recheck the original controller,
 target, document and frame fence before every action; old helpers retain one
@@ -548,6 +554,8 @@ request per action. Only queued text actions share a request (at most 16), with
 each text/input event preserved. Keys, pointer input and clipboard operations
 remain ordering barriers. A failed or uncertain action discards the queued suffix
 without replay.
+IME candidate-selection keys stay local to the viewer; only committed text is
+sent to the remote page. A later ordinary Enter remains a remote key action.
 Live image props use opaque byte buffers so React development timing diagnostics
 cannot expand and retain every screenshot byte. Normal timing diagnostics remain enabled.
 Queued inputs retain only immutable frame fences, not screenshot bytes or prior
@@ -578,9 +586,13 @@ returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
 
-Native dropdown popups may not appear in page frames. After focusing a dropdown,
-the human can use **Choose option** to read its choices and select through the
-normal browser action API. The viewer reads only on demand and retains that
+Native dropdown popups may not appear in page frames. With a controller that
+advertises focused input observations, clicking one opens its choices beside
+the click. Ordinary clicks use a bounded focus probe instead of a full page
+snapshot; only a focused native dropdown (or a child-frame focus hint) requests
+semantic options. **Choose option** remains an explicit fallback for older
+controllers and controls that cannot be identified automatically. Selection uses the
+normal browser action API. The viewer retains that
 observation's target/document/frame fence. Private, oversized, or ambiguous
 choices remain unavailable; the page's keyboard controls still work. This
 fallback requires a controller with focused native-select metadata support and

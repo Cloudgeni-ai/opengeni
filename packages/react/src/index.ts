@@ -356,6 +356,7 @@ export {
   toolDisplayName,
 } from "./timeline";
 export type {
+  GroupTimelineOptions,
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
@@ -425,6 +426,7 @@ export type {
   TurnSummaryFacetResult,
   TurnSummaryOptions,
   TurnSummaryProps,
+  TurnSummaryStatus,
   LightboxControlLabels,
 } from "./timeline";
 

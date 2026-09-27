@@ -7388,6 +7388,37 @@ export const MODEL_CONTEXT_LABEL = "[Application context attached to this user m
 export const SESSION_GOAL_CONTEXT_LABEL =
   "[Session goal frozen when this turn was accepted]" as const;
 
+const MODEL_CONTEXT_WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+] as const;
+
+/**
+ * Wall-clock time as the model sees it, for example
+ * `Saturday 2026-09-26 07:51 UTC`. Minute precision gives the model the current
+ * date and time without prompting sub-second answers. Callers pass a durable
+ * timestamp (message acceptance, update creation or delivery), never the
+ * inference-time clock, so persisted history renders once and replays exactly.
+ */
+export function formatModelContextTimestamp(value: Date | string): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+  if (Number.isNaN(date.getTime())) {
+    throw new RangeError("Model context timestamp is not a valid date");
+  }
+  const iso = date.toISOString();
+  return `${MODEL_CONTEXT_WEEKDAYS[date.getUTCDay()]} ${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/** The time part of one accepted user-role message, from its acceptance time. */
+export function renderMessageSentAtForModel(sentAt: Date | string): string {
+  return `[Message sent ${formatModelContextTimestamp(sentAt)}]`;
+}
+
 /**
  * Render the exact goal authority frozen with one accepted logical turn. Goal
  * state belongs at the chronological input boundary, not in the mutable
@@ -7414,19 +7445,22 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
 /**
  * Build one canonical user-role message body. `modelContext` is ordinary
  * message content, while `goalSnapshot` is the exact goal authority frozen at
- * turn acceptance. Both remain in the visible message's chronological
- * position, and presentation layers may omit their leading parts.
+ * turn acceptance. `sentAt` is the message's durable acceptance time, so the
+ * model knows the current date without spending a tool call on it. All of them
+ * remain in the visible message's chronological position, and presentation
+ * layers may omit their leading parts.
  */
 export function renderUserMessageContentForModel(
   text: string,
   annotations: readonly TimelineAnnotation[],
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
+  sentAt?: Date | string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
   const goalContext = renderSessionGoalContext(goalSnapshot);
-  if (!context && !goalContext) return visibleContent;
+  if (!context && !goalContext && sentAt == null) return visibleContent;
   return [
     ...(goalContext
       ? [
@@ -7443,6 +7477,9 @@ export function renderUserMessageContentForModel(
             text: `${MODEL_CONTEXT_LABEL}\n${context}`,
           },
         ]
+      : []),
+    ...(sentAt != null
+      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt) }]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -8324,18 +8361,38 @@ export const SessionQueueSnapshot = z.object({
 });
 export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
+type RenderableSessionSystemUpdate = Pick<
+  SessionSystemUpdate,
+  "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+> &
+  Partial<Pick<SessionSystemUpdate, "createdAt">>;
+
+/**
+ * Durable delivery time of one claimed batch: the `deliveredAt` written to
+ * every member in the same claim transaction. Rendering it tells the model the
+ * current time on turns that no human message started.
+ */
+export type SessionSystemUpdateBatchRenderOptions = {
+  deliveredAt?: Date | string | null;
+};
+
+function renderSessionSystemUpdateDeliveredAt(
+  options: SessionSystemUpdateBatchRenderOptions,
+): string[] {
+  return options.deliveredAt == null
+    ? []
+    : [`Delivered: ${formatModelContextTimestamp(options.deliveredAt)}`];
+}
+
 /**
  * Deterministic, protocol-safe model representation of one claimed machine
  * input batch. This exact string is persisted before inference and replayed on
  * every later turn; callers must not synthesize an equivalent transient copy.
+ * Times come from the durable update rows, never from the rendering clock.
  */
 export function renderSessionSystemUpdateBatch(
-  updates: ReadonlyArray<
-    Pick<
-      SessionSystemUpdate,
-      "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
-    >
-  >,
+  updates: ReadonlyArray<RenderableSessionSystemUpdate>,
+  options: SessionSystemUpdateBatchRenderOptions = {},
 ): string {
   if (updates.length === 0) {
     throw new TypeError("A durable machine-input batch requires at least one update");
@@ -8343,12 +8400,14 @@ export function renderSessionSystemUpdateBatch(
   return [
     "[OpenGeni internal updates]",
     "These platform updates were delivered together for this inference.",
+    ...renderSessionSystemUpdateDeliveredAt(options),
     JSON.stringify({
       updates: updates.map((update) => ({
         id: update.id,
         kind: update.kind,
         classification: update.classification,
         sourceId: update.sourceId,
+        ...(update.createdAt ? { createdAt: formatModelContextTimestamp(update.createdAt) } : {}),
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
@@ -8370,6 +8429,7 @@ export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurre
  */
 function renderScheduledOccurrenceTaskBatch(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+  options: SessionSystemUpdateBatchRenderOptions,
 ): string | null {
   if (updates.length === 0 || updates.some((update) => update.kind !== "scheduled_occurrence")) {
     return null;
@@ -8394,6 +8454,7 @@ function renderScheduledOccurrenceTaskBatch(
   return [
     SCHEDULED_OCCURRENCE_TASK_LABEL,
     introduction,
+    ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
@@ -8403,6 +8464,9 @@ function renderScheduledOccurrenceTaskBatch(
         `Scheduled task ID: ${occurrence.payload.scheduledTaskId}`,
         `Scheduled task run ID: ${occurrence.payload.scheduledTaskRunId}`,
         `Update ID: ${occurrence.update.id}`,
+        ...(occurrence.update.createdAt
+          ? [`Created: ${formatModelContextTimestamp(occurrence.update.createdAt)}`]
+          : []),
         "Instructions:",
         occurrence.payload.text,
       ];
@@ -8413,18 +8477,20 @@ function renderScheduledOccurrenceTaskBatch(
 export function sessionSystemUpdateBatchHistoryItem(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
   goalSnapshot?: SessionGoalSnapshot,
-  options: { promoteScheduledOccurrenceToUser?: boolean } = {},
+  options: SessionSystemUpdateBatchRenderOptions & {
+    promoteScheduledOccurrenceToUser?: boolean;
+  } = {},
 ): { type: "message"; role: "system" | "user"; content: string } {
   const goalContext = renderSessionGoalContext(goalSnapshot);
   const scheduledTask = options.promoteScheduledOccurrenceToUser
-    ? renderScheduledOccurrenceTaskBatch(updates)
+    ? renderScheduledOccurrenceTaskBatch(updates, options)
     : null;
   return {
     type: "message",
     role: scheduledTask ? "user" : "system",
     content: [
       ...(goalContext ? [`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`] : []),
-      scheduledTask ?? renderSessionSystemUpdateBatch(updates),
+      scheduledTask ?? renderSessionSystemUpdateBatch(updates, options),
     ].join("\n\n"),
   };
 }
@@ -16143,6 +16209,7 @@ export const MachineRuntime = z.object({
   updateChannel: z.enum(["stable", "beta"]).nullable(),
   desiredVersion: z.string().nullable(),
   versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  updateBlockedReason: z.string().nullable().optional(),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
 });

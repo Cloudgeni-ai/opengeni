@@ -43,6 +43,9 @@ import {
   readVerifiedSignupTrialSwitch,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
+  listPendingModalProviderCreates,
+  claimModalProviderCreateRecovery,
+  recordRecoveredModalProviderCreate,
   markWarmBillingStopCutoff,
   listMeterableWarmLeases,
   listSandboxViewerForceDrainWorkspaceIds,
@@ -58,6 +61,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
   readSandboxRotationBacklog,
+  readRecentSandboxRecoveryObservations,
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
@@ -112,6 +116,7 @@ import {
   providerWorkspaceCapturePolicy,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
+  findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForSession,
   querySelfhostedOp,
   resumeExactSandboxSession,
@@ -159,6 +164,8 @@ import {
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
+  recordSandboxProviderMissingBeforeCapture,
+  recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
@@ -278,6 +285,8 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Only provider discovery is injected; durable recovery remains real. */
+  findModalProviderCreateReceipt?: typeof findModalProviderCreateReceipt;
   /** Override the read-only bounded OpenSandbox Kubernetes projection. */
   inspectOpenSandboxKubernetesInventory?: InspectOpenSandboxKubernetesInventoryFn;
   /** Override only the read-only provider process probe. The canonical DB
@@ -722,6 +731,22 @@ export function createSandboxLeaseActivities(
       // immutable launch locators must reconcile even when managed ownership is
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
       await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+
+      // Disabling new lease ownership cannot strand a previously dispatched
+      // operation. This only attributes a positive receipt; normal draining
+      // already runs in both ownership modes.
+      try {
+        await reconcileModalProviderCreates(
+          db,
+          settings,
+          observability,
+          options.findModalProviderCreateReceipt,
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: Modal create recovery inventory failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
 
       if (!settings.sandboxOwnershipEnabled) {
         // Inventory remains useful while provider ownership is intentionally
@@ -1276,14 +1301,12 @@ export async function replayConnectedCommandOutput(
   let capturedThrough = 0n;
   while (true) {
     const before = capturedThrough;
-    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, async (frames) => {
-      await capture(frames);
-      for (const frame of frames) {
-        const sequence = BigInt(frame.sequence);
-        if (sequence > capturedThrough) capturedThrough = sequence;
-      }
-    });
+    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
     if (!terminalKnown || replay.status === "completed" || replay.terminal) return;
+    // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
+    // chunk). These are real replay progress even when capture receives no
+    // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
+    capturedThrough = BigInt(replay.replaySequence);
     // This is a finite terminal drain, not a poller for a running command.
     // Failed persistence, transport/integrity errors, and no-progress reads
     // return control to normal reconciliation without licensing settlement.
@@ -2328,6 +2351,17 @@ async function refreshQueueLeaseAndCreditGauges(
     ),
     refreshSandboxInventoryGauge(
       observability,
+      "recovery_observations",
+      "recovery-observations",
+      async () => {
+        recordSandboxRecoveryObservationGauges(
+          observability,
+          await readRecentSandboxRecoveryObservations(db),
+        );
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
       "rotation_backlog",
       "rotation-backlog",
       async () => {
@@ -2458,10 +2492,50 @@ async function forceDrainOverLimitWorkspaces(
   return forceDrained;
 }
 
+export async function reconcileModalProviderCreates(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  discover: typeof findModalProviderCreateReceipt = findModalProviderCreateReceipt,
+): Promise<void> {
+  if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret)
+    return;
+  const candidates = await listPendingModalProviderCreates(db);
+  await forEachWithConcurrency(candidates, 2, async (candidate) => {
+    try {
+      const { accountId } = await rlsContextForWorkspace(db, candidate.workspaceId);
+      const identity = { ...candidate, accountId };
+      const attempt = await claimModalProviderCreateRecovery(db, identity);
+      if (!attempt) return;
+      const instanceId = await discover(settings, attempt);
+      if (!instanceId) return; // Absence never settles an unknown dispatch.
+      if (await recordRecoveredModalProviderCreate(db, { ...identity, attempt, instanceId })) {
+        observability.info("sandbox reaper: recovered Modal create receipt", {
+          ...candidate,
+          operationId: attempt.operationId,
+          instanceId,
+        });
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: Modal create remains fenced pending discovery", {
+        ...candidate,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+}
+
 export function modalOrphanTerminationStillEligible(
   latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
   candidate: ModalOrphanSweepTermination,
 ): boolean {
+  // The provider may have accepted a create whose reply has not arrived.
+  // Before attribution, neither its ID nor its separately-applied tags are
+  // available here. Postpone orphan deletion while any such owner exists;
+  // age/absence cannot distinguish its provider from an abandoned one.
+  if (latest.some((lease) => lease.liveness === "warming" && lease.instanceId === null)) {
+    return false;
+  }
   if (latest.some((lease) => lease.instanceId === candidate.sandboxId)) {
     return false;
   }
@@ -3118,6 +3192,12 @@ async function terminateDrainableBox(
     providerMissingBeforeCapture: providerMissing,
   });
   if (wentCold) {
+    // Only the exact successful cold commit counts provider loss. A missing
+    // probe, a stale capture, a failed commit, or a retried child is not another
+    // observed loss. Keep this outside the best-effort session event writer.
+    if (providerMissing) {
+      recordSandboxProviderMissingBeforeCapture(observability, backend);
+    }
     // Durable termination record (sandbox-file-persistence observability): who
     // ended this box and whether its /workspace was captured first, appended to
     // every session sharing the group's box. Best-effort: attribution must
@@ -3296,6 +3376,11 @@ export async function terminateProviderBox(
   // fail closed instead of silently leaving a live provider behind while the
   // caller commits the lease cold.
   if (!lease.instanceId) {
+    if (lease.providerCreateAttempt?.instanceId === null) {
+      throw new Error(
+        "provider_create_outcome_unknown: cannot infer termination from missing instance ID",
+      );
+    }
     if (persistedInstanceId) {
       throw new Error(
         `sandbox backend ${backend} has persisted provider identity ${persistedInstanceId} but no authoritative lease instance; refusing teardown`,
@@ -3332,7 +3417,12 @@ export async function terminateProviderBox(
     }
     try {
       await beforeProviderStop?.();
-      await terminateModalById(settings, lease.instanceId);
+      await terminateModalById(
+        settings,
+        lease.instanceId,
+        undefined,
+        lease.providerCreateAttempt?.providerBindingKey,
+      );
     } catch (error) {
       if (!isProviderSandboxNotFoundError("modal", error)) {
         throw error;

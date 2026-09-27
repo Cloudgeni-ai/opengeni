@@ -4,6 +4,7 @@ import {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   boundSessionEventPayload,
+  renderMessageSentAtForModel,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
 } from "@opengeni/contracts";
@@ -223,6 +224,14 @@ async function controlWorkspace(
       }),
     ),
   );
+}
+
+/** A claimed human message renders its frozen acceptance time before the text. */
+function acceptedUserContent(text: string, turn: { createdAt: string }) {
+  return [
+    { type: "input_text", text: renderMessageSentAtForModel(turn.createdAt) },
+    { type: "input_text", text },
+  ];
 }
 
 async function claimTestSessionWork(
@@ -2977,7 +2986,11 @@ describe("clean session control plane", () => {
     });
     const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
     expect(history.map((row) => row.item)).toEqual([
-      { type: "message", role: "user", content: "change the external state" },
+      {
+        type: "message",
+        role: "user",
+        content: acceptedUserContent("change the external state", turn!),
+      },
       {
         type: "function_call",
         name: "mutate_state",
@@ -4314,7 +4327,7 @@ describe("clean session control plane", () => {
     expect(nextHistory.at(-1)?.item).toMatchObject({
       type: "message",
       role: "user",
-      content: "Use the child result now",
+      content: acceptedUserContent("Use the child result now", prompt.turn),
     });
   });
 
@@ -6670,7 +6683,9 @@ describe("clean session control plane", () => {
       (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
         (row) => row.item,
       ),
-    ).toEqual([{ type: "message", role: "user", content: "build it" }]);
+    ).toEqual([
+      { type: "message", role: "user", content: acceptedUserContent("build it", first!) },
+    ]);
 
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
     expect(
