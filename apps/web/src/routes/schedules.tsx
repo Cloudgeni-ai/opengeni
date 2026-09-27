@@ -778,7 +778,7 @@ export function SchedulesRoute({
         </>
       ) : null}
 
-      <div className="mt-4 grid gap-2">
+      <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-2">
         {tasksView === "loading" ? (
           <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-4 text-sm text-fg-muted">
             <Loader2Icon className="size-4 animate-spin" />
@@ -841,7 +841,7 @@ export function SchedulesRoute({
             </CollapsibleTrigger>
           </div>
           <CollapsibleContent>
-            <div className="mt-2 grid gap-2">
+            <div className="mt-2 grid grid-cols-[minmax(0,1fr)] gap-2">
               {groups.paused.map((task) => renderTaskCard(task, "paused"))}
             </div>
           </CollapsibleContent>
@@ -1489,7 +1489,7 @@ function ScheduledTaskForm(props: {
   };
 
   return (
-    <div className="mt-4 grid gap-5 border-t border-border pt-4">
+    <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-5 border-t border-border pt-4">
       <div className="grid gap-1.5">
         <Label>Name</Label>
         <Input

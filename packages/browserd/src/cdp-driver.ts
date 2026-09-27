@@ -448,7 +448,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // target-scoped CDP authority.
     this.started = true;
     let connection: BrowserCdpConnection;
-    let launched: { url?: unknown; targetId?: unknown };
+    let target: TargetInfo;
     if (this.targetLifecycle === "cdp") {
       connection = await this.ensureConnection();
       const created = await connection.send<{ targetId?: unknown }>(
@@ -456,10 +456,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         { url: "about:blank", background: true, ...this.contextScope() },
         { timeoutMs: BROWSER_START_TIMEOUT_MS },
       );
-      launched = {
-        targetId: created.targetId,
-        url: "about:blank",
-      };
+      if (typeof created.targetId !== "string" || !created.targetId) {
+        throw new Error("browser did not return its initial page target");
+      }
+      // Attached Chrome's tab inventory may lag the creation receipt. Never
+      // substitute another tab (even another blank tab) for the exact target
+      // we created: the initial navigation would overwrite the user's page.
+      target = await this.waitForCreatedTargetInfo(connection, created.targetId);
     } else {
       connection = await this.ensureConnection();
       if (this.headlessSessionCookies) {
@@ -478,18 +481,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         }
         page = await this.waitForCreatedTargetInfo(connection, created.targetId);
       }
-      launched = { targetId: page.targetId, url: page.url };
+      target = page;
     }
-    const targets = await this.targetInfos(connection);
-    const launchedUrl = typeof launched.url === "string" ? launched.url : url;
-    const launchedTargetId = typeof launched.targetId === "string" ? launched.targetId : undefined;
-    const target =
-      targets.find(
-        (candidate) => candidate.type === "page" && candidate.targetId === launchedTargetId,
-      ) ??
-      targets.find((candidate) => candidate.type === "page" && candidate.url === launchedUrl) ??
-      visiblePageTargets(targets)[0];
-    if (!target) throw new Error("managed browser launched without a page target");
     this.selectedTargetId = target.targetId;
     await this.activateManagedTarget(target.targetId);
     if (deferNavigation) {

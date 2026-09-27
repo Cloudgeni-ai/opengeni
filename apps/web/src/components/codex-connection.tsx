@@ -47,24 +47,8 @@ import {
   redeemCodexResetCredit,
   type CodexResetRedemptionPreparation,
 } from "@/api";
+import { relativePastTimestamp, relativeTimestamp } from "@/lib/relative-timestamp";
 import { cn } from "@/lib/utils";
-
-function relativeTimestamp(value: string | number | null | undefined, now: number): string {
-  if (value == null) return "";
-  const timestamp = typeof value === "number" ? value * 1000 : new Date(value).getTime();
-  if (!Number.isFinite(timestamp)) return "";
-  const delta = timestamp - now;
-  const future = delta >= 0;
-  const absolute = Math.abs(delta);
-  const minutes = Math.max(1, Math.round(absolute / 60_000));
-  const amount =
-    minutes >= 1440
-      ? `${Math.round(minutes / 1440)}d`
-      : minutes >= 60
-        ? `${Math.round(minutes / 60)}h`
-        : `${minutes}m`;
-  return future ? `in ${amount}` : `${amount} ago`;
-}
 
 function absoluteTimestamp(value: string | number | null | undefined): string {
   if (value == null) return "";
@@ -414,7 +398,7 @@ function AccountUsageMeta({
         <div className="text-2xs text-fg-subtle">
           {overview.usage.source === "provider" ? "Provider reported" : "Cached by OpenGeni"}
           {overview.usage.fetchedAt
-            ? ` · ${absoluteTimestamp(overview.usage.fetchedAt)} (${relativeTimestamp(overview.usage.fetchedAt, now)})`
+            ? ` · ${absoluteTimestamp(overview.usage.fetchedAt)} (${relativePastTimestamp(overview.usage.fetchedAt, now)})`
             : " · never checked"}
           {overview.usage.stale ? " · stale" : ""}
         </div>
@@ -490,7 +474,7 @@ export function ResetCreditInventory({
       <p className="text-2xs text-fg-subtle" aria-live="polite">
         {authorityCopy[reset.detailState]}
         {reset.fetchedAt
-          ? ` Checked ${absoluteTimestamp(reset.fetchedAt)} (${relativeTimestamp(reset.fetchedAt, now)}).`
+          ? ` Checked ${absoluteTimestamp(reset.fetchedAt)} (${relativePastTimestamp(reset.fetchedAt, now)}).`
           : ""}
       </p>
       {viewOnlyOwnership === "unowned" ? (
@@ -730,6 +714,7 @@ export function CodexSubscriptionsCardWithClient({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [disconnectTarget, setDisconnectTarget] = useState<CodexAccount | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
@@ -1096,14 +1081,16 @@ export function CodexSubscriptionsCardWithClient({
   }, [redemption, workspaceId, refreshUsage]);
 
   const disconnect = useCallback(
-    async (accountId: string) => {
+    async (accountId: string): Promise<boolean> => {
       setBusy(true);
       try {
         await client.disconnectCodexAccount(workspaceId, accountId);
         await refreshAccounts();
         toast.success("Subscription disconnected");
+        return true;
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Failed to disconnect subscription");
+        return false;
       } finally {
         setBusy(false);
       }
@@ -1461,7 +1448,7 @@ export function CodexSubscriptionsCardWithClient({
                         variant="ghost"
                         size="sm"
                         disabled={busy}
-                        onClick={() => void disconnect(account.id)}
+                        onClick={() => setDisconnectTarget(account)}
                       >
                         <Trash2Icon className="size-3.5" /> Disconnect
                       </Button>
@@ -1526,6 +1513,21 @@ export function CodexSubscriptionsCardWithClient({
           ) : null}
         </div>
       ) : null}
+      <ConfirmDialog
+        open={disconnectTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDisconnectTarget(null);
+        }}
+        title={
+          disconnectTarget
+            ? `Disconnect ${accountDisplay(disconnectTarget)}?`
+            : "Disconnect subscription?"
+        }
+        description="New chats and scheduled tasks in this workspace stop using this Codex subscription, for everyone. You can connect it again later."
+        confirmLabel="Disconnect subscription"
+        pendingLabel="Disconnecting…"
+        onConfirm={() => (disconnectTarget ? disconnect(disconnectTarget.id) : false)}
+      />
       <ConfirmDialog
         open={redemption != null}
         onOpenChange={(open) => {

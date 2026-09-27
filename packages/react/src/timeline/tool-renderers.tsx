@@ -889,6 +889,14 @@ function LoadedRetainedSessionImageDisclosure({
 }: RetainedSessionImageDisclosureProps) {
   const state = useRetainedImageObjectUrl(artifact, load);
   const downloadFilename = filename ?? retainedImageFilename(artifact);
+  const figure = {
+    src: state.kind === "ready" ? state.url : "",
+    caption,
+    alt: caption,
+    expandLabel: `Expand ${noun}`,
+    lightboxLabel,
+    downloadFilename,
+  };
 
   return (
     <ActivityDisclosure
@@ -909,14 +917,7 @@ function LoadedRetainedSessionImageDisclosure({
       }
       media={
         state.kind === "ready" ? (
-          <Thumbnail
-            src={state.url}
-            caption={caption}
-            alt={caption}
-            expandLabel={`Expand ${noun}`}
-            lightboxLabel={lightboxLabel}
-            downloadFilename={downloadFilename}
-          />
+          <Thumbnail {...figure} />
         ) : state.kind === "loading" ? (
           <MediaSkeleton />
         ) : (
@@ -925,14 +926,7 @@ function LoadedRetainedSessionImageDisclosure({
       }
     >
       {state.kind === "ready" ? (
-        <ScreenshotFigure
-          src={state.url}
-          caption={caption}
-          alt={caption}
-          expandLabel={`Expand ${noun}`}
-          lightboxLabel={lightboxLabel}
-          downloadFilename={downloadFilename}
-        />
+        <ScreenshotFigure {...figure} />
       ) : state.kind === "loading" ? (
         <BodyNote>Loading the retained {noun}…</BodyNote>
       ) : state.kind === "unavailable" ? (
@@ -940,13 +934,27 @@ function LoadedRetainedSessionImageDisclosure({
           {noun === "screenshot" ? "Screenshot" : "Image"} {state.label}.
         </BodyNote>
       ) : (
-        <BodyNote tone="error">
-          {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed: {state.message}
-        </BodyNote>
+        <ImageRetrievalError noun={noun} retry={state.retry} />
       )}
       {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
       {children}
     </ActivityDisclosure>
+  );
+}
+
+function ImageRetrievalError({ noun = "image", retry }: { noun?: string; retry: () => void }) {
+  return (
+    <BodyNote tone="error">
+      {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed.{" "}
+      <button
+        type="button"
+        aria-label={`Retry ${noun} retrieval`}
+        onClick={retry}
+        className="underline underline-offset-2"
+      >
+        Retry
+      </button>
+    </BodyNote>
   );
 }
 
@@ -1294,7 +1302,7 @@ function GeneratedImageDisclosure({
       ) : state.kind === "unavailable" ? (
         <BodyNote>Image {state.label}.</BodyNote>
       ) : (
-        <BodyNote tone="error">Image retrieval failed.</BodyNote>
+        <ImageRetrievalError retry={state.retry} />
       )}
       <BodyNote>
         {dimensions.width}×{dimensions.height} · {receipt.sandboxPath}

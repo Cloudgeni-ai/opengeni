@@ -376,7 +376,10 @@ test.each([
                 url: "https://first.example.test/",
                 attached: true,
               },
-              ...(created
+              // An attached bridge can acknowledge creation before its tab
+              // inventory includes the new target. Existing user tabs must
+              // never receive the requested initial navigation in that gap.
+              ...(created && createdTargetReads >= 2
                 ? [
                     {
                       targetId: "target-2",

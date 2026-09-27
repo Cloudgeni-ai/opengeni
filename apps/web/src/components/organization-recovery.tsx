@@ -530,7 +530,7 @@ export function OrganizationRecoverySection(props: {
               value={targetMembershipId}
               disabled={Boolean(visibleBusy)}
               onChange={(event) => setTargetMembershipId(event.target.value)}
-              className="min-h-11 min-w-0 rounded-md border border-input bg-bg px-3 text-sm"
+              className="min-h-11 min-w-0 rounded-md border border-border bg-bg px-3 text-sm"
             >
               {eligibleMembers.map((member) => (
                 <option key={member.membershipId} value={member.membershipId}>

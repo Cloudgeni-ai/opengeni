@@ -62,6 +62,38 @@ mock.module("sonner", () => ({
   toast: { error: mock(() => undefined), success: mock(() => undefined) },
 }));
 
+mock.module("@/components/ui/confirm-dialog", () => ({
+  ConfirmDialog: ({
+    open,
+    title,
+    confirmLabel,
+    onOpenChange,
+    onConfirm,
+  }: {
+    open: boolean;
+    title: string;
+    confirmLabel: string;
+    onOpenChange: (open: boolean) => void;
+    onConfirm: () => Promise<void | boolean> | boolean;
+  }) =>
+    open ? (
+      <div role="dialog">
+        <p>{title}</p>
+        <button
+          type="button"
+          onClick={() => {
+            void (async () => {
+              const result = await onConfirm();
+              if (result !== false) onOpenChange(false);
+            })();
+          }}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    ) : null,
+}));
+
 const { OrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
 
 beforeAll(() => {
@@ -117,6 +149,16 @@ describe("organization Codex subscriptions", () => {
       );
       expect(disconnect).not.toBeNull();
       await act(async () => disconnect!.click());
+      await flush();
+
+      // Disconnecting a paid subscription asks first and names the account.
+      expect(requestJson.mock.calls.some(([method]) => method === "DELETE")).toBe(false);
+      expect(document.body.textContent).toContain("Disconnect Backup subscription?");
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Disconnect subscription",
+      );
+      expect(confirm).toBeDefined();
+      await act(async () => confirm!.click());
       await flush();
 
       expect(requestJson.mock.calls).toContainEqual([

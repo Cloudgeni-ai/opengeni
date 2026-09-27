@@ -165,8 +165,6 @@ They remain on the turn cancellation fence and stop before finalization, allowin
 an agent to test a preview server without waiting for it to exit.
 
 `wait_for_input` persists a turn and deadline; input or timeout resumes execution.
-A human/API turn that neither waits again nor consumes immediate input leaves it
-held.
 Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
 drives working/recheck UI separately from unread. `session_wait`/`command_wait`
 are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
@@ -192,10 +190,9 @@ retain backoff.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
-Reports—including secondary audits—use native documents. Operational instructions
-route authoring to the Documents Skill; goal/artifact domains validate persisted
-requirements/current inspection proof. Chat/code/local-file
-exceptions remain. See [`goals.md`](goals.md).
+Reports default to chat; requested or large ones use native documents authored
+via the Documents Skill; goal/artifact domains validate persisted
+requirements/current inspection proof. See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 
@@ -445,6 +442,8 @@ Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.t
 or proved provider loss (`packages/db/src/index.ts`). Both require a verified
 CURRENT checkpoint, singleton, quiescence and durable warning; no command
 replay/empty reset. See migrations 0495/0526 and [run lifecycle](run-lifecycle.md).
+Operator reauthorization supersedes verified public recovery;
+[provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
@@ -1173,7 +1172,6 @@ it may not detach a rejecting task or install an `unhandledRejection` handler
 that exits the shared worker. The worker's global rejection listener is a
 last-resort observational boundary, while deliberate restart remains an
 OpenGeni drain-and-checkpoint decision.
-Audited historical recovery preserves generation gaps; see [`run-lifecycle.md`](run-lifecycle.md).
 
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.
@@ -1411,8 +1409,9 @@ partial-message row IDs. `timeline-anchor.tsx` captures pre-mutation position;
 `message-timeline.tsx` corrects residual browser-anchor movement without resuming
 tip-follow. Upward input loads bounded older pages despite collapsed rows.
 Underfill preserves tails, offers explicit earlier navigation at limits, never
-auto-pages forward; Jump to latest restores live tails. Normalization/coalescing
-joins interleaved chunks by provider identity without merging distinct messages.
+auto-pages forward; Jump to latest restores live tails. Normalization
+joins chunks by provider identity; each message completes once, in order, with
+`phase` (see `docs/run-lifecycle.md`).
 Pre-transfer metadata planning bounds database batches to 256 events and the
 default 1 MiB full-payload page budget.
 
@@ -1513,6 +1512,10 @@ Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
+
+`apps/worker/src/retained-process-retry.ts` caps retained observation backoff at
+the exact Modal lease's rotation lead boundary, then reaper cadence; cancellation,
+capture and settlement proofs remain unchanged.
 
 Scheduled deadline rotation stops legacy commands where possible, then captures
 after bounded grace under a quiesced owner, exact lease fence, and no other

@@ -130,8 +130,12 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-* {
-  border-color: var(--color-border);
+/* Layered so Tailwind border-color utilities (border-brand, border-danger...)
+   can override the default. Unlayered, this rule beat every utility. */
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
 }
 
 ::selection {
@@ -184,7 +188,21 @@ body {
 ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
-  border-radius: var(--radius-sm);
+}
+
+/* Round the ring on unstyled targets (bare links, text buttons) without
+   overriding a control's own rounded-* utility, which would snap it to 6px. */
+@layer base {
+  :where(
+    button,
+    a,
+    input,
+    textarea,
+    [role="button"],
+    [tabindex]:not([tabindex="-1"])
+  ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
+    border-radius: var(--radius-sm);
+  }
 }
 
 /* Connector controls own a bounded inset ring, so adjacent actions never overlap. */

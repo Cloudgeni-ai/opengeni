@@ -98,7 +98,7 @@ const chat = await og.chat({
 });
 
 const reply = await chat.send("hello"); // creates the session on the first send
-console.log(reply.text); // or String(reply)
+console.log(reply.text); // or String(reply); the answer, without progress commentary
 
 for await (const chunk of chat.stream("and then?")) {
   if (chunk.type === "text") process.stdout.write(chunk.text);

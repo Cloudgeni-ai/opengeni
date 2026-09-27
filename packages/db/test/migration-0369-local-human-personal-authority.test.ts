@@ -62,6 +62,8 @@ describe("migration 0369 local human personal authority", () => {
       (grant) => grant.workspaceId === access.defaultWorkspaceId,
     );
     if (!workspace) throw new Error("local workspace grant was not returned");
+    // The local organization grant carries its real name, like managed grants.
+    expect(access.accountGrants[0]?.metadata).toEqual({ accountName: "OpenGeni Local" });
     const now = new Date().toISOString();
     const connection = await persistProviderOAuthConnection(client.db, {
       accountId: workspace.accountId,

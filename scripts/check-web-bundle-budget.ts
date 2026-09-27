@@ -477,6 +477,12 @@ const effectiveBudgets = {
     // 1.5 KiB headroom; gzip, file-count, initial, per-file, lazy, and CSS caps
     // stay fixed.
     wholeKibEnvelope(2_455_310, 1.5 * kib),
+    // Layered base border-color/focus-radius rules (the focus selector is
+    // repeated inside @layer base) plus the settings truthfulness fixes: base
+    // 92cbe65c6 measures 2,456,501 raw / 693,335 gzip and this change
+    // 2,458,018 / 693,922 across the same 33 files (Bun 1.4.2 Linux/x64).
+    // Keep the established 1.5 KiB allowance; gzip and other caps stay fixed.
+    wholeKibEnvelope(2_458_018, 1.5 * kib),
     // Artifact link resolution and host message-presentation plumbing: 2,445,478
     // raw / 691,865 gzip on Bun 1.4 macOS/arm64. Media/PDF viewers remain lazy.
     wholeKibEnvelope(2_445_478, 1.5 * kib),

@@ -16,6 +16,7 @@ import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-co
 
 import { ModelConnectionSection } from "@/components/model-connection-section";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { SubscriptionAccountRow } from "@/components/subscription-account-row";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Select } from "@/components/ui/select";
@@ -63,6 +64,7 @@ export function SuperGrokSubscriptionsCardWithClient({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [disconnectTarget, setDisconnectTarget] = useState<SuperGrokAccount | null>(null);
   const [pending, setPending] = useState<PendingDeviceCode | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const cancelled = useRef(false);
@@ -161,14 +163,16 @@ export function SuperGrokSubscriptionsCardWithClient({
   }, [client, refresh, scope, workspaceId, organizationId]);
 
   const mutate = useCallback(
-    async (operation: () => Promise<unknown>, success: string) => {
+    async (operation: () => Promise<unknown>, success: string): Promise<boolean> => {
       setBusy(true);
       try {
         await operation();
         await refresh();
         toast.success(success);
+        return true;
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "SuperGrok update failed");
+        return false;
       } finally {
         setBusy(false);
       }
@@ -372,18 +376,7 @@ export function SuperGrokSubscriptionsCardWithClient({
                       variant="ghost"
                       size="sm"
                       disabled={busy}
-                      onClick={() =>
-                        void mutate(
-                          () =>
-                            organizationId
-                              ? client.disconnectOrganizationSuperGrokAccount(
-                                  organizationId,
-                                  account.id,
-                                )
-                              : client.disconnectSuperGrokAccount(workspaceId!, account.id),
-                          "SuperGrok account disconnected",
-                        )
-                      }
+                      onClick={() => setDisconnectTarget(account)}
                     >
                       <Trash2Icon className="size-3.5" /> Disconnect
                     </Button>
@@ -437,6 +430,35 @@ export function SuperGrokSubscriptionsCardWithClient({
             : "The active subscription runs sessions that aren't pinned to a specific account."}
         </p>
       ) : null}
+      <ConfirmDialog
+        open={disconnectTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDisconnectTarget(null);
+        }}
+        title={
+          disconnectTarget
+            ? `Disconnect ${accountLabel(disconnectTarget)}?`
+            : "Disconnect SuperGrok account?"
+        }
+        description={
+          organizationId
+            ? "Workspaces that use the organization's SuperGrok accounts stop using this one for new work. You can connect it again later."
+            : "New chats and scheduled tasks in this workspace stop using this SuperGrok account. You can connect it again later."
+        }
+        confirmLabel="Disconnect account"
+        pendingLabel="Disconnecting…"
+        onConfirm={() => {
+          const account = disconnectTarget;
+          if (!account) return false;
+          return mutate(
+            () =>
+              organizationId
+                ? client.disconnectOrganizationSuperGrokAccount(organizationId, account.id)
+                : client.disconnectSuperGrokAccount(workspaceId!, account.id),
+            "SuperGrok account disconnected",
+          );
+        }}
+      />
     </ModelConnectionSection>
   );
 }

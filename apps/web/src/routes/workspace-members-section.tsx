@@ -35,6 +35,7 @@ import {
   workspaceMemberPermissionGroups,
   type WorkspaceAccessLevel,
 } from "@/lib/permissions";
+import { workspaceMemberAccessRole } from "@/lib/workspace-access-levels";
 import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
@@ -110,7 +111,9 @@ function MembersSectionContent({
     ]);
     if (!isCurrentRefresh()) return;
     if (memberResult.status === "fulfilled") {
-      setMembers(memberResult.value.filter((member) => member.subjectId.startsWith("user:")));
+      // Every person with access, including the local owner (`dev`); only
+      // workspace API keys hold memberships without being people.
+      setMembers(memberResult.value.filter((member) => !member.subjectId.startsWith("api_key:")));
     } else {
       setMembersError(
         memberResult.reason instanceof Error
@@ -382,13 +385,7 @@ function MembersSectionContent({
           <div className="divide-y divide-border/70">
             {members.map((member) => {
               const label = memberLabel(member);
-              const currentLevel = workspaceAccessLevels.find(
-                (level) =>
-                  level.role === member.role &&
-                  new Set(level.permissions).size === new Set(member.permissions).size &&
-                  level.permissions.every((permission) => member.permissions.includes(permission)),
-              );
-              const roleValue = currentLevel?.role ?? "custom";
+              const roleValue = workspaceMemberAccessRole(member, workspaceAccessLevels);
               const isSelf = member.subjectId === context.accessContext.subjectId;
               return (
                 <div
@@ -409,8 +406,10 @@ function MembersSectionContent({
                       <p className="truncate text-xs text-fg-muted">
                         {roleValue === "custom"
                           ? "Custom access"
-                          : workspaceAccessLevels.find((level) => level.role === roleValue)
-                              ?.description}
+                          : roleValue === "owner"
+                            ? "Owns this workspace and can manage everything in it."
+                            : workspaceAccessLevels.find((level) => level.role === roleValue)
+                                ?.description}
                       </p>
                     </div>
                   </div>
@@ -427,6 +426,11 @@ function MembersSectionContent({
                         {roleValue === "custom" ? (
                           <option value="custom" disabled>
                             Custom access
+                          </option>
+                        ) : null}
+                        {roleValue === "owner" ? (
+                          <option value="owner" disabled>
+                            Owner
                           </option>
                         ) : null}
                         {workspaceAccessLevels.map((level) => (
@@ -455,7 +459,9 @@ function MembersSectionContent({
                     <span className="text-sm text-fg-muted">
                       {roleValue === "custom"
                         ? "Custom access"
-                        : workspaceAccessLevels.find((level) => level.role === roleValue)?.label}
+                        : roleValue === "owner"
+                          ? "Owner"
+                          : workspaceAccessLevels.find((level) => level.role === roleValue)?.label}
                     </span>
                   )}
                   <div className="flex justify-end">

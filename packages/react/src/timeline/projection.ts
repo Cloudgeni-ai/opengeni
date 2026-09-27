@@ -470,6 +470,9 @@ export function buildTimeline(
         }
         const messageId = stringValue(payload.messageId);
         const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
+        // Responses providers declare the phase when they announce the item, so
+        // a streaming progress note is known as commentary before it completes.
+        const phase = assistantMessagePhase(payload.phase);
         if (
           (!completeHistoryPrefix && !knownMessagePrefixTurns.has(turnId)) ||
           (messageKey && incompleteMessageKeys.has(messageKey))
@@ -477,14 +480,11 @@ export function buildTimeline(
           if (messageKey) incompleteMessageKeys.add(messageKey);
           break;
         }
-        // A provider phase on the stream classifies the message while it
-        // streams instead of when it completes.
-        const deltaPhase = assistantMessagePhase(payload.phase);
         const identified = messageKey ? identifiedMessages.get(messageKey) : undefined;
         if (identified) {
           if (identified.annotationSource?.eventType !== "agent.message.completed") {
             identified.text += text;
-            if (deltaPhase && !identified.phase) identified.phase = deltaPhase;
+            if (phase && !identified.phase) identified.phase = phase;
             rememberAgentResponse(turnId, identified, false);
           }
           break;
@@ -526,7 +526,7 @@ export function buildTimeline(
           id: event.id,
           turnId,
           text,
-          ...(deltaPhase ? { phase: deltaPhase } : {}),
+          ...(phase ? { phase } : {}),
           streaming: true,
           occurredAt: event.occurredAt,
         };
@@ -1164,10 +1164,11 @@ export function buildTimeline(
           Boolean(visibleFinalOutput) && !finalOutputMirrorsCommentary;
         const pendingWaitOutcome = takePendingWaitOutcome(turnId);
         if (hasAuthoritativeFinalOutput) {
-          // `agent.message.completed` and `turn.completed` normally commit
-          // together, but legacy or partially compacted ledgers may retain only
-          // the terminal output receipt. Keep that authoritative response
-          // visible instead of leaving it trapped in raw audit data.
+          // The final message normally lands as its own completion before
+          // `turn.completed` (older workers commit a copy with it), but legacy or
+          // partially compacted ledgers may retain only the terminal output
+          // receipt. Keep that authoritative response visible instead of
+          // leaving it trapped in raw audit data.
           if (
             latestAgentResponse &&
             !latestAgentResponse.completed &&

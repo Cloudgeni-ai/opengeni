@@ -71,13 +71,26 @@ wakes the agent once more; the deadline bounds that cost.
 `sessionInputWaitDecidingTurnSql` in `packages/db/src/index.ts` is the single
 predicate for this rule. Worker peek and settlement, wake and claim admission,
 public `inputWait`, and waiting-descendant counts all read it.
+The operational instructions still tell the agent to answer and then call
+`wait_for_input` again while the awaited work is still in flight, reusing the
+earlier reason and only the time left before the earlier deadline, because
+each turn's wait sets a fresh deadline from its timeout.
 
 A successful Temporal signal is transport delivery, not input admission. The
 current workflow-wake revision stays retryable while an eligible immediate input
 remains pending, or an idle session still owns an expired input wait. Future holds acknowledge
 the early signal so settlement can re-arm their deadline without retaining an
 earlier retry time. A closing
-workflow cannot acknowledge away that obligation. Claim, supersession, and
+workflow cannot acknowledge away that obligation.
+An immediate update that reaches an idle session whose wake is still
+undelivered joins that revision instead of opening another one. The row is
+often future-dated (the `wait_for_input` deadline or goal idle backoff), so the
+update pulls it to now and its producer still signals after commit; without
+that signal the input would wait for the periodic dispatcher tick. The extra
+signal is a hint only: one claim consumes the whole pending batch, and the
+acknowledgement rules above keep the revision open until it does. Terminal
+background-command settlement registers the same wake but does not signal from
+its settlement callers, so the dispatcher delivers it. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 without ongoing intent do not create new work.
 
@@ -129,6 +142,16 @@ pending one, and the parent timeline records `system.update.cancelled` with
 results, an immediate child notice may autonomously wake a parent with either
 an active goal or a current session-level wait. Without either durable
 obligation, child lifecycle notices remain pending until new intent arrives.
+
+A failed or cancelled child reports from its settlement transaction, but an
+idle child reports only when its workflow closes. After the terminal turn
+settles, the child's `sessionWorkflow` idle branch waits the bounded 5 s signal
+race window, re-peeks PostgreSQL, and only then runs `markSessionIdle`, which
+commits the `child_terminal_result` outbox row and delivers it to the parent.
+That window therefore adds about 5 s to every idle handoff. Notifying the
+parent when the terminal turn settles, while keeping the window only for
+closing the run, changes the workflow's command sequence and needs a Temporal
+`patched()` gate plus a decision on what a notified-but-open `idle` child means.
 
 Terminal background-command settlement follows the same proof-first rule as
 the command lifecycle. The transaction that changes the exact command row from

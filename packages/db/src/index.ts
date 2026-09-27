@@ -1767,6 +1767,9 @@ export async function bootstrapWorkspace(
           ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
           role: "owner",
           permissions: input.accountPermissions ?? allAccountPermissions,
+          // Same shape as managed grants, so clients show the organization's
+          // real name instead of an id fragment.
+          metadata: { accountName: account.name },
         },
       ],
       workspaceGrants: memberships.map((row) => ({
@@ -38367,6 +38370,26 @@ function excludeUnclaimedHumanPromptEventFilter(workspaceId: string): SQL {
 }
 
 /**
+ * SQL twin of `isStreamedAssistantMessageCompletion` in `@opengeni/contracts`.
+ * Every branch is coalesced: a missing key must keep the row, never make the
+ * negated predicate unknown.
+ */
+function excludeStreamedAssistantMessageEventFilter(): SQL {
+  const event = schema.sessionEvents;
+  return sql`not (
+    ${event.type} = 'agent.message.completed'
+    and (
+      coalesce(${event.payload} ->> 'phase', '') in ('commentary', 'final_answer')
+      or coalesce(
+        jsonb_typeof(${event.payload} -> 'messageId') = 'string'
+          and ${event.payload} ->> 'messageId' <> '',
+        false
+      )
+    )
+  )`;
+}
+
+/**
  * Compact-by-construction discovery projection for the first-party
  * `sessions_list` MCP tool. It never selects instructions, resources, tools,
  * MCP metadata, repositories, settings, or full event/history bodies.
@@ -39133,6 +39156,13 @@ export type ListSessionEventsOptions = {
    * exact.
    */
   excludeUnclaimedHumanPrompts?: boolean;
+  /**
+   * Omit per-message assistant completions (they carry a provider `messageId`
+   * or a `phase`). The settling `turn.completed` carries the answer, so a
+   * reader of settled changes excludes them in SQL: a long run of progress
+   * notes can then neither wake it nor fill its page ahead of the outcome.
+   */
+  excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
@@ -39262,10 +39292,15 @@ export async function listSessionEventPage(
       if (options.excludeUnclaimedHumanPrompts) {
         filters.push(excludeUnclaimedHumanPromptEventFilter(workspaceId));
       }
+      if (options.excludeStreamedAssistantMessages) {
+        filters.push(excludeStreamedAssistantMessageEventFilter());
+      }
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
         // null. They remain eligible; explicitly stale/duplicate rows and rows
-        // carrying a duplicate reference cannot compete with current truth.
+        // carrying a duplicate reference cannot compete with current truth. A
+        // completed progress note is not a result, so it cannot be the latest
+        // terminal event while a turn is still working.
         filters.push(
           and(
             or(
@@ -39273,6 +39308,8 @@ export async function listSessionEventPage(
               eq(schema.sessionEvents.turnAssociation, "current"),
             )!,
             isNull(schema.sessionEvents.duplicateOfEventId),
+            sql`not (${schema.sessionEvents.type} = 'agent.message.completed'
+              and coalesce(${schema.sessionEvents.payload} ->> 'phase', '') = 'commentary')`,
           )!,
         );
       }
@@ -47086,6 +47123,12 @@ export async function authorizeHistoricalSandboxCheckpointRecovery(
       (await authorizedHistoricalArchiveGeneration(tx, row)) === input.expectedArchiveGeneration
     )
       return { authorized: true };
+    const publicRecovery = row.public_recovery as Record<string, unknown> | null;
+    // Only a completed public restore may be superseded by this new, exact
+    // operator authorization. Never steal an accepted selection or silently
+    // retry a failed public operation. Keep its full projection in the new
+    // audit receipt; permanent public command receipts remain untouched.
+    if (publicRecovery && publicRecovery.status !== "verified") return { authorized: false };
     const metadata = {
       version: 1,
       leaseId: row.id,
@@ -47095,6 +47138,7 @@ export async function authorizeHistoricalSandboxCheckpointRecovery(
       selectedRevision: input.selectedRevision,
       reason: input.reason,
       acceptedHistoricalCheckpoint: true,
+      ...(publicRecovery ? { supersededPublicRecovery: publicRecovery } : {}),
     };
     await tx.insert(schema.auditEvents).values(
       withLosslessContentWriteVersion(
@@ -47112,7 +47156,8 @@ export async function authorizeHistoricalSandboxCheckpointRecovery(
         "metadataCodecVersion",
       ),
     );
-    await tx.execute(sql`update sandbox_leases set resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+    await tx.execute(sql`update sandbox_leases set public_recovery = null,
+      resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
       '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(input.operationId)}::jsonb), updated_at = now()
       where id = ${row.id}`);
     return { authorized: true };
@@ -79222,7 +79267,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           added: true,
           reason: "added",
           update: mapSessionSystemUpdate(inserted),
-          shouldWake: wake?.shouldSignal ?? false,
+          shouldWake: wake !== null,
           workflowWakeRevision: wake?.wakeRevision ?? null,
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,

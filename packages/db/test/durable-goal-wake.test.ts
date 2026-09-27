@@ -3940,6 +3940,9 @@ describe("input-aware continuation cap and idle backoff", () => {
       },
     });
     if (!message.added) throw new Error("agent message was not inserted");
+    // It joins the armed backoff revision and still signals the workflow now.
+    expect(message.shouldWake).toBe(true);
+    expect(message.workflowWakeRevision).toBe(Number(wake!.wake_revision));
     wake = await outboxRow(ctx);
     expect(wake!.next_attempt_at.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
     expect(Number(wake!.wake_revision)).toBeGreaterThan(Number(wake!.delivered_revision));
