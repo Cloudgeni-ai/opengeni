@@ -36,6 +36,58 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("attached Chrome discovery never loads unrelated workspace inventories", async () => {
+    const bridge = {
+      enrollmentId: randomUUID(),
+      state: "online" as const,
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount: 0,
+      lastSeenAt: now,
+    };
+    const requests: unknown[] = [];
+    const unexpected = async () => {
+      throw new Error("Unrelated workspace inventory must not be loaded");
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: unexpected,
+        listComputerSessions: unexpected,
+        listBrowserIdentities: unexpected,
+        listAttachedBrowsers: async (workspace, options) => {
+          requests.push({ workspace, options });
+          return { revision: 42, bridges: [bridge], devices: [] };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    for (const includeDisconnectedDevices of [undefined, true]) {
+      const result = await definitions[0]!.execute(
+        { scope: "attached_browsers", includeDisconnectedDevices },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual({
+        browserRevision: 42,
+        computerRevision: 42,
+        identityRevision: 42,
+        attachedBrowserRevision: 42,
+        browsers: [],
+        computers: [],
+        identities: [],
+        attachedBrowserBridges: [bridge],
+        attachedBrowsers: [],
+      });
+    }
+    expect(requests).toEqual([
+      { workspace: workspaceId, options: { includeDisconnected: false } },
+      { workspace: workspaceId, options: { includeDisconnected: true } },
+    ]);
+  });
+
   test("browser reuse never crosses explicit ephemeral and private profile modes", async () => {
     for (const requestedMode of ["private_profile", "ephemeral_context"] as const) {
       const createRequests: Array<Record<string, unknown>> = [];
