@@ -1,5 +1,24 @@
 # @opengeni/db
 
+## 6.1.1
+
+### Patch Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+- a63a029: Reject Lightpanda placeholder images as screenshots and correct screenshot
+  capabilities for existing semantic-only sessions. Keep DOM observation available.
+- 4124c7c: Verify fresh conversation-history appends using their returned persisted rows instead of rereading numeric positions under row-level security while holding the session write lock. Existing-position retries retain exact content and turn checks, with atomic rollback on conflicts.
+- 2563950: Add a database runtime kill switch for the one-time verified signup trial credit (rolling migration 0521). A grant now needs both `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` and the newest row of the append-only `opengeni_private.verified_signup_trial_switch_revisions` table, which starts enabled. Operators flip it with the owner-only audited `set_verified_signup_trial_credits_enabled(enabled, operator, reason)` function. The change applies to the next setup transaction on every API replica, with no deploy or restart. Runtime roles can only read the switch. `readVerifiedSignupTrialSwitch` exposes the switch state, and the control worker publishes it as `opengeni_verified_signup_trial_credits_runtime_enabled`, next to `opengeni_verified_signup_trial_credits_deployment_enabled` for the master opt-in.
+- Updated dependencies [74e0dfb]
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/config@3.1.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/codemode@0.6.4
+  - @opengeni/codex@0.2.28
+
 ## 6.1.0
 
 ### Minor Changes

@@ -323,6 +323,7 @@ export type PlacementBrowserTransport =
 
 export type BrowserViewGrant = {
   fencedInputBatches?: true;
+  focusedInputObservations?: true;
   grantId: string;
   expiresAt: string;
 };
@@ -724,10 +725,16 @@ export class BrowserControlClient {
         "browser controller returned invalid input batching capability",
       );
     }
+    if (data.focusedInputObservations !== undefined && data.focusedInputObservations !== true) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned invalid focused input capability",
+      );
+    }
     return {
       grantId,
       expiresAt,
       ...(data.fencedInputBatches === true ? { fencedInputBatches: true } : {}),
+      ...(data.focusedInputObservations === true ? { focusedInputObservations: true } : {}),
     };
   }
 

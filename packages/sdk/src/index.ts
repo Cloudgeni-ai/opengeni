@@ -613,6 +613,7 @@ export type {
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,
+  CodexPlanExcludedModel,
   CodexAccountOverview,
   CodexAccountsResponse,
   SessionCodexAccountsResponse,

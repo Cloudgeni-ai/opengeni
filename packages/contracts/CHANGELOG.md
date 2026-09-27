@@ -1,5 +1,20 @@
 # @opengeni/contracts
 
+## 5.3.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+
+### Patch Changes
+
+- 1842911: Recover managed browser viewers through the existing session when an unrelated attached Chrome profile loses its connection. Negotiate focused-input observations so native select choices appear after a viewer click, with existing generation fences and explicit fallback for older controllers.
+- ec707de: Negotiate bounded viewer typing batches from the active browser controller. Preserve
+  individual text events and input order while reducing request overhead; recheck the
+  original document fence before each action and discard uncertain queued input
+  without replay. Older controllers retain sequential input.
+- 3aab8f9: Allow a single MCP provider to use the existing aggregate tool-count allowance instead of dropping otherwise bounded catalogs above 1,000 tools. Align permissions discovery and explicit tool selections with the same allowance. Preserve definition, response, per-provider and aggregate byte limits and shared count accounting.
+
 ## 5.2.0
 
 ### Minor Changes

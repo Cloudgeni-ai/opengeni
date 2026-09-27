@@ -1064,6 +1064,7 @@ export type BrowserSessionAttachment = {
   stream: InteractionFrameStreamAttachment<3>;
   /** Negotiated from this attachment’s live controller, absent on older helpers. */
   fencedInputBatches?: true | undefined;
+  focusedInputObservations?: true | undefined;
   expiresAt: string;
 };
 
@@ -1079,7 +1080,10 @@ export type BrowserActionRequest = {
   expectedTargetGeneration: string;
   expectedDocumentGeneration: string | null;
   expectedFrameId: string | null;
-  observationMode?: "full" | "none" | undefined;
+  /** `input` is negotiated by focusedInputObservations on a live attachment.
+   * It returns optional native-select metadata after a pointer click, and null
+   * for ordinary input. Use full for agent observations. */
+  observationMode?: "full" | "none" | "input" | undefined;
   action: BrowserAction | BrowserActionBatch;
 };
 

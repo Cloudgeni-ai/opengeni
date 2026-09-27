@@ -13,6 +13,10 @@ import {
   SandboxWorkspaceMutationFencedError,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  beginModalProviderCreate,
+  listPendingModalProviderCreates,
+  claimModalProviderCreateRecovery,
+  recordRecoveredModalProviderCreate,
   claimTemporalScheduleCleanups,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
@@ -893,6 +897,213 @@ describe("archive object publication binding and disposition", () => {
       superseded: true,
       candidateDisposition: "already_referenced",
     });
+  }, 60_000);
+});
+
+describe("Modal create outcome fencing", () => {
+  test("owner-death discovery binds one exact receipt without renewing or publishing the workspace", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      ...identity,
+      kind: "turn",
+      holderId: "dead-create-owner",
+      backend: "modal",
+      leaseTtlMs: 45000,
+    });
+    const operationId = crypto.randomUUID();
+    await beginModalProviderCreate(db, {
+      ...identity,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      operationId,
+      providerBindingKey: "fixture-provider",
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-fixture",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "b".repeat(64),
+    });
+    expect(await claimModalProviderCreateRecovery(db, identity)).toBeNull();
+    await admin`update sandbox_leases set expires_at=now()-interval '1 second', updated_at=now()-interval '1 minute'
+      where workspace_id=${ids.workspaceId} and sandbox_group_id=${ids.groupId}`;
+    expect(await listPendingModalProviderCreates(db)).toContainEqual({
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    });
+    const before = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    const claims = await Promise.all(
+      Array.from({ length: 4 }, () => claimModalProviderCreateRecovery(db, identity)),
+    );
+    const attempt = claims.find(Boolean)!;
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    expect(await listPendingModalProviderCreates(db)).not.toContainEqual({
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    });
+    const other = await freshWorkspace();
+    expect(
+      await recordRecoveredModalProviderCreate(db, {
+        ...identity,
+        workspaceId: other.workspaceId,
+        attempt,
+        instanceId: "sb-wrong-tenant",
+      }),
+    ).toBe(false);
+    expect(
+      await recordRecoveredModalProviderCreate(db, {
+        ...identity,
+        attempt: { ...attempt, providerBindingKey: "wrong" },
+        instanceId: "sb-wrong-binding",
+      }),
+    ).toBe(false);
+    expect(
+      await recordRecoveredModalProviderCreate(db, {
+        ...identity,
+        attempt: { ...attempt, leaseEpoch: attempt.leaseEpoch + 1 },
+        instanceId: "sb-wrong-epoch",
+      }),
+    ).toBe(false);
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        recordRecoveredModalProviderCreate(db, {
+          ...identity,
+          attempt,
+          instanceId: "sb-recovered-exact",
+        }),
+      ),
+    );
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const after = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    expect(after.instanceId).toBe("sb-recovered-exact");
+    expect(after.providerCreateAttempt).toEqual({ ...attempt, instanceId: "sb-recovered-exact" });
+    expect(after.expiresAt).toEqual(before.expiresAt);
+    expect(after.leaseEpoch).toBe(before.leaseEpoch);
+    expect(after.liveness).toBe("warming");
+    expect(after.recovery.workspace.status).toBe("not_ready");
+    expect(after.recovery.provider.instanceId).toBe("sb-recovered-exact");
+    expect(after.currentCheckpointArtifactId).toBe(before.currentCheckpointArtifactId);
+    // Discovery never terminates. The ordinary expired-holder sweep can now
+    // dispatch exact-instance cleanup instead of resetting an unknown create.
+    await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 0,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 0,
+    });
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("draining");
+  }, 60_000);
+
+  test("unknown reply survives rollback, global expiry and competing dispatch; late exact receipt unlocks cleanup", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      ...identity,
+      kind: "turn",
+      holderId: "unknown-create-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const expectedEpoch = acquired.lease.leaseEpoch;
+    const operationId = crypto.randomUUID();
+    const intent = {
+      ...identity,
+      expectedEpoch,
+      operationId,
+      providerBindingKey: "synthetic-modal-workspace/app/environment",
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-synthetic",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "a".repeat(64),
+    };
+    await beginModalProviderCreate(db, intent);
+    const receipt = (await readLease(db, ids.workspaceId, ids.groupId))!.providerCreateAttempt;
+    await failWarmingToCold(db, { ...identity, expectedEpoch });
+    await admin`update sandbox_leases set expires_at = now() - interval '1 second'
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
+    await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 45_000,
+    });
+    await reapStaleLeaseHolders(db, {
+      workspaceId: ids.workspaceId,
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 45_000,
+    });
+    const held = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    expect(held.liveness).toBe("warming");
+    expect(held.leaseEpoch).toBe(expectedEpoch);
+    expect(held.providerCreateAttempt).toEqual(receipt);
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 8 }, () => {
+        const competingOperation = crypto.randomUUID();
+        return beginModalProviderCreate(db, {
+          ...intent,
+          operationId: competingOperation,
+          providerName: `opengeni-create-${competingOperation}`,
+        });
+      }),
+    );
+    expect(attempts.every((result) => result.status === "rejected")).toBe(true);
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set resume_state = '{}'::jsonb
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set liveness = 'cold', lease_epoch = lease_epoch + 1
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      Promise.resolve(admin`update sandbox_leases set provider_create_attempt = null
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      Promise.resolve(admin`delete from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    const attribute = {
+      ...identity,
+      expectedEpoch,
+      instanceId: "sb-exact-late-reply",
+      leaseTtlMs: 45_000,
+    };
+    expect(
+      (
+        await recordWarmingSandboxCreated(db, {
+          ...attribute,
+          providerCreateOperationId: crypto.randomUUID(),
+        })
+      ).recorded,
+    ).toBe(false);
+    expect(
+      (
+        await recordWarmingSandboxCreated(db, {
+          ...attribute,
+          providerCreateOperationId: intent.operationId,
+        })
+      ).recorded,
+    ).toBe(true);
+    expect(
+      (await readLease(db, ids.workspaceId, ids.groupId))!.providerCreateAttempt?.instanceId,
+    ).toBe(attribute.instanceId);
+    // Synthetic provider terminal proof is the caller's precondition here.
+    await failWarmingToCold(db, { ...identity, expectedEpoch });
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("cold");
   }, 60_000);
 });
 
@@ -2269,6 +2480,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expectedEpoch: old.lease.leaseEpoch,
       instanceId: "old-provider-local",
       resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "old-provider-local" } },
+      },
       leaseTtlMs: 45_000,
       warmingLeaseTtlMs: 600_000,
     });
@@ -2318,6 +2533,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expectedEpoch: old.lease.leaseEpoch,
       instanceId: "old-provider-global",
       resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "old-provider-global" } },
+      },
       leaseTtlMs: 45_000,
       warmingLeaseTtlMs: 600_000,
     });

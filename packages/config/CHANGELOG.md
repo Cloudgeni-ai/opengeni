@@ -1,5 +1,24 @@
 # @opengeni/config
 
+## 3.1.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+
+### Patch Changes
+
+- 74e0dfb: Refresh the default Modal desktop image to the verified publication supporting
+  viewport actions and focused DOM reads. Report exact legacy controller schema
+  and route mismatches as unsupported controller features without replaying browser
+  actions or restarting live sessions.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/codex@0.2.28
+
 ## 3.0.0
 
 ### Major Changes

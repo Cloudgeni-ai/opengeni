@@ -106,6 +106,7 @@ afterAll(() => {
 
 beforeEach(() => {
   listWorkspaceMembers.mockClear();
+  listWorkspaceMembers.mockImplementation(async () => [callerMember, collaboratorMember]);
   listWorkspaceMemberCandidates.mockClear();
   addWorkspaceMember.mockClear();
   updateWorkspaceMember.mockClear();
@@ -138,6 +139,35 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
 }
 
 describe("workspace access settings convergence", () => {
+  test("lists the local owner and hides API-key subjects", async () => {
+    listWorkspaceMembers.mockImplementation(async () => [
+      {
+        subjectId: "dev",
+        subjectLabel: "Local dev",
+        role: "owner",
+        permissions: ["workspace:read", "workspace:admin", "members:manage"],
+        createdAt: "2026-08-10T12:00:00.000Z",
+      },
+      {
+        subjectId: "api_key:ci",
+        subjectLabel: "CI key",
+        role: "member",
+        permissions: ["workspace:read"],
+        createdAt: "2026-08-10T12:00:00.000Z",
+      },
+    ]);
+    const rendered = await renderMembers(false);
+    try {
+      expect(rendered.container.textContent).toContain("Local dev");
+      expect(rendered.container.textContent).toContain("Owner");
+      expect(rendered.container.textContent).not.toContain("Custom access");
+      expect(rendered.container.textContent).not.toContain("CI key");
+      expect(rendered.container.textContent).not.toContain("No members yet");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("shows the workspace-scoped member manager", async () => {
     const rendered = await renderMembers(true);
     try {

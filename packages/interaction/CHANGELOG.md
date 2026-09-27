@@ -1,5 +1,22 @@
 # @opengeni/interaction
 
+## 0.4.42
+
+### Patch Changes
+
+- 509513d: Accept synchronous iterables when restoring operation journals, allowing controllers to recover durable receipts without retaining every observation graph in memory at once. Existing array inputs remain supported.
+
+## 0.4.41
+
+### Patch Changes
+
+- ab4d25f: Release settled interaction receipt memory after successful durable persistence. Optional journal readers restore exact hash-bound receipts on replay; unavailable or changed records fail closed without repeating input. Controllers without durable readers retain bounded-entry compressed receipts.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+
 ## 0.4.40
 
 ### Patch Changes

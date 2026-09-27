@@ -359,7 +359,7 @@ test.each([
         }
         if (method === "Target.createTarget") {
           expect(params).toEqual({
-            url: targetLifecycle === "cdp" ? "about:blank" : "https://second.example.test/",
+            url: "about:blank",
             background: true,
           });
           created = true;
@@ -376,7 +376,10 @@ test.each([
                 url: "https://first.example.test/",
                 attached: true,
               },
-              ...(created
+              // An attached bridge can acknowledge creation before its tab
+              // inventory includes the new target. Existing user tabs must
+              // never receive the requested initial navigation in that gap.
+              ...(created && createdTargetReads >= 2
                 ? [
                     {
                       targetId: "target-2",
@@ -452,6 +455,18 @@ test.each([
           ? await driver.start("https://second.example.test/")
           : (await driver.start("https://first.example.test/"),
             await driver.openTarget("https://second.example.test/"));
+      const createdAt = calls.findIndex((call) => call.method === "Target.createTarget");
+      const navigatedAt = calls.findIndex(
+        (call, index) => index > createdAt && call.method === "Page.navigate",
+      );
+      expect(navigatedAt).toBeGreaterThan(createdAt);
+      expect(calls[navigatedAt]).toMatchObject({
+        params: { url: "https://second.example.test/" },
+        sessionId: "session-2",
+      });
+      expect(
+        calls.slice(createdAt, navigatedAt).some((call) => call.method === "Page.getFrameTree"),
+      ).toBe(true);
       if (targetLifecycle === "cdp")
         expect(
           calls

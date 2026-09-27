@@ -14,6 +14,8 @@ export type EphemeralChromiumPoolOptions = {
   /** Must launch a new, private, headless Chromium process; never an attached browser. */
   launch: () => Promise<BrowserCommandRunner>;
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
+  /** Notification after the owned browser process has terminated successfully. */
+  onTerminal?: () => void;
 };
 
 type LeaseOptions = Pick<
@@ -216,6 +218,7 @@ export class EphemeralChromiumContextPool {
       this.leases.clear();
       this.control?.close();
       await this.runner?.terminate?.();
+      this.options.onTerminal?.();
     });
     return this.shutdownPromise;
   }

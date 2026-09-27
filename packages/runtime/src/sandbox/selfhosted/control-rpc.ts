@@ -202,13 +202,10 @@ export function agentErrorToControlError(
         detail,
       });
     case ErrorCode.ERROR_CODE_DRAINING:
-      // A pre-admission backpressure rejection (the machine's bounded host-work
-      // pool is full, or it is shutting down): the op NEVER started, so it is safe
-      // to retry (SelfhostedSession.call retries it a bounded number of times).
-      // Replace the agent's internal "N in flight" phrasing with human-language,
-      // actionable copy; call() appends the retry count when it finally surfaces.
+      // Pre-admission refusal: the op never started. Preserve the typed cause;
+      // an update drain or a breaker is not proof of ordinary capacity exhaustion.
       return new SelfhostedControlError({
-        message: drainingMessage(0),
+        message: drainingMessage(0, detail),
         code: err.code,
         reason: null,
         retryable: true,
@@ -297,19 +294,37 @@ export function payloadTooLargeMessage(detail: Record<string, string>): string {
   );
 }
 
-/**
- * DRAINING copy: the machine is at its concurrent-work capacity. `retries` is the
- * number of times `SelfhostedSession.call` already re-tried before giving up (0 at
- * the mapping layer, the final count when it surfaces after exhausting retries).
- */
-export function drainingMessage(retries: number): string {
+/** Shared copy for plain errors and structured tool faults; unknown reasons
+ * must not be presented as proof of capacity exhaustion. */
+export function drainingPresentation(detail: Record<string, string>) {
+  if (detail.reason === "agent_update") {
+    return {
+      headline: "the machine is draining accepted work for a self-update",
+      cause: "a verified self-update is waiting for accepted work to finish",
+      tryNext: "wait for the self-update to finish, then retry; do not interrupt accepted work",
+    };
+  }
+  if (detail.backpressure === "queue_breaker" || detail.backpressure === "wait_breaker") {
+    return {
+      headline: `the machine's admission breaker '${detail.backpressure}' tripped`,
+      cause: `the '${detail.backpressure}' admission breaker detected a pathological backlog`,
+      tryNext:
+        "inspect host admission telemetry and the backlog before retrying; this is not ordinary load",
+    };
+  }
+  return {
+    headline: "the machine temporarily refused new work at admission",
+    cause: "the agent refused new work without a recognized admission reason",
+    tryNext: "try again shortly; if it persists, inspect the agent's admission and update state",
+  };
+}
+
+/** `retries` is zero at mapping and the final count after exhausting retries. */
+export function drainingMessage(retries: number, detail: Record<string, string> = {}): string {
   const retried =
     retries > 0 ? ` It was retried ${retries} time${retries === 1 ? "" : "s"} first.` : "";
-  return (
-    "The machine is at its concurrent-work capacity and could not accept this command." +
-    retried +
-    " Try again shortly, or reduce the number of commands you run in parallel."
-  );
+  const presentation = drainingPresentation(detail);
+  return `${presentation.headline}.${retried} ${presentation.tryNext}.`;
 }
 
 /** Rebuild a DRAINING error with the final retry count folded into its message —
@@ -319,7 +334,7 @@ export function drainingExhaustedError(
   retries: number,
 ): SelfhostedControlError {
   return new SelfhostedControlError({
-    message: drainingMessage(retries),
+    message: drainingMessage(retries, base.detail),
     code: base.code,
     reason: base.reason,
     retryable: base.retryable,

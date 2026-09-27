@@ -82,11 +82,14 @@ function projectHistoryMessage(item: Record<string, unknown>): CodexRealtimeInit
   const role = item.role;
   if (role !== "user" && role !== "developer" && role !== "assistant") return null;
   if (item.status !== undefined && item.status !== "completed") return null;
-  const text = messageText(item.content);
+  const text = messageText(item.content, role === "assistant" ? "" : "\n");
   return text ? { role, text } : null;
 }
 
-function messageText(content: unknown): string {
+// User and developer parts are separate blocks (application context, the
+// message time, the prompt), so each keeps its own line. Assistant output parts
+// are pieces of one answer and join directly.
+function messageText(content: unknown, separator: string): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
@@ -101,7 +104,7 @@ function messageText(content: unknown): string {
       }
       return [];
     })
-    .join("");
+    .join(separator);
 }
 
 function estimatedTokens(text: string): number {

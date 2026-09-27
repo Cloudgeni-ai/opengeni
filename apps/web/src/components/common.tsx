@@ -146,7 +146,7 @@ export function PageHeader(props: {
         props.className,
       )}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 lg:flex-1">
         <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
           <span className="text-brand">{props.icon}</span>
           {props.title}
@@ -156,7 +156,7 @@ export function PageHeader(props: {
         ) : null}
       </div>
       {props.actions ? (
-        <div className="flex min-w-0 flex-wrap items-center gap-2">{props.actions}</div>
+        <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">{props.actions}</div>
       ) : null}
     </div>
   );

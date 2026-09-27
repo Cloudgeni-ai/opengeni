@@ -641,7 +641,8 @@ async function processRunning(pid: number): Promise<boolean> {
       const commandEnd = stat.lastIndexOf(")");
       return commandEnd >= 0 && stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ESRCH") return false;
       throw error;
     }
   }
@@ -1062,6 +1063,13 @@ export function browserLaunchArguments(
     "--restore-last-session",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
+    // Component-update suppression does not stop Chromium's on-demand local
+    // model downloads. Managed profiles must not each fetch gigabytes of AI
+    // weights; OpenGeni's model provider is independent of Chrome's local AI.
+    "--disable-features=OptimizationGuideOnDeviceModel",
+    // Chromium's free-disk-derived default can retain gigabytes per actor.
+    // Bound disposable HTTP caching without limiting cookies or site storage.
+    "--disk-cache-size=67108864",
     // Chromium's presentation-fenced screenshot path can wait indefinitely for
     // hidden headed tabs. Copy a freshly repainted surface without raising the
     // browser or changing the shared desktop's active tab.

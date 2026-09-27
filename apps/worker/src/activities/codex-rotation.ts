@@ -12,9 +12,25 @@ import type {
   CodexLeaseAccountStatus,
   CodexPinSource,
 } from "@opengeni/db";
-import { connectionModelAllowed } from "@opengeni/db";
+import { codexPlanExcludesModel, connectionModelAllowed } from "@opengeni/db";
 
 export type CodexRotationAccount = CodexAccountStatus | CodexLeaseAccountStatus;
+
+/**
+ * Model-scoped allocation filter: user connection policy plus proven plan
+ * entitlement. A plan exclusion applies only until it expires (one request
+ * then re-probes the account) or a different plan is observed.
+ */
+export function codexAccountServesModel(
+  account: Pick<CodexRotationAccount, "allowedModelIds" | "planType" | "planEntitlementExclusion">,
+  modelId: string,
+  now: Date,
+): boolean {
+  return (
+    connectionModelAllowed(account.allowedModelIds, modelId) &&
+    !codexPlanExcludesModel(account, modelId, now)
+  );
+}
 
 /** Capacity metadata worth an authoritative live read before/all through an idle. */
 export function codexAccountNeedsLiveCapacityRefresh(
@@ -528,9 +544,12 @@ export function selectCodexCredentialLeaseForTurn<
   if (args.context.failoverExhausted) {
     return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
   }
+  // User model policy and proven plan entitlement both remove an account for
+  // this model only. A plan exclusion is provider truth, never user policy; it
+  // becomes inert when a different plan is observed or its TTL elapses.
   const accounts = args.context.modelId
     ? args.context.accounts.filter((account) =>
-        connectionModelAllowed(account.allowedModelIds, args.context.modelId!),
+        codexAccountServesModel(account, args.context.modelId!, args.now),
       )
     : args.context.accounts;
   const failedCredentialIds = new Set(args.context.failedCredentialIds ?? []);

@@ -8,6 +8,8 @@ import {
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
   evaluateSlackTaskPolicy,
+  isStreamedAssistantMessageCompletion,
+  turnCompletedReply,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
   SlackChannelRouteListResponse,
@@ -4460,7 +4462,15 @@ async function deliverSlackSessionEvents(
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
       const latestAssistantText = safePayloadText(event.payload, "text");
-      if (latestAssistantText && !terminalAssistantSequences.has(event.sequence)) {
+      // A streamed per-message completion is either commentary (activity,
+      // never a Slack post) or a final message that its turn.completed
+      // delivers with the requester mention. Posting it early as progress
+      // would turn the mention into an edit, which Slack does not notify.
+      if (
+        latestAssistantText &&
+        !terminalAssistantSequences.has(event.sequence) &&
+        !isStreamedAssistantMessageCompletion(event)
+      ) {
         const progress = await claimSlackInteractionProgressDelivery(deps.db, {
           accountId: interaction.accountId,
           workspaceId: interaction.workspaceId,
@@ -4548,6 +4558,15 @@ async function deliverSlackSessionEvents(
       // and delivery open for the eventual response; never promote commentary
       // or invent a success message for these boundaries.
       if (!hasPublishableOutput || safePayloadText(event.payload, "segmentLimit")) {
+        // The one exception is the reply the worker recorded for a human's
+        // message before the turn waited again (for example a status answer):
+        // it answers that message, so it is posted, and delivery stays open.
+        const reply = safePayloadText(event.payload, "segmentLimit")
+          ? null
+          : turnCompletedReply(event.payload);
+        if (reply) {
+          await postDelivery(client, interaction, event, `${requester.mention}${reply}`, "reply");
+        }
         terminal = null;
         continue;
       }

@@ -244,7 +244,10 @@ describe("op-stream exec (fake runner)", () => {
         if (expectDetached) expect(activeSubscriptions).toBe(0);
         captured.push(...frames);
       };
-      expect((await reader.readExisting("bounded_read:0", 1, capture)).status).toBe("running");
+      expect(await reader.readExisting("bounded_read:0", 1, capture)).toMatchObject({
+        status: "running",
+        replaySequence: "1",
+      });
       expect(captured).toEqual([]); // split UTF-8 prefix lives in the checkpoint decoder
       for (let i = 0; i < 5; i++) await reader.readExisting("bounded_read:0", 1, capture);
       expect(fromSeqs).toEqual(["0", "1", "1", "1", "1", "1"]);

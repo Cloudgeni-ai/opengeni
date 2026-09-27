@@ -2,7 +2,7 @@
 // runtime-only jobs skip this test; native verification must run it explicitly.
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
@@ -27,11 +27,11 @@ for (const [lines, interrupt, raw = false] of [
   [80000, false, true],
   [80000, true, true],
 ] as const) {
-  test.skipIf(process.platform !== "linux" || !existsSync(binary))(
+  test.skipIf(!["linux", "darwin"].includes(process.platform) || !existsSync(binary))(
     `TypeScript ${raw ? "raw writer" : "editor"} drives native transactional files (${lines} lines): ${interrupt ? "abandoned staging cleanup" : "verified replacement"}`,
     async () => {
       setSelfhostedApplyDiff(applyDiff);
-      const root = await mkdtemp(join(tmpdir(), "opengeni-native-write-"));
+      const root = await realpath(await mkdtemp(join(tmpdir(), "opengeni-native-write-")));
       const path = join(root, "synthetic.md");
       const original = "# Before\n" + "Synthetic cross-language fixture.\n".repeat(lines);
       await writeFile(path, original, { mode: 0o640 });

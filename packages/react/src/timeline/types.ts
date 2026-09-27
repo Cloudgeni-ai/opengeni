@@ -89,11 +89,21 @@ export type AgentMessageItem = {
   id: string;
   turnId: string | null;
   text: string;
-  /** Provider-declared assistant channel. Absent on legacy and non-Responses events. */
+  /**
+   * Assistant channel: provider-declared, or `commentary` when the model asked
+   * for tool work in the same response. Absent on legacy events and on
+   * undeclared final messages. Known from the first delta for Responses models.
+   */
   phase?: "commentary" | "final_answer" | undefined;
   /** Still receiving deltas (no completed/turn-end seen yet). */
   streaming: boolean;
   occurredAt: string;
+  /**
+   * When the first streamed text arrived, kept once completion moves
+   * `occurredAt` to the completion time. Absent for a message that never
+   * streamed.
+   */
+  startedAt?: string | undefined;
   /** Available only after the canonical completed event lands. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
 };
@@ -366,6 +376,14 @@ export type NoticeItem = {
   text: string;
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
+  /**
+   * Recorded agent wait only: delegated worker sessions that had not reported
+   * back when the wait began. Best effort from the loaded history; absent when
+   * none are known.
+   */
+  waitingAgents?: number;
+  /** Recorded agent wait only: when later input ended the wait. */
+  waitEndedAt?: string;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
@@ -518,7 +536,11 @@ export type TimelineItem = (
   sourceEvents?: readonly { eventId: string; sequence: number }[] | undefined;
 };
 
-/** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
+/**
+ * Activity items cluster between chat messages (reasoning, tools, workers,
+ * sandbox, memory). With `groupTimeline(items, { foldExchanges: true })`,
+ * assistant commentary (progress notes) joins the cluster as well.
+ */
 export type ActivityItem =
   | ReasoningItem
   | ToolCallItem
@@ -527,7 +549,8 @@ export type ActivityItem =
   | StartupPhaseItem
   | MemoryItem
   | KnowledgeItem
-  | FleetDecisionItem;
+  | FleetDecisionItem
+  | AgentMessageItem;
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
@@ -537,6 +560,12 @@ export type TimelineGroup =
       items: ActivityItem[];
       outcome?: TurnOutcome;
       failureText?: string;
+      /**
+       * Exchange fold only: earlier settled work of the same exchange (turns,
+       * routine machine inputs, recorded waits, compaction) that this live
+       * cluster continues. Rendered behind the same live status row.
+       */
+      earlier?: TimelineGroup[];
     }
   | {
       kind: "turn";

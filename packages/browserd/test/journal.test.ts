@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import type { BrowserActionReceipt } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
@@ -15,6 +16,42 @@ const controllerGeneration = "controller-1";
 const settledAt = "2026-08-09T12:00:00.000Z";
 
 describe("SqliteBrowserOperationJournal", () => {
+  test("replays exact durable receipts and isolates readers by controller authority", async () => {
+    await withJournal(async ({ path, journal }) => {
+      let dispatches = 0;
+      const controller = new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        onJournalRecord: (next) => journal.write(next),
+        loadJournalRecord: (operation) => journal.read(operation),
+        driver: fixtureDriver(() => {
+          dispatches++;
+        }),
+      });
+      const completedReceipt = await controller.run(command(id(1)));
+      await controller.waitForIdle();
+      expect(journal.read(id(1))?.receipt).toEqual(completedReceipt);
+      expect(controller.receipt(id(1))).toEqual(completedReceipt);
+      expect(await controller.run(command(id(1)))).toEqual(completedReceipt);
+      const other = await SqliteBrowserOperationJournal.open({
+        path,
+        browserSessionId,
+        controllerGeneration: "other-controller",
+      });
+      try {
+        expect(other.read(id(1))).toBeNull();
+      } finally {
+        other.close();
+      }
+      expect(journal.read(id(2))).toBeNull();
+      expect(dispatches).toBe(1);
+      journal.close();
+      expect(() => controller.receipt(id(1))).toThrow("closed");
+      expect(() => controller.run(command(id(1)))).toThrow("closed");
+      expect(dispatches).toBe(1);
+    });
+  });
+
   test("recovers dispatched work as outcome unknown and never replays it", async () => {
     await withJournal(async ({ path, journal }) => {
       const operationId = id(1);
@@ -81,6 +118,92 @@ describe("SqliteBrowserOperationJournal", () => {
     });
   });
 
+  test("streams recovered receipts into the controller without redispatch", async () => {
+    await withJournal(async ({ journal }) => {
+      let dispatches = 0;
+      const driver = fixtureDriver(() => {
+        dispatches++;
+      });
+      const original = new BrowserInteractionController({
+        browserSessionId,
+        controllerGeneration,
+        driver,
+        onJournalRecord: (entry) => journal.write(entry),
+        loadJournalRecord: (operationId) => journal.read(operationId),
+      });
+      const receipts = [];
+      for (let i = 1; i <= 3; i++) receipts.push(await original.run(command(id(i))));
+      await original.waitForIdle();
+      const restored = journal.withRecoveredRecords((records) => {
+        expect(Array.isArray(records)).toBe(false);
+        return new BrowserInteractionController({
+          browserSessionId,
+          controllerGeneration,
+          driver,
+          initialJournal: records,
+          onJournalRecord: (entry) => journal.write(entry),
+          loadJournalRecord: (operationId) => journal.read(operationId),
+        });
+      }, settledAt);
+      for (let i = 1; i <= 3; i++) {
+        expect(await restored.run(command(id(i)))).toEqual(receipts[i - 1]!);
+      }
+      expect(dispatches).toBe(3);
+    });
+  });
+
+  test("consumer failure rolls back recovery and cannot leave a live iterator", async () => {
+    await withJournal(async ({ journal }) => {
+      journal.write(record(id(1), "a".repeat(64), "prepared"));
+      journal.write(record(id(2), "b".repeat(64), "prepared"));
+      let escaped: Iterator<unknown> | undefined;
+      expect(() =>
+        journal.withRecoveredRecords((records) => {
+          escaped = records[Symbol.iterator]();
+          expect(escaped.next().done).toBe(false);
+          throw new Error("controller initialization failed");
+        }, settledAt),
+      ).toThrow("controller initialization failed");
+      expect(escaped?.next().done).toBe(true);
+      expect(journal.read(id(1))?.receipt.state).toBe("prepared");
+      expect(journal.read(id(2))?.receipt.state).toBe("prepared");
+      expect(() => journal.withRecoveredRecords(() => Promise.resolve(), settledAt)).toThrow(
+        "consumer must be synchronous",
+      );
+      expect(journal.read(id(1))?.receipt.state).toBe("prepared");
+    });
+  });
+
+  test("rolls back earlier recovery when a later retained receipt is corrupt", async () => {
+    await withJournal(async ({ path, journal }) => {
+      const digest = createHash("sha256").update("recovery").digest("hex");
+      journal.write(record(id(1), digest, "prepared"));
+      journal.write(record(id(2), digest, "prepared"));
+      journal.write(record(id(2), digest, "dispatched"));
+      const db = new Database(path);
+      try {
+        db.query(
+          "UPDATE interaction_operation_journal SET receipt_json = '{}' WHERE operation_id = ?",
+        ).run(id(2));
+        expect(() => journal.loadAndRecover(settledAt)).toThrow("byte count is corrupt");
+        let consumed = false;
+        expect(() =>
+          journal.withRecoveredRecords(() => {
+            consumed = true;
+          }, settledAt),
+        ).toThrow("byte count is corrupt");
+        expect(consumed).toBe(false);
+        expect(
+          db
+            .query("SELECT state FROM interaction_operation_journal WHERE operation_id = ?")
+            .get(id(1)),
+        ).toEqual({ state: "prepared" });
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   test("enforces digest identity and monotonic transitions", async () => {
     await withJournal(async ({ journal }) => {
       const operationId = id(1);
@@ -118,6 +241,111 @@ describe("SqliteBrowserOperationJournal", () => {
         ]);
       },
       { maxEntries: 1 },
+    );
+  });
+
+  test("bounds receipt bytes on settlement while preserving in-flight work and exact replay", async () => {
+    await withJournal(
+      async ({ journal, path }) => {
+        const digest = "a".repeat(64);
+        const failed = (n: number) => ({
+          ...record(id(n), digest, "failed"),
+          receipt: {
+            ...receipt(id(n), "failed"),
+            error: {
+              code: "controller_lost" as const,
+              message: "x".repeat(1300),
+              retryable: false,
+            },
+          },
+        });
+        journal.write(record(id(1), digest, "prepared"));
+        journal.write(failed(1));
+        journal.write(record(id(2), digest, "prepared"));
+        journal.write(record(id(3), digest, "prepared"));
+        journal.write(failed(3));
+        expect(journal.read(id(1))).toBeNull();
+        expect(journal.read(id(2))?.receipt.state).toBe("prepared");
+        expect(journal.read(id(3))).toEqual(failed(3));
+        const db = new Database(path, { readonly: true });
+        try {
+          expect(
+            (
+              db
+                .query("SELECT sum(receipt_bytes) AS bytes FROM interaction_operation_journal")
+                .get() as { bytes: number }
+            ).bytes,
+          ).toBeLessThanOrEqual(3000);
+        } finally {
+          db.close();
+        }
+        journal.close();
+        const reopened = await SqliteBrowserOperationJournal.open({
+          path,
+          browserSessionId,
+          controllerGeneration,
+          maxTotalReceiptBytes: 3000,
+        });
+        try {
+          expect(reopened.loadAndRecover(settledAt).find((r) => r.operationId === id(3))).toEqual(
+            failed(3),
+          );
+          expect(reopened.read(id(2))?.receipt.state).toBe("failed");
+        } finally {
+          reopened.close();
+        }
+      },
+      { maxTotalReceiptBytes: 3000 },
+    );
+  });
+
+  test("byte eviction cannot redispatch a previously completed live operation", async () => {
+    await withJournal(
+      async ({ journal }) => {
+        let dispatches = 0;
+        const controller = new BrowserInteractionController({
+          browserSessionId,
+          controllerGeneration,
+          onJournalRecord: (next) => journal.write(next),
+          loadJournalRecord: (operation) => journal.read(operation),
+          driver: fixtureDriver(() => {
+            dispatches++;
+          }),
+        });
+        await controller.run(command(id(1)));
+        await controller.waitForIdle();
+        const digest = "c".repeat(64);
+        journal.write(record(id(2), digest, "prepared"));
+        const large = record(id(2), digest, "failed");
+        large.receipt.error!.message = "x".repeat(2500);
+        journal.write(large);
+        expect(journal.read(id(1))).toBeNull();
+        expect(() => controller.run(command(id(1)))).toThrow(
+          "durable operation receipt is unavailable",
+        );
+        expect(dispatches).toBe(1);
+      },
+      { maxTotalReceiptBytes: 3000 },
+    );
+  });
+
+  test("byte-cap refusal rolls back tentative evictions and never discards in-flight records", async () => {
+    await withJournal(
+      async ({ journal }) => {
+        const digest = "b".repeat(64);
+        for (const n of [1, 2, 3]) journal.write(record(id(n), digest, "prepared"));
+        journal.write(record(id(1), digest, "failed"));
+        const previous = journal.read(id(1));
+        const large = record(id(3), digest, "failed");
+        large.receipt.error!.message = "x".repeat(2500);
+        expect(() => journal.write(large)).toThrow("byte budget");
+        expect(journal.read(id(1))).toEqual(previous);
+        expect(journal.read(id(2))?.receipt.state).toBe("prepared");
+        expect(journal.read(id(3))?.receipt.state).toBe("prepared");
+        large.receipt.error!.message = "x".repeat(3000);
+        expect(() => journal.write(large)).toThrow("durable byte envelope");
+      },
+      { maxTotalReceiptBytes: 3000 },
     );
   });
 });
@@ -170,7 +398,7 @@ describe("SqliteBrowserProtectedAuthJournal", () => {
 
 async function withJournal(
   callback: (fixture: { path: string; journal: SqliteBrowserOperationJournal }) => Promise<void>,
-  options: { maxEntries?: number } = {},
+  options: { maxEntries?: number; maxTotalReceiptBytes?: number } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-journal-");
   const path = join(directory, "operations.sqlite");

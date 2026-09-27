@@ -859,9 +859,10 @@ describe("BrowserControlServer", () => {
               ),
             );
             expect(result.data.fencedInputBatches).toBe(supported ? true : undefined);
+            expect(result.data.focusedInputObservations).toBe(supported ? true : undefined);
           }
         },
-        { fencedInputBatches: supported },
+        { fencedInputBatches: supported, focusedInputObservations: supported },
       );
     });
   }
@@ -1131,6 +1132,7 @@ async function withServer(
   }) => Promise<void>,
   options: {
     fencedInputBatches?: boolean;
+    focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
@@ -1199,6 +1201,7 @@ function fakeDriver(
   context: BrowserSupervisorDriverContext,
   options: {
     fencedInputBatches?: boolean;
+    focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
@@ -1240,6 +1243,7 @@ function fakeDriver(
   });
   return {
     fencedInputBatches: options.fencedInputBatches === true,
+    focusedInputObservations: options.focusedInputObservations === true,
     async start(url) {
       if (options.failStart) throw new Error("private-driver-detail");
       target.url = url ?? "about:blank";

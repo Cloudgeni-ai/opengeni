@@ -817,6 +817,70 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(await durableProcess(fixture)).toMatchObject({ state: "exited", exitCode: 7 });
   }, 60_000);
 
+  test("a running background server cannot back off beyond its rotation lead boundary", async () => {
+    if (!available) throw new Error("PostgreSQL required for deadline retry regression");
+    const fixture = await promoteTurnProcess({
+      supervised: true,
+      outcome: "completed",
+      backgroundCommand: "preview",
+    });
+    const deadlineMs = SETTINGS.sandboxRotationLeadMs + 90_000;
+    await admin`update sandbox_leases set provider_created_at=now(),
+      provider_deadline_at=now()+(${deadlineMs}::bigint * interval '1 millisecond')
+      where id=${fixture.leaseId}`;
+    await admin`update sandbox_retained_processes set reconcile_attempts=10
+      where id=${fixture.process.id}`;
+    let probes = 0;
+    await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+      probes++;
+      expect(await persistence!.cancellationRequested!()).toBe(false);
+      return { status: "deferred", reason: "provider_running" };
+    });
+    const [row] = await admin`select p.state, p.cancellation_requested_at,
+      extract(epoch from (p.reconcile_after - now())) * 1000 as retry_ms,
+      extract(epoch from (p.reconcile_after - l.provider_deadline_at)) * 1000
+        + ${SETTINGS.sandboxRotationLeadMs}::bigint as past_lead_ms
+      from sandbox_retained_processes p join sandbox_leases l on l.id=p.lease_id
+      where p.id=${fixture.process.id}`;
+    try {
+      expect(probes).toBe(1);
+      expect(row!.state).toBe("active");
+      expect(row!.cancellation_requested_at).toBeNull();
+      expect(Number(row!.retry_ms)).toBeGreaterThan(30_000);
+      expect(Number(row!.retry_ms)).toBeLessThanOrEqual(95_000);
+      expect(Number(row!.past_lead_ms)).toBeLessThan(5_000);
+    } finally {
+      // The fixture retains a supervised writer: retire it with both terminal
+      // receipts before the suite removes its workspace, including on failure.
+      await admin`update sandbox_retained_processes set reconcile_after=now()
+        where id=${fixture.process.id}`;
+      await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+        const command = await persistence!.load();
+        if (command?.kind !== "modal-router-v1" || !command.supervision)
+          throw new Error("Expected supervised command");
+        await persistence!.recordSupervisionReceipt!({
+          protocol: "native-subreaper-v1",
+          invocationId: command.supervision.invocationId,
+          receiptId: crypto.randomUUID(),
+          leaderExitCode: 0,
+        });
+        const terminal = structuredClone(command);
+        for (const stream of ["stdout", "stderr"] as const)
+          terminal.streams[stream] = { ...terminal.streams[stream], eof: true, exitCode: 0 };
+        await persistence!.captureRouterPage!({
+          expected: command,
+          command: terminal,
+          stdout: "",
+          stderr: "",
+        });
+        return {
+          status: "proved",
+          proof: { outcome: "exited", exitCode: 0, reason: "provider_exit_banner" },
+        };
+      });
+    }
+  }, 60_000);
+
   test("a completed attempt's final provider mutation re-arms the cleanup wake", async () => {
     if (!available) throw new Error("PostgreSQL is required for cleanup admission proof");
     const ids = await freshWorkspace();

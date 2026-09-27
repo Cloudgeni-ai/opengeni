@@ -146,6 +146,13 @@ to another window or screen. `macos_autorelease` exercises the actual helper wit
 Objective-C missing-pool diagnostics enabled; run this ignored test explicitly
 in an unlocked local GUI session.
 
+Accessibility notifications invalidate the snapshots that registered the changed
+element, so one observed window's value changes do not discard an unrelated
+window's observation. Application-wide focus/layout events, unrecognized event
+sources, and overflow of the bounded 64-notification queue still invalidate all
+snapshots for that process. Every semantic action continues to verify the target,
+element identity and observed state immediately before dispatch.
+
 Native window and screen pointer input uses the exact painted frame's encoded
 dimensions. Continuous capture retains superseded frame metadata for at most
 two seconds, bounded to 32 frames per target and 512 per adapter, so a newer
@@ -171,6 +178,15 @@ origin. Older agent releases that only accept the development origin cannot
 connect the store-installed extension; updating the extension alone cannot fix
 that host-side restriction. Store uploads omit the development-only manifest
 `key` field.
+
+The bridge generation is an opaque unpadded-base64url token: leading `-` and
+`_` are valid and retained verbatim in inventory and discovery. Rejecting either
+prefix strands a healthy bridge until its next generation. Rolling migration
+`0525_attached_browser_opaque_generations.sql` aligns the database bridge-generation
+check with this contract; API validation alone does not restore discovery.
+Extension handshake
+timeouts and rejected readiness fences clear the exact failed port and reconnect
+with bounded backoff; late events from that port cannot invalidate a successor.
 
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
@@ -372,6 +388,18 @@ const samples = await client.machineMetricsSeries(workspaceId, enrollmentId, {
 
 ## Control liveness and backpressure
 
+`ERROR_CODE_DRAINING` is a pre-execution admission refusal, not proof that a
+machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
+means a verified self-update is draining accepted work; `queue_breaker` and
+`wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
+detail remains an unspecified admission refusal. The same distinction survives
+retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
+`update_busy_uploads`) and immediately reopens admission. It does not wait for
+long-lived servers, cancel accepted work, or restart the host. Request an update
+again at a safe idle point. Older runners can remain draining indefinitely;
+inspect their accepted operations and coordinate a safe stop/restart with their
+owners instead of killing useful work or increasing concurrency limits.
+
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
 admission has no ordinary fixed concurrency or queue-wait limit: its only
@@ -549,6 +577,21 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+After process exit and pipe drain, the native runner releases both transport-sized
+read buffers before waiting for result collection. Retained output and the terminal
+record remain replayable until their normal acknowledgement/retention boundary;
+completed commands do not need idle pipe buffers to preserve that guarantee.
+
+Retained frames also share a runner-wide memory ledger: one sixteenth of measured
+available RAM, with a 64 MiB floor. Starting a command reserves nothing. Appending
+past either its per-command limit or the shared limit spills its retained frames
+to the existing disk spool; sequence numbers, replay and acknowledgement remain
+unchanged. Acknowledgement, successful spill and log disposal release memory
+charges. Lower capacity samples affect future reservations without discarding
+existing output. This bounds memory-backed record costs, not total runner RSS:
+spool indexes, transport/replay buffers and other subsystems use memory separately.
+Disk exhaustion remains an explicit retention failure.
+
 When an exec yields as background work, `session_background_commands` becomes
 the durable lifecycle authority before the tool returns. It stores only a
 bounded command preview plus the immutable launch locator; no later active
@@ -563,7 +606,12 @@ death; a successor connection is never queried on the predecessor's behalf.
 Completed operations may need multiple retained-output batches. Reconciliation
 keeps one reader and its integrity checkpoint while captured sequence progress
 continues, and settles only after the terminal output frontier is verified.
-Empty or repeated batches defer recovery; they never license a success result.
+Terminal replay measures progress by the verified contiguous frame sequence,
+including heartbeat frames and undecoded UTF-8 prefixes. A quiet command can
+therefore drain successive retained batches without restarting from frame zero
+merely because a batch contains no printable stdout or stderr. Failed output
+persistence or a stalled frame frontier still prevents settlement.
+Stalled or repeated frame frontiers defer recovery; they never license a success result.
 Adoption takes the canonical workspace-control and exact turn-attempt fence, so
 it has a total order with Steer, Pause, terminal Cancel, and session deletion.
 Before that transaction starts, the op-stream yield path takes exact
@@ -644,6 +692,21 @@ not repair an older agent already executing its previous update handoff; those
 installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
+
+Mac app installations update the complete signed application, including bundled
+browser/computer helpers. The updater selects the signed manifest's
+`universal-apple-darwin-app` ZIP, verifies its signature and checksum, stages it
+beside the installed application, and checks the sealed resources, bundle ID,
+signing-team continuity and executable version before an atomic directory
+exchange. A failed post-exchange verification or managed-receipt write exchanges
+the entire old app back. The successor receipt contains the installed executable
+digest, not the ZIP digest. Interrupted transactions retain their recovery copy.
+Standalone Mac executables retain the binary update path.
+
+Mac agents older than 0.1.29 require a one-time upgrade through the official
+whole-app installer. Their old updater would replace a single sealed executable;
+the Machines UI explains this limitation and the API refuses to dispatch that
+unsafe update. Do not run an older app's `update` command as a bootstrap shortcut.
 
 Because the binary is shared, the current installer refuses to replace a newer
 installed agent with an older verified release from a lagging deployment. Set
@@ -738,6 +801,12 @@ resulting scope in their list cards so wider publication is never implicit.
 
 ## Transactional file edits
 
+Native ranged file reads retain only the selected bytes, rather than allocating
+the entire file before slicing it. They still consume the full stream to report
+the actual `total_size`, including virtual files whose stat size is zero; this
+reduces memory use without promising less disk I/O. A zero length continues to
+mean the remainder of the file, and an offset beyond EOF returns empty content.
+
 The editor uses transactional transfers for text creation and in-place updates,
 including small files, when the exact live agent advertises
 `transactional_fs_write`. Small in-place updates must not bypass staging: a
@@ -749,7 +818,7 @@ machine, and does not prove that earlier operations failed.
 Transfers stage bounded chunks privately, verify the intended BLAKE3 digest and
 byte count, and publish only after the expected destination state is checked.
 Large Files-panel writes use provider byte transport instead of shell arguments.
-On capable Linux agents, raw replacements above 256 KiB use these same transfers,
+On capable Linux and macOS agents, raw replacements above 256 KiB use these same transfers,
 including binary files; an ambiguous write is never retried through a fallback.
 Every transfer request is reauthorized against the same physical connection.
 The runner pins each operation to its original nonzero session route epoch;
@@ -767,10 +836,12 @@ lost authority do not prove cleanup: private staging may remain until the link
 ends, and a process crash may leave an orphan. There is no automatic sweep or
 adoption of unknown transfers.
 
-The initial native implementation supports ordinary Linux regular files with
-existing parent directories. It fails closed on unsupported symlinks, hard links,
+The native implementation supports ordinary Linux and macOS APFS regular files
+with existing parent directories. It fails closed on unsupported symlinks, hard links,
 ownership, special modes, and extended metadata rather than silently discarding
 their semantics. Transactional editing does not implement `runAs` impersonation.
+macOS permits OS-generated provenance only when replacement preserves its exact
+bytes; extended ACLs, other attributes and inode flags remain unsupported.
 Expected-base checks detect observed changes but are not a filesystem
 compare-and-swap against unrelated concurrent writers.
 
@@ -786,6 +857,14 @@ Small moves retain the legacy direct-write path so they do not acquire a new
 read requirement on a write-only destination. They do not have transactional
 publication guarantees. Legacy agents without transactional support also retain
 their existing direct-write behavior; inspect the destination after any timeout.
+
+The Files and terminal API report an oversized native request as HTTP 413
+(`limit_exceeded`), without marking the machine offline. An oversized reply is
+HTTP 502 with the same code: the operation may already have completed, so inspect
+its result before repeating it. Both errors are non-retryable and include
+`details.code: machine_transport_payload_too_large` plus a bounded `direction`
+(`request` or `response`), without native paths or diagnostic contents. This
+reporting does not add transactional transfer support to unsupported platforms.
 
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.
@@ -862,7 +941,12 @@ geometry when valid; the controller does not substitute guessed dimensions.
 
 Attached Chrome is an explicit user-profile choice, never an automatic fallback
 for an unavailable managed browser. A new attached BrowserSession creates a new
-background tab rather than navigating an existing personal tab. Reuse honors
+background tab rather than navigating an existing personal tab. Startup waits
+for that exact target to appear in the bridge inventory; a missing target fails
+without borrowing another tab, including an existing blank tab. Attached startup
+uses an empty, network-free data document because the installed extension excludes
+`about:` pages from discovery and debugger control; browser-owned page restrictions
+remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.

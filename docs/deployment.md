@@ -1,5 +1,21 @@
 # Deployment
 
+## Assistant message phases (0527)
+
+`0527_session_attention_excludes_commentary.sql` is rolling: it builds the
+commentary-free attention index concurrently, and the 0503 index keeps serving
+older API processes. The same predicate admits a `turn.completed` whose
+`reply` records the answer a human's message received before its turn waited
+for input. Workers from this release stream one
+`agent.message.completed` per assistant message, including progress notes
+(`phase: "commentary"`). Only API processes from the same release treat those as
+activity. While an older API process still runs next to a newer worker, it can
+post up to three progress notes per Slack interaction, wake `session_wait`
+change mode on each note, and mark a session unread for a note. Roll the API
+before the workers to avoid that window; nothing is stored wrongly either way.
+Once no API image older than 0527 can run, a later rolling migration drops
+`session_events_meaningful_attention_idx` (the 0503 index) and its schema entry.
+
 ## Verified signup trial runtime switch (0521)
 
 `0521_verified_signup_trial_runtime_switch.sql` is a rolling migration. It needs
@@ -142,6 +158,32 @@ alone removes its warning receipt through the legitimate parent cascade.
 This adds canonical-human consent for singleton managed-home Modal recovery only.
 It does not enable automatic rollback, shared-group recovery, command replay,
 empty reset, or a new cancellation/reaper protocol. See [run lifecycle](run-lifecycle.md).
+
+## Automatic checkpoint continuity (0526)
+
+`0526_automatic_checkpoint_discontinuity.sql` is maintenance-only. Stop old
+API/control/turn workers, migrate and provision roles, then start only the
+matching binaries. A pre-0520 worker does not reconstruct a system-selected
+filesystem warning. The replacement claim guard requires the worker's
+transaction-local warning protocol v2 for sessions with an automatic receipt;
+human-consented sessions still require v1. Never put either declaration in a
+role default, pool configuration or deployment environment.
+
+The worker may automatically select only the registered CURRENT native Modal
+checkpoint of a singleton home when definitive provider loss made its archive
+generation older than the workspace generation. Selection is a separate
+system-attributed durable receipt, not human consent or proof of restore. The
+ordinary provider snapshot and artifact verification must finish before the box
+is usable. Other degraded failures, unverified archives, shared groups, live
+writers and no-checkpoint cases remain blocked. Every affected agent attempt
+reconstructs a deterministic warning after the static instruction prefix;
+unknown command outcomes are never replayed. Operator metrics and alerts
+record the fallback even when the next turn succeeds. A read-only, aggregate
+`opengeni_private.sandbox_recovery_observations()` inventory reconstructs
+the last 30 minutes of provider-loss and fallback decisions from a small
+indexed private ledger, committed with their RLS-verified source audit events.
+The ledger stores only event IDs and fixed kinds, not tenant or provider data;
+normal role provisioning grants exact EXECUTE-only capabilities, not table reads.
 
 ## Selective Knowledge source discovery (0469)
 

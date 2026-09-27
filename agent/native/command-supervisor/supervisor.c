@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/random.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -339,7 +340,64 @@ static int launch(const struct options *o) {
     }
 }
 
+/* Unlike retained commands, a placement service owns its descendants only
+ * while its leader lives. Keep the subreaper alive through leader crashes and
+ * terminate adopted descendants before exiting, including detached daemons. */
+static int service(char **command) {
+    initialize();
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGINT);
+    sigaddset(&signals, SIGCHLD);
+    if (sigprocmask(SIG_BLOCK, &signals, NULL)) fail("service signal block failed");
+    struct sigaction action = {.sa_handler = SIG_DFL};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, NULL) || sigaction(SIGINT, &action, NULL))
+        fail("service signal reset failed");
+    int events = signalfd(-1, &signals, SFD_CLOEXEC | SFD_NONBLOCK);
+    if (events < 0) fail("service signal descriptor unavailable");
+    pid_t leader = fork();
+    if (leader < 0) fail("service fork failed");
+    if (!leader) {
+        close(events);
+        sigemptyset(&signals);
+        if (sigprocmask(SIG_SETMASK, &signals, NULL)) _exit(125);
+        execvp(command[0], command);
+        _exit(127);
+    }
+    int handle = pidfd_open_child(leader);
+    int code = 125;
+    bool seen = false;
+    long long shutdown_at = 0, cleanup_at = 0;
+    for (;;) {
+        if (reap(leader, &code, &seen)) {
+            close(handle);
+            close(events);
+            return code;
+        }
+        long long now = milliseconds();
+        if (seen || (shutdown_at && now - shutdown_at >= 30000)) {
+            if (!cleanup_at) cleanup_at = now;
+            signal_children(now - cleanup_at >= CANCEL_GRACE_MS ? SIGKILL : SIGTERM);
+        }
+        if (ready(events, POLLIN, cleanup_at ? 10 : 1000)) {
+            struct signalfd_siginfo info;
+            ssize_t size = read(events, &info, sizeof(info));
+            if (size < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+            if (size != (ssize_t)sizeof(info)) fail("service signal read failed");
+            if (info.ssi_signo == SIGCHLD) continue;
+            if (!seen) signal_handle(handle, (int)info.ssi_signo);
+            if (!shutdown_at) shutdown_at = milliseconds();
+        }
+    }
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "service")) {
+        if (argc < 4 || strcmp(argv[2], "--")) fail("service requires -- command");
+        return service(&argv[3]);
+    }
     /* Bounded capability check: exercise the same kernel prerequisites as
      * launch, but create no socket, child or persistent supervisor. */
     if (argc == 2 && !strcmp(argv[1], "capabilities")) {
