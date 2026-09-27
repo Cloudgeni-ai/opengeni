@@ -227,7 +227,8 @@ function operatorAuthorization(f: Awaited<ReturnType<typeof fixture>>) {
     accountId: f.accountId,
     workspaceId: f.workspaceId,
     sandboxGroupId: f.session.sandboxGroupId,
-    expectedEpoch: 4,
+    // Warm publication advances 3 -> 4; the subsequent provider loss advances to 5.
+    expectedEpoch: 5,
     expectedWorkspaceGeneration: 50,
     expectedArchiveGeneration: 10,
     selectedRevision: f.request.selection.revision,
@@ -271,7 +272,7 @@ describe("explicit singleton checkpoint recovery", () => {
       expect(audit!.subject_id).toBe(authorization.subjectId);
       expect(audit!.metadata).toMatchObject({
         leaseId: f.leaseId,
-        leaseEpoch: 4,
+        leaseEpoch: 5,
         workspaceGeneration: 50,
         archiveGeneration: 10,
         selectedRevision: f.request.selection.revision,
@@ -300,11 +301,87 @@ describe("explicit singleton checkpoint recovery", () => {
     }
   });
 
+  test("an unresolved holder blocks supersession of completed public recovery", async () => {
+    const f = await completedRecoveryLostAgain();
+    const authorization = operatorAuthorization(f);
+    const [before] =
+      await shared.admin`select public_recovery, resume_state from sandbox_leases where id = ${f.leaseId}`;
+    // Keep the cached refcount at zero: the durable holder itself must fence
+    // authorization even when the lease summary no longer accounts for it.
+    await shared.admin`insert into sandbox_lease_holders(account_id,workspace_id,lease_id,kind,holder_id)
+      values(${f.accountId},${f.workspaceId},${f.leaseId},'viewer','unresolved-after-loss')`;
+    expect(await authorizeHistoricalSandboxCheckpointRecovery(client.db, authorization)).toEqual({
+      authorized: false,
+    });
+    const [blocked] =
+      await shared.admin`select public_recovery, resume_state from sandbox_leases where id = ${f.leaseId}`;
+    expect(blocked).toEqual(before);
+    expect(
+      await shared.admin`select id from audit_events where id = ${authorization.operationId}`,
+    ).toHaveLength(0);
+    expect((await f.consent()).outcome).toBe("replayed");
+
+    await shared.admin`delete from sandbox_lease_holders where lease_id = ${f.leaseId}
+      and kind = 'viewer' and holder_id = 'unresolved-after-loss'`;
+    expect(await authorizeHistoricalSandboxCheckpointRecovery(client.db, authorization)).toEqual({
+      authorized: true,
+    });
+  });
+
+  test("concurrent identical operator authorizations supersede once and replay across connections", async () => {
+    const f = await completedRecoveryLostAgain();
+    const authorization = operatorAuthorization(f);
+    const [before] =
+      await shared.admin`select public_recovery from sandbox_leases where id = ${f.leaseId}`;
+    const second = createDb(shared.appUrl);
+    try {
+      expect(
+        await Promise.all([
+          authorizeHistoricalSandboxCheckpointRecovery(client.db, authorization),
+          authorizeHistoricalSandboxCheckpointRecovery(second.db, authorization),
+        ]),
+      ).toEqual([{ authorized: true }, { authorized: true }]);
+      const audits = await shared.admin`select id, subject_id, metadata from audit_events
+        where target_id = ${f.session.sandboxGroupId}
+          and action = 'sandbox.historical_checkpoint_recovery.authorized'`;
+      // The original consent receipt and exactly one new operator receipt survive.
+      expect(audits).toHaveLength(2);
+      expect(audits.filter((row) => row.id === f.request.operationId)).toHaveLength(1);
+      const operatorAudits = audits.filter((row) => row.id === authorization.operationId);
+      expect(operatorAudits).toHaveLength(1);
+      expect(operatorAudits[0]).toMatchObject({
+        subject_id: authorization.subjectId,
+        metadata: {
+          leaseId: f.leaseId,
+          leaseEpoch: 5,
+          workspaceGeneration: 50,
+          archiveGeneration: 10,
+          selectedRevision: f.request.selection.revision,
+          supersededPublicRecovery: before!.public_recovery,
+        },
+      });
+      const [after] =
+        await shared.admin`select public_recovery, resume_state, current_checkpoint_artifact_id,
+          lease_epoch, workspace_generation, archive_generation from sandbox_leases where id = ${f.leaseId}`;
+      expect(after!.public_recovery).toBeNull();
+      expect(after!.resume_state.opengeniHistoricalArchiveRecoveryId).toBe(
+        authorization.operationId,
+      );
+      expect(after!.current_checkpoint_artifact_id).toBe(f.artifact.id);
+      expect(Number(after!.lease_epoch)).toBe(5);
+      expect(Number(after!.workspace_generation)).toBe(50);
+      expect(Number(after!.archive_generation)).toBe(10);
+      expect((await f.consent()).outcome).toBe("replayed");
+    } finally {
+      await second.close();
+    }
+  });
+
   test("stale operator selection cannot clear a completed public recovery", async () => {
     const f = await completedRecoveryLostAgain();
     const authorization = operatorAuthorization(f);
     for (const stale of [
-      { expectedEpoch: 3 },
+      { expectedEpoch: 4 },
       { expectedWorkspaceGeneration: 44 },
       { expectedArchiveGeneration: 9 },
       { selectedRevision: "stale-revision" },

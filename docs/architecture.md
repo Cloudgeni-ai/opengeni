@@ -56,12 +56,6 @@ annotations remain stripped. See `packages/codex/src/hosted-call-status.ts` and
 Postgres commits precede notifications. NATS transports fanout, invalidations,
 request/reply and machine streams—not durable commit evidence.
 
-Historical sandbox recovery remains exact-selection authority. A new operator
-authorization can atomically supersede a verified public recovery projection,
-preserving it in the authorization audit and retaining permanent consent receipts;
-it does not reuse completed consent or broaden automatic fallback. See
-[`run-lifecycle.md`](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
-
 `session_event_cursors` verifies appends transactionally and owns monotonic
 per-session sequencing/public `lastSequence`. Semantic writers lock sessions
 for atomic state/event commits; `sessions.last_sequence` is compatibility-only.
@@ -449,6 +443,8 @@ Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.t
 or proved provider loss (`packages/db/src/index.ts`). Both require a verified
 CURRENT checkpoint, singleton, quiescence and durable warning; no command
 replay/empty reset. See migrations 0495/0526 and [run lifecycle](run-lifecycle.md).
+Operator reauthorization supersedes verified public recovery;
+[provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
@@ -1177,7 +1173,6 @@ it may not detach a rejecting task or install an `unhandledRejection` handler
 that exits the shared worker. The worker's global rejection listener is a
 last-resort observational boundary, while deliberate restart remains an
 OpenGeni drain-and-checkpoint decision.
-Audited historical recovery preserves generation gaps; see [`run-lifecycle.md`](run-lifecycle.md).
 
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.
