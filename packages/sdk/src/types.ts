@@ -5297,6 +5297,7 @@ export type SandboxRecoveryProjection = {
   reason: string | null;
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
+  automaticAvailable?: boolean;
 };
 export type SandboxRecoveryRequest = {
   operationId: string;

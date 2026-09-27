@@ -1602,6 +1602,8 @@ The managed browser exposes a separate public contract at
 GET is a bounded, provider-free projection. POST requires the canonical managed
 human cookie, current session-control authority, an operation UUID, explicit
 historical-checkpoint acceptance, and the exact selection returned by GET.
+The exact built-in local human may read GET to see the system-selected Retry
+route; local mode cannot submit POST consent.
 Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
 routes, legacy/unregistered archives, and `archive.previous` are unsupported.
 
@@ -1669,6 +1671,35 @@ Old workers fail closed for affected sessions; rollback after consent requires
 compatible workers. Pause/Cancel and settlement remain available. This public gate
 does not retrofit operator historical recovery that has no public consent receipt.
 No cancellation/reaper protocol changes are included.
+
+### Automatic continuity after a missing managed provider
+
+This is separate from human consent. Before agent construction (including
+on-demand sandbox turns), an exact live attempt may select the singleton
+session's registered CURRENT native Modal checkpoint only when the provider is
+definitively missing, the cold lease has an archive-generation mismatch, and
+no other holders, processes, mutations, pending tools or competing attempts
+remain. It records a distinct system-attributed audit and immutable per-session
+receipt before a replacement can be elected. The same attempt reuses that
+selection; stale attempts cannot change it. Retry may admit this narrowly
+recoverable route, but does not itself restore files or replay unknown effects.
+The lease pins group membership, route and CURRENT archive while selection is
+pending; restore admission recounts all group members, including private
+siblings. Only verified warm publication releases that pin.
+
+The existing cold election and native provider/artifact checks still decide
+whether a replacement becomes usable. No archive, uncertain provider, corrupt
+checkpoint, active writer or shared group remains blocked. Newer filesystem
+changes can be unavailable while conversation and external effects remain.
+Provider loss and fallback selection are also committed as audit facts before
+process-local counters; the reaper rebuilds a fresh, release-scoped alert
+inventory from those receipts if a worker exits after the transaction.
+Every agent reconstruction appends the same checkpoint-specific discontinuity
+warning to session instructions, after the stable workspace prompt prefix.
+Maintenance migration 0526 requires warning protocol v2 at attempt claim for
+every session with an automatic receipt, including after failed restoration or
+lease churn; old workers fail closed. Human-consented recovery keeps its
+independent v1 gate.
 
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base

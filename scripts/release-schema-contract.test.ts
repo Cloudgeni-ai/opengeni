@@ -143,46 +143,51 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0525_attached_browser_opaque_generations.sql",
+          (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
         )
-          ? "0525_attached_browser_opaque_generations.sql"
+          ? "0526_automatic_checkpoint_discontinuity.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0524_codex_plan_entitlement.sql",
+                (migration) => migration.path === "0525_attached_browser_opaque_generations.sql",
               )
-            ? "0524_codex_plan_entitlement.sql"
+            ? "0525_attached_browser_opaque_generations.sql"
             : sourceContract.migrations.some(
-                  (migration) => migration.path === "0523_modal_provider_create_fence.sql",
+                  (migration) => migration.path === "0524_codex_plan_entitlement.sql",
                 )
-              ? "0523_modal_provider_create_fence.sql"
+              ? "0524_codex_plan_entitlement.sql"
               : sourceContract.migrations.some(
-                    (migration) => migration.path === "0522_scoped_machine_update_status.sql",
+                    (migration) => migration.path === "0523_modal_provider_create_fence.sql",
                   )
-                ? "0522_scoped_machine_update_status.sql"
+                ? "0523_modal_provider_create_fence.sql"
                 : sourceContract.migrations.some(
-                      (migration) =>
-                        migration.path === "0521_verified_signup_trial_runtime_switch.sql",
+                      (migration) => migration.path === "0522_scoped_machine_update_status.sql",
                     )
-                  ? "0521_verified_signup_trial_runtime_switch.sql"
+                  ? "0522_scoped_machine_update_status.sql"
                   : sourceContract.migrations.some(
-                        (migration) => migration.path === "0520_session_code_search_frozen.sql",
+                        (migration) =>
+                          migration.path === "0521_verified_signup_trial_runtime_switch.sql",
                       )
-                    ? "0520_session_code_search_frozen.sql"
+                    ? "0521_verified_signup_trial_runtime_switch.sql"
                     : sourceContract.migrations.some(
-                          (migration) =>
-                            migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
+                          (migration) => migration.path === "0520_session_code_search_frozen.sql",
                         )
-                      ? "0519_session_recovery_backlog_excludes_paused.sql"
+                      ? "0520_session_code_search_frozen.sql"
                       : sourceContract.migrations.some(
                             (migration) =>
-                              migration.path === "0518_member_connection_read_backfill.sql",
+                              migration.path ===
+                              "0519_session_recovery_backlog_excludes_paused.sql",
                           )
-                        ? "0518_member_connection_read_backfill.sql"
+                        ? "0519_session_recovery_backlog_excludes_paused.sql"
                         : sourceContract.migrations.some(
                               (migration) =>
-                                migration.path === "0515_autonomous_learning_defaults.sql",
+                                migration.path === "0518_member_connection_read_backfill.sql",
                             )
-                          ? "0515_autonomous_learning_defaults.sql"
-                          : "0514_failed_session_variable_set_attach.sql",
+                          ? "0518_member_connection_read_backfill.sql"
+                          : sourceContract.migrations.some(
+                                (migration) =>
+                                  migration.path === "0515_autonomous_learning_defaults.sql",
+                              )
+                            ? "0515_autonomous_learning_defaults.sql"
+                            : "0514_failed_session_variable_set_attach.sql",
       );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
@@ -201,6 +206,14 @@ describe("release schema contract", () => {
           ),
         }
       : sourceContract;
+    const automaticCheckpointDiscontinuityMigration = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
+    );
+    if (automaticCheckpointDiscontinuityMigration)
+      expect(automaticCheckpointDiscontinuityMigration.deploymentMode).toBe("maintenance");
+    const automaticCheckpointDiscontinuity = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
+    );
     const autonomousLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
     );
@@ -491,6 +504,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (automaticCheckpointDiscontinuity ? 1 : 0) +
         (attachedBrowserOpaqueGenerations ? 1 : 0) +
         (codexPlanEntitlement ? 1 : 0) +
         (modalProviderCreateFence ? 1 : 0) +
@@ -820,6 +834,9 @@ describe("release schema contract", () => {
       ...(attachedBrowserOpaqueGenerations
         ? { latestMigration: "0525_attached_browser_opaque_generations.sql" }
         : {}),
+      ...(automaticCheckpointDiscontinuity
+        ? { latestMigration: "0526_automatic_checkpoint_discontinuity.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -838,6 +855,7 @@ describe("release schema contract", () => {
             "0523_modal_provider_create_fence.sql",
             "0524_codex_plan_entitlement.sql",
             "0525_attached_browser_opaque_generations.sql",
+            "0526_automatic_checkpoint_discontinuity.sql",
           ].includes(migration.path),
       ),
     };
@@ -2310,6 +2328,7 @@ describe("release schema contract", () => {
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
       "0524_codex_plan_entitlement.sql",
+      "0526_automatic_checkpoint_discontinuity.sql",
       "0520_session_code_search_frozen.sql",
       "0519_session_recovery_backlog_excludes_paused.sql",
       "0516_member_connection_read.sql",
@@ -2824,6 +2843,7 @@ describe("release schema contract", () => {
       "0523_modal_provider_create_fence.sql",
       "0524_codex_plan_entitlement.sql",
       "0525_attached_browser_opaque_generations.sql",
+      "0526_automatic_checkpoint_discontinuity.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
