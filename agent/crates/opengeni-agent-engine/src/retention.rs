@@ -236,6 +236,43 @@ struct SpoolBudgetExhausted {
     max: u64,
 }
 
+/// Shared budget for frames retained in memory, charged by payload plus record
+/// overhead. Exhaustion spills a log to disk instead of rejecting new jobs.
+/// This is not an RSS limit: replay buffers and spool indexes are separate.
+#[derive(Debug)]
+pub struct GlobalMemoryBudget(GlobalSpoolBudget);
+
+impl GlobalMemoryBudget {
+    /// Creates an empty, atomically reserved memory ledger.
+    #[must_use]
+    pub fn new(max_bytes: u64) -> Self {
+        Self(GlobalSpoolBudget::new(max_bytes))
+    }
+
+    /// Unbounded accounting for isolated library callers and tests.
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self::new(u64::MAX)
+    }
+
+    /// Changes future reservations without discarding already retained frames.
+    pub fn set_max_bytes(&self, max_bytes: u64) {
+        self.0.set_max_bytes(max_bytes);
+    }
+
+    /// Current ceiling for in-memory record costs.
+    #[must_use]
+    pub fn max_bytes(&self) -> u64 {
+        self.0.max_bytes()
+    }
+
+    /// Record costs currently held by memory-backed logs.
+    #[must_use]
+    pub fn used_bytes(&self) -> u64 {
+        self.0.used_bytes()
+    }
+}
+
 /// Where the retained frames physically live.
 enum Mode {
     /// All retained frames are in memory, oldest-first.
@@ -264,6 +301,8 @@ pub struct RetentionLog {
     /// encoded bytes.
     spool_budget: Arc<GlobalSpoolBudget>,
     spool_charged_bytes: u64,
+    memory_budget: Arc<GlobalMemoryBudget>,
+    memory_charged_bytes: u64,
     /// A spool create/write failure may leave a partial trailing record. Keep
     /// successful earlier frames replayable, but never append behind it.
     spool_failed: bool,
@@ -302,6 +341,23 @@ impl RetentionLog {
         spool_dir: PathBuf,
         spool_budget: Arc<GlobalSpoolBudget>,
     ) -> Self {
+        Self::with_budgets(
+            config,
+            spool_dir,
+            Arc::new(GlobalMemoryBudget::unlimited()),
+            spool_budget,
+        )
+    }
+
+    /// Creates an empty log with shared memory and physical disk accounting.
+    /// Merely starting a log reserves nothing in either ledger.
+    #[must_use]
+    pub fn with_budgets(
+        config: RetentionConfig,
+        spool_dir: PathBuf,
+        memory_budget: Arc<GlobalMemoryBudget>,
+        spool_budget: Arc<GlobalSpoolBudget>,
+    ) -> Self {
         Self {
             config,
             mode: Mode::Memory(VecDeque::new()),
@@ -311,6 +367,8 @@ impl RetentionLog {
             spool_dir_pending: Some(spool_dir),
             spool_budget,
             spool_charged_bytes: 0,
+            memory_budget,
+            memory_charged_bytes: 0,
             spool_failed: false,
         }
     }
@@ -338,7 +396,7 @@ impl RetentionLog {
             let over_bytes = self.retained_bytes + len
                 > u64::try_from(self.config.memory_max_bytes).unwrap_or(u64::MAX);
             let over_frames = frames.len() + 1 > self.config.memory_max_frames;
-            if over_bytes || over_frames {
+            if over_bytes || over_frames || self.memory_budget.0.try_reserve(len).is_err() {
                 if self.config.spool_max_bytes == 0 {
                     return Err(RetentionError::Overflow {
                         retained_bytes: self.retained_bytes + len,
@@ -347,6 +405,8 @@ impl RetentionLog {
                     });
                 }
                 self.spill_to_spool()?;
+            } else {
+                self.memory_charged_bytes += len;
             }
         }
 
@@ -400,7 +460,10 @@ impl RetentionLog {
                     if front.seq > acked_seq {
                         break;
                     }
-                    self.retained_bytes -= record_cost(&front.body);
+                    let bytes = record_cost(&front.body);
+                    self.retained_bytes -= bytes;
+                    self.memory_charged_bytes -= bytes;
+                    self.memory_budget.0.release(bytes);
                     frames.pop_front();
                 }
                 SpoolFreed::default()
@@ -564,6 +627,8 @@ impl RetentionLog {
             return Err(error);
         }
         self.mode = Mode::Spooled(spool);
+        self.memory_budget.0.release(self.memory_charged_bytes);
+        self.memory_charged_bytes = 0;
         Ok(())
     }
 
@@ -601,6 +666,8 @@ impl RetentionLog {
 
 impl Drop for RetentionLog {
     fn drop(&mut self) {
+        self.memory_budget.0.release(self.memory_charged_bytes);
+        self.memory_charged_bytes = 0;
         self.spool_budget.release(self.spool_charged_bytes);
         self.spool_charged_bytes = 0;
     }
@@ -1140,6 +1207,161 @@ mod tests {
             0,
             "log teardown releases its exact share"
         );
+    }
+
+    #[test]
+    fn shared_memory_spills_replays_and_releases_without_reserving_idle_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cost = 40 + RECORD_OVERHEAD_BYTES;
+        let memory = Arc::new(GlobalMemoryBudget::new(2 * cost));
+        let disk = Arc::new(GlobalSpoolBudget::unlimited());
+        let mut logs = (0..100)
+            .map(|i| {
+                RetentionLog::with_budgets(
+                    RetentionConfig {
+                        memory_max_bytes: 4096,
+                        ..small_config()
+                    },
+                    dir.path().join(i.to_string()),
+                    memory.clone(),
+                    disk.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(memory.used_bytes(), 0);
+        for (i, log) in logs.iter_mut().take(3).enumerate() {
+            log.append(data(&[u8::try_from(i).unwrap(); 40])).unwrap();
+        }
+        assert!(!logs[0].is_spooled());
+        assert!(!logs[1].is_spooled());
+        assert!(logs[2].is_spooled());
+        assert_eq!(memory.used_bytes(), 2 * cost);
+        // The first log must migrate its earlier frame before appending the next.
+        logs[0]
+            .append(FrameBody::Exit {
+                payload: b"done".to_vec(),
+            })
+            .unwrap();
+        assert!(logs[0].is_spooled());
+        assert_eq!(memory.used_bytes(), cost);
+        let replay = logs[0].replay(0).unwrap();
+        assert_eq!(replay.iter().map(|f| f.seq).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(replay[0].body, data(&[0; 40]));
+        assert_eq!(
+            replay[1].body,
+            FrameBody::Exit {
+                payload: b"done".to_vec()
+            }
+        );
+        logs[1].ack(1);
+        logs[1].ack(1);
+        assert_eq!(memory.used_bytes(), 0);
+        logs[3].append(FrameBody::Progress).unwrap();
+        assert_eq!(memory.used_bytes(), RECORD_OVERHEAD_BYTES);
+        logs[0].ack(2);
+        drop(logs);
+        assert_eq!(memory.used_bytes(), 0);
+        assert_eq!(disk.used_bytes(), 0);
+    }
+
+    #[test]
+    fn shared_memory_shrink_preserves_frames_until_next_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Arc::new(GlobalMemoryBudget::new(4096));
+        let mut log = RetentionLog::with_budgets(
+            RetentionConfig {
+                memory_max_bytes: 4096,
+                ..small_config()
+            },
+            dir.path().join("spool"),
+            memory.clone(),
+            Arc::new(GlobalSpoolBudget::unlimited()),
+        );
+        log.append(data(&[7; 40])).unwrap();
+        memory.set_max_bytes(0);
+        assert_eq!(log.replay(0).unwrap()[0].body, data(&[7; 40]));
+        assert_eq!(memory.used_bytes(), 40 + RECORD_OVERHEAD_BYTES);
+        log.append(FrameBody::Progress).unwrap();
+        assert!(log.is_spooled());
+        assert_eq!(memory.used_bytes(), 0);
+        assert_eq!(log.replay(0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn shared_memory_failed_spill_preserves_charge_and_prior_output() {
+        for failure in ["disabled", "disk-budget", "io"] {
+            let dir = tempfile::tempdir().unwrap();
+            let spool = dir.path().join("spool");
+            if failure == "io" {
+                fs::write(&spool, b"not a directory").unwrap();
+            }
+            let memory = Arc::new(GlobalMemoryBudget::new(40 + RECORD_OVERHEAD_BYTES));
+            let disk = Arc::new(GlobalSpoolBudget::new(if failure == "disk-budget" {
+                0
+            } else {
+                4096
+            }));
+            let mut log = RetentionLog::with_budgets(
+                RetentionConfig {
+                    memory_max_bytes: 4096,
+                    spool_max_bytes: if failure == "disabled" { 0 } else { 4096 },
+                    ..small_config()
+                },
+                spool,
+                memory.clone(),
+                disk.clone(),
+            );
+            log.append(data(&[9; 40])).unwrap();
+            let error = log.append(FrameBody::Progress).unwrap_err();
+            match failure {
+                "disabled" => assert!(matches!(error, RetentionError::Overflow { .. })),
+                "disk-budget" => {
+                    assert!(matches!(error, RetentionError::GlobalSpoolExhausted { .. }))
+                }
+                _ => assert!(matches!(error, RetentionError::SpoolIo { .. })),
+            }
+            assert_eq!(log.high_seq(), 1);
+            assert_eq!(log.replay(0).unwrap()[0].body, data(&[9; 40]));
+            assert_eq!(memory.used_bytes(), 40 + RECORD_OVERHEAD_BYTES);
+            log.ack(1);
+            assert_eq!(memory.used_bytes(), 0);
+            drop(log);
+            assert_eq!(disk.used_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn shared_memory_concurrent_logs_cannot_oversubscribe() {
+        let dir = tempfile::tempdir().unwrap();
+        let cost = 40 + RECORD_OVERHEAD_BYTES;
+        let memory = Arc::new(GlobalMemoryBudget::new(4 * cost));
+        let barrier = std::sync::Barrier::new(17);
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                let memory = &memory;
+                let barrier = &barrier;
+                let path = dir.path().join(i.to_string());
+                scope.spawn(move || {
+                    let mut log = RetentionLog::with_budgets(
+                        RetentionConfig {
+                            memory_max_bytes: 4096,
+                            ..small_config()
+                        },
+                        path,
+                        memory.clone(),
+                        Arc::new(GlobalSpoolBudget::unlimited()),
+                    );
+                    log.append(data(&[7; 40])).unwrap();
+                    barrier.wait();
+                    barrier.wait();
+                    assert_eq!(log.replay(0).unwrap()[0].body, data(&[7; 40]));
+                });
+            }
+            barrier.wait();
+            assert_eq!(memory.used_bytes(), 4 * cost);
+            barrier.wait();
+        });
+        assert_eq!(memory.used_bytes(), 0);
     }
 
     #[test]
