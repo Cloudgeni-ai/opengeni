@@ -393,9 +393,12 @@ machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
 means a verified self-update is draining accepted work; `queue_breaker` and
 `wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
 detail remains an unspecified admission refusal. The same distinction survives
-retry exhaustion and structured tool-error rendering. Update drains should be
-allowed to finish without interrupting accepted work; persistent refusals need
-admission/update-state diagnosis, not an inferred concurrency-limit increase.
+retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
+`update_busy_uploads`) and immediately reopens admission. It does not wait for
+long-lived servers, cancel accepted work, or restart the host. Request an update
+again at a safe idle point. Older runners can remain draining indefinitely;
+inspect their accepted operations and coordinate a safe stop/restart with their
+owners instead of killing useful work or increasing concurrency limits.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
