@@ -1,3 +1,4 @@
+import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -477,7 +478,7 @@ export function sandboxLifecycleTransitionDiagnostic(
 }
 
 /**
- * Recognize the one active-route transition that cannot finish inside its
+ * Recognize active-route transitions that cannot finish inside their
  * originating attempt. A Modal-home session may start on a Connected Machine
  * without creating or leasing its managed home box. When an explicit attach
  * clears the active pointer back to home, the pointer commit is authoritative,
@@ -490,7 +491,11 @@ export function sandboxLifecycleTransitionDiagnostic(
  */
 export function sandboxRouteTransitionCode(
   error: unknown,
-): "home_unavailable_this_turn" | "workspace_root_changed_this_turn" | null {
+):
+  | "home_unavailable_this_turn"
+  | "workspace_root_changed_this_turn"
+  | "native_capabilities_changed_this_attempt"
+  | null {
   const pending: unknown[] = [error];
   const seen = new WeakSet<object>();
   let inspected = 0;
@@ -503,6 +508,13 @@ export function sandboxRouteTransitionCode(
 
     try {
       const record = current as Record<string, unknown>;
+      if (
+        (current instanceof SandboxCapabilitiesChangedError ||
+          record.name === "SandboxCapabilitiesChangedError") &&
+        record.code === "native_capabilities_changed_this_attempt"
+      ) {
+        return "native_capabilities_changed_this_attempt";
+      }
       if (
         (current instanceof ActiveBackendUnresolvableError ||
           record.name === "ActiveBackendUnresolvableError") &&

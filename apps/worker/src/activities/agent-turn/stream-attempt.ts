@@ -113,7 +113,6 @@ import {
   retainableBrowserScreenshotToolCall,
   completedToolCallFromSdkEvent,
 } from "./history";
-import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
 import {
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
@@ -180,6 +179,7 @@ export type TurnStreamAttemptDeps = {
   providerTurn: ProviderTurnState;
   leases: ReturnType<typeof createTurnCredentialLeases>;
   historySink: ReturnType<typeof createTurnHistorySink>;
+  checkpointBeforeProviderDispatch: () => Promise<void>;
   media: ReturnType<typeof createTurnMediaArtifacts>;
   toolResultSpill: ToolResultSpill;
   claimedResult: ClaimedResult;
@@ -303,6 +303,7 @@ export async function runTurnStreamAttempt(
     providerTurn,
     leases,
     historySink,
+    checkpointBeforeProviderDispatch,
     media,
     toolResultSpill,
     claimedResult,
@@ -614,7 +615,7 @@ export async function runTurnStreamAttempt(
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
-      await checkpointHistoryBeforeProviderDispatch(historySink);
+      await checkpointBeforeProviderDispatch();
       if (
         providerPublishesNativeRequestEvents ||
         eventing.firstModelRequestPreparationRecorded ||

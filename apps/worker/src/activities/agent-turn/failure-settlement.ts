@@ -413,13 +413,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       throw recoveryError;
     }
   }
-  // A managed-home session can start directly on a Connected Machine without
-  // creating or leasing its cloud home. If sandbox_attach/sandbox_swap then
-  // clears the durable pointer to home, the commit is valid but this exact
-  // attempt cannot serve a later home operation. Preserve the completed attach
+  // A route change can require a different home, filesystem root, or native
+  // capability set than this attempt established. Preserve the completed attach
   // and every preceding model/tool receipt, close only the unresolved suffix,
   // and continue the SAME logical turn in a fresh attempt. That next attempt
-  // starts from the now-null pointer and establishes home normally.
+  // starts from the committed pointer and establishes its route normally.
   const routeTransitionCode = sandboxRouteTransitionCode(error);
   if (routeTransitionCode && recoveryTurnId && eventing.publish && eventing.turnStartedPublished) {
     try {
@@ -443,7 +441,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult({ status: "cancelled" });
       }
       if (recovery.action !== "recovering") {
-        throw new Error("Home sandbox route transition could not recover the current turn");
+        throw new Error("Sandbox route transition could not recover the current turn");
       }
       acknowledgeRecoveryQuiescence();
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
