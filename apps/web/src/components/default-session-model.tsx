@@ -1,11 +1,18 @@
 import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
-import type { DefaultModelSelectionSource } from "@opengeni/sdk";
+import type { DefaultModelSelectionSource, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ModelPicker } from "@/components/pickers";
 import { useAppContext } from "@/context";
+import {
+  availabilityReasonLabel,
+  billingClassForModel,
+  billingClassLabel,
+  payerSummaryForModel,
+  type PickerModelRow,
+} from "@/lib/model-policy";
 import { initialReasoningEffort } from "@/lib/session-tools";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { IntelligenceEffort } from "@/lib/session-tools";
@@ -22,6 +29,58 @@ function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): 
     default:
       return "Following the deployment default until you choose one or connect a subscription.";
   }
+}
+
+/**
+ * Picker rows for the default-model row. The shared picker only lists models
+ * whose credentials are ready, but the current default may be one that can't
+ * run yet (e.g. OpenGeni credits without a balance). Keep that real catalog
+ * entry visible as an unselectable row so the trigger shows its label and
+ * payment source instead of a raw id.
+ */
+export function defaultModelPickerRows(
+  rows: PickerModelRow[],
+  models: WorkspaceModelCatalogModel[],
+  modelId: string,
+): PickerModelRow[] {
+  if (rows.some((row) => row.id === modelId)) return rows;
+  const catalog = models.find((model) => model.id === modelId);
+  if (!catalog) return rows;
+  const billingClass = billingClassForModel(catalog);
+  return [
+    ...rows,
+    {
+      id: catalog.id,
+      label: catalog.label,
+      ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
+      billingClass,
+      billingClassLabel: billingClassLabel(billingClass),
+      selectable: false,
+      unavailableReason: availabilityReasonLabel(catalog.availability.reason) ?? "Unavailable",
+      provider: catalog.provider,
+      providerLabel: catalog.providerLabel,
+      catalog,
+    },
+  ];
+}
+
+/** One line naming the default, who pays for it, and whether it can run now. */
+export function defaultModelSummary(
+  models: WorkspaceModelCatalogModel[],
+  modelId: string,
+): { text: string; unavailable: string | null } | null {
+  const catalog = models.find((model) => model.id === modelId);
+  if (!catalog) return null;
+  const runnable =
+    catalog.credentialReadiness.status === "ready" && catalog.availability.selectable;
+  return {
+    text: `${catalog.label} · ${payerSummaryForModel(catalog)}`,
+    unavailable: runnable
+      ? null
+      : `Can't run right now: ${
+          availabilityReasonLabel(catalog.availability.reason) ?? "Unavailable"
+        }`,
+  };
 }
 
 /** Workspace default inherited by new chats and new scheduled tasks. */
@@ -65,6 +124,9 @@ export function DefaultSessionModelPreferenceRow(props: {
     context.clientConfig,
   ]);
 
+  const pickerRows = defaultModelPickerRows(catalog.rows, catalog.models, draft.model);
+  const summary = catalog.loading ? null : defaultModelSummary(catalog.models, draft.model);
+
   function updateDraft(next: Draft) {
     draftRef.current = next;
     setDraft(next);
@@ -96,13 +158,21 @@ export function DefaultSessionModelPreferenceRow(props: {
           Used for new chats and scheduled tasks in this workspace.
           {configured ? null : ` ${automaticDefaultNote(automatic?.source)}`}
         </p>
+        {summary ? (
+          <p className="mt-0.5 text-xs text-fg-muted">
+            {summary.text}
+            {summary.unavailable ? (
+              <span className="text-status-waiting"> · {summary.unavailable}</span>
+            ) : null}
+          </p>
+        ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {saving ? (
           <Loader2Icon aria-label="Saving default model" className="size-3.5 animate-spin" />
         ) : null}
         <ModelPicker
-          rows={catalog.rows}
+          rows={pickerRows}
           model={draft.model}
           effort={draft.reasoningEffort}
           latencyMode="standard"

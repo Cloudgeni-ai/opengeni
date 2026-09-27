@@ -75,6 +75,7 @@ import {
   delegableApiKeyPermissions,
   hasWorkspacePermission,
 } from "@/lib/permissions";
+import { apiKeyStatus } from "@/lib/api-key-status";
 import type { ApiKey, OrganizationMember, OrganizationWorkspaceAccessMember } from "@/types";
 import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 
@@ -343,7 +344,7 @@ function OperationalWorkspaceSettingsRoute({
     return true;
   }
 
-  const activeApiKeyCount = apiKeys.filter((key) => !key.revokedAt).length;
+  const activeApiKeyCount = apiKeys.filter((key) => apiKeyStatus(key) === "active").length;
 
   return (
     <WorkspaceSettingsContent section={section}>
@@ -671,7 +672,7 @@ function OperationalWorkspaceSettingsRoute({
                           <div className="truncate text-xs text-fg-muted">{apiKey.description}</div>
                         ) : null}
                         <div className="truncate text-2xs text-fg-subtle">
-                          {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
+                          {apiKey.prefix}… · {apiKeyStatus(apiKey)}
                         </div>
                       </div>
                       <Button

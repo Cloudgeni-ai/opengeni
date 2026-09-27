@@ -1,6 +1,9 @@
 /** Web-facing model-picker helpers (re-exported from `@opengeni/react`). */
 export {
   advancedSourceSummary,
+  availabilityReasonLabel,
+  billingClassForModel,
+  billingClassLabel,
   coerceReasoningEffortForModel,
   effortOptionsForModel,
   findPickerRow,

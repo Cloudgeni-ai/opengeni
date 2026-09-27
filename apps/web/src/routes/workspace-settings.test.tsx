@@ -73,8 +73,24 @@ const listSlackUserLinkAccessRequests = mock(
 const approveSlackUserLinkAccessRequest = mock(async () => undefined);
 const denySlackUserLinkAccessRequest = mock(async () => undefined);
 
+const organizationId = "44444444-4444-4444-8444-444444444444";
+const getOrganizationAdministrationOverview = mock(async () => ({
+  organization: { id: organizationId, name: "Acme" },
+  roles: [
+    {
+      role: "member",
+      label: "Member",
+      description: "Server member description.",
+      permissions: ["workspace:read", "sessions:create", "sessions:read"],
+    },
+  ],
+  workspaces: [],
+}));
+
 const context = {
+  workspaces: [] as Array<{ id: string; accountId: string }>,
   client: {
+    getOrganizationAdministrationOverview,
     approveSlackUserLinkAccessRequest,
     addWorkspaceMember,
     denySlackUserLinkAccessRequest,
@@ -84,7 +100,10 @@ const context = {
     removeWorkspaceMember,
     updateWorkspaceMember,
   },
-  accessContext: { subjectId: "user:caller" },
+  accessContext: {
+    subjectId: "user:caller",
+    accountGrants: [] as Array<{ accountId: string; subjectId: string; role: string }>,
+  },
 };
 
 mock.module("@/context", () => ({ useAppContext: () => context }));
@@ -105,7 +124,11 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  context.workspaces = [];
+  context.accessContext.accountGrants = [];
+  getOrganizationAdministrationOverview.mockClear();
   listWorkspaceMembers.mockClear();
+  listWorkspaceMembers.mockImplementation(async () => [callerMember, collaboratorMember]);
   listWorkspaceMemberCandidates.mockClear();
   addWorkspaceMember.mockClear();
   updateWorkspaceMember.mockClear();
@@ -138,6 +161,62 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
 }
 
 describe("workspace access settings convergence", () => {
+  test("lists the local owner and hides API-key subjects", async () => {
+    listWorkspaceMembers.mockImplementation(async () => [
+      {
+        subjectId: "dev",
+        subjectLabel: "Local dev",
+        role: "owner",
+        permissions: ["workspace:read", "workspace:admin", "members:manage"],
+        createdAt: "2026-08-10T12:00:00.000Z",
+      },
+      {
+        subjectId: "api_key:ci",
+        subjectLabel: "CI key",
+        role: "member",
+        permissions: ["workspace:read"],
+        createdAt: "2026-08-10T12:00:00.000Z",
+      },
+    ]);
+    const rendered = await renderMembers(false);
+    try {
+      expect(rendered.container.textContent).toContain("Local dev");
+      expect(rendered.container.textContent).toContain("Owner");
+      expect(rendered.container.textContent).not.toContain("Custom access");
+      expect(rendered.container.textContent).not.toContain("CI key");
+      expect(rendered.container.textContent).not.toContain("No members yet");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("matches members against the server role catalog", async () => {
+    context.workspaces = [{ id: workspaceA, accountId: organizationId }];
+    context.accessContext.accountGrants = [
+      { accountId: organizationId, subjectId: "user:caller", role: "owner" },
+    ];
+    listWorkspaceMembers.mockImplementation(async () => [
+      {
+        subjectId: "user:server-member",
+        subjectLabel: "Server Member",
+        role: "member",
+        permissions: ["workspace:read", "sessions:read", "sessions:create"],
+        createdAt: "2026-08-10T12:00:00.000Z",
+      },
+    ]);
+    const rendered = await renderMembers(false);
+    try {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(getOrganizationAdministrationOverview).toHaveBeenCalledWith(organizationId);
+      expect(rendered.container.textContent).toContain("Server member description.");
+      expect(rendered.container.textContent).not.toContain("Custom access");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("shows the workspace-scoped member manager", async () => {
     const rendered = await renderMembers(true);
     try {

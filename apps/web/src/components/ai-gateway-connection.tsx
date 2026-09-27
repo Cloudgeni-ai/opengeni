@@ -234,6 +234,7 @@ function ModelProviderConnectionCardWithClient(
   const [modelPendingRemoval, setModelPendingRemoval] =
     useState<WorkspaceProviderCustomModel | null>(null);
   const [open, setOpen] = useState(false);
+  const [disconnectPending, setDisconnectPending] = useState(false);
   const activeRef = useRef(true);
   const connectionRequestGenerationRef = useRef(0);
   const customModelsRequestGenerationRef = useRef(0);
@@ -447,15 +448,15 @@ function ModelProviderConnectionCardWithClient(
     }
   }
 
-  async function disconnect() {
-    if (!connection) return;
+  async function disconnect(): Promise<boolean> {
+    if (!connection) return false;
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
     try {
       await client.deleteConnection(props.workspaceId, connection.id);
-      if (!activeRef.current) return;
+      if (!activeRef.current) return false;
       const reconciled = await refreshConnection();
-      if (!activeRef.current) return;
+      if (!activeRef.current) return false;
       const committed =
         reconciled !== null &&
         !reconciled.some(
@@ -468,15 +469,16 @@ function ModelProviderConnectionCardWithClient(
               ? "Reload the connection state before trying again."
               : `A newer ${config.credentialLabel} connection is still active.`,
         });
-        return;
+        return false;
       }
       setOpen(false);
       props.onConnectionChange?.();
       toast.success(`${config.credentialLabel} disconnected`);
+      return true;
     } catch (caught) {
-      if (!activeRef.current) return;
+      if (!activeRef.current) return false;
       const reconciled = await refreshConnection();
-      if (!activeRef.current) return;
+      if (!activeRef.current) return false;
       const committed =
         reconciled !== null &&
         !reconciled.some(
@@ -486,11 +488,12 @@ function ModelProviderConnectionCardWithClient(
         setOpen(false);
         props.onConnectionChange?.();
         toast.success(`${config.credentialLabel} disconnected`);
-        return;
+        return true;
       }
       toast.error(`Couldn't disconnect ${config.credentialLabel}`, {
         description: caught instanceof Error ? caught.message : String(caught),
       });
+      return false;
     } finally {
       if (activeRef.current) setBusy(false);
     }
@@ -714,7 +717,7 @@ function ModelProviderConnectionCardWithClient(
                   variant="ghost"
                   disabled={busy}
                   className="text-destructive hover:text-destructive"
-                  onClick={disconnect}
+                  onClick={() => setDisconnectPending(true)}
                 >
                   <Trash2Icon className="size-3.5" />
                   Disconnect
@@ -870,6 +873,15 @@ function ModelProviderConnectionCardWithClient(
           ) : null}
         </div>
       </ModelConnectionSection>
+      <ConfirmDialog
+        open={disconnectPending}
+        onOpenChange={setDisconnectPending}
+        title={`Disconnect ${config.credentialLabel}?`}
+        description="Its models stop working in this workspace. Existing sessions keep their model identity, but cannot make new calls until a key is connected again."
+        confirmLabel={`Disconnect ${config.credentialLabel}`}
+        pendingLabel="Disconnecting…"
+        onConfirm={disconnect}
+      />
       <ConfirmDialog
         open={modelPendingRemoval !== null}
         onOpenChange={(next) => {

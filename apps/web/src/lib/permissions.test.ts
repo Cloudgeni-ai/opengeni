@@ -9,6 +9,8 @@ import {
   fixedOrganizationApiKeyPermissions,
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
+  resolveWorkspaceAccessLevels,
+  workspaceMemberAccessRole,
 } from "./permissions";
 
 describe("workspace member permission groups", () => {
@@ -142,5 +144,41 @@ describe("Personal workspace settings", () => {
         memberships: [{ ...self.memberships[0]!, personalWorkspaceId: "different-workspace" }],
       }),
     ).toBe(false);
+  });
+});
+
+describe("workspace member access roles", () => {
+  const serverMember = {
+    role: "member" as const,
+    label: "Member",
+    description: "Can create sessions and contribute shared workspace content.",
+    permissions: ["workspace:read", "sessions:create", "sessions:read"],
+  };
+
+  test("matches members against the server role catalog", () => {
+    const levels = resolveWorkspaceAccessLevels([serverMember]);
+    expect(levels.find((level) => level.role === "member")).toBe(serverMember);
+    // Roles the server did not return keep the client fallback.
+    expect(levels.map((level) => level.role)).toEqual(["viewer", "member", "admin"]);
+    expect(
+      workspaceMemberAccessRole(
+        { role: "member", permissions: ["sessions:read", "workspace:read", "sessions:create"] },
+        levels,
+      ),
+    ).toBe("member");
+  });
+
+  test("falls back to the client catalog without a server catalog", () => {
+    expect(resolveWorkspaceAccessLevels(null)).toBe(workspaceAccessLevels);
+  });
+
+  test("names the workspace owner and marks divergent grants as custom", () => {
+    const levels = resolveWorkspaceAccessLevels(null);
+    expect(
+      workspaceMemberAccessRole({ role: "owner", permissions: ["workspace:admin"] }, levels),
+    ).toBe("owner");
+    expect(
+      workspaceMemberAccessRole({ role: "member", permissions: ["workspace:read"] }, levels),
+    ).toBe("custom");
   });
 });

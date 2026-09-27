@@ -16,6 +16,7 @@ import { ModelConnectionSection } from "@/components/model-connection-section";
 import { ChatGptMark } from "@/components/chatgpt-mark";
 import { CodexDeviceCodePanel } from "@/components/codex-connection";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 
 function accountDisplay(account: CodexAccount): string {
@@ -42,6 +43,7 @@ export function OrganizationCodexSubscriptionsWithClient({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [disconnectTarget, setDisconnectTarget] = useState<CodexAccount | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
@@ -147,7 +149,7 @@ export function OrganizationCodexSubscriptionsWithClient({
     }
   };
 
-  const disconnect = async (accountId: string): Promise<void> => {
+  const disconnect = async (accountId: string): Promise<boolean> => {
     setBusy(true);
     try {
       await client.requestJson(
@@ -157,8 +159,10 @@ export function OrganizationCodexSubscriptionsWithClient({
       );
       await refresh();
       toast.success("Organization subscription disconnected");
+      return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to disconnect subscription");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -269,7 +273,7 @@ export function OrganizationCodexSubscriptionsWithClient({
                     variant="ghost"
                     disabled={busy}
                     aria-label={`Disconnect ${accountDisplay(account)}`}
-                    onClick={() => void disconnect(account.id)}
+                    onClick={() => setDisconnectTarget(account)}
                   >
                     <Trash2Icon className="size-3.5" /> Disconnect
                   </Button>
@@ -294,6 +298,21 @@ export function OrganizationCodexSubscriptionsWithClient({
           onConnect={() => void connect()}
         />
       ) : null}
+      <ConfirmDialog
+        open={disconnectTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDisconnectTarget(null);
+        }}
+        title={
+          disconnectTarget
+            ? `Disconnect ${accountDisplay(disconnectTarget)}?`
+            : "Disconnect subscription?"
+        }
+        description="Workspaces that use the organization's Codex subscriptions stop using this one for new work. You can connect it again later."
+        confirmLabel="Disconnect subscription"
+        pendingLabel="Disconnecting…"
+        onConfirm={() => (disconnectTarget ? disconnect(disconnectTarget.id) : false)}
+      />
     </ModelConnectionSection>
   );
 }
