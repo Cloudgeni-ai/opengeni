@@ -1433,6 +1433,9 @@
 :where(.og-root).right-1\.5,:where(.og-root) .right-1\.5 {
     right: calc(var(--spacing) * 1.5);
   }
+:where(.og-root).right-2,:where(.og-root) .right-2 {
+    right: calc(var(--spacing) * 2);
+  }
 :where(.og-root).right-3,:where(.og-root) .right-3 {
     right: calc(var(--spacing) * 3);
   }

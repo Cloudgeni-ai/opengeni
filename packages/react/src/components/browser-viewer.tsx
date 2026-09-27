@@ -75,6 +75,7 @@ import type { EmbeddedBrowserInteractionClientOverride } from "../session-contex
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { BrowserSelectControl } from "./browser-select-control";
+import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 
 export type BrowserViewerNotification = {
   kind: "error" | "info";
@@ -1095,7 +1096,7 @@ function BrowserToolbar(props: {
   onRefresh: () => void;
   setupUrl?: string | undefined;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
   const current = props.sessions.filter((session) => props.relevantSessionIds.has(session.id));
   const others = props.sessions.filter((session) => !props.relevantSessionIds.has(session.id));
@@ -1275,7 +1276,7 @@ function BrowserLaunchMenu(props: {
   setupUrl?: string | undefined;
   prominent?: boolean;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const choose = (choice?: BrowserLaunchChoice) => {
     detailsRef.current?.removeAttribute("open");
     props.onCreate(choice);
@@ -1287,7 +1288,7 @@ function BrowserLaunchMenu(props: {
   const activeIdentities = props.identities.filter((identity) => identity.status === "active");
   const archivedIdentities = props.identities.filter((identity) => identity.status === "archived");
   return (
-    <details ref={detailsRef} className={cn("relative", props.prominent && "mt-4 inline-block")}>
+    <details ref={detailsRef} className={cn(props.prominent && "mt-4 inline-block")}>
       <summary
         onClick={(event) => {
           if (busy) event.preventDefault();
@@ -1311,8 +1312,8 @@ function BrowserLaunchMenu(props: {
       </summary>
       <div
         className={cn(
-          "absolute z-40 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 text-left shadow-xl",
-          props.prominent ? "left-1/2 top-10 -translate-x-1/2" : "right-0 top-8",
+          "absolute z-40 max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] overflow-y-auto rounded-og-md border border-og-border bg-og-surface-1 p-1 text-left shadow-xl",
+          props.prominent ? "left-1/2 top-2 -translate-x-1/2" : "right-2 top-10",
         )}
       >
         {props.attachedDevices.length > 0 || props.attachedBridges.length > 0 ? (
@@ -1460,7 +1461,7 @@ function BrowserProfileMenu(props: {
   ) => Promise<boolean>;
   onOpenVersion: (identityId: string, baseRevisionId: string) => void;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const nameInputId = useId();
   const [name, setName] = useState("");
   const attached = props.session?.placement.kind === "attached_device";
@@ -1491,7 +1492,7 @@ function BrowserProfileMenu(props: {
           : "unsaved"
       : "temporary";
   return (
-    <details ref={detailsRef} className="relative min-w-0">
+    <details ref={detailsRef} className="min-w-0">
       <summary className="flex h-7 max-w-40 cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 text-og-xs text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
         {props.saving ? (
           <LoaderCircleIcon className="size-3 animate-spin" />
@@ -1508,7 +1509,7 @@ function BrowserProfileMenu(props: {
         ) : null}
         <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
       </summary>
-      <div className="absolute right-0 top-8 z-40 w-72 rounded-og-md border border-og-border bg-og-surface-1 p-3 shadow-xl">
+      <div className="absolute right-2 top-10 z-40 max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] overflow-y-auto rounded-og-md border border-og-border bg-og-surface-1 p-3 shadow-xl">
         <div className="flex items-start gap-2">
           <span className="grid size-7 shrink-0 place-items-center rounded-og-sm bg-og-surface-2 text-og-muted">
             {attached ? (
