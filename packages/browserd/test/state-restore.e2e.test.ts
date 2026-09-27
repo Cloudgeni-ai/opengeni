@@ -85,12 +85,12 @@ e2e.each(["restart", "stop"] as const)(
       expect(preview.state).toBe("completed");
       const previewDeadline = Date.now() + 5_000;
       while (
-        !(await supervisor.listTargets(source)).some((target) => target.url.startsWith("blob:")) &&
+        !(await supervisor.listTargets(source)).some((tab) => tab.url.startsWith("blob:")) &&
         Date.now() < previewDeadline
       )
         await Bun.sleep(50);
       expect(
-        (await supervisor.listTargets(source)).some((target) => target.url.startsWith("blob:")),
+        (await supervisor.listTargets(source)).some((tab) => tab.url.startsWith("blob:")),
       ).toBe(true);
       await supervisor.selectTarget(source, created.observation.target.id);
 
