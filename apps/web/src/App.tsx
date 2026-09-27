@@ -8,7 +8,8 @@
 //   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
-//   /workspaces/:id/variable-sets            → variable sets + variables
+//   /workspaces/:id/variable-sets            → variable sets (?view=new)
+//   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
@@ -35,6 +36,8 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
+  useParams,
+  useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
@@ -323,7 +326,23 @@ const workspaceAgentsRoute = createRoute({
 const workspaceVariableSetsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "variable-sets",
+  // The list and each set's page share one component, so moving between them
+  // never re-reads the sets. The child routes only match the URL.
   component: VariableSets,
+});
+const workspaceVariableSetsIndexRoute = createRoute({
+  getParentRoute: () => workspaceVariableSetsRoute,
+  path: "/",
+  validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
+    search.view === "new" ? { view: "new" } : {},
+});
+const workspaceVariableSetDetailRoute = createRoute({
+  getParentRoute: () => workspaceVariableSetsRoute,
+  path: "$variableSetId",
+  validateSearch: (search: Record<string, unknown>): { view?: "add" | "paste" | "edit" } =>
+    search.view === "add" || search.view === "paste" || search.view === "edit"
+      ? { view: search.view }
+      : {},
 });
 const workspaceEnvironmentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -333,11 +352,15 @@ const workspaceEnvironmentsRoute = createRoute({
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "rigs",
+  validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
+    search.view === "new" ? { view: "new" } : {},
   component: Rigs,
 });
 const workspaceRigDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "rigs/$rigId",
+  validateSearch: (search: Record<string, unknown>): { view?: "edit" | "edit-setup" } =>
+    search.view === "edit" || search.view === "edit-setup" ? { view: search.view } : {},
   component: RigDetail,
 });
 const workspaceMachinesRoute = createRoute({
@@ -561,7 +584,10 @@ const routeTree = rootRoute.addChildren([
     workspaceSessionsRoute,
     workspaceSessionRoute,
     workspaceAgentsRoute,
-    workspaceVariableSetsRoute,
+    workspaceVariableSetsRoute.addChildren([
+      workspaceVariableSetsIndexRoute,
+      workspaceVariableSetDetailRoute,
+    ]),
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
@@ -684,7 +710,11 @@ function SessionDeepLink() {
 
 function VariableSets() {
   const { workspaceId } = workspaceVariableSetsRoute.useParams();
-  return <LazyVariableSetsRoute workspaceId={workspaceId} />;
+  const { variableSetId } = useParams({ strict: false });
+  const { view } = useSearch({ strict: false });
+  return (
+    <LazyVariableSetsRoute workspaceId={workspaceId} variableSetId={variableSetId} view={view} />
+  );
 }
 
 function VariableSetsRedirect() {
@@ -694,12 +724,14 @@ function VariableSetsRedirect() {
 
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
-  return <LazyRigsRoute workspaceId={workspaceId} />;
+  const { view } = workspaceRigsRoute.useSearch();
+  return <LazyRigsRoute workspaceId={workspaceId} view={view} />;
 }
 
 function RigDetail() {
   const { workspaceId, rigId } = workspaceRigDetailRoute.useParams();
-  return <LazyRigDetailRoute workspaceId={workspaceId} rigId={rigId} />;
+  const { view } = workspaceRigDetailRoute.useSearch();
+  return <LazyRigDetailRoute workspaceId={workspaceId} rigId={rigId} view={view} />;
 }
 
 function Machines() {

@@ -1,17 +1,17 @@
-// Rig overview: what this machine IS at a glance — platform base, active
-// version, default variable sets, credential hooks — plus the most recent
-// verification of the active version's checks.
-import { Loader2Icon, RotateCwIcon } from "lucide-react";
+// An environment at a glance: the active version's health checks and their
+// last run, its setup script, and the variable sets it adds by default.
+import { Loader2Icon, RotateCwIcon, VariableIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { RigStatusChip } from "@/components/rigs/rig-status-chip";
+import { rigHealth } from "@/components/rigs/rig-health";
+import { CheckList, SetupScript } from "@/components/rigs/rig-versions-timeline";
 import { VerificationLog } from "@/components/rigs/verification-log";
 import { Button } from "@/components/ui/button";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { formatTimestamp } from "@/lib/format";
-import { withOccurrenceKeys } from "@/lib/react-key";
-import { rigActorLabel, rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
+import { DetailSection } from "@/components/ui/detail-sheet";
+import { ListRow, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
+import { StatusDot } from "@/components/ui/status-dot";
+import { versionHasChecks } from "@/lib/rig-status";
 import type { Rig, RigChange, RigChangeVerification } from "@/types";
 
 export function RigOverview({
@@ -21,6 +21,7 @@ export function RigOverview({
   canUse,
   mutating,
   onVerify,
+  onOpenVariableSet,
 }: {
   rig: Rig;
   changes: RigChange[];
@@ -28,14 +29,17 @@ export function RigOverview({
   canUse: boolean;
   mutating: boolean;
   onVerify: () => Promise<{ ok: boolean; versionId: string } | null>;
+  onOpenVariableSet: (id: string) => void;
 }) {
   const active = rig.activeVersion;
   if (!active) {
     return (
-      <Notice tone="waiting" title="This sandbox environment has no active version">
-        Create a version by proposing and promoting a change, then it will materialize into
-        sandboxes.
-      </Notice>
+      <DetailSection title="No active version yet">
+        <p className="text-sm leading-5 text-fg-muted">
+          Propose a change and promote it once it passes. Sessions start using the environment after
+          that.
+        </p>
+      </DetailSection>
     );
   }
 
@@ -45,131 +49,86 @@ export function RigOverview({
     changes
       .filter((change) => change.resultVersionId === active.id && change.verification)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.verification ?? null;
-
-  // Use the server-derived activeVersionHealth (same source the list cards use —
-  // it also reflects audit-recorded active-version re-verifications), so the
-  // detail overview never disagrees with the list dot. Fall back to the local
-  // change-derived reading only if the field is absent. The no-checks case still
-  // shows no health chip (a version with no checks has nothing to be "unknown").
-  const health = !versionHasChecks(active)
-    ? null
-    : (rig.activeVersionHealth?.checkHealth ??
-      (latestVerification
-        ? latestVerification.passed === false
-          ? "failing"
-          : "passing"
-        : "unknown"));
+  // The server-derived summary (the same one the list uses), so the page never
+  // disagrees with the list.
+  const health = rigHealth(rig);
+  const hasChecks = versionHasChecks(active);
 
   return (
-    <div className="grid gap-5">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Base image">
-          <span className="text-xs">
-            Deployment-managed platform image
-            {active.image ? (
-              <span className="text-fg-subtle"> · legacy override ignored</span>
-            ) : null}
-          </span>
-        </Field>
-        <Field label="Active version">
-          <span className="text-sm">
-            Version {active.version}
-            <span className="text-fg-subtle">
-              {" "}
-              · {rigActorLabel(active.createdBy)} · {formatTimestamp(active.createdAt)}
-            </span>
-          </span>
-        </Field>
-        <Field label="Default variable sets">
-          {active.defaultVariableSetIds.length === 0 ? (
-            <span className="text-xs text-fg-subtle">None</span>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {active.defaultVariableSetIds.map((id) => (
-                <MetaChip key={id}>{variableSetName(id)}</MetaChip>
-              ))}
-            </div>
-          )}
-        </Field>
-        <Field label="Credential hooks">
-          {active.credentialHooks.length === 0 ? (
-            <span className="text-xs text-fg-subtle">None</span>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {active.credentialHooks.map((hook) => (
-                <MetaChip key={hook}>{hook}</MetaChip>
-              ))}
-            </div>
-          )}
-        </Field>
-      </div>
-
-      <div className="grid gap-2.5 border-t border-border/70 pt-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium">Health checks</h3>
-            {health ? <RigStatusChip view={rigCheckHealthView(health)} /> : null}
-          </div>
-          {canUse ? (
+    <>
+      <DetailSection
+        title="Health checks"
+        description={
+          hasChecks
+            ? "Commands that must succeed in a clean sandbox for the environment to count as healthy."
+            : "This version declares no checks. Add some with Edit setup."
+        }
+        action={
+          canUse && hasChecks ? (
             <Button
               type="button"
-              variant="ghost"
+              variant="outline"
               size="sm"
-              className="h-8"
+              className="pointer-coarse:h-11"
               disabled={mutating}
               onClick={async () => {
                 const result = await onVerify();
                 if (result) {
-                  toast.success("Re-verifying the active version", {
-                    description:
-                      "The checks are running in a clean sandbox. This can take a moment.",
+                  toast.success("Running the checks again", {
+                    description: "They run in a clean sandbox. This can take a moment.",
                   });
                 }
               }}
             >
               {mutating ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
+                <Loader2Icon aria-hidden="true" className="animate-spin" />
               ) : (
-                <RotateCwIcon className="size-3.5" />
+                <RotateCwIcon aria-hidden="true" />
               )}
-              Re-run checks
+              Run checks
             </Button>
-          ) : null}
-        </div>
-
-        {!versionHasChecks(active) ? (
-          <p className="text-xs text-fg-subtle">
-            This version declares no checks. Add checks via a definition edit to make the machine
-            self-verifying.
-          </p>
-        ) : latestVerification ? (
-          <div className="rounded-md border border-border/70 bg-bg/20 p-2.5">
-            <VerificationLog verification={latestVerification} />
+          ) : null
+        }
+      >
+        {hasChecks ? (
+          <div className="flex min-w-0 flex-col gap-4">
+            <p className="inline-flex items-center gap-1.5 text-sm leading-5 font-medium text-fg">
+              <StatusDot tone={health.tone} size="sm" />
+              {health.label}
+            </p>
+            {latestVerification ? (
+              <VerificationLog verification={latestVerification} />
+            ) : (
+              <CheckList checks={active.checks} />
+            )}
           </div>
+        ) : null}
+      </DetailSection>
+
+      <DetailSection title="Setup script" description="Runs once when a sandbox starts.">
+        <SetupScript script={active.setupScript} />
+      </DetailSection>
+
+      <DetailSection
+        title="Default variable sets"
+        description="Added to new sessions that use this environment."
+      >
+        {active.defaultVariableSetIds.length === 0 ? (
+          <p className="text-sm leading-5 text-fg-muted">None. Sessions pick their own.</p>
         ) : (
-          <div className="grid gap-1">
-            <p className="text-xs text-fg-subtle">Not verified yet. The declared checks:</p>
-            {withOccurrenceKeys(
-              active.checks,
-              (check) => `${check.name}\u0000${check.command}`,
-            ).map(({ key, item: check }) => (
-              <div key={key} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
-                <div className="truncate text-xs font-medium">{check.name}</div>
-                <div className="truncate font-mono text-2xs text-fg-subtle">{check.command}</div>
-              </div>
+          <RowList label="Default variable sets" flush>
+            {active.defaultVariableSetIds.map((id) => (
+              <ListRow
+                key={id}
+                leading={<LogoTile icon={<VariableIcon />} />}
+                title={variableSetName(id)}
+                indicator="open"
+                onOpen={() => onOpenVariableSet(id)}
+              />
             ))}
-          </div>
+          </RowList>
         )}
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="grid gap-1">
-      <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">{label}</div>
-      {children}
-    </div>
+      </DetailSection>
+    </>
   );
 }
