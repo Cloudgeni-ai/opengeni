@@ -19,8 +19,8 @@
 //   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
 //   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
 //   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
-//   /workspaces/:id/documents                → document bases + search
-//   /workspaces/:id/memory                   → durable workspace memory
+//   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
+//   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
 //   /workspaces/:id/settings                 → workspace settings (general, access, models, API keys)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
@@ -51,6 +51,7 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
+import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
 import {
@@ -96,8 +97,6 @@ const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
   "AgentTopologyPreviewRoute",
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
-const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
-const LazyMemoryRoute = lazyRouteComponent(() => import("@/routes/memory"), "MemoryRoute");
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
   "VariableSetsRoute",
@@ -463,9 +462,7 @@ const workspaceScheduleEditRoute = createRoute({
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
-  // Memory used to live inside Documents, so existing timeline links and
-  // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
-  // compatibility redirect to the first-class Memory surface.
+  // Old Documents links (and `?memory=<id>` bookmarks) open Knowledge.
   validateSearch: (
     search: Record<string, unknown>,
   ): { memory?: string; from?: "brain"; authority?: DocumentAuthorityKind } => ({
@@ -482,9 +479,7 @@ const workspaceDocumentsRoute = createRoute({
 const workspaceMemoryRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "memory",
-  // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
-  // Memory page reveals + highlights that record even when the filters would
-  // otherwise hide it. Unknown values are ignored.
+  // Memory is Knowledge now: `?memory=<id>` (from a timeline step) opens that entry.
   validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
     ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
     ...(search.from === "brain" ? { from: "brain" as const } : {}),
@@ -526,15 +521,8 @@ const workspaceSettingsRoute = createRoute({
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { view?: "instructions" | "skills" | "files"; file?: string; review?: boolean } => ({
-    ...(search.review === true ? { review: true } : {}),
-    ...(search.view === "instructions" || search.view === "skills" || search.view === "files"
-      ? { view: search.view }
-      : {}),
-    ...(typeof search.file === "string" ? { file: search.file } : {}),
-  }),
+  validateSearch: (search: Record<string, unknown>): KnowledgeSearch =>
+    parseKnowledgeSearch(search),
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -855,35 +843,26 @@ function ScheduleEdit() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory, from, authority } = workspaceDocumentsRoute.useSearch();
-  if (memory) {
-    return (
-      <Navigate
-        to="/workspaces/$workspaceId/memory"
-        params={{ workspaceId }}
-        search={{ memory, ...(from ? { from } : {}) }}
-        replace
-      />
-    );
-  }
+  const { memory } = workspaceDocumentsRoute.useSearch();
   return (
-    <LazyDocumentsRoute
-      key={`${workspaceId}:${authority ?? "all"}`}
-      workspaceId={workspaceId}
-      returnToBrain={from === "brain"}
-      authorityKind={authority}
+    <Navigate
+      to="/workspaces/$workspaceId/state"
+      params={{ workspaceId }}
+      search={memory ? parseKnowledgeSearch({ entry: memory }) : { view: "files" }}
+      replace
     />
   );
 }
 
 function Memory() {
   const { workspaceId } = workspaceMemoryRoute.useParams();
-  const { memory, from } = workspaceMemoryRoute.useSearch();
+  const { memory } = workspaceMemoryRoute.useSearch();
   return (
-    <LazyMemoryRoute
-      workspaceId={workspaceId}
-      focusMemoryId={memory}
-      returnToBrain={from === "brain"}
+    <Navigate
+      to="/workspaces/$workspaceId/state"
+      params={{ workspaceId }}
+      search={memory ? parseKnowledgeSearch({ entry: memory }) : {}}
+      replace
     />
   );
 }
@@ -893,6 +872,17 @@ function WorkspaceSettings() {
   const { section, account, view, key, member } = workspaceSettingsRoute.useSearch();
   if (section === "plugins") {
     return <Navigate to="/workspaces/$workspaceId/plugins" params={{ workspaceId }} replace />;
+  }
+  // Agent learning is the Learning page of Knowledge now.
+  if (section === "learning") {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/state"
+        params={{ workspaceId }}
+        search={{ page: "learning" }}
+        replace
+      />
+    );
   }
   return (
     <LazyWorkspaceSettingsRoute
@@ -912,15 +902,8 @@ function WorkspaceSettings() {
 
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
-  const { view, file, review } = workspaceStateRoute.useSearch();
-  return (
-    <LazyWorkspaceStateRoute
-      workspaceId={workspaceId}
-      view={view}
-      review={review}
-      {...(file ? { fileId: file } : {})}
-    />
-  );
+  const search = workspaceStateRoute.useSearch();
+  return <LazyWorkspaceStateRoute workspaceId={workspaceId} search={search} />;
 }
 
 function Artifacts() {
