@@ -15,7 +15,7 @@
 // legible fault as their result instead of the misleading wrapper.
 
 import { errorCodeToJSON, ErrorCode } from "@opengeni/agent-proto";
-import { SelfhostedControlError } from "./control-rpc";
+import { drainingPresentation, SelfhostedControlError } from "./control-rpc";
 
 /**
  * A stable, low-cardinality fault-class string for a `SelfhostedControlError` — the
@@ -156,12 +156,13 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
 
   if (error.draining) {
     const retried = detail.retries ? ` after ${detail.retries} retries` : "";
+    const presentation = drainingPresentation(detail);
     return assemble(error, {
-      headline: "the machine is at its concurrent-work capacity",
-      happened: `the machine rejected this command at its admission gate${retried} because its work pool is full`,
-      layer: "the machine's host-work admission — the machine is online, just saturated",
+      headline: presentation.headline,
+      happened: `the machine rejected this command at its admission gate${retried} because ${presentation.cause}`,
+      layer: "the machine's host-work admission — not the command's execution",
       preserved: "nothing ran; the command was rejected before it started.",
-      tryNext: "try again shortly, or reduce the number of commands you run in parallel.",
+      tryNext: presentation.tryNext,
     });
   }
 

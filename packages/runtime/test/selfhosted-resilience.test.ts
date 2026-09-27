@@ -354,7 +354,7 @@ describe("SelfhostedSession control and op-stream retry boundaries", () => {
     }
     expect(err).toBeInstanceOf(SelfhostedControlError);
     expect((err as SelfhostedControlError).draining).toBe(true);
-    expect((err as SelfhostedControlError).message).toContain("concurrent-work capacity");
+    expect((err as SelfhostedControlError).message).toContain("admission");
     expect(requests.filter((request) => request.op?.$case === "opStart")).toHaveLength(
       SELFHOSTED_EXEC_DRAINING_MAX_RETRIES + 1,
     );
@@ -540,7 +540,7 @@ describe("actionable error copy", () => {
       retryable: true,
       detail: {},
     });
-    expect(mapped.message).toContain("concurrent-work capacity");
+    expect(mapped.message).toContain("admission");
     expect(mapped.message).not.toContain("in flight");
     expect(drainingMessage(0)).not.toContain("retried");
     expect(drainingMessage(1)).toContain("retried 1 time");
