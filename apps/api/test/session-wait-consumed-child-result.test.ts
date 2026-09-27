@@ -18,6 +18,7 @@ import {
   listOutstandingSessionSystemUpdatesForAttempt,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   materializeGoalContinuation,
+  peekSessionWork,
   sessionSystemUpdateOutboxKindPayload,
   setSessionGoalStatus,
   recordConsumedChildAnswers,
@@ -890,4 +891,95 @@ describe("a result committed after the parent already read the answer", () => {
       order by created_at`;
     expect(states).toEqual([{ state: "superseded" }, { state: "pending" }]);
   });
+});
+
+describe("a held wait and a goal-owned child's continuation", () => {
+  async function claimParentQuestion(ws: Workspace, parent: Attempt): Promise<Attempt> {
+    await enqueueSessionTurn(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.sessionId,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${parent.sessionId}`,
+      source: "user",
+      prompt: "How is it going?",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: ws.subjectId },
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ws.workspaceId, {
+      sessionId: parent.sessionId,
+      workflowId: `session-${parent.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`question not claimed: ${claimed.action}`);
+    expect(claimed.turn.source).toBe("user");
+    return {
+      sessionId: parent.sessionId,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      triggerEventId: claimed.turn.triggerEventId,
+    };
+  }
+
+  for (const order of ["after", "during"] as const) {
+    test(`a status question that read the new continuation retires the wait (result ${order} it)`, async () => {
+      const ws = await workspace();
+      const parent = await start(ws, "Count the users.");
+      const child = await start(ws, "Count them.", parent, "Count the users");
+      const answer = "28 distinct users in the window.";
+      await settleChildAnswer(ws, child, answer);
+      // The parent joins the child's answer, then waits for it to finish its goal.
+      const joined = await callTool(agentMcp(ws, parent), "session_wait", {
+        targets: [{ sessionId: child.sessionId, afterSequence: 0 }],
+        waitFor: "completion",
+        maxWaitSeconds: 1,
+      });
+      expect(JSON.stringify(joined)).toContain(answer);
+      await callTool(agentMcp(ws, parent), "wait_for_input", {
+        reason: "Waiting for the worker to finish.",
+        timeoutSeconds: 600,
+      });
+      await completeParentTurn(ws, parent);
+      expect(await peekSessionWork(client.db, ws.workspaceId, parent.sessionId)).toMatchObject({
+        kind: "input-wait",
+        disposition: "held",
+      });
+
+      // The child's goal continuation finishes; a person asks for status.
+      await continueGoalWithRemark(
+        ws,
+        child,
+        "The goal is complete. A fresh check found 31 users.",
+      );
+      const question = await claimParentQuestion(ws, parent);
+      if (order === "during") await deliverIdleResult(ws, child);
+      const read = await callTool(agentMcp(ws, question), "session_events", {
+        sessionId: child.sessionId,
+        view: "results",
+        after: 0,
+      });
+      expect(JSON.stringify(read)).toContain("31 users");
+      await completeParentTurn(ws, question);
+      if (order === "after") await deliverIdleResult(ws, child);
+
+      // The result never wakes the parent, so the question that read the new
+      // continuation ends the wait instead of its deadline.
+      expect(await updateState(parent.sessionId)).toEqual([{ state: "superseded" }]);
+      expect(await peekSessionWork(client.db, ws.workspaceId, parent.sessionId)).toMatchObject({
+        kind: "input-wait",
+        disposition: "superseded",
+      });
+    });
+  }
 });

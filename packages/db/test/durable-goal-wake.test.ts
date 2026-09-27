@@ -3058,6 +3058,67 @@ describe("session-level wait_for_input", () => {
     await expectWaitRetiredByAnswerRead(ctx, waiting);
   });
 
+  // The child answered (seq 7) and then finished its goal in a continuation
+  // turn (seq 9); its result reports both parts, the answer first.
+  async function addContinuedChildResult(ctx: GoalFixture, childSessionId: string) {
+    const added = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: childSessionId,
+      dedupeKey: `child-completion:${childSessionId}:9`,
+      summary: "A worker session you spawned has finished its work and gone idle.",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId,
+        status: "idle",
+        finalAnswer: {
+          sequence: 7,
+          text: "42 new users",
+          truncated: false,
+          totalBytes: 12,
+          goalContinuations: [{ sequence: 9, text: "Confirmed 45 users, goal complete." }],
+        },
+      },
+      lineage: { parentSessionId: ctx.session.id, parentTurnId: ctx.turn.id, childSessionId },
+    });
+    if (!added.added) throw new Error("child result was not inserted");
+  }
+
+  for (const readBeforeWait of [[7], [7, 9]]) {
+    const retires = !readBeforeWait.includes(9);
+    test(`a person's turn that reads a continued child result ${retires ? "whose continuation is new retires the wait" : "read whole before the wait leaves the wait held"}`, async () => {
+      const ctx = await runningGoalFixture({ withAncestor: true });
+      await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      const childSessionId = crypto.randomUUID();
+      // The declaring turn read part of the child's output before it waited.
+      for (const sequence of readBeforeWait) {
+        await recordAnswerRead(ctx.turn.id, ctx.attemptId, childSessionId, sequence);
+      }
+      await submitPrompt(ctx, "user", "how's it going?");
+      const waiting = await wait(ctx, { timeoutSeconds: 600, reason: "Waiting for the child" });
+      await settleIdle(ctx);
+      const answer = await claimNext(ctx);
+      await recordAnswerRead(answer.claimed.turn.id, answer.attemptId, childSessionId, 7);
+      await recordAnswerRead(answer.claimed.turn.id, answer.attemptId, childSessionId, 9);
+      await settleClaimedIdle(ctx, answer.claimed, answer.attemptId);
+      await addContinuedChildResult(ctx, childSessionId);
+      expect(await childResultState(ctx, childSessionId)).toBe("superseded");
+      if (retires) {
+        await expectWaitRetiredByAnswerRead(ctx, waiting);
+      } else {
+        expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+          kind: "input-wait",
+          disposition: "held",
+          waitTurnId: ctx.turn.id,
+          deadlineAt: waiting.deadlineAt,
+        });
+      }
+    });
+  }
+
   test("re-reading a child answer consumed before the wait leaves the wait held", async () => {
     const ctx = await runningGoalFixture({ withAncestor: true });
     await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
