@@ -1,4 +1,5 @@
 {{- if .Values.api.enabled }}
+{{- $extraEnv := include "opengeni.extraEnv" (dict "root" . "entries" .Values.api.extraEnv "reserved" (list "OPENGENI_API_METRICS_PORT")) }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.api.priorityClassName "tier" "control") }}
 apiVersion: apps/v1
 kind: Deployment
@@ -64,7 +65,7 @@ spec:
             # authoritative for protected provider/model overrides.
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
-          {{- if or .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
+          {{- if or $extraEnv .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
           env:
             {{- with .Values.api.metricsPort }}
             - name: OPENGENI_API_METRICS_PORT
@@ -72,6 +73,9 @@ spec:
             {{- end }}
             {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
+            {{- with $extraEnv }}
+            {{- . | nindent 12 }}
+            {{- end }}
           {{- else }}
           env: []
           {{- end }}

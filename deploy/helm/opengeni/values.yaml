@@ -220,6 +220,8 @@ externalSecret:
   dataFrom: []
 
 api:
+  # Kubernetes EnvVars for the API only; not inherited by hooks/web/artifact roles.
+  extraEnv: []
   # Additional Kubernetes volumes and mounts for the API container (for example TLS Secrets).
   extraVolumes: []
   extraVolumeMounts: []
@@ -306,6 +308,8 @@ api:
     targetCPUUtilizationPercentage: 70
 
 worker:
+  # Kubernetes EnvVars shared by control and turn workers only.
+  extraEnv: []
   # Shared by control and turn workers; appended to any built-in volumes and mounts.
   extraVolumes: []
   extraVolumeMounts: []
