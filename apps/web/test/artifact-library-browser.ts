@@ -52,12 +52,26 @@ try {
             metadata: string[];
             downloads: string[];
             prompts: string[];
+            siteHtml: string[];
           },
       );
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    const outside: string[] = [];
+    page.on("request", (request) => {
+      if (/^https?:/.test(request.url()) && !request.url().startsWith(baseUrl))
+        outside.push(request.url());
+    });
+    await page.addInitScript(() => {
+      window.addEventListener("message", (event) => {
+        if (event.data === "site-ran") Reflect.set(window, "siteRan", true);
+      });
+    });
     await page.goto(`${baseUrl}/test/artifact-library.html`, { waitUntil: "networkidle" });
-    await page.getByRole("link", { name: "Project mark", exact: true }).waitFor();
+    // The first load pays Vite's cold transforms, slow on a busy machine.
+    await page
+      .getByRole("link", { name: "Project mark", exact: true })
+      .waitFor({ timeout: 90_000 });
     await page.getByRole("link", { name: "Project mark", exact: true }).scrollIntoViewIfNeeded();
     await page.getByRole("img", { name: "Project mark", exact: true }).waitFor();
     await page.locator('[data-slot="content-page"]').evaluate((element) => {
@@ -68,13 +82,32 @@ try {
       (await activity()).prompts.at(-1),
       "Help me create a workspace artifact. Ask what I want to make before creating it.",
     );
-    assert.equal(await page.locator("iframe").count(), 0, "catalog must not run a Site");
+    // The gallery (default) shows a Site as a still: sandboxed with no scripts, no network.
+    const still = page.getByTitle("Preview of Product analytics", { exact: true });
+    await still.waitFor({ state: "attached" });
+    assert.equal(await still.getAttribute("sandbox"), "", "a Site still runs no code");
+    assert.equal(
+      await page.locator("iframe:not([sandbox=''])").count(),
+      0,
+      "catalog must not run a Site",
+    );
+    assert.equal(await page.evaluate(() => Reflect.get(window, "siteRan") ?? false), false);
+    assert.deepEqual(outside, [], "a Site still makes no network requests");
+    assert.equal(
+      await page.getByRole("radio", { name: "Gallery", exact: true }).getAttribute("aria-checked"),
+      "true",
+    );
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
       false,
       "no horizontal overflow",
     );
+    await page.screenshot({ path: `${output}/gallery-${suffix}.png`, fullPage: true });
+    await page.getByRole("radio", { name: "List", exact: true }).click();
+    assert.equal(await page.locator("iframe").count(), 0, "the list shows no Site stills");
+    assert.equal(await page.locator("[data-slot=list-row]").count(), 7);
     await page.screenshot({ path: `${output}/list-${suffix}.png`, fullPage: true });
+    await page.getByRole("radio", { name: "Gallery", exact: true }).click();
     await page.getByRole("tab", { name: "Images", exact: true }).click();
     assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 2);
     await page.getByRole("button", { name: "New artifact", exact: true }).click();
@@ -172,7 +205,11 @@ try {
           : page.getByText(state === "error" ? "Couldn't load artifacts" : /No artifacts yet/);
       await expected.waitFor();
     }
-    for (const view of ["list"]) {
+    for (const view of ["gallery", "list"]) {
+      await page.evaluate(
+        (next) => localStorage.setItem("opengeni:artifact-library:view:v1", next),
+        view,
+      );
       await page.goto(`${baseUrl}/test/artifact-library.html?many=1`, { waitUntil: "networkidle" });
       // Network idleness can precede the fixture's async React render and
       // IntersectionObserver delivery. Observe a loaded nearby thumbnail before
@@ -204,7 +241,7 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
     console.log(
-      `Artifact library ${suffix}: CTA, type tabs, viewport-gated thumbnails, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
+      `Artifact library ${suffix}: gallery with Site stills, list toggle, CTA, type tabs, viewport-gated thumbnails, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
     );
   }
 } finally {

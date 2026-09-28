@@ -1,11 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
+  artifactExtension,
   artifactKey,
   artifactPath,
   artifactRoute,
   defaultArtifactFilters,
   filterArtifactCatalog,
+  readArtifactView,
+  rememberArtifactView,
 } from "./artifact-catalog";
 
 const item = (
@@ -26,6 +29,11 @@ const items = [
   item("same", "image", "Project logo"),
   item("doc", "document", "Archive notes", "archived"),
 ];
+const storage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+afterEach(() => {
+  if (storage) Object.defineProperty(globalThis, "localStorage", storage);
+  else Reflect.deleteProperty(globalThis, "localStorage");
+});
 describe("artifact catalog", () => {
   test("uses kind and native ID together and preserves domain routes", () => {
     expect(new Set(items.map(artifactKey)).size).toBe(3);
@@ -67,5 +75,32 @@ describe("artifact catalog", () => {
     expect(artifactPath("ws", { kind: "image", id: "i" }, "s1")).toBe(
       "/workspaces/ws/artifacts/files/i?fromSession=s1",
     );
+  });
+  test("defaults to the gallery, keeps List, and survives blocked browser storage", () => {
+    const saved = new Map<string, string>();
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => saved.get(key) ?? null,
+        setItem: (key: string, value: string) => void saved.set(key, value),
+      },
+    });
+    expect(readArtifactView()).toBe("gallery");
+    rememberArtifactView("list");
+    expect(readArtifactView()).toBe("list");
+    saved.set("opengeni:artifact-library:view:v1", "unsafe");
+    expect(readArtifactView()).toBe("gallery");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get: () => {
+        throw new Error("blocked");
+      },
+    });
+    expect(readArtifactView()).toBe("gallery");
+    expect(() => rememberArtifactView("list")).not.toThrow();
+  });
+  test("reads a file's extension for its placeholder", () => {
+    expect(artifactExtension({ title: "Export", filename: "Research export.CSV" })).toBe("csv");
+    expect(artifactExtension({ title: "Notes" })).toBeNull();
   });
 });

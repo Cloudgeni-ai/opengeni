@@ -36,7 +36,7 @@ type PeopleFilter = "all" | "invited" | "suspended";
 type Rotation = typeof codexProvider.rotation;
 type Source = typeof codexProvider.source;
 type Range = "today" | "7d" | "month";
-type View = "grid" | "list";
+type View = "gallery" | "list";
 
 const LEARNING_OPTIONS: SegmentedControlOption<LearningMode>[] = learningModes.map((mode) => ({
   value: mode.id,
@@ -61,7 +61,7 @@ const RANGE_OPTIONS: SegmentedControlOption<Range>[] = [
 ];
 
 const VIEW_OPTIONS: SegmentedControlOption<View>[] = [
-  { value: "grid", label: "Grid", icon: <LayoutGridIcon />, iconOnly: true },
+  { value: "gallery", label: "Gallery", icon: <LayoutGridIcon />, iconOnly: true },
   { value: "list", label: "List", icon: <ListIcon />, iconOnly: true },
 ];
 
@@ -102,7 +102,7 @@ function Examples({ version }: { version: VersionProps }) {
   const [people, setPeople] = useState<PeopleFilter>("all");
   const [rotation, setRotation] = useState<Rotation>(codexProvider.rotation);
   const [range, setRange] = useState<Range>("7d");
-  const [view, setView] = useState<View>("list");
+  const [view, setView] = useState<View>("gallery");
   return (
     <div className="flex min-w-0 flex-col gap-5">
       <Example caption="Workspace instructions" where="Learning">
@@ -267,7 +267,7 @@ export default function SegmentedControlSection() {
               size="sm"
               aria-label="View"
               options={VIEW_OPTIONS}
-              defaultValue="grid"
+              defaultValue="gallery"
             />
           </div>
         </StateCell>

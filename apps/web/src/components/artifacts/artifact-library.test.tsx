@@ -13,6 +13,7 @@ import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-l
 import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 let ArtifactLibrary: typeof import("./artifact-library").ArtifactLibrary;
 let ArtifactThumbnail: typeof import("./artifact-library").ArtifactThumbnail;
+let siteStillDocument: typeof import("./artifact-library").siteStillDocument;
 
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;
@@ -23,7 +24,7 @@ beforeAll(async () => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  ({ ArtifactLibrary, ArtifactThumbnail } = await import("./artifact-library"));
+  ({ ArtifactLibrary, ArtifactThumbnail, siteStillDocument } = await import("./artifact-library"));
 });
 
 test("offscreen thumbnails never mount the retained loader; visible thumbnails load once", async () => {
@@ -156,7 +157,65 @@ async function renderInRouter(root: ReturnType<typeof createRoot>, node: () => R
   });
 }
 
-test("shared library lists flush rows with the type as a word and never executes Sites", async () => {
+test("a Site still blocks scripts and the network before any of the Site's markup", () => {
+  const still = siteStillDocument(
+    "<html><head><script>alert(1)</script></head><body>Hi</body></html>",
+  );
+  expect(still.startsWith('<!doctype html><meta http-equiv="Content-Security-Policy"')).toBe(true);
+  expect(still).toContain("default-src 'none'");
+  expect(still).not.toContain("script-src");
+  expect(still.indexOf("Content-Security-Policy")).toBeLessThan(still.indexOf("<script>"));
+});
+
+test("the gallery is the default; List shows flush rows and is remembered", async () => {
+  localStorage.removeItem("opengeni:artifact-library:view:v1");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = () =>
+    renderInRouter(root, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={items}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+        onSelect={() => {}}
+      />
+    ));
+  try {
+    await render();
+    const cards = container.querySelectorAll("ul[aria-label=Artifacts] > li");
+    expect(cards).toHaveLength(2);
+    expect(container.querySelector('[data-slot="list-row"]')).toBeNull();
+    expect(cards[0]!.textContent).toContain("Site · updated");
+    const list = container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="List"]');
+    await act(async () => list!.click());
+    expect(localStorage.getItem("opengeni:artifact-library:view:v1")).toBe("list");
+    expect(container.querySelector("[data-card-action]")).toBeNull();
+    await act(async () => root.unmount());
+    const again = createRoot(container);
+    await renderInRouter(again, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={items}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+      />
+    ));
+    expect(container.querySelector("[data-card-action]")).toBeNull();
+    expect(container.querySelectorAll("ul[aria-label=Artifacts] > li")).toHaveLength(2);
+    await act(async () => again.unmount());
+  } finally {
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
+    container.remove();
+  }
+});
+
+test("shared library lists the type as a word and never executes Sites", async () => {
   const selected: string[] = [];
   let setKind: (kind: "all" | "document") => void = () => {};
   function Fixture() {
