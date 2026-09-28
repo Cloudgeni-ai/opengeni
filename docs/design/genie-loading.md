@@ -74,7 +74,7 @@ transitions. Returning `null` hides the visual.
 ## Readable turns (`turnSummary.rolling`)
 
 `turnSummary={{ rolling: true }}` selects `groupTimeline(items, { readableTurns:
-true })`. The September 28, 2026 OPE-591 decision supersedes the exchange-fold and
+true })`. The September 28, 2026 design revision supersedes the exchange-fold and
 answer-anchor presentation. Runtime phase semantics, replay deduplication, and
 classic `groupTimeline(items)` grouping are unchanged. The deprecated
 `foldExchanges` option aliases readable turns; there is no legacy folding mode.
@@ -105,7 +105,7 @@ The recorded wait itself reads "Waited for 1 agent · 3m 5s" once later input, a
 pause, or the session failing or being cancelled ended it, or "Waiting · since
 10:32" while it is still open, in both presentations.
 
-OPE-99 normal tip-follow continues through long answers. Manual scroll, older
+Normal tip-follow continues through long answers. Manual scroll, older
 history anchors, and explicit Jump to latest retain their existing behavior.
 There is no forced answer stop and no automatic repin on subsequent work.
 
