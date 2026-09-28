@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MessageTimeline } from "@opengeni/react/session-ui";
 import type { SessionEvent } from "@opengeni/sdk";
+import recordedAnswerExchange from "../test/fixtures/exchange-answer-before-machine-turns.json";
 import "./styles.css";
 
 /*
@@ -9,9 +10,12 @@ import "./styles.css";
  * MessageTimeline. Compare the compact presentation (one status row per
  * exchange, answer below a "Worked for" separator) with the classic grouping,
  * in both themes, at any viewport width. `?scenario=` picks the script:
- * `delegated` (default), `follow-up`, `notes`, or `history`. The last three
- * stream messages the way the runtime records them today: identified deltas
- * without a phase, and a phase-less final output receipt at turn end.
+ * `delegated` (default), `follow-up`, `notes`, `history`, or
+ * `machine-follow-up`. `follow-up`, `notes`, and `history` stream messages the
+ * way the runtime records them today: identified deltas without a phase, and a
+ * phase-less final output receipt at turn end. `machine-follow-up` replays an
+ * anonymized recorded exchange whose answer is followed by one more
+ * machine-triggered turn.
  */
 
 type Draft = { type: string; payload: unknown; turnId: string | null; at: number };
@@ -257,11 +261,27 @@ function delegatedScenario(): Draft[] {
   return drafts;
 }
 
+/**
+ * A recorded exchange (anonymized): the answer settles, then an agent message
+ * starts one more short turn that ends without prose.
+ */
+function machineFollowUpScenario(): Draft[] {
+  const recorded = recordedAnswerExchange as SessionEvent[];
+  const start = Date.parse(recorded[0]!.occurredAt);
+  return recorded.map((event) => ({
+    type: event.type,
+    payload: event.payload,
+    turnId: event.turnId ?? null,
+    at: (Date.parse(event.occurredAt) - start) / 1000,
+  }));
+}
+
 const SCENARIOS: Record<string, () => Draft[]> = {
   delegated: delegatedScenario,
   "follow-up": followUpScenario,
   notes: notesScenario,
   history: historyScenario,
+  "machine-follow-up": machineFollowUpScenario,
 };
 
 const STAGES = [
