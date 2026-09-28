@@ -38,6 +38,7 @@ import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdow
 import { EmptyState } from "@/components/ui/empty-state";
 import { Checkbox, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
+import { InAppHelpLink } from "@/components/in-app-help-link";
 import { HelpLink } from "@/components/ui/inline-help";
 import {
   LineTabs,
@@ -441,9 +442,9 @@ function EntryPageContent({
           icon={entry.source.kind === "conversation" ? <MessageSquareIcon /> : <FileTextIcon />}
         >
           {entry.source.kind === "conversation" && entry.source.sessionId ? (
-            <HelpLink href={`/workspaces/${workspaceId}/sessions/${entry.source.sessionId}`}>
+            <InAppHelpLink href={`/workspaces/${workspaceId}/sessions/${entry.source.sessionId}`}>
               Open the chat
-            </HelpLink>
+            </InAppHelpLink>
           ) : externalUrl(entry.source.uri) ? (
             <a
               href={externalUrl(entry.source.uri)!}

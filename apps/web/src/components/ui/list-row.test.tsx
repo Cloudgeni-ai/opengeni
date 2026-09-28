@@ -60,6 +60,52 @@ describe("ListRow", () => {
     container.remove();
   });
 
+  test("a link row keeps its router click handler, so a plain click never loads the page", async () => {
+    // Regression: /schedules rows passed `href` and `linkProps.onClick` (the
+    // router) but no `onOpen`, and the absent `onOpen` replaced the handler.
+    const go = mock(() => {});
+    const { container, root } = await mount(
+      <RowList label="Schedules">
+        <ListRow
+          title="Morning digest"
+          href="/workspaces/ws-1/schedules?taskId=task-1"
+          linkProps={{
+            onClick: (event) => {
+              event.preventDefault();
+              go();
+            },
+          }}
+        />
+      </RowList>,
+    );
+    const link = container.querySelector<HTMLAnchorElement>("a[data-row-action]")!;
+    expect(link.getAttribute("href")).toBe("/workspaces/ws-1/schedules?taskId=task-1");
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    await act(async () => {
+      link.dispatchEvent(click);
+    });
+    expect(go).toHaveBeenCalledTimes(1);
+    expect(click.defaultPrevented).toBe(true);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("a link row runs onOpen first and skips linkProps once onOpen handled the click", async () => {
+    const onOpen = mock((event: React.MouseEvent<HTMLElement>) => event.preventDefault());
+    const linkClick = mock(() => {});
+    const { container, root } = await mount(
+      <RowList label="Used by">
+        <ListRow title="Chat" href="/x" onOpen={onOpen} linkProps={{ onClick: linkClick }} />
+      </RowList>,
+    );
+    const link = container.querySelector<HTMLAnchorElement>("a[data-row-action]")!;
+    await act(async () => link.click());
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(linkClick).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("a click on a time inside the row still opens it", async () => {
     const onOpen = mock(() => {});
     const { container, root } = await mount(

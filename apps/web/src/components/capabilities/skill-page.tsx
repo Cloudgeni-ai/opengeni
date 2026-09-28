@@ -275,7 +275,6 @@ export function SkillPage({
         <SettingRowGroup className="-my-3">
           <SettingRow
             label="Available to"
-            description="Who can use this skill in their work."
             controlWidth="auto"
             control={
               <div className="w-[200px] max-w-full">

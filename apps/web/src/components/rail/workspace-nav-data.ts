@@ -1,5 +1,6 @@
 // Main rail destination catalog (routes, labels, icon keys). Rendering lives in
 // `workspace-config-link.tsx`.
+import type { RailDestinationId } from "@/lib/rail-destinations";
 
 export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/agents"
@@ -28,6 +29,8 @@ export type WorkspaceConfigIcon =
   | "settings";
 
 export type WorkspaceConfigItem = {
+  /** Stable id for the rail customization; Settings is always shown. */
+  id: RailDestinationId | "settings";
   to: WorkspaceConfigTarget;
   icon: WorkspaceConfigIcon;
   label: string;
@@ -37,42 +40,48 @@ export type WorkspaceConfigItem = {
 };
 
 /**
- * The main rail beside New session and For you. Every destination once, with
- * one name and one icon (the same icon as its page header). Settings is the
- * last entry; the settings sub-nav opens inside the content area.
+ * The workspace destinations beside New session and For you. Every destination
+ * once, with one name and one icon (the same icon as its page header). Settings
+ * is the last entry and always shown; the rest can be moved under More.
  */
 export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
+    id: "agents",
     to: "/workspaces/$workspaceId/agents",
     icon: "network",
     label: "Agents",
     description: "Every workstream in this workspace, live",
   },
   {
+    id: "schedules",
     to: "/workspaces/$workspaceId/schedules",
     icon: "calendar-clock",
     label: "Schedules",
     description: "Run agents on a schedule",
   },
   {
+    id: "artifacts",
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
     label: "Artifacts",
     description: "Sites, images, documents, and files built with Geni",
   },
   {
+    id: "knowledge",
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
     label: "Knowledge",
     description: "Knowledge, instructions, and skills",
   },
   {
+    id: "capabilities",
     to: "/workspaces/$workspaceId/plugins",
     icon: "plug",
     label: "Capabilities",
     description: "Plugins, Skills, and integrations",
   },
   {
+    id: "insights",
     to: "/workspaces/$workspaceId/insights",
     icon: "bar-chart",
     label: "Insights",
@@ -80,6 +89,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     requiresAdmin: true,
   },
   {
+    id: "settings",
     to: "/workspaces/$workspaceId/settings",
     icon: "settings",
     label: "Settings",

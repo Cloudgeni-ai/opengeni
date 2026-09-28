@@ -4,7 +4,9 @@
 // permissioned, audited API and MCP read paths are unchanged).
 //
 //   /variable-sets                 the list          ?view=new  New variable set
-//   /variable-sets/$variableSetId  the set's page    ?view=add|paste|edit
+//   /variable-sets/$variableSetId  the set's page    ?view=paste|edit
+//                                  (?view=add redirects to the set's page, where one variable
+//                                  is added inline at the bottom of the list)
 import {
   useOpenGeni,
   useScheduledTasks,
@@ -16,9 +18,9 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
-  AddVariablePage,
   EditVariableSetPage,
   NewVariableSetPage,
+  PasteVariablesPage,
   ReplaceValueDialog,
   type NewSetValues,
   type NewVariableInput,
@@ -54,7 +56,7 @@ export {
 } from "@/components/variable-sets/variable-set-model";
 
 export type VariableSetListView = "new";
-export type VariableSetView = "add" | "paste" | "edit";
+export type VariableSetView = "paste" | "edit";
 
 export function VariableSetsRoute({
   workspaceId,
@@ -216,6 +218,15 @@ export function VariableSetsRoute({
     openSet(target.id);
   }
 
+  /** The inline row on the set's page: saves one variable and stays on the page. */
+  async function addOneVariable(target: WorkspaceVariableSet, variable: NewVariableInput) {
+    await attempt(() =>
+      client.setVariableSetVariable(workspaceId, target.id, variable.name, variable.value),
+    );
+    await variableSets.refresh();
+    toast.success(`Added ${variable.name}`);
+  }
+
   async function saveDetails(
     target: WorkspaceVariableSet,
     name: string,
@@ -226,6 +237,18 @@ export function VariableSetsRoute({
     toast.success("Saved");
     openSet(target.id);
   }
+
+  // The old Add variable page: adding one variable now happens inline on the set's page.
+  useEffect(() => {
+    if (variableSetId && view === "add") {
+      void navigate({
+        to: "/workspaces/$workspaceId/variable-sets/$variableSetId",
+        params: { workspaceId, variableSetId },
+        search: {},
+        replace: true,
+      });
+    }
+  }, [navigate, variableSetId, view, workspaceId]);
 
   /* ------------------------------------------------------------ dialogs */
 
@@ -291,12 +314,10 @@ export function VariableSetsRoute({
       ) : (
         <VariableSetDetailLoading onBack={() => openList()} />
       );
-  } else if ((view === "add" || view === "paste") && canManageSecrets) {
+  } else if (view === "paste" && canManageSecrets) {
     page = (
-      <AddVariablePage
-        key={view}
+      <PasteVariablesPage
         set={set}
-        initialMode={view === "paste" ? "paste" : "one"}
         onClose={() => openSet(set.id)}
         onAdd={(variables, replaced) => addVariables(set, variables, replaced)}
       />
@@ -321,7 +342,8 @@ export function VariableSetsRoute({
         canManageSecrets={canManageSecrets}
         actions={{
           back: () => openList(),
-          addVariable: (mode) => openSet(set.id, { view: mode === "paste" ? "paste" : "add" }),
+          addVariable: (variable) => addOneVariable(set, variable),
+          pasteEnv: () => openSet(set.id, { view: "paste" }),
           replaceValue: setReplacing,
           deleteVariable: setDeletingVariable,
           editSet: () => openSet(set.id, { view: "edit" }),

@@ -458,7 +458,11 @@ export interface ListRowProps {
   onOpen?: (event: MouseEvent<HTMLElement>) => void;
   /** Makes the whole row a link. */
   href?: string;
-  /** Extra props for the link (target, rel, router handlers). */
+  /**
+   * Extra props for the link (target, rel, router handlers). An in-app `href`
+   * needs `onClick` (or `onOpen`) to call the router and preventDefault on a
+   * plain click; otherwise the row loads the whole page.
+   */
   linkProps?: RowLinkProps;
   /** The row's detail is open (sheet or page). */
   selected?: boolean;
@@ -582,7 +586,13 @@ export function ListRow({
         {...actionProps}
         ref={actionRef as RefObject<HTMLAnchorElement>}
         href={href}
-        onClick={onOpen}
+        // Both handlers run: `linkProps.onClick` is how callers keep a plain
+        // click in the router. Letting an absent `onOpen` replace it made the
+        // row a full page load.
+        onClick={(event) => {
+          onOpen?.(event);
+          if (!event.defaultPrevented) linkProps?.onClick?.(event);
+        }}
       >
         <span id={titleId}>{title}</span>
       </a>

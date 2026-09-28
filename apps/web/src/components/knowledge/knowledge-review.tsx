@@ -17,6 +17,7 @@ import {
   WandSparklesIcon,
   type LucideIcon,
 } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -26,8 +27,10 @@ import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import { DiffView } from "@/components/ui/diff-view";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Field, TextArea, TextInput } from "@/components/ui/field";
+import { InAppHelpLink } from "@/components/in-app-help-link";
 import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
 import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { inAppClick } from "@/lib/in-app-click";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
@@ -267,6 +270,7 @@ function OriginLink({
   origin: Origin;
   inline?: boolean;
 }) {
+  const navigate = useNavigate();
   const href =
     origin.kind === "chat"
       ? `/workspaces/${workspaceId}/sessions/${origin.sessionId}`
@@ -284,6 +288,7 @@ function OriginLink({
   const name = href ? (
     <a
       href={href}
+      onClick={inAppClick(() => void navigate({ href }))}
       className="min-w-0 truncate rounded-[4px] font-medium text-fg underline-offset-2 hover:underline"
     >
       {origin.name}
@@ -939,9 +944,9 @@ function ReviewDetail({
       {loaded.kind === "skill" && !removal ? (
         <InlineHelp icon>
           Approving adds it to Skills in{" "}
-          <HelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
+          <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
             Capabilities
-          </HelpLink>
+          </InAppHelpLink>
           , where you can change it later.
         </InlineHelp>
       ) : null}

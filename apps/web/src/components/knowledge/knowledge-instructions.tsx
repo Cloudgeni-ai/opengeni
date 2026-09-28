@@ -22,6 +22,7 @@ import { DetailSection } from "@/components/ui/detail-sheet";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
 import { Field, TextArea } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
+import { InAppHelpLink } from "@/components/in-app-help-link";
 import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
@@ -292,7 +293,7 @@ export function InstructionsTab({
               }
               actions={
                 canManageOrganization ? (
-                  <HelpLink
+                  <InAppHelpLink
                     href={`/workspaces/${workspaceId}/organization?section=knowledge`}
                     className="text-sm leading-5"
                   >
@@ -301,7 +302,7 @@ export function InstructionsTab({
                       aria-hidden="true"
                       className="ml-0.5 inline size-3.5 align-[-2px]"
                     />
-                  </HelpLink>
+                  </InAppHelpLink>
                 ) : undefined
               }
             />
@@ -448,7 +449,9 @@ export function InstructionsTab({
       <InlineHelp icon>
         Facts go in the <HelpLink onClick={onGoToLibrary}>Library</HelpLink>. Step-by-step
         procedures go in Skills, in{" "}
-        <HelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>Capabilities</HelpLink>
+        <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
+          Capabilities
+        </InAppHelpLink>
         .
       </InlineHelp>
       {canEdit ? (

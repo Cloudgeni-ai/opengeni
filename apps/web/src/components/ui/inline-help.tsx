@@ -1,3 +1,4 @@
+import { inAppClick } from "@/lib/in-app-click";
 import { CircleHelpIcon, InfoIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -68,8 +69,10 @@ export function HelpLink({
     className,
   );
   if (href) {
+    // With both, a plain click runs `onClick` (the router) and modified clicks
+    // open the link normally; an in-app href without it loads the whole page.
     return (
-      <a href={href} className={classes}>
+      <a href={href} onClick={onClick ? inAppClick(onClick) : undefined} className={classes}>
         {children}
       </a>
     );

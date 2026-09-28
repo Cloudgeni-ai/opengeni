@@ -4,7 +4,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
-import { AddVariablePage } from "@/components/variable-sets/variable-set-forms";
+import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
 import { errorParts, usageSummary } from "@/components/variable-sets/variable-set-model";
 import {
   VariableSetDetailPage,
@@ -48,7 +48,8 @@ const VARIABLE_SET: WorkspaceVariableSet = {
 
 const NO_ACTIONS: VariableSetPageActions = {
   back: () => undefined,
-  addVariable: () => undefined,
+  addVariable: async () => undefined,
+  pasteEnv: () => undefined,
   replaceValue: () => undefined,
   deleteVariable: () => undefined,
   editSet: () => undefined,
@@ -192,7 +193,11 @@ describe("Variable sets", () => {
       expect(
         view.container.querySelector('button[aria-label="More actions for staging"]'),
       ).not.toBeNull();
-      expect(text).toContain("Add variable");
+      expect(
+        view.container.querySelector('form[aria-label="Add a variable to staging"]'),
+      ).not.toBeNull();
+      expect(text).toContain("Paste .env");
+      expect(text).not.toContain("Add variable");
     } finally {
       await view.cleanup();
     }
@@ -214,7 +219,8 @@ describe("Variable sets", () => {
       expect(
         view.container.querySelector('button[aria-label="More actions for staging"]'),
       ).toBeNull();
-      expect(view.container.textContent).not.toContain("Add variable");
+      expect(view.container.querySelector("form")).toBeNull();
+      expect(view.container.textContent).not.toContain("Paste .env");
       expect(view.container.textContent).not.toContain("Delete variable set");
       expect(view.container.textContent).toContain("Only organization admins can change it.");
     } finally {
@@ -222,35 +228,57 @@ describe("Variable sets", () => {
     }
   });
 
-  test("saves the normalized name and explains reserved names before submitting", async () => {
+  test("adds variables inline: uppercases live, explains errors, then clears for the next", async () => {
     const added: Array<{ name: string; value: string }> = [];
     const view = await render(
-      <AddVariablePage
+      <AddVariableRow
         set={VARIABLE_SET}
-        initialMode="one"
-        onClose={() => undefined}
-        onAdd={async (variables) => {
-          added.push(...variables);
+        onPaste={() => undefined}
+        onAdd={async (variable) => {
+          added.push(variable);
         }}
       />,
     );
     try {
-      const name = view.container.querySelector<HTMLInputElement>('input[name="variable-name"]')!;
-      const value = view.container.querySelector<HTMLTextAreaElement>(
-        'textarea[name="variable-value"], input[name="variable-value"]',
-      )!;
-      expect(name.autocomplete).toBe("off");
+      const name = () =>
+        view.container.querySelector<HTMLInputElement>('input[name="variable-name"]')!;
+      const value = () =>
+        view.container.querySelector<HTMLInputElement>('input[name="variable-value"]')!;
+      const submit = async () => {
+        await act(async () => {
+          view.container.querySelector("form")!.requestSubmit();
+        });
+        await act(async () => {
+          await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+        });
+      };
+      expect(name().autocomplete).toBe("off");
 
-      await setInputValue(name, "github token");
+      await setInputValue(name(), "github token");
+      expect(name().value).toBe("GITHUB_TOKEN");
       expect(view.container.textContent).toContain("OpenGeni sets GITHUB_TOKEN");
 
-      await setInputValue(name, "test-key");
-      expect(view.container.textContent).toContain("Saved as TEST_KEY");
-      await setInputValue(value as unknown as HTMLInputElement, "secret-value");
-      await act(async () => {
-        view.container.querySelector("form")!.requestSubmit();
-      });
+      await setInputValue(name(), "api_token");
+      expect(view.container.textContent).toContain("API_TOKEN is already in this set");
+
+      await setInputValue(name(), "test-key");
+      expect(name().value).toBe("TEST_KEY");
+      await submit();
+      expect(view.container.textContent).toContain("Enter a value.");
+      expect(added).toEqual([]);
+
+      await setInputValue(value(), "secret-value");
+      await submit();
       expect(added).toEqual([{ name: "TEST_KEY", value: "secret-value" }]);
+      expect(name().value).toBe("");
+      expect(value().value).toBe("");
+      expect(document.activeElement).toBe(name());
+      expect(view.container.textContent).not.toContain("Enter a value.");
+
+      await setInputValue(name(), "region");
+      await setInputValue(value(), "eu-north-1");
+      await submit();
+      expect(added.at(-1)).toEqual({ name: "REGION", value: "eu-north-1" });
     } finally {
       await view.cleanup();
     }

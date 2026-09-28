@@ -166,7 +166,6 @@ export function ConnectionAccessRows({
       {organization ? (
         <SettingNavRow
           label="Available in"
-          description="The shared workspaces that can use this account."
           value={workspacesShort(policy, access.data!.personalWorkspacesSupported)}
           disabled={!canManage}
           onOpen={onEdit}

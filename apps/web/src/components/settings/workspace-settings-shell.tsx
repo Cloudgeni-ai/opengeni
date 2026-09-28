@@ -34,11 +34,14 @@ import { NavItem } from "@/components/ui/settings-nav";
 /** One name, one icon and one description per settings page. */
 export const WORKSPACE_SETTINGS_COPY: Record<
   WorkspaceSettingsSection,
-  { title: string; description: (names: { workspace: string; organization: string }) => string }
+  {
+    title: string;
+    /** Omitted when it would only list what the page shows. */
+    description?: (names: { workspace: string; organization: string }) => string;
+  }
 > = {
   general: {
     title: "General",
-    description: () => "Name, agent activity and defaults for new sessions.",
   },
   access: {
     title: "Access",
@@ -171,7 +174,7 @@ export function WorkspaceManagementShell({
     section && !isSubPage(section, search)
       ? {
           title: WORKSPACE_SETTINGS_COPY[section].title,
-          description: WORKSPACE_SETTINGS_COPY[section].description(names),
+          description: WORKSPACE_SETTINGS_COPY[section].description?.(names),
         }
       : null;
 

@@ -357,9 +357,7 @@ describe("organization billing StrictMode ownership", () => {
     });
     expect(container.textContent).toContain("No visible usage recorded in this period.");
     expect(useBillingUsage).not.toHaveBeenCalled();
-    expect(container.textContent).toContain(
-      "View invoices and manage payment information in Stripe.",
-    );
+    expect(container.textContent).toContain("Invoices and payment details");
     expect(container.textContent).not.toContain("OG-0042");
 
     const usageSection = container.querySelector('[aria-label="Organization usage dashboard"]')!;

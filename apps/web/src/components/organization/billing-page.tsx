@@ -262,7 +262,6 @@ export function OrganizationBillingPage({
                 />
                 <SettingRow
                   label="Invoices and payment details"
-                  description="View invoices and manage payment information in Stripe."
                   controlWidth="auto"
                   control={
                     <RowButton disabled={visibleBusy} onClick={() => void openBillingPortal()}>
@@ -335,10 +334,7 @@ function EntitlementsSection(props: {
   }
   if (rows.length === 0) return null;
   return (
-    <Section
-      title="Plan limits"
-      description="The limits and features this organization runs under."
-    >
+    <Section title="Plan limits">
       <SettingRowGroup>
         {rows.map((row) => (
           <SettingRow

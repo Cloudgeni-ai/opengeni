@@ -156,6 +156,12 @@ Cancel and the action as the primary.
   chats in a form another provider's model can continue. Off keeps new chats on Codex, with better
   memory of long conversations." Never spell out both states as "On: ... Off: ...". Details only
   some people need go in a tooltip.
+- **No description that restates the label.** A page subtitle, section description or row
+  description earns its place by adding something the label and value don't say. "General" does
+  not need "The organization's name and ID"; a "Name" row shows the name, not "The name people
+  see". Drop it rather than paraphrase. The same goes for a section header that only repeats the
+  page title: Settings > General starts with its rows (Name, ID) and no "Organization" or
+  "Workspace" header.
 - Sentence case everywhere. Plain dashes (-), never em-dashes. Dates as "Mon 28 Sep, 08:00" or
   "3 days ago" with the exact time on hover; never seconds, never ISO.
 - No ellipsis in button labels: "Delete", "Pause", "Rename", not "Delete...". A button that opens

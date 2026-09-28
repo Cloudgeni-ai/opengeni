@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { FileTextIcon, LoaderCircleIcon, PlusIcon } from "lucide-react";
+import { useId, useRef, useState, type FormEvent } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Disclosure } from "@/components/ui/disclosure";
 import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
@@ -20,12 +22,12 @@ import type { WorkspaceVariableSet } from "@/types";
 import { joinAnd, scopeHint, scopeLocked, type VariableSetScope } from "./variable-set-model";
 
 /* ----------------------------------------------------------------------------
-   New variable set, Add variables (one, or a pasted .env) and Edit details are
-   their own pages with a back link and a sticky footer. Replace value is the
-   one small centered dialog. Server errors show inside the form.
+   New variable set, Paste .env and Edit details are their own pages with a
+   back link and a sticky footer. One variable is added inline at the bottom
+   of the set's list. Replace value is the one small centered dialog. Server
+   errors show inside the form.
    -------------------------------------------------------------------------- */
 
-const NAME_HINT = "Letters, numbers and underscores. Saved in uppercase.";
 const TAKES_EFFECT =
   "Takes effect from the next turn. Turns already running keep the current value.";
 
@@ -206,28 +208,34 @@ function plural(count: number): string {
 }
 
 /* ----------------------------------------------------------------------------
-   Add variable (one, or a pasted .env).
+   Add variable: an inline row at the bottom of the variables list. Name,
+   value, Add. After a save the row clears and Name takes focus again, so
+   several variables go in quickly. A pasted .env has its own page.
    -------------------------------------------------------------------------- */
 
-export type AddMode = "one" | "paste";
+/** Uppercase as people type; spaces and dashes become underscores. */
+export function liveVariableName(input: string): string {
+  return input.toUpperCase().replace(/[\s-]/g, "_");
+}
 
-export function AddVariablePage({
+export function AddVariableRow({
   set,
-  initialMode,
-  onClose,
   onAdd,
+  onPaste,
 }: {
   set: WorkspaceVariableSet;
-  initialMode: AddMode;
-  onClose: () => void;
-  /** Saves the values. Throws a user-facing error. */
-  onAdd: (variables: NewVariableInput[], replaced: string[]) => Promise<void>;
+  /** Saves one variable. Throws a user-facing error. */
+  onAdd: (variable: NewVariableInput) => Promise<void>;
+  /** Opens the Paste .env page. */
+  onPaste: () => void;
 }) {
-  const [mode, setMode] = useState<AddMode>(initialMode);
+  const id = useId();
+  const nameRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
-  const [env, setEnv] = useState("");
   const [tried, setTried] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [serverError, setServerError] = useState<string>();
 
   const existing = set.variables.map((variable) => variable.name);
   const normalized = normalizeVariableName(name);
@@ -238,114 +246,192 @@ export function AddVariablePage({
       : null;
   const nameError = issue?.message ?? (tried && !normalized ? "Name the variable." : undefined);
   const valueError = tried && !value ? "Enter a value." : undefined;
+  const nameErrorId = `${id}-name-error`;
+  const valueErrorId = `${id}-value-error`;
+  const serverErrorId = `${id}-server-error`;
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (pending) return;
+    setTried(true);
+    setServerError(undefined);
+    if (issue || !normalized) {
+      nameRef.current?.focus();
+      return;
+    }
+    if (!value) {
+      event.currentTarget.querySelector<HTMLInputElement>('input[name="variable-value"]')?.focus();
+      return;
+    }
+    setPending(true);
+    try {
+      await onAdd({ name: normalized, value });
+      setName("");
+      setValue("");
+      setTried(false);
+      requestAnimationFrame(() => nameRef.current?.focus());
+    } catch (error) {
+      setServerError(
+        error instanceof Error && error.message ? error.message : "Couldn't add it. Try again.",
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div
+      data-slot="add-variable"
+      className="@container/add min-w-0 border-t border-border px-3 pt-3"
+    >
+      <form
+        noValidate
+        aria-label={`Add a variable to ${set.name}`}
+        onSubmit={(event) => void submit(event)}
+        className="grid min-w-0 gap-2 @[400px]/add:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_auto] @[400px]/add:items-start"
+      >
+        <div className="min-w-0">
+          <TextInput
+            ref={nameRef}
+            mono
+            name="variable-name"
+            aria-label="Name"
+            aria-invalid={nameError ? true : undefined}
+            aria-describedby={nameError ? nameErrorId : undefined}
+            value={name}
+            onChange={(event) => {
+              setName(liveVariableName(event.target.value));
+              setServerError(undefined);
+            }}
+            placeholder="NAME"
+            suppressAutofill
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            disabled={pending}
+          />
+          {nameError ? (
+            <p id={nameErrorId} className="mt-1 text-xs leading-4.5 text-danger">
+              {nameError}
+            </p>
+          ) : null}
+        </div>
+        <div className="min-w-0">
+          <SecretInput
+            name="variable-value"
+            aria-label="Value"
+            aria-invalid={valueError ? true : undefined}
+            aria-describedby={valueError ? valueErrorId : undefined}
+            value={value}
+            onChange={(event) => {
+              setValue(event.target.value);
+              setServerError(undefined);
+            }}
+            placeholder="Value"
+            disabled={pending}
+          />
+          {valueError ? (
+            <p id={valueErrorId} className="mt-1 text-xs leading-4.5 text-danger">
+              {valueError}
+            </p>
+          ) : null}
+        </div>
+        <Button
+          type="submit"
+          variant="outline"
+          disabled={pending}
+          aria-describedby={serverError ? serverErrorId : undefined}
+          className="justify-self-start rounded-[10px] pointer-coarse:h-11"
+        >
+          {pending ? (
+            <LoaderCircleIcon aria-hidden="true" className="animate-spin" />
+          ) : (
+            <PlusIcon aria-hidden="true" />
+          )}
+          {pending ? "Adding…" : "Add"}
+        </Button>
+      </form>
+      {serverError ? (
+        <p id={serverErrorId} role="alert" className="mt-2 text-xs leading-4.5 text-danger">
+          {serverError}
+        </p>
+      ) : null}
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-4.5 text-fg-subtle">
+        <span>Values are hidden once added.</span>
+        <button
+          type="button"
+          onClick={onPaste}
+          className="inline-flex items-center gap-1 rounded-sm font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:min-h-11"
+        >
+          <FileTextIcon aria-hidden="true" className="size-3.5" />
+          Paste .env
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   Paste .env: several variables at once, on their own page.
+   -------------------------------------------------------------------------- */
+
+export function PasteVariablesPage({
+  set,
+  onClose,
+  onAdd,
+}: {
+  set: WorkspaceVariableSet;
+  onClose: () => void;
+  /** Saves the values. Throws a user-facing error. */
+  onAdd: (variables: NewVariableInput[], replaced: string[]) => Promise<void>;
+}) {
+  const [env, setEnv] = useState("");
+  const [tried, setTried] = useState(false);
+
+  const existing = set.variables.map((variable) => variable.name);
   const rows = env.trim() ? parseEnvText(env, existing) : [];
   const importable = importableEnvRows(rows);
   const envError = tried ? envProblems(rows) : undefined;
-  const paste = mode === "paste";
   const count = importable.length;
 
   return (
     <FlushFormPage
       backLabel={set.name}
       onClose={onClose}
-      title={paste ? "Add variables" : "Add variable"}
-      description={`In ${set.name}. Agents get ${paste ? "them" : "it"} from the next turn.`}
-      submitLabel={paste ? (count > 0 ? `Add ${plural(count)}` : "Add variables") : "Add variable"}
+      title="Paste .env"
+      description={`Add several variables to ${set.name}. Agents get them from the next turn.`}
+      submitLabel={count > 0 ? `Add ${plural(count)}` : "Add variables"}
       pendingLabel="Adding…"
-      submitDisabled={paste && count === 0}
+      submitDisabled={count === 0}
       onSubmit={async () => {
         setTried(true);
-        if (paste) {
-          if (count === 0 || envProblems(rows)) return false;
-          await onAdd(
-            importable.map((row) => ({ name: row.name, value: row.value })),
-            importable.filter((row) => row.status === "replace").map((row) => row.name),
-          );
-          return true;
-        }
-        if (issue || !normalized || !value) return false;
-        await onAdd([{ name: normalized, value }], []);
+        if (count === 0 || envProblems(rows)) return false;
+        await onAdd(
+          importable.map((row) => ({ name: row.name, value: row.value })),
+          importable.filter((row) => row.status === "replace").map((row) => row.name),
+        );
         return true;
       }}
     >
       <FieldStack>
-        <SegmentedControl
-          aria-label="How to add"
-          size="sm"
-          className="self-start"
-          value={mode}
-          onValueChange={setMode}
-          options={[
-            { value: "one", label: "One variable" },
-            { value: "paste", label: "Paste .env" },
-          ]}
-        />
-        {paste ? (
-          <>
-            <Field
-              label="Variables"
-              error={envError}
-              hint={
-                rows.length
-                  ? undefined
-                  : "One NAME=value per line. Comments and export are ignored."
-              }
-            >
-              <TextArea
-                mono
-                rows={5}
-                value={env}
-                onChange={(event) => setEnv(event.target.value)}
-                placeholder={"DATABASE_URL=postgres://…\nPGSSLMODE=require"}
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </Field>
-            {rows.length ? <EnvPastePreview rows={rows} /> : null}
-          </>
-        ) : (
-          <>
-            <Field
-              label="Name"
-              error={nameError}
-              hint={
-                normalized && normalized !== name ? (
-                  <>
-                    Saved as <span className="font-mono text-fg">{normalized}</span>
-                  </>
-                ) : (
-                  NAME_HINT
-                )
-              }
-            >
-              <TextInput
-                mono
-                name="variable-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="e.g. DATABASE_URL"
-                suppressAutofill
-                autoComplete="off"
-                autoCapitalize="characters"
-                spellCheck={false}
-              />
-            </Field>
-            <Field
-              label="Value"
-              error={valueError}
-              hint="Hidden after you save it. Agents still get it in their sandbox."
-            >
-              <SecretInput
-                multiline
-                rows={2}
-                name="variable-value"
-                value={value}
-                onChange={(event) => setValue(event.target.value)}
-                placeholder="Paste the value"
-              />
-            </Field>
-          </>
-        )}
+        <Field
+          label="Variables"
+          error={envError}
+          hint={
+            rows.length ? undefined : "One NAME=value per line. Comments and export are ignored."
+          }
+        >
+          <TextArea
+            mono
+            rows={5}
+            value={env}
+            onChange={(event) => setEnv(event.target.value)}
+            placeholder={"DATABASE_URL=postgres://…\nPGSSLMODE=require"}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </Field>
+        {rows.length ? <EnvPastePreview rows={rows} /> : null}
       </FieldStack>
     </FlushFormPage>
   );

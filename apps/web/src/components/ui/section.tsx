@@ -66,7 +66,11 @@ export function SectionStack({
 }
 
 export interface SectionProps extends Omit<ComponentProps<"section">, "title"> {
-  title: ReactNode;
+  /**
+   * Omit only for the first rows of a page whose page title already names them
+   * (Settings > General: Name, ID). Pass `aria-label` then if the rows need a name.
+   */
+  title?: ReactNode;
   /** One or two short sentences, 12px muted. */
   description?: ReactNode;
   /** Right of the title, centred on the title line. One quiet action. */
@@ -107,56 +111,60 @@ export function Section({
   const headingId = useId();
   const Heading = headingLevel === 3 ? "h3" : "h2";
   const hasContent = children !== undefined && children !== null && children !== false;
+  const hasHeader = title !== undefined && title !== null && title !== false;
 
   return (
     <section
       data-slot="section"
       data-variant={variant}
-      aria-labelledby={headingId}
+      aria-labelledby={hasHeader ? headingId : undefined}
       className={cn("min-w-0", className)}
       {...props}
     >
       {/* Title and action share the first line; on narrow widths the description
           runs under both, so a wide action never squeezes it into a column. */}
-      <div
-        className={cn(
-          "@container/section-header grid min-w-0 items-start gap-x-4",
-          action ? "grid-cols-[minmax(0,1fr)_auto]" : "grid-cols-1",
-        )}
-      >
-        <Heading
-          id={headingId}
-          className={cn("col-start-1 row-start-1 break-words", SECTION_TITLE_CLASS)}
+      {hasHeader ? (
+        <div
+          className={cn(
+            "@container/section-header grid min-w-0 items-start gap-x-4",
+            action ? "grid-cols-[minmax(0,1fr)_auto]" : "grid-cols-1",
+          )}
         >
-          {title}
-        </Heading>
-        {action ? (
-          <div
-            data-slot="section-action"
-            className="col-start-2 row-start-1 flex h-6 shrink-0 items-center gap-2"
+          <Heading
+            id={headingId}
+            className={cn("col-start-1 row-start-1 break-words", SECTION_TITLE_CLASS)}
           >
-            {action}
-          </div>
-        ) : null}
-        {description ? (
-          <p
-            data-slot="section-description"
-            className={cn(
-              "row-start-2 mt-1 text-xs leading-4.5 text-fg-muted",
-              // Under the action on narrow widths: clear the 32px button, which
-              // overhangs the 24px title line by 4px.
-              action && "col-span-2 mt-2 @md/section-header:col-span-1 @md/section-header:mt-1",
-            )}
-          >
-            {description}
-          </p>
-        ) : null}
-      </div>
+            {title}
+          </Heading>
+          {action ? (
+            <div
+              data-slot="section-action"
+              className="col-start-2 row-start-1 flex h-6 shrink-0 items-center gap-2"
+            >
+              {action}
+            </div>
+          ) : null}
+          {description ? (
+            <p
+              data-slot="section-description"
+              className={cn(
+                "row-start-2 mt-1 text-xs leading-4.5 text-fg-muted",
+                // Under the action on narrow widths: clear the 32px button, which
+                // overhangs the 24px title line by 4px.
+                action && "col-span-2 mt-2 @md/section-header:col-span-1 @md/section-header:mt-1",
+              )}
+            >
+              {description}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       {hasContent ? (
         <div
           data-slot="section-content"
           className={cn(
-            "mt-3 min-w-0",
+            "min-w-0",
+            hasHeader && "mt-3",
             CONTENT_CLASS[variant],
             variant === "open" && divided && "divide-y divide-border",
             contentClassName,

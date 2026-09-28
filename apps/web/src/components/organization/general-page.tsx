@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { PencilIcon } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { RowButton } from "@/components/ui/page-actions";
@@ -6,13 +7,14 @@ import { CopyField } from "@/components/ui/copy-field";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
-import { Section, SectionStack } from "@/components/ui/section";
+import { Section } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 
 import { useOrganizationDirectory } from "./organization-directory";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > General: the organization's name and its ID.
+   Organization settings > General: two plain rows, Name and Organization ID.
+   The page title names them, so no section header and no descriptions.
    -------------------------------------------------------------------------- */
 
 export function OrganizationGeneralPage() {
@@ -34,36 +36,36 @@ export function OrganizationGeneralPage() {
   }
 
   return (
-    <SectionStack>
-      <Section title="Organization">
-        <SettingRowGroup>
-          {!organization ? (
-            <SettingRowSkeleton />
-          ) : (
-            <>
-              <SettingRow
-                label="Name"
-                description={organization.name}
-                control={<RowButton onClick={() => setRenameOpen(true)}>Rename</RowButton>}
-              />
-              <SettingRow
-                label="Organization ID"
-                description="For the API and support requests."
-                controlWidth="auto"
-                control={
-                  <CopyField
-                    value={organization.id}
-                    label="organization ID"
-                    size="md"
-                    truncate="middle"
-                    maxLength={20}
-                  />
-                }
-              />
-            </>
-          )}
-        </SettingRowGroup>
-      </Section>
+    <Section aria-label="Organization">
+      <SettingRowGroup>
+        {!organization ? (
+          <SettingRowSkeleton />
+        ) : (
+          <>
+            <SettingRow
+              label="Name"
+              description={<RowValue>{organization.name}</RowValue>}
+              control={
+                <RowButton
+                  aria-label={`Rename organization ${organization.name}`}
+                  onClick={() => setRenameOpen(true)}
+                >
+                  <PencilIcon aria-hidden="true" />
+                  Rename
+                </RowButton>
+              }
+            />
+            <SettingRow
+              label="Organization ID"
+              description={
+                <span className="mt-0.5 flex min-w-0">
+                  <CopyField value={organization.id} label="organization ID" truncate="middle" />
+                </span>
+              }
+            />
+          </>
+        )}
+      </SettingRowGroup>
       {organization ? (
         <RenameOrganizationDialog
           open={renameOpen}
@@ -73,8 +75,13 @@ export function OrganizationGeneralPage() {
           singleUser={directory.singleUser}
         />
       ) : null}
-    </SectionStack>
+    </Section>
   );
+}
+
+/** A row's current value: 14px in the title color, under the label. */
+function RowValue({ children }: { children: ReactNode }) {
+  return <span className="mt-0.5 block text-sm leading-5 break-words text-fg">{children}</span>;
 }
 
 function RenameOrganizationDialog({

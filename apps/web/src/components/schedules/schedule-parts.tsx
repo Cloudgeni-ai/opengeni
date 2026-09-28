@@ -2,7 +2,7 @@
  * Small pieces the Schedules list and the schedule page share: permissions,
  * links, the tile, the Next run / Last run values, the owner and the row menu.
  */
-import type { MouseEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   CalendarClockIcon,
@@ -130,23 +130,7 @@ export function useScheduleNavigation(workspaceId: string) {
   };
 }
 
-/** Plain left clicks stay in the app; modified clicks open the link normally. */
-export function inAppClick(go: () => void) {
-  return (event: MouseEvent<HTMLAnchorElement>) => {
-    if (
-      event.defaultPrevented ||
-      event.button !== 0 ||
-      event.metaKey ||
-      event.ctrlKey ||
-      event.shiftKey ||
-      event.altKey
-    ) {
-      return;
-    }
-    event.preventDefault();
-    go();
-  };
-}
+export { inAppClick } from "@/lib/in-app-click";
 
 /* ----------------------------------------------------------------------------
    Values.

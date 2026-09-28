@@ -37,10 +37,14 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
   { id: "security", label: "Security & data", icon: ShieldIcon },
 ];
 
-function description(section: OrganizationAdminSection, organizationName: string): string {
+function description(
+  section: OrganizationAdminSection,
+  organizationName: string,
+): string | undefined {
   switch (section) {
     case "general":
-      return "The organization's name and ID.";
+      // The rows (Name, Organization ID) say it; a description would restate them.
+      return undefined;
     case "people":
       return `Everyone in ${organizationName}, with one role each and a private Personal workspace.`;
     case "workspaces":

@@ -4,7 +4,6 @@ import {
   Building2Icon,
   CalendarClockIcon,
   ContainerIcon,
-  FileTextIcon,
   MessageSquareIcon,
   PencilIcon,
   PlusIcon,
@@ -44,6 +43,7 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { WorkspaceVariableSet } from "@/types";
 
+import { AddVariableRow, type NewVariableInput } from "./variable-set-forms";
 import {
   SCOPE_LABEL,
   errorParts,
@@ -280,7 +280,10 @@ export function VariableSetsListPage({
 
 export interface VariableSetPageActions {
   back: () => void;
-  addVariable: (mode: "one" | "paste") => void;
+  /** Saves one variable from the inline row. Throws a user-facing error. */
+  addVariable: (variable: NewVariableInput) => Promise<void>;
+  /** Opens the Paste .env page. */
+  pasteEnv: () => void;
   replaceValue: (name: string) => void;
   deleteVariable: (name: string) => void;
   editSet: () => void;
@@ -515,25 +518,12 @@ export function VariableSetDetailPage({
             </span>,
           ]}
           actions={
-            <>
-              {canManageSecrets && !empty ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => actions.addVariable("one")}
-                  className="rounded-[10px] pointer-coarse:h-11"
-                >
-                  <PlusIcon aria-hidden="true" />
-                  Add variable
-                </Button>
-              ) : null}
-              <SetMenu
-                set={set}
-                canEdit={canManageSet}
-                canDelete={canManageSecrets}
-                actions={actions}
-              />
-            </>
+            <SetMenu
+              set={set}
+              canEdit={canManageSet}
+              canDelete={canManageSecrets}
+              actions={actions}
+            />
           }
           tabs={
             <LineTabsList aria-label={`${set.name} sections`}>
@@ -557,38 +547,31 @@ export function VariableSetDetailPage({
                   Agents get these as environment variables. Changes apply from the next turn.
                 </p>
                 {scopeNote}
-                {empty ? (
+                {empty && !canManageSecrets ? (
                   <EmptyState
                     variant="page"
                     icon={<VariableIcon />}
                     title="No variables yet"
-                    description={
-                      canManageSecrets
-                        ? "Add the keys and config agents need, one at a time or from a .env file."
-                        : "Someone who can manage this set can add variables."
-                    }
+                    description="Someone who can manage this set can add variables."
                     className="pt-8 pb-6"
-                    action={
-                      canManageSecrets ? (
-                        <>
-                          <Button type="button" onClick={() => actions.addVariable("one")}>
-                            <PlusIcon aria-hidden="true" />
-                            Add variable
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => actions.addVariable("paste")}
-                          >
-                            <FileTextIcon aria-hidden="true" />
-                            Paste .env
-                          </Button>
-                        </>
-                      ) : undefined
-                    }
                   />
                 ) : (
-                  <VariablesTable set={set} canManage={canManageSecrets} actions={actions} />
+                  <>
+                    {empty ? (
+                      <p className="px-3 pb-3 text-sm leading-5 text-fg-muted">
+                        No variables yet. Add the keys and config agents need.
+                      </p>
+                    ) : (
+                      <VariablesTable set={set} canManage={canManageSecrets} actions={actions} />
+                    )}
+                    {canManageSecrets ? (
+                      <AddVariableRow
+                        set={set}
+                        onAdd={actions.addVariable}
+                        onPaste={actions.pasteEnv}
+                      />
+                    ) : null}
+                  </>
                 )}
               </DetailSection>
             </LineTabsContent>
