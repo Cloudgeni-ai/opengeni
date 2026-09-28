@@ -234,8 +234,8 @@ This is the one rule people most often get wrong, so it has its own section.
 **Anything you open is its own page.** A variable set, a Codex or model account, a person, an API
 key, a schedule, a knowledge entry, a workspace, an environment. The list row navigates to a
 URL (`/variable-sets/aws-production`, `/models/accounts/ops`), the page renders inside the content
-area (rail and settings sub-nav stay), and a back link returns to the list with its scroll and
-filters intact.
+area (the rail, or the settings rail, stays), and a back link returns to the list with its scroll
+and filters intact.
 
 The detail page anatomy (`components/ui/detail-page.tsx`, following Claude's skill page):
 
@@ -268,11 +268,19 @@ Main column: DetailSection ...        | Quiet aside card:
 - Focus moves to the page title when the page opens in place; the title is focusable from script
   (`useFocusOnNavigation`). Back on the list, focus returns to the row that was opened.
 
-**Settings pages render in `SettingsFrame`.** The frame draws the sub-nav and the section's page
-header; a sub-page (an account, a key, a person, a form) hides that header and declares its own
-back link and title. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
+**Settings is a mode of the rail.** Entering settings (the rail footer's Settings, any workspace,
+organization or personal settings URL, and the Agents, Insights and runtime pages listed in the
+settings rail) swaps the main rail for the settings rail, drawn by `SettingsShell`
+(`components/settings/settings-sidebar.tsx`): a back link that leaves settings ("Back to sessions";
+organization settings go back to workspace settings, personal settings to OpenGeni), the scope
+switcher, the grouped settings pages and an out link (workspace settings -> Organization). Leaving
+restores the main rail. Below 1024px the settings rail folds into a header with the back link, the
+current page and a Menu button that opens it in a drawer. Settings pages render full width beside
+the rail in the standard 960px column, with the section's page header; a sub-page (an account, a
+key, a person, a form) hides that header and declares its own back link and title. Pages that own
+their layout (Agents, Insights, Variable sets) render their own `ContentPage`. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
 reload and browser Back work, and its back link returns to the tab or list it was opened from.
-Inside the settings column pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
+Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 `FlushFormPage` (or `FLUSH_FORM_PAGE_CLASS`) for `FormPage`, and the flush `AccessList`, so the
 back link, title and rows start where the section header does. Page actions use `RowButton` and
 `MoreMenu` from `components/ui/page-actions.tsx`.
@@ -303,8 +311,8 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 
 | Component | Decision |
 | --- | --- |
-| Page header | Icon on main-rail pages only; settings sub-pages drop the icon because the sub-nav gives context. |
-| Navigation | The rail never swaps. Settings opens a sub-nav column inside the content. |
+| Page header | Icon on main-rail pages only; settings pages drop the icon because the settings rail gives context. |
+| Navigation | Settings swaps the rail for the settings rail (240px, grouped, icons) with a back link that restores the main rail. No settings sub-nav inside the content. |
 | Section | Open section: 16px title (one step above the 14px row titles), 12px description, rows below, one hairline between sections, no box. |
 | Tabs and toolbar | Underline tabs; search, filter and the primary action in a toolbar that keeps its shape. Status filters are not a second tab row. |
 | List row | Divided resource row (56-64px, 32px tile, one meta line) for things you own; the catalog row (76px, 40px tile, 2 columns) for discovery. Same tile, type and hover. |

@@ -17,7 +17,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { SettingsHeaderActions } from "@/components/settings/settings-frame";
+import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
 import {

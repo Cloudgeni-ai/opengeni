@@ -1,4 +1,4 @@
-// Workspace settings pages, rendered inside the settings frame
+// Workspace settings pages, rendered inside the settings shell
 // (components/settings/workspace-settings-shell.tsx): General, Access,
 // Models and API keys. The org/billing console lives at
 // Organization settings.

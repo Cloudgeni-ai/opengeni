@@ -1,7 +1,7 @@
 /**
  * Workspace settings pages, addressed by `?section=` on `/settings`. Settings
- * hold configuration only: the sub-nav links to the Agents and Insights
- * dashboards, which open as their own pages.
+ * hold configuration only: the settings rail also links to the Agents and
+ * Insights dashboards and the runtime pages, which open as their own pages.
  */
 export type WorkspaceSettingsSection = "general" | "access" | "models" | "api-keys" | "learning";
 
@@ -20,6 +20,8 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
 ];
 
 const WORKSPACE_PAGE_TARGETS = [
+  "/workspaces/$workspaceId/agents",
+  "/workspaces/$workspaceId/insights",
   "/workspaces/$workspaceId/variable-sets",
   "/workspaces/$workspaceId/rigs",
   "/workspaces/$workspaceId/machines",
@@ -44,8 +46,8 @@ export function workspaceSettingsSectionFromSearch(
 }
 
 /**
- * Resolve the workspace routes that share the settings frame (the sub-nav
- * beside the page). Matching is segment-aware: `/rigs/:rigId` belongs to
+ * Resolve the workspace routes that open in settings mode: the settings rail
+ * replaces the main rail. Matching is segment-aware: `/rigs/:rigId` belongs to
  * Sandbox environments, while a future `/rigs-archive` route is not captured.
  */
 export function workspaceManagementLocation(

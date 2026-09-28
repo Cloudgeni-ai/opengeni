@@ -49,10 +49,16 @@ describe("workspace rail destinations", () => {
     ).toBe(true);
   });
 
-  test("settings open in the content area while the main rail stays", () => {
-    // The footer Settings entry is the way in; the frame renders inside RailShell.
-    const shell = workspaceRouteSource.slice(workspaceRouteSource.indexOf("<RailShell>"));
-    expect(shell.indexOf("<WorkspaceManagementShell")).toBeGreaterThan(0);
-    expect(shell.indexOf("<WorkspaceManagementShell")).toBeLessThan(shell.indexOf("</RailShell>"));
+  test("settings mode swaps the main rail for the settings rail", () => {
+    // The footer Settings entry is the way in; the management shell replaces RailShell.
+    const shell = workspaceRouteSource.slice(
+      workspaceRouteSource.indexOf("usesOrganizationShell ? ("),
+    );
+    const management = shell.indexOf("<WorkspaceManagementShell");
+    expect(management).toBeGreaterThan(0);
+    expect(management).toBeLessThan(shell.indexOf("<RailShell>"));
+    expect(shell.slice(management, shell.indexOf("</WorkspaceManagementShell>"))).not.toContain(
+      "<RailShell>",
+    );
   });
 });

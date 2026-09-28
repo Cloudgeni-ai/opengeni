@@ -66,12 +66,12 @@ const workspaceRouteContracts = {
   workspaceSettingsRoute: {
     kind: "page",
     source: "routes/workspace-settings.tsx",
-    scrollSource: "components/settings/settings-frame.tsx",
+    scrollSource: "components/settings/settings-sidebar.tsx",
   },
   workspaceOrganizationRoute: {
     kind: "page",
     source: "routes/org-settings.tsx",
-    scrollSource: "components/settings/settings-frame.tsx",
+    scrollSource: "components/settings/settings-sidebar.tsx",
   },
   workspaceAccountRoute: { kind: "redirect" },
 } satisfies Record<string, ScrollContract>;
@@ -139,10 +139,11 @@ describe("workspace route scroll ownership", () => {
     for (const path of [
       "components/settings/workspace-settings-shell.tsx",
       "components/settings/organization-settings-shell.tsx",
+      "components/settings/personal-settings-shell.tsx",
     ]) {
       const shellSource = await source(path);
-      expect(shellSource, `${path} must render the shared settings frame`).toContain(
-        "<SettingsFrame",
+      expect(shellSource, `${path} must render the shared settings shell`).toContain(
+        "<SettingsShell",
       );
       expect(shellSource).not.toContain("h-dvh");
     }

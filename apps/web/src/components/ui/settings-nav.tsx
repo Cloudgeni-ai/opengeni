@@ -7,7 +7,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 
 /**
- * Navigation items for the main rail and the settings sub-nav.
+ * Navigation items for the main rail and the settings rail.
  *
  * NavItem: 32px, radius 10, 16px icon, 14/500 muted. Active is a surface-2
  * fill, full-strength text and a 2x16px brand bar on the left edge. Every
@@ -15,9 +15,10 @@ import { cn } from "@/lib/utils";
  * 44px target.
  *
  * SettingsNav variants:
- * - `column` (default): a 200px sub-nav inside the content area. The main rail
- *   never swaps; text-only items keep it quieter than the rail beside it.
- * - `rail`: a 240px rail that replaces the main rail (switcher as header).
+ * - `rail`: the 240px settings rail that replaces the main rail in settings
+ *   mode (back link and scope switcher as header). This is what the app uses.
+ * - `column` (default): a 200px column inside the content area, kept for the
+ *   kit's history.
  */
 
 export type NavItemSize = "default" | "comfortable";
@@ -243,7 +244,7 @@ export interface SettingsNavProps extends ComponentProps<"nav"> {
   footer?: ReactNode;
 }
 
-/** The settings sub-nav. Label it: `aria-label="Workspace settings"`. */
+/** The settings navigation. Label it: `aria-label="Workspace settings"`. */
 export function SettingsNav({
   variant = "column",
   header,

@@ -1,4 +1,4 @@
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import {
   BlocksIcon,
   CodeIcon,
@@ -14,7 +14,7 @@ import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { OrganizationSettingsSwitcher } from "./organization-settings-switcher";
-import { SettingsFrame, SettingsFrameOutLink } from "./settings-frame";
+import { SettingsShell, settingsHomeLink } from "./settings-sidebar";
 import { useAppContext } from "@/context";
 import { organizationsForSubject } from "@/lib/org";
 import type { OrganizationAdminSection } from "@/lib/organization-admin";
@@ -85,30 +85,33 @@ export function OrganizationSettingsShell({
   children: ReactNode;
 }) {
   const context = useAppContext();
-  const rawSection = useRouterState({
-    select: (state) => (state.location.search as { section?: unknown }).section,
-  });
   const organizationCount = organizationsForSubject(
     context.accessContext,
     context.workspaces,
   ).length;
   const items = ORGANIZATION_SETTINGS_ITEMS.filter((item) => visibleSections.has(item.id));
   const current = ORGANIZATION_SETTINGS_ITEMS.find((item) => item.id === section)!;
-  const workspaceName =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "Workspace";
   return (
-    <SettingsFrame
+    <SettingsShell
       label="Organization settings"
-      heading="Organization"
-      subheading={organizationCount > 1 ? undefined : organizationLabel}
-      header={
+      back={{
+        label: "Workspace settings",
+        link: <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }} />,
+      }}
+      home={settingsHomeLink(workspaceId)}
+      scope={
         organizationCount > 1 ? (
           <OrganizationSettingsSwitcher
             workspaceId={workspaceId}
             organizationLabel={organizationLabel}
             section={section}
           />
-        ) : undefined
+        ) : (
+          <div className="min-w-0 px-2.5">
+            <p className="truncate text-sm leading-5 font-semibold text-fg">{organizationLabel}</p>
+            <p className="text-xs leading-4.5 text-fg-subtle">Organization</p>
+          </div>
+        )
       }
       groups={[
         {
@@ -127,30 +130,14 @@ export function OrganizationSettingsShell({
         },
       ]}
       activeId={section}
-      indexRequested={rawSection === undefined}
-      indexLink={<Link to="/workspaces/$workspaceId/organization" params={{ workspaceId }} />}
-      footer={
-        <SettingsFrameOutLink
-          groupLabel="Workspace"
-          label={workspaceName}
-          icon={SlidersHorizontalIcon}
-          link={
-            <Link
-              to="/workspaces/$workspaceId/settings"
-              params={{ workspaceId }}
-              aria-label={`Workspace settings for ${workspaceName}`}
-            />
-          }
-        />
-      }
+      currentPage={current.label}
       page={
         hideHeader
           ? null
           : { title: current.label, description: description(section, organizationLabel), actions }
       }
-      ownBackLink={hideHeader}
     >
       {children}
-    </SettingsFrame>
+    </SettingsShell>
   );
 }

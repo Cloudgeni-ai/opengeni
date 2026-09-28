@@ -551,25 +551,25 @@ function AuthorizedWorkspaceShell({
         }
       }}
     >
-      <RailProvider workspaceId={workspaceId}>
-        <RailShell>
-          {/* Settings open inside the content area; the main rail never swaps. */}
-          {usesOrganizationShell ? (
-            children
-          ) : managementLocation ? (
-            <WorkspaceManagementShell
-              workspaceId={workspaceId}
-              workspaceName={activeWorkspace?.name}
-              organizationName={organizationName}
-              location={managementLocation}
-            >
-              {children}
-            </WorkspaceManagementShell>
-          ) : (
-            children
-          )}
-        </RailShell>
-      </RailProvider>
+      {/* Settings mode swaps the rail: organization settings and the workspace
+          management shell draw the settings rail, and "Back to sessions"
+          returns to the main rail. */}
+      {usesOrganizationShell ? (
+        children
+      ) : managementLocation ? (
+        <WorkspaceManagementShell
+          workspaceId={workspaceId}
+          workspaceName={activeWorkspace?.name}
+          organizationName={organizationName}
+          location={managementLocation}
+        >
+          {children}
+        </WorkspaceManagementShell>
+      ) : (
+        <RailProvider workspaceId={workspaceId}>
+          <RailShell>{children}</RailShell>
+        </RailProvider>
+      )}
     </OpenGeniProvider>
   );
 }

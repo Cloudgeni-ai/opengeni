@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import type { OrganizationWorkspaceAdministration } from "@/components/settings/organization-workspace-administration";
-import { SettingsHeaderActions } from "@/components/settings/settings-frame";
+import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
 import { AccessList, type AccessMember } from "@/components/ui/access-list";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";

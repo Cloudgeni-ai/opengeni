@@ -5,7 +5,7 @@ import { SearchIcon, UserPlusIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { SettingsHeaderActions } from "@/components/settings/settings-frame";
+import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
 import { AccessList, type AccessMember } from "@/components/ui/access-list";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";

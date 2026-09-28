@@ -23,11 +23,34 @@ mock.module("@/context", () => ({
 }));
 
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children, ...props }: { children?: ReactNode; className?: string }) =>
-    createElement("a", { className: props.className }, children),
+  Link: ({
+    children,
+    to,
+    params,
+    search: _search,
+    ...props
+  }: {
+    children?: ReactNode;
+    to: string;
+    params?: { workspaceId?: string };
+    search?: unknown;
+  }) =>
+    createElement(
+      "a",
+      { ...props, href: to.replace("$workspaceId", params?.workspaceId ?? "") },
+      children,
+    ),
   useNavigate: () => navigate,
   useRouterState: ({ select }: { select: (state: unknown) => unknown }) =>
     select({ location: { search: {} } }),
+}));
+
+mock.module("@/components/rail/workspace-switcher", () => ({
+  WorkspaceSwitcherMenu: () => createElement("button", { type: "button" }, "Switch workspace"),
+}));
+
+mock.module("@/components/rail/workspace-paused-banner", () => ({
+  WorkspacePausedBanner: () => null,
 }));
 
 GlobalRegistrator.register();
@@ -84,10 +107,9 @@ async function renderShell(
   };
 }
 
-describe("workspace settings frame", () => {
+describe("workspace settings rail", () => {
   test("lists settings plus the Agents and Insights dashboards; no Memory, Capabilities or Danger zone", async () => {
     workspacePermissions = ["workspace:admin"];
-    // The settings list itself (narrow frames show it as a page).
     const view = await renderShell({ kind: "settings", section: null });
     try {
       const text = view.container.textContent ?? "";
@@ -126,7 +148,7 @@ describe("workspace settings frame", () => {
     }
   });
 
-  test("keeps settings and runtime pages in the frame, and dashboards out of it", () => {
+  test("settings, the Agents and Insights dashboards and runtime pages open in settings mode", () => {
     expect(workspaceManagementLocation(`${base}/settings`, workspaceId, "api-keys")).toEqual({
       kind: "settings",
       section: "api-keys",
@@ -135,7 +157,7 @@ describe("workspace settings frame", () => {
       kind: "settings",
       section: null,
     });
-    for (const route of ["variable-sets", "rigs", "machines"]) {
+    for (const route of ["agents", "insights", "variable-sets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
     expect(workspaceManagementLocation(`${base}/rigs/rig-123`, workspaceId)).toEqual({
@@ -143,8 +165,6 @@ describe("workspace settings frame", () => {
       target: "/workspaces/$workspaceId/rigs",
     });
     for (const route of [
-      "agents",
-      "insights",
       "memory",
       "sessions",
       "plugins",
@@ -167,7 +187,7 @@ describe("workspace settings frame", () => {
     expect(workspaceSettingsSectionFromSearch("danger")).toBe("general");
   });
 
-  test("links to organization settings under the sub-nav", () => {
+  test("links to organization settings at the bottom of the settings rail", () => {
     expect(shellSource).toContain('to="/workspaces/$workspaceId/organization"');
     expect(shellSource).toContain("Organization settings for ${organizationName}");
     expect(shellSource).toContain('label="Workspace settings"');
@@ -191,6 +211,25 @@ describe("workspace settings frame", () => {
       expect(text).not.toContain("Variable sets");
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("Agents keeps the settings rail, with Agents current and a way back to sessions", async () => {
+    workspacePermissions = ["workspace:admin"];
+    const view = await renderShell({ kind: "page", target: "/workspaces/$workspaceId/agents" });
+    try {
+      const rail = view.container.querySelector('nav[aria-label="Workspace settings"]')!;
+      expect(rail).not.toBeNull();
+      expect(rail.querySelector('a[aria-current="page"]')?.textContent).toBe("Agents");
+      const back = Array.from(rail.querySelectorAll("a")).find(
+        (link) => link.textContent === "Back to sessions",
+      );
+      expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
+      // The dashboard brings its own page; the shell adds no settings header.
+      expect(view.container.querySelector("main h1")).toBeNull();
+      expect(view.container.querySelector("main")?.textContent).toContain("Settings content");
+    } finally {
+      await view.unmount();
     }
   });
 });

@@ -27,7 +27,7 @@ const incomingInvitationsSource = await Bun.file(
   `${import.meta.dir}/components/organization-invitations.tsx`,
 ).text();
 const frameSource = await Bun.file(
-  `${import.meta.dir}/components/settings/settings-frame.tsx`,
+  `${import.meta.dir}/components/settings/settings-sidebar.tsx`,
 ).text();
 const settingsNavSource = await Bun.file(
   `${import.meta.dir}/components/ui/settings-nav.tsx`,
@@ -93,7 +93,7 @@ describe("organization administration surface", () => {
   test("routes accessible general, people, workspaces, identity, security, developer, and billing sections", () => {
     expect(routeSource).toContain("<OrganizationSettingsShell");
     expect(shellSource).toContain('label="Organization settings"');
-    // The shell's SettingsFrame names the sub-nav from `label`; SettingsNav marks the current page.
+    // The SettingsShell names the settings rail from `label`; NavItem marks the current page.
     expect(frameSource).toContain("aria-label={label}");
     expect(settingsNavSource).toContain('aria-current={active && !disabled ? "page" : undefined}');
     for (const section of [
