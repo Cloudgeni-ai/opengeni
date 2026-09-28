@@ -124,9 +124,8 @@ function workspacesShort(policy: ModelConnectionAccessPolicy, personalSupported:
 }
 
 /**
- * "Models it can serve" on an account's page. In a workspace it only shows
- * once the account is limited (the workspace's Allowed models covers the rest);
- * at organization scope it always shows, with the workspaces that can use it.
+ * "Models it can serve" on an account's page, including unrestricted accounts.
+ * At organization scope it also shows the workspaces that can use it.
  */
 export function ConnectionAccessRows({
   access,
@@ -154,7 +153,6 @@ export function ConnectionAccessRows({
   }
   const policy = access.data?.policy;
   if (!policy) return null;
-  if (!organization && policy.allowedModels === null) return null;
   const models =
     policy.allowedModels === null
       ? "All models"

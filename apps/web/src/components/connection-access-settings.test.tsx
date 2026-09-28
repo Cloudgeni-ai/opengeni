@@ -1,7 +1,7 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 mock.module("sonner", () => ({
@@ -21,6 +21,197 @@ afterAll(() => {
 });
 
 for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as const) {
+  test(`${kind} workspace access stays editable before restrictions and after resetting to all models`, async () => {
+    let policy = {
+      allowedModels: null as string[] | null,
+      allowedWorkspaces: null as string[] | null,
+      allowPersonalWorkspaces: true,
+      version: 1,
+    };
+    const writes: (typeof policy)[] = [];
+    const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+      requestJson: async (method: string, path: string, body: typeof policy) => {
+        expect(path).toBe(`/v1/workspaces/workspace/model-connections/${kind}/account/access`);
+        if (method === "PUT") {
+          writes.push(structuredClone(body));
+          policy = { ...body, version: policy.version + 1 };
+          return policy;
+        }
+        return {
+          policy,
+          models: [
+            { id: "model-a", label: "Model A" },
+            { id: "model-b", label: "Model B" },
+          ],
+          workspaces: [],
+          personalWorkspacesSupported: false,
+        };
+      },
+    });
+    function Page() {
+      const [editing, setEditing] = useState(false);
+      const access = useConnectionAccess({
+        client,
+        workspaceId: "workspace",
+        kind,
+        connectionId: "account",
+      });
+      return editing ? (
+        <ConnectionAccessFormPage
+          access={access}
+          organization={false}
+          canManage
+          name="Team plan"
+          onClose={() => setEditing(false)}
+        />
+      ) : (
+        <ConnectionAccessRows
+          access={access}
+          organization={false}
+          canManage
+          onEdit={() => setEditing(true)}
+        />
+      );
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const flush = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    const editor = () =>
+      container.querySelector<HTMLButtonElement>('[data-slot="setting-nav-row"] button');
+    const open = async () => {
+      expect(editor()).not.toBeNull();
+      await act(async () => editor()!.click());
+      expect(container.querySelector("h1")?.textContent).toBe("Models Team plan can serve");
+    };
+    const choose = async (text: string) => {
+      const radio = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+        (candidate) => candidate.textContent?.includes(text),
+      );
+      expect(radio).toBeDefined();
+      await act(async () => radio!.click());
+    };
+    const save = async () => {
+      const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent === "Save",
+      );
+      expect(submit?.disabled).toBe(false);
+      await act(async () => submit!.closest("form")!.requestSubmit());
+      await flush();
+    };
+    try {
+      await act(async () => root.render(<Page />));
+      await flush();
+      expect(editor()?.textContent).toContain("Models it can serve");
+      expect(editor()?.textContent).toContain("All models");
+      await open();
+      expect(container.textContent).not.toContain("Which workspaces can use it");
+      await choose("Only the models I choose");
+      const label = [...container.querySelectorAll("label")].find(
+        (candidate) => candidate.textContent === "Model B",
+      );
+      expect(label).toBeDefined();
+      await act(async () => document.getElementById(label!.htmlFor)!.click());
+      await save();
+      expect(writes).toEqual([
+        {
+          allowedModels: ["model-a"],
+          allowedWorkspaces: null,
+          allowPersonalWorkspaces: true,
+          version: 1,
+        },
+      ]);
+      expect(editor()?.textContent).toContain("1 model");
+
+      await open();
+      await choose("All models, including new ones");
+      await save();
+      expect(writes[1]).toEqual({
+        allowedModels: null,
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: true,
+        version: 2,
+      });
+      expect(writes).toHaveLength(2);
+      expect(editor()?.textContent).toContain("All models");
+      await open();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test(`${kind} workspace access remains read-only without manage permission`, async () => {
+    const onEdit = mock(() => undefined);
+    const update = mock(async () => ({}));
+    const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+      getModelConnectionAccess: async () => ({
+        policy: {
+          allowedModels: null,
+          allowedWorkspaces: null,
+          allowPersonalWorkspaces: true,
+          version: 1,
+        },
+        models: [{ id: "model-a", label: "Model A" }],
+        workspaces: [],
+        personalWorkspacesSupported: false,
+      }),
+      updateModelConnectionAccess: update,
+    });
+    function Page({ editing }: { editing: boolean }) {
+      const access = useConnectionAccess({
+        client,
+        workspaceId: "workspace",
+        kind,
+        connectionId: "account",
+      });
+      return editing ? (
+        <ConnectionAccessFormPage
+          access={access}
+          organization={false}
+          canManage={false}
+          name="Team plan"
+          onClose={() => undefined}
+        />
+      ) : (
+        <ConnectionAccessRows
+          access={access}
+          organization={false}
+          canManage={false}
+          onEdit={onEdit}
+        />
+      );
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Page editing={false} />));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(container.textContent).toContain("Models it can serve");
+      expect(container.textContent).toContain("All models");
+      expect(container.querySelector('[data-slot="setting-nav-row"] button')).toBeNull();
+      const row = container.querySelector<HTMLElement>('[aria-disabled="true"]');
+      expect(row).not.toBeNull();
+      await act(async () => row!.click());
+      expect(onEdit).not.toHaveBeenCalled();
+
+      // Direct navigation to the form must not bypass the same permission fence.
+      await act(async () => root.render(<Page editing />));
+      const radios = container.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+      expect(radios.length).toBe(2);
+      expect([...radios].every((radio) => radio.disabled)).toBe(true);
+      const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent === "Save",
+      );
+      expect(save?.disabled).toBe(true);
+      expect(update).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test(`${kind} saves individual workspace and model choices on the connection`, async () => {
     let policy = {
       allowedModels: null as string[] | null,
