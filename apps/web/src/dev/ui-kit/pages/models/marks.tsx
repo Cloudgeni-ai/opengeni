@@ -15,7 +15,7 @@ export type ProviderId = "codex" | "vercel" | "openrouter";
 function VercelMark(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M12 3.5 22.5 20.5h-21z" />
+      <path d="M 12 3.5 22.5 20.5h-21z" />
     </svg>
   );
 }
