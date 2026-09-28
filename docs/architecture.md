@@ -1432,9 +1432,9 @@ outside direct-session bundles.
 
 Updates offer reload; API-contract incompatibility retains its guard.
 
-Web loads structured questions, command controls and file attachments on mount;
-message text and repository chips stay eager. Local Suspense fallbacks preserve
-the transcript. `test/e2e/session-lazy-panels.browser.e2e.ts` checks production
+Web lazily mounts questions, commands and attachments; text and repository chips
+stay eager. Suspense fallbacks preserve transcripts.
+`test/e2e/session-lazy-panels.browser.e2e.ts` checks production
 desktop/mobile chunk boundaries.
 
 Products normally use server-side SDK proxies with optional React surfaces;
