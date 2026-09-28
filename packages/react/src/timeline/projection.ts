@@ -170,6 +170,28 @@ export function buildTimeline(
   const workerSessions = new Set<string>();
   const pendingWorkerSessions = new Set<string>();
   let openWaitNotice: NoticeItem | null = null;
+  // Tool results update the original tool row in place, and running lifecycle
+  // receipts have no row. Carry resume evidence on the attention landmarks so
+  // grouping cannot mistake historical approval for a live wait.
+  const presentationWaits = new Map<string | null, Array<NoticeItem | SessionStatusItem>>();
+  let presentationTurnId: string | null = null;
+  const rememberPresentationWait = (
+    item: NoticeItem | SessionStatusItem,
+    turnId: string | null,
+  ) => {
+    const key = turnId ?? presentationTurnId;
+    const waits = presentationWaits.get(key) ?? [];
+    waits.push(item);
+    presentationWaits.set(key, waits);
+    items.push(item);
+  };
+  const resolvePresentationWait = (event: SessionEvent, turnId: string | null) => {
+    if (event.duplicateOfEventId || (event.turnAssociation && event.turnAssociation !== "current"))
+      return;
+    const key = turnId ?? presentationTurnId;
+    for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
+    presentationWaits.delete(key);
+  };
   const queuedAtByTurn = new Map<string, string>();
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
@@ -327,6 +349,13 @@ export function buildTimeline(
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    if (
+      turnId &&
+      (event.type === "turn.started" ||
+        (presentationTurnId === null && isAgentActivityEvent(event.type)))
+    ) {
+      presentationTurnId = turnId;
+    }
     if (
       openWaitNotice &&
       (event.type === "user.message" ||
@@ -736,6 +765,7 @@ export function buildTimeline(
         if (!target) {
           break;
         }
+        resolvePresentationWait(event, turnId ?? target.turnId);
         if (target.kind === "worker") {
           // A worker spawn/message that returns an error flag (or an MCP
           // isError result) settles to "failed" too, so WorkerRow surfaces it.
@@ -943,6 +973,7 @@ export function buildTimeline(
         if (!isSessionStatus(status)) {
           break;
         }
+        if (status === "running") resolvePresentationWait(event, turnId);
         // Only attention-worthy statuses earn a timeline divider. queued /
         // running / idle are machinery telemetry: the header pill carries the
         // live status, the shimmer says "running", and the turn chip's duration
@@ -954,15 +985,17 @@ export function buildTimeline(
         const previous = [...items]
           .reverse()
           .find((item): item is SessionStatusItem => item.kind === "session-status");
-        if (previous?.status === status) {
+        if (previous?.status === status && !previous.resolvedAt) {
           break;
         }
-        items.push({
+        const item: SessionStatusItem = {
           kind: "session-status",
           id: event.id,
           status,
           occurredAt: event.occurredAt,
-        });
+        };
+        if (status === "requires_action") rememberPresentationWait(item, turnId);
+        else items.push(item);
         break;
       }
 
@@ -982,13 +1015,16 @@ export function buildTimeline(
 
       case "session.requiresAction": {
         finalizeOpen(turnId, "complete", event.occurredAt);
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "waiting",
-          text: "Approval needed — the turn is paused until someone decides.",
-          occurredAt: event.occurredAt,
-        });
+        rememberPresentationWait(
+          {
+            kind: "notice",
+            id: event.id,
+            tone: "waiting",
+            text: "Approval needed — the turn is paused until someone decides.",
+            occurredAt: event.occurredAt,
+          },
+          turnId,
+        );
         break;
       }
 
@@ -1730,8 +1766,9 @@ export function groupTimeline(
 /** Prose and attention surfaces never enter a work fold. */
 function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
-  const groups: TimelineGroup[] = [];
+  let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
+  const compactionTurns = new Map<ContextCompactionItem, string>();
   const messages = new Map<string, AgentMessageItem[]>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
   let legacyTurn = "start";
@@ -1770,7 +1807,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         group.work.endedAt = item.occurredAt;
       }
     } else if (item.kind === "context-compaction" && item.phase === "compacted") {
-      workForTurn().work!.details.push({ kind: "item", item });
+      // A maintenance checkpoint alone is not conversational work. Resolve its
+      // attachment after real activity has established this turn's work row.
+      compactionTurns.set(item, key);
+      groups.push({ kind: "item", item });
     } else if (
       item.kind === "machine-input-batch" &&
       item.members.every((member) => ROUTINE_MACHINE_INPUT_KINDS.has(member.kind))
@@ -1797,12 +1837,21 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       groups.push({ kind: "item", item });
       const current = turns.get(currentTurn)?.work;
       if (current && !current.endedAt) {
-        if (item.kind === "notice" && item.tone === "waiting" && !item.recordedOutcome) {
+        if (
+          item.kind === "notice" &&
+          item.tone === "waiting" &&
+          !item.recordedOutcome &&
+          !item.resolvedAt
+        ) {
           current.waiting = {
             label: item.text.startsWith("Approval needed") ? "Waiting for you" : "Waiting",
             since: item.occurredAt,
           };
-        } else if (item.kind === "session-status" && item.status === "requires_action") {
+        } else if (
+          item.kind === "session-status" &&
+          item.status === "requires_action" &&
+          !item.resolvedAt
+        ) {
           current.waiting = { label: "Waiting for you", since: item.occurredAt };
         } else if (
           item.kind === "session-status" &&
@@ -1819,6 +1868,14 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       }
     }
   }
+  groups = groups.filter((entry) => {
+    if (entry.kind !== "item" || entry.item.kind !== "context-compaction") return true;
+    const key = compactionTurns.get(entry.item);
+    const work = key === undefined ? undefined : turns.get(key)?.work;
+    if (!work) return true;
+    work.details.push(entry);
+    return false;
+  });
   // A declared answer starts the response clock immediately. Without a phase,
   // only settlement identifies the last response; text length never does.
   const responseRows = new Map<AgentMessageItem, Work>();

@@ -130,6 +130,44 @@ describe("readable timeline browser regression", () => {
     }
   }, 60_000);
 
+  for (const scenario of ["review-maintenance", "review-approval"]) {
+    test(`${scenario} has truthful live status and preserved history`, async () => {
+      const page = await openHarness(scenario, 390, true);
+      try {
+        await page.setViewportSize({ width: 390, height: 900 });
+        await page.getByRole("button", { name: "Dark", exact: true }).click();
+        await page.evaluate(() =>
+          window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+        );
+        await page.waitForTimeout(350);
+        if (scenario === "review-maintenance") {
+          expect(await page.locator("[data-og-exchange-status]").count()).toBe(0);
+          await page
+            .getByText("Conversation history compacted", { exact: false })
+            .waitFor({ state: "visible" });
+          expect(await page.locator("[data-og-fold-content]").count()).toBe(0);
+        } else {
+          expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);
+          expect(await page.locator('[data-og-exchange-status="waiting"]').count()).toBe(0);
+          await page
+            .getByText("Approval was needed.", { exact: true })
+            .waitFor({ state: "visible" });
+          expect(await page.getByText("waiting on you", { exact: false }).count()).toBe(0);
+          await page
+            .getByText("reconciling the source breakdown", { exact: false })
+            .waitFor({ state: "visible" });
+        }
+        const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+        if (output) {
+          mkdirSync(output, { recursive: true });
+          await page.screenshot({ path: `${output}/timeline-${scenario}-390-light.png` });
+        }
+      } finally {
+        await page.context().close();
+      }
+    }, 60_000);
+  }
+
   test("one Latest question button targets the newest user message from an older bounded window", async () => {
     const page = await openHarness("history");
     try {
