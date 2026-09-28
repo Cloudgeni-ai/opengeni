@@ -45,7 +45,7 @@ describe("staging / production split workflows", () => {
     expect(source).not.toContain('[[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]');
     expect(source).toContain('git merge-base --is-ancestor "$SOURCE_SHA" HEAD');
     expect(source).toContain('git checkout --quiet --detach "$SOURCE_SHA"');
-    expect(source).not.toContain('export GITHUB_SHA=');
+    expect(source).not.toContain("export GITHUB_SHA=");
     expect(source).toContain('[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]');
     expect(source).toContain('ref: "${{ github.sha }}"');
     expect(source).toContain('[[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]');
