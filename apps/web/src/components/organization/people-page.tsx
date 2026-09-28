@@ -1080,6 +1080,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       backLabel="People"
       onClose={() => nav.openSection("people")}
       submitLabel={count > 1 ? `Send ${count} invitations` : "Send invitation"}
+      submitAnalyticsAction="invite_member"
       pendingLabel="Sending…"
       footerStart="Invitations expire in 7 days."
       onSubmit={async () => {

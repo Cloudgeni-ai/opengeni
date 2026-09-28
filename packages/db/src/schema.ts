@@ -12048,13 +12048,14 @@ export const modelCallFacts = pgTable(
   }),
 );
 
-/** Singleton, migration-installed gate. Standalone defaults keep both off. */
+/** Singleton, migration-installed gate. Standalone defaults keep every kind off. */
 export const hostExportConfig = pgTable(
   "host_export_config",
   {
     id: integer("id").primaryKey().default(1),
     sessionEventsEnabled: boolean("session_events_enabled").notNull().default(false),
     usageEventsEnabled: boolean("usage_events_enabled").notNull().default(false),
+    lifecycleFactsEnabled: boolean("lifecycle_facts_enabled").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -12076,8 +12077,9 @@ export const hostExportOutbox = pgTable(
     exportKind: text("export_kind").notNull(),
     exportCursor: bigint("export_cursor", { mode: "bigint" }),
     sourceId: uuid("source_id").notNull(),
-    accountId: uuid("account_id").notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
+    // Null only for `lifecycle_fact` rows (see host_export_outbox_scope_check).
+    accountId: uuid("account_id"),
+    workspaceId: uuid("workspace_id"),
     sessionId: uuid("session_id"),
     rootSessionId: uuid("root_session_id"),
     turnId: uuid("turn_id"),
@@ -12108,7 +12110,15 @@ export const hostExportOutbox = pgTable(
   (table) => ({
     kindValid: check(
       "host_export_outbox_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
+    ),
+    scopeValid: check(
+      "host_export_outbox_scope_check",
+      sql`(${table.exportKind} <> 'lifecycle_fact'
+        and ${table.accountId} is not null and ${table.workspaceId} is not null)
+        or (${table.exportKind} = 'lifecycle_fact'
+          and (${table.workspaceId} is null or ${table.accountId} is not null)
+          and ${table.sessionId} is null)`,
     ),
     rootSessionCaptured: check(
       "host_export_outbox_root_session_check",
@@ -12148,7 +12158,7 @@ export const hostExportCursorState = pgTable(
   (table) => ({
     kindValid: check(
       "host_export_cursor_state_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
     ),
     cursorValid: check(
       "host_export_cursor_state_next_check",
@@ -12188,7 +12198,7 @@ export const hostExportConsumers = pgTable(
     ),
     kindValid: check(
       "host_export_consumers_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
     ),
     checkpointValid: check("host_export_consumers_checkpoint_check", sql`${table.checkpoint} >= 0`),
     due: index("host_export_consumers_due_idx").on(
@@ -12222,7 +12232,7 @@ export const hostExportDeadLetters = pgTable(
     ),
     kindValid: check(
       "host_export_dead_letters_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
     ),
     reasonValid: check(
       "host_export_dead_letters_reason_check",

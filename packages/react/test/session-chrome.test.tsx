@@ -1392,6 +1392,7 @@ describe("SessionChrome compact actions", () => {
       '[aria-label="Steer first queued message"]',
     )!;
     expect(action.closest("button")).toBe(action);
+    expect(action.getAttribute("data-analytics-action")).toBe("steer");
     await act(async () => action.click());
     expect(ids).toEqual(["11111111-1111-4111-8111-111111111111"]);
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
