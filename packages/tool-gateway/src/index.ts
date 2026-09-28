@@ -29,6 +29,7 @@ import {
   ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
 } from "./errors";
+import { summarizeToolGatewayInputErrors } from "./input-issues";
 
 export type ToolGatewayExecutionContext = {
   operationId: string;
@@ -117,6 +118,8 @@ type CompiledDefinition = {
   preflightCall: ToolGatewayDefinition["preflightCall"];
   lifecycle: ToolGatewayCallLifecycle | undefined;
   validateInput: ValidateFunction<unknown>;
+  /** Lazily compiled all-errors validator, used only to describe a rejected call. */
+  diagnoseInput: () => ValidateFunction<unknown>;
   validateOutput: ValidateFunction<unknown> | null;
 };
 
@@ -225,7 +228,7 @@ export class ToolGateway {
       throw new ToolGatewayApprovalRequiredError();
     }
     if (!definition.validateInput(request.arguments)) {
-      throw new ToolGatewayInputValidationError();
+      throw inputValidationError(definition, request.arguments);
     }
     if (
       caller.kind === "model" &&
@@ -331,7 +334,8 @@ export function prepareToolGatewayDefinitions(
   definitions: readonly ToolGatewayDefinition[],
 ): PreparedToolGatewayDefinitions {
   const paths = allocateToolPaths(definitions);
-  const schemaValidators = createSchemaValidators();
+  const schemaValidators = createSchemaValidators("first_error");
+  let diagnosticValidators: SchemaValidators | undefined;
   const compiled = definitions.map((definition, index): CompiledDefinition => {
     const {
       execute,
@@ -349,6 +353,7 @@ export function prepareToolGatewayDefinitions(
       ...entryInput,
       codemodePath: paths[index],
     });
+    let diagnoseInput: ValidateFunction<unknown> | undefined;
     return {
       entry,
       execute,
@@ -356,6 +361,11 @@ export function prepareToolGatewayDefinitions(
       preflightCall,
       lifecycle,
       validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
+      diagnoseInput: () =>
+        (diagnoseInput ??= compileCatalogSchema(
+          (diagnosticValidators ??= createSchemaValidators("all_errors")),
+          entry.inputSchema,
+        )),
       validateOutput: entry.outputSchema
         ? compileCatalogSchema(schemaValidators, entry.outputSchema)
         : null,
@@ -403,30 +413,69 @@ export function createWorkspaceToolGateway(input: {
 
 type SchemaCompiler = { compile(schema: object): ValidateFunction<unknown> };
 
-const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
-const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
+type SchemaValidatorMode = "first_error" | "all_errors";
 
-function createSchemaValidators(): {
+type SchemaValidators = {
+  mode: SchemaValidatorMode;
   draft7: SchemaCompiler;
   draft2019: SchemaCompiler;
   draft2020: SchemaCompiler;
-} {
+};
+
+const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
+const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
+
+/**
+ * Serialized-size ceiling for the all-errors diagnostic pass. The accept/reject
+ * decision always uses the first-error validator, which stops at the first
+ * failure so a schema's own bounds (for example `maxLength` ahead of `pattern`)
+ * keep limiting validation cost. The diagnostic pass runs only after a
+ * rejection and only on arguments this small; larger ones report the first
+ * problem alone.
+ */
+export const TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS = 64 * 1024;
+
+function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
   const options = {
-    allErrors: false,
+    allErrors: mode === "all_errors",
     coerceTypes: false,
     strict: false,
     useDefaults: false,
     validateFormats: false,
   } as const;
   return {
+    mode,
     draft7: new Ajv(options),
     draft2019: new Ajv2019(options),
     draft2020: new Ajv2020(options),
   };
 }
 
+/**
+ * Describe why the first-error validator rejected `args`: every problem (capped)
+ * when the arguments are small enough for the diagnostic pass, else the first.
+ * Never includes argument values.
+ */
+function inputValidationError(
+  definition: CompiledDefinition,
+  args: Record<string, unknown>,
+): ToolGatewayInputValidationError {
+  let errors = definition.validateInput.errors;
+  try {
+    const serialized = JSON.stringify(args);
+    if (serialized !== undefined && serialized.length <= TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS) {
+      const diagnose = definition.diagnoseInput();
+      if (!diagnose(args) && diagnose.errors?.length) errors = diagnose.errors;
+    }
+  } catch {
+    // Diagnostics are best effort; the rejection itself is already decided.
+  }
+  const { issues, omittedIssueCount } = summarizeToolGatewayInputErrors(errors);
+  return new ToolGatewayInputValidationError(issues, omittedIssueCount);
+}
+
 function compileCatalogSchema(
-  validators: ReturnType<typeof createSchemaValidators>,
+  validators: SchemaValidators,
   schema: ToolGatewayCatalogEntryValue["inputSchema"],
 ): ValidateFunction<unknown> {
   const dialect = typeof schema.$schema === "string" ? schema.$schema : "";
@@ -435,7 +484,7 @@ function compileCatalogSchema(
     : dialect.includes("2019-09")
       ? "2019-09"
       : "draft7";
-  const cacheKey = `${family}:${digestCanonicalJson(schema)}`;
+  const cacheKey = `${validators.mode}:${family}:${digestCanonicalJson(schema)}`;
   const cached = compiledCatalogSchemaCache.get(cacheKey);
   if (cached) {
     compiledCatalogSchemaCache.delete(cacheKey);
@@ -532,3 +581,4 @@ function identityKey(identity: ToolGatewayIdentity): string {
 export * from "./catalog";
 export * from "./declarations";
 export * from "./errors";
+export * from "./input-issues";

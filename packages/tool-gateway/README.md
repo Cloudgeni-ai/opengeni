@@ -67,3 +67,17 @@ authorization checks without invoking the supplied executor. Attempt transports
 use that seam before crossing their durable side-effect marker, then invoke the
 returned execution closure. Ordinary `call` remains the compatible
 combined preflight-plus-execution API.
+
+Argument validation enforces the entry's advertised input schema, including
+`required`, for every caller. A rejected call throws
+`ToolGatewayInputValidationError` (`code: "invalid_tool_arguments"`) before
+authorization, lifecycle preparation, or execution. Its `issues` name each
+missing, mistyped, or unexpected property by path, for example
+`missing required property "context"`, capped at
+`TOOL_GATEWAY_INPUT_ISSUES_MAX` with `omittedIssueCount` for the rest; `summary`
+and `message` carry the same text. Issues are built from the property path and
+the schema only and never quote argument values. The accept/reject decision uses
+a validator that stops at the first error, so a schema's own bounds keep
+limiting validation cost; a second, all-errors pass runs only after a rejection
+and only for arguments up to `TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS`
+serialized characters. Larger arguments report the first problem alone.

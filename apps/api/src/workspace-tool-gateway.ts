@@ -690,7 +690,18 @@ function throwWorkspaceToolGatewayHttpError(error: unknown): never {
     throw new HTTPException(404, { message: error.code, cause: error });
   }
   if (error instanceof ToolGatewayInputValidationError) {
-    throw new HTTPException(422, { message: error.code, cause: error });
+    // The same value-free summary the model sees: which properties are missing
+    // or mistyped, never the submitted argument values.
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      retryable: false,
+      details: {
+        code: error.code,
+        issues: error.issues,
+        omittedIssueCount: error.omittedIssueCount,
+      },
+    });
   }
   if (error instanceof ToolGatewayApprovalRequiredError) {
     throw new HTTPException(409, { message: error.code, cause: error });
