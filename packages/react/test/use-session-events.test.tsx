@@ -50,6 +50,7 @@ function event(
 }
 
 type ListOptions = {
+  includeTypes?: string[];
   after?: number;
   before?: number;
   limit?: number;
@@ -62,12 +63,14 @@ function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEven
   const after = options.after ?? 0;
   const limit = options.limit ?? 500;
   let candidates = store.filter((item) => item.sequence > after);
+  if (options.includeTypes)
+    candidates = candidates.filter((item) => options.includeTypes!.includes(item.type));
   if (options.before !== undefined) {
     const before = options.before;
     candidates = candidates.filter((item) => item.sequence < before);
     return candidates.slice(-limit);
   }
-  return candidates.slice(0, limit);
+  return options.direction === "before" ? candidates.slice(-limit) : candidates.slice(0, limit);
 }
 
 function scriptedClient(input: {
@@ -100,6 +103,99 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  test("Latest question resolves durable newest user input beyond both old and live-tail windows", async () => {
+    const store = Array.from({ length: 12000 }, (_, index) => {
+      const sequence = index + 1;
+      return sequence === 1 || sequence === 3000 || sequence === 9000
+        ? event(sequence)
+        : event(sequence, "agent.reasoning.delta", {
+            text: "Thinking",
+            itemId: `reason-${sequence}`,
+          });
+    });
+    const { client, listCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(30);
+      expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(false);
+      await actRun(async () => expect(await hook.result.current.jumpToSequence(3000)).toBe(true));
+      await flush(20);
+      expect(hook.result.current.hasNewer).toBe(true);
+      const reads = listCalls.length;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(9000));
+      await flush(20);
+      expect(listCalls.slice(reads)).toEqual([
+        { direction: "before", includeTypes: ["user.message"], limit: 1, payloadMode: "full" },
+        { before: 9001, limit: 128, compact: true, payloadMode: "full" },
+        { after: 9000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+      ]);
+      expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(true);
+      expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question already loaded needs only one lookup; empty sessions have no target", async () => {
+    const { client, listCalls } = scriptedClient({ store: [event(1), event(2)] });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      const reads = listCalls.length;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+      expect(listCalls.length - reads).toBe(1);
+    } finally {
+      await hook.unmount();
+    }
+    const empty = scriptedClient({ store: [] });
+    const emptyHook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client: empty.client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () =>
+        expect(await emptyHook.result.current.jumpToLatestQuestion()).toBeNull(),
+      );
+    } finally {
+      await emptyHook.unmount();
+    }
+  });
+
+  test("a stale Latest question lookup cannot replace a newer explicit history target", async () => {
+    let release!: (events: SessionEvent[]) => void;
+    const pending = new Promise<SessionEvent[]>((resolve) => {
+      release = resolve;
+    });
+    const store = Array.from({ length: 2000 }, (_, index) => event(index + 1));
+    const { client } = scriptedClient({
+      store,
+      listEvents: (options) =>
+        options.includeTypes ? pending : Promise.resolve(listPage(store, options)),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      const lookup = hook.result.current.jumpToLatestQuestion();
+      await actRun(async () => expect(await hook.result.current.jumpToSequence(100)).toBe(true));
+      release([event(2000)]);
+      await actRun(async () => expect(await lookup).toBeNull());
+      expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(true);
+      expect(hook.result.current.events.some((item) => item.sequence === 2000)).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("an exact target supersedes the initial tail even when the client ignores abort", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

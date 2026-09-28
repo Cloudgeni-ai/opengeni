@@ -4,7 +4,7 @@ import type { ActivityItem, TimelineGroup } from "./types";
 
 /*
  * Pure presentation facts shared by the projection and the renderers. Kept
- * free of React so the session-only entry can fold exchanges without pulling
+ * free of React so the session-only entry can inspect primary output without pulling
  * in rendering code.
  */
 
@@ -41,7 +41,7 @@ export function timelineGroupContainsPresentedImage(group: TimelineGroup): boole
     case "activity":
       return (
         activityPresentsImage(group.items) ||
-        (group.earlier?.some(timelineGroupContainsPresentedImage) ?? false)
+        (group.work?.details?.some(timelineGroupContainsPresentedImage) ?? false)
       );
     case "turn":
       return group.groups.some(timelineGroupContainsPresentedImage);

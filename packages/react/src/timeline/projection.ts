@@ -16,7 +16,6 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
-import { activityPresentsImage, timelineGroupContainsPresentedImage } from "./presented-image";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -1665,8 +1664,7 @@ type WorkActivityItem = Exclude<ActivityItem, AgentMessageItem>;
  * Whether an item clusters into an activity block. A `switch` (not a stringly-
  * typed set) so adding an {@link ActivityItem} kind is a compile-time prompt to
  * decide its grouping, and it narrows `item` to a work item with no cast.
- * Assistant commentary joins clusters only in the exchange fold (see
- * {@link commentaryMessageIds}).
+ * Assistant prose stays outside activity clusters.
  */
 function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   switch (item.kind) {
@@ -1685,16 +1683,9 @@ function isActivityItem(item: TimelineItem): item is WorkActivityItem {
 }
 
 export type GroupTimelineOptions = {
-  /**
-   * Compact exchange presentation. Assistant commentary joins its activity
-   * cluster instead of splitting it, and the work an exchange produces folds
-   * behind one row per stretch of work. Only work folds: turns, routine machine
-   * inputs, recorded waits, goal continuations, compaction, and progress notes.
-   * Every answer stays a visible message, including an answer that later
-   * machine-triggered turns follow; their work folds into a new row below it.
-   * Failures, approvals, auth recovery, human input, scheduled prompts, and
-   * presented images also stay visible.
-   */
+  /** Readable assistant prose with an independent work summary for each turn. */
+  readableTurns?: boolean;
+  /** @deprecated Use readableTurns. Cross-turn exchange folding has been removed. */
   foldExchanges?: boolean;
 };
 
@@ -1702,13 +1693,10 @@ export function groupTimeline(
   items: TimelineItem[],
   options: GroupTimelineOptions = {},
 ): TimelineGroup[] {
-  const foldExchanges = options.foldExchanges === true;
-  const commentary = foldExchanges ? commentaryMessageIds(items) : null;
-  // Messages lifted out of a settled turn only because it wrote no answer.
-  const notes = new Set<string>();
+  if (options.readableTurns || options.foldExchanges) return groupReadableTurns(items);
   const groups: TimelineGroup[] = [];
   for (const item of items) {
-    if (isActivityItem(item) || (item.kind === "agent-message" && commentary?.has(item.id))) {
+    if (isActivityItem(item)) {
       const open = groups[groups.length - 1];
       if (open?.kind === "activity" && open.outcome === undefined) {
         open.items.push(item);
@@ -1723,67 +1711,160 @@ export function groupTimeline(
     }
     if (item.kind === "turn-end") {
       stampTurnOutcome(groups, item);
-      foldSettledTurn(groups, item, foldExchanges, notes);
+      foldSettledTurn(groups, item);
       continue;
     }
     groups.push({ kind: "item", item });
   }
-  return foldExchanges ? foldExchangeRuns(groups, notes) : groups;
+  return groups;
 }
 
-/**
- * A phase-less message of the running turn reads as a progress note until it
- * grows past this length. Recorded notes rarely do (99% stay under about 800
- * characters), while more than half of recorded answers do, so a long answer
- * still streams in place instead of waiting for its turn to end.
- */
-const LIVE_NOTE_MAX_CHARS = 1000;
-
-/**
- * Assistant messages that narrate work rather than answer. A provider-declared
- * phase is authoritative. A phase-less message is commentary when its own turn
- * produced more work or prose after it. The latest message of the running turn
- * cannot be told apart from a note while it streams, so it stays one until the
- * turn ends or it outgrows {@link LIVE_NOTE_MAX_CHARS}.
- */
-function commentaryMessageIds(items: readonly TimelineItem[]): Set<string> {
-  const commentary = new Set<string>();
-  const laterOutput = new Set<string | null>();
-  // The newest turn when it has not ended. Only one turn runs at a time, and a
-  // superseded turn never receives a turn end of its own.
-  let runningTurnId: string | null | undefined;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index]!;
-    if (runningTurnId === undefined && "turnId" in item && item.turnId !== null) {
-      runningTurnId = item.kind === "turn-end" ? null : item.turnId;
+/** Prose and attention surfaces never enter a work fold. */
+function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
+  type Work = Extract<TimelineGroup, { kind: "activity" }>;
+  const groups: TimelineGroup[] = [];
+  const turns = new Map<string, Work>();
+  const messages = new Map<string, AgentMessageItem[]>();
+  const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
+  let legacyTurn = "start";
+  let currentTurn = legacyTurn;
+  for (const item of items) {
+    if (item.kind === "user-message") legacyTurn = item.id;
+    const key = ("turnId" in item && item.turnId) || legacyTurn;
+    if ("turnId" in item && item.turnId && key !== currentTurn && !turns.has(key)) {
+      const previous = turns.get(currentTurn);
+      if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
+      currentTurn = key;
     }
-    if (item.kind === "turn-end") {
-      laterOutput.delete(item.turnId);
-    } else if (item.kind === "user-message") {
-      // Legacy ledgers without turn ids delimit turns by the human prompt.
-      laterOutput.delete(null);
-    } else if (item.kind === "agent-message") {
-      if (
-        item.phase === "commentary" ||
-        (item.phase === undefined &&
-          (laterOutput.has(item.turnId) ||
-            (item.turnId !== null &&
-              item.turnId === runningTurnId &&
-              item.text.length <= LIVE_NOTE_MAX_CHARS)))
-      ) {
-        commentary.add(item.id);
+    const workForTurn = () => {
+      let group = turns.get(key);
+      if (!group) {
+        group = {
+          kind: "activity",
+          id: `work-${key}`,
+          items: [],
+          work: { startedAt: item.occurredAt, details: [] },
+        };
+        turns.set(key, group);
+        groups.push(group);
       }
-      if (item.text.trim()) laterOutput.add(item.turnId);
+      return group;
+    };
+    if (isActivityItem(item)) {
+      const group = workForTurn();
+      group.items.push(item);
+      delete group.work!.waiting;
+    } else if (item.kind === "turn-end") {
+      const group = turns.get(key);
+      if (group?.work) {
+        group.outcome = item.outcome;
+        if (item.failureText) group.failureText = item.failureText;
+        group.work.endedAt = item.occurredAt;
+      }
+    } else if (item.kind === "context-compaction" && item.phase === "compacted") {
+      workForTurn().work!.details.push({ kind: "item", item });
     } else if (
-      isActivityItem(item) &&
-      item.kind !== "startup-phase" &&
-      item.kind !== "fleet-decision" &&
-      (item.kind !== "reasoning" || item.text.trim())
+      item.kind === "machine-input-batch" &&
+      item.members.every((member) => ROUTINE_MACHINE_INPUT_KINDS.has(member.kind))
     ) {
-      laterOutput.add(item.turnId);
+      const previous = inputs.get(key);
+      if (previous) {
+        previous.members.push(
+          ...item.members.filter((member) => !previous.members.some((old) => old.id === member.id)),
+        );
+        previous.sourceEvents = [...(previous.sourceEvents ?? []), ...(item.sourceEvents ?? [])];
+      } else {
+        const batch = { ...item, compact: true, members: [...item.members] };
+        inputs.set(key, batch);
+        groups.push({ kind: "item", item: batch });
+      }
+    } else if (
+      item.kind === "worker-completion" ||
+      (item.kind === "goal" && item.action === "continuation")
+    ) {
+      const group = turns.get(currentTurn);
+      if (group?.work) group.work.details.push({ kind: "item", item });
+      else groups.push({ kind: "item", item });
+    } else {
+      groups.push({ kind: "item", item });
+      const current = turns.get(currentTurn)?.work;
+      if (current && !current.endedAt) {
+        if (item.kind === "notice" && item.tone === "waiting" && !item.recordedOutcome) {
+          current.waiting = {
+            label: item.text.startsWith("Approval needed") ? "Waiting for you" : "Waiting",
+            since: item.occurredAt,
+          };
+        } else if (item.kind === "session-status" && item.status === "requires_action") {
+          current.waiting = { label: "Waiting for you", since: item.occurredAt };
+        } else if (
+          item.kind === "session-status" &&
+          ["paused", "cancelled", "failed"].includes(item.status)
+        ) {
+          current.endedAt = item.occurredAt;
+          delete current.waiting;
+        }
+      }
+      if (item.kind === "agent-message" && item.text.trim()) {
+        const prose = messages.get(key) ?? [];
+        prose.push(item);
+        messages.set(key, prose);
+      }
     }
   }
-  return commentary;
+  // A declared answer starts the response clock immediately. Without a phase,
+  // only settlement identifies the last response; text length never does.
+  const responseRows = new Map<AgentMessageItem, Work>();
+  const movedRows = new Set<Work>();
+  const positions = new Map<TimelineGroup | TimelineItem, number>();
+  const nextBoundary = new Map<Work, number>();
+  let boundary = groups.length;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const entry = groups[index]!;
+    positions.set(entry.kind === "item" ? entry.item : entry, index);
+    if (entry.kind === "activity" && entry.work) {
+      nextBoundary.set(entry, boundary);
+      boundary = index;
+    } else if (
+      entry.kind === "item" &&
+      (entry.item.kind === "user-message" || entry.item.kind === "machine-input-batch")
+    ) {
+      boundary = index;
+    }
+  }
+  for (const [key, group] of turns) {
+    const prose = messages.get(key) ?? [];
+    const settledAt = group.work!.endedAt;
+    const responseCandidates = settledAt
+      ? prose.filter(
+          (message) => Date.parse(message.startedAt ?? message.occurredAt) <= Date.parse(settledAt),
+        )
+      : prose;
+    const response =
+      responseCandidates.find((message) => message.phase === "final_answer") ??
+      (settledAt
+        ? (responseCandidates.at(-1) ?? prose.find((message) => message.phase === "final_answer"))
+        : undefined);
+    if (response) {
+      const responseAt = response.startedAt ?? response.occurredAt;
+      // A delayed completion-only receipt cannot extend a settled work clock.
+      group.work!.responseStartedAt =
+        settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
+      // A late completion may belong to an older turn. Keep its work at its
+      // original boundary rather than moving it across a newer turn's input.
+      if ((positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)) {
+        responseRows.set(response, group);
+        movedRows.add(group);
+      }
+    }
+  }
+  return groups.flatMap((group) => {
+    if (group.kind === "activity" && movedRows.has(group)) return [];
+    const row =
+      group.kind === "item" && group.item.kind === "agent-message"
+        ? responseRows.get(group.item)
+        : undefined;
+    return row ? [row, group] : [group];
+  });
 }
 
 /** Machine inputs that continue the current exchange rather than start one. */
@@ -1799,127 +1880,6 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
   "child_waiting_capacity",
   "child_progress",
 ]);
-
-/**
- * Whether a top-level item folds into its exchange instead of staying visible.
- * An assistant message folds only when it is a turn's stand-in note or has no
- * visible text. An answer never folds: work after it starts a new row.
- */
-function foldsIntoExchange(item: TimelineItem, notes: ReadonlySet<string>): boolean {
-  switch (item.kind) {
-    case "agent-message":
-      return notes.has(item.id) || !item.text.trim();
-    case "worker-completion":
-      return true;
-    case "machine-input-batch":
-      return item.members.every((member) => ROUTINE_MACHINE_INPUT_KINDS.has(member.kind));
-    case "notice":
-      return item.recordedOutcome === true;
-    case "context-compaction":
-      return item.phase === "compacted";
-    case "goal":
-      return item.action === "continuation";
-    default:
-      return false;
-  }
-}
-
-function endsExchangeFold(group: TimelineGroup, notes: ReadonlySet<string>): boolean {
-  switch (group.kind) {
-    case "item":
-      return !foldsIntoExchange(group.item, notes);
-    case "activity":
-      return activityPresentsImage(group.items);
-    case "turn":
-      return (
-        group.outcome === "failed" ||
-        timelineGroupContainsPresentedImage(group) ||
-        groupContainsAuthNeeded(group)
-      );
-  }
-}
-
-function groupContainsAuthNeeded(group: TimelineGroup): boolean {
-  switch (group.kind) {
-    case "item":
-      return group.item.kind === "auth-needed";
-    case "activity":
-      return false;
-    case "turn":
-      return group.groups.some(groupContainsAuthNeeded);
-  }
-}
-
-function foldExchangeRuns(groups: TimelineGroup[], notes: ReadonlySet<string>): TimelineGroup[] {
-  const folded: TimelineGroup[] = [];
-  let run: TimelineGroup[] = [];
-  const flush = (atTip: boolean) => {
-    folded.push(...foldExchangeRun(run, atTip));
-    run = [];
-  };
-  for (const group of groups) {
-    if (endsExchangeFold(group, notes)) {
-      flush(false);
-      folded.push(group);
-    } else {
-      run.push(group);
-    }
-  }
-  flush(true);
-  return folded;
-}
-
-/**
- * Fold one uninterrupted run of work behind a single row. Answers end a run,
- * so a trailing assistant message here is the stand-in note of a turn that
- * wrote no answer, and it stays visible as that turn's reply. A live cluster at
- * the end carries the earlier work of the run; otherwise the run becomes one
- * settled turn group whose children keep their own turn chips. Input delivered
- * at the tip opens its row at once, so the row that the next turn continues
- * is already on screen.
- */
-function foldExchangeRun(run: TimelineGroup[], atTip: boolean): TimelineGroup[] {
-  const last = run[run.length - 1];
-  const reply = last?.kind === "item" && last.item.kind === "agent-message" ? last : undefined;
-  const body = reply ? run.slice(0, -1) : run;
-  const resuming =
-    atTip &&
-    !reply &&
-    body.some((group) => group.kind === "item" && group.item.kind === "machine-input-batch");
-  if (!resuming && (body.length < 2 || !body.some((group) => group.kind !== "item"))) {
-    return run;
-  }
-  const id = `exchange-${timelineGroupIdentity(body[0]!)}`;
-  const tail = body[body.length - 1]!;
-  if (tail.kind === "activity" && tail.outcome === undefined) {
-    return [{ ...tail, id, earlier: body.slice(0, -1) }, ...(reply ? [reply] : [])];
-  }
-  let lastTurn: Extract<TimelineGroup, { kind: "turn" }> | undefined;
-  for (const group of body) {
-    if (group.kind === "turn") lastTurn = group;
-  }
-  const compactions = body.filter(
-    (group) =>
-      group.kind === "item" &&
-      group.item.kind === "context-compaction" &&
-      group.item.phase === "compacted",
-  ).length;
-  const startedAt = groupStartedAt(body[0]) ?? lastTurn?.startedAt ?? "";
-  const merged: TimelineGroup = {
-    kind: "turn",
-    id,
-    outcome: lastTurn?.outcome ?? "complete",
-    startedAt,
-    endedAt: lastTurn?.endedAt ?? groupStartedAt(tail) ?? startedAt,
-    groups: body,
-    ...(compactions > 0 ? { contextCompactionCount: compactions } : {}),
-  };
-  return reply ? [merged, reply] : [merged];
-}
-
-function timelineGroupIdentity(group: TimelineGroup): string {
-  return group.kind === "item" ? group.item.id : group.id;
-}
 
 /* --- helpers ---------------------------------------------------------------- */
 
@@ -2220,12 +2180,7 @@ function applyTurnOutcome(
   }
 }
 
-function foldSettledTurn(
-  groups: TimelineGroup[],
-  turnEnd: TurnEndItem,
-  commentaryInClusters = false,
-  notes?: Set<string>,
-): void {
+function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   let startIndex = groups.length;
   let stoppedAtForeignTurn = false;
   while (startIndex > 0) {
@@ -2245,7 +2200,7 @@ function foldSettledTurn(
     }
   }
 
-  let collected = groups.slice(startIndex);
+  const collected = groups.slice(startIndex);
   if (collected.length === 0) {
     return;
   }
@@ -2275,30 +2230,11 @@ function foldSettledTurn(
           group.item.phase !== "commentary" &&
           group.item.annotationSource?.eventType === "agent.message.completed",
       ) ?? waitMessages.at(-1);
-  const finalMessage =
-    waitResponse ??
-    extractFinalAgentMessage(collected, turnEnd) ??
-    // Commentary lives inside the clusters here, so a top-level message of
-    // this turn is its answer even when a trailing step of the turn followed
-    // it. It stays the visible reply instead of folding into the turn.
-    (commentaryInClusters ? extractLatestTopLevelAnswer(collected, turnEnd) : null);
-  let fallbackMessage =
+  const finalMessage = waitResponse ?? extractFinalAgentMessage(collected, turnEnd);
+  const fallbackMessage =
     finalMessage || hasOrdinaryFinalAgentMessage(collected, turnEnd)
       ? null
       : extractLatestCompletedCommentary(collected, turnEnd);
-  if (!finalMessage && !fallbackMessage && commentaryInClusters) {
-    // Commentary lives inside the clusters here. A turn that never produced an
-    // answer still surfaces its latest note, exactly like the item form above.
-    const lifted = liftLatestCommentary(collected, turnEnd);
-    if (lifted) {
-      collected = lifted.groups;
-      fallbackMessage = lifted.message;
-    }
-  }
-  if (fallbackMessage?.item.kind === "agent-message") {
-    // A note standing in for a missing answer still folds with the work.
-    notes?.add(fallbackMessage.item.id);
-  }
   const visibleMessage = finalMessage ?? fallbackMessage;
   const body = visibleMessage ? collected.filter((group) => group !== visibleMessage) : collected;
   if (body.length === 0) {
@@ -2331,37 +2267,6 @@ function foldSettledTurn(
     collectedLength,
     ...(visibleMessage ? [turnGroup, visibleMessage] : [turnGroup]),
   );
-}
-
-/**
- * Take the latest completed commentary of this turn out of its cluster. The
- * cluster keeps every other item; a cluster left empty disappears.
- */
-function liftLatestCommentary(
-  collected: TimelineGroup[],
-  turnEnd: TurnEndItem,
-): { groups: TimelineGroup[]; message: Extract<TimelineGroup, { kind: "item" }> } | null {
-  for (let groupIndex = collected.length - 1; groupIndex >= 0; groupIndex -= 1) {
-    const group = collected[groupIndex];
-    if (group?.kind !== "activity") continue;
-    for (let itemIndex = group.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
-      const item = group.items[itemIndex];
-      if (
-        item?.kind !== "agent-message" ||
-        item.streaming ||
-        !item.text.trim() ||
-        !belongsToTurn(item, turnEnd.turnId)
-      ) {
-        continue;
-      }
-      const items = group.items.filter((_, index) => index !== itemIndex);
-      const groups = collected.flatMap((candidate, index) =>
-        index !== groupIndex ? [candidate] : items.length > 0 ? [{ ...group, items }] : [],
-      );
-      return { groups, message: { kind: "item", item } };
-    }
-  }
-  return null;
 }
 
 function isTurnBoundary(group: TimelineGroup | undefined): boolean {
@@ -2414,26 +2319,6 @@ function extractFinalAgentMessage(
     return null;
   }
   return tail;
-}
-
-function extractLatestTopLevelAnswer(
-  groups: TimelineGroup[],
-  turnEnd: TurnEndItem,
-): Extract<TimelineGroup, { kind: "item" }> | null {
-  for (let index = groups.length - 1; index >= 0; index -= 1) {
-    const group = groups[index];
-    if (group?.kind !== "item" || group.item.kind !== "agent-message") continue;
-    const message = group.item;
-    if (
-      !message.streaming &&
-      message.phase !== "commentary" &&
-      message.text.trim().length > 0 &&
-      belongsToTurn(message, turnEnd.turnId)
-    ) {
-      return group;
-    }
-  }
-  return null;
 }
 
 function hasOrdinaryFinalAgentMessage(groups: TimelineGroup[], turnEnd: TurnEndItem): boolean {

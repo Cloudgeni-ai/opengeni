@@ -903,10 +903,33 @@ remaining built-ins in supplied order. Duplicate IDs keep their first
 definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
 
-`turnSummary={{ rolling: true }}` selects the compact progress presentation the
-web app uses: each stretch of work folds behind one live status row, and every
-answer stays a visible message, including an answer that later
-machine-triggered turns follow. See
+`turnSummary={{ rolling: true }}` selects the readable per-turn presentation:
+every assistant progress message and answer stays fully formatted and visible.
+Each turn has its own Working / Worked disclosure and rolling latest step;
+routine machine inputs get one compact reason per resumed turn. Normal tip-follow
+continues through long answers, and manual scrolling never auto-repins on new work.
+
+Wire the newest-question resolver when history can be unloaded:
+
+```tsx
+const events = useSessionEvents(sessionId);
+<MessageTimeline
+  events={events.events}
+  turnSummary={{ rolling: true }}
+  hasNewer={events.hasNewer}
+  onJumpToLatest={events.jumpToLatest}
+  onJumpToLatestQuestion={events.jumpToLatestQuestion}
+/>;
+```
+
+The single **Latest question** button targets the newest durable user message,
+not the viewport-relative question or the newest message in an older loaded page.
+The resolver uses one filtered lookup and, if needed, two bounded context reads.
+Without that callback, local navigation is available only at the live history
+window; the component never guesses from an older page. `onJumpToLatest` retains
+its separate bottom-follow behavior. `groupTimeline(items)` retains classic
+grouping; `{ readableTurns: true }` selects the new projection. The deprecated
+`foldExchanges` option aliases readable turns, not the removed cross-turn fold. See
 [`docs/design/genie-loading.md`](../../docs/design/genie-loading.md).
 
 ## Sandbox surfacing

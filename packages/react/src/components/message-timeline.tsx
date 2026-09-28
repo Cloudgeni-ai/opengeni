@@ -26,9 +26,7 @@ import {
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
-  ChevronUpIcon,
   PauseCircleIcon,
   PauseIcon,
   MessageCircleQuestionIcon,
@@ -252,6 +250,9 @@ export type MessageTimelineProps = {
    * scrolls the in-memory window.
    */
   onJumpToLatest?: (() => void | Promise<void>) | undefined;
+  /** Resolve the newest durable user message and load its bounded window.
+   * Wire useSessionEvents().jumpToLatestQuestion for unloaded history. */
+  onJumpToLatestQuestion?: (() => Promise<number | null>) | undefined;
   /** Host-owned content appended after timeline groups, such as startup progress. */
   trailingState?: ReactNode | undefined;
   emptyState?: ReactNode | undefined;
@@ -291,7 +292,7 @@ const PIN_THRESHOLD_PX = 48;
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
 /** Breathing room above the question when following stops at an answer. */
-const ANSWER_ANCHOR_MARGIN_PX = 12;
+const QUESTION_NAV_MARGIN_PX = 12;
 /**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
@@ -425,76 +426,26 @@ function contentTopOf(node: HTMLElement, groupKey: string): number | null {
 }
 
 /** The question the reader is inside of, once its start has scrolled out of view. */
-type QuestionNav = { key: string; previous: string | null; next: string | null };
+type QuestionNav = { key: string | null };
 
 /** How far a question's start must be above the viewport before navigation shows. */
 const QUESTION_NAV_HIDDEN_PX = 24;
 
 function readQuestionNav(node: HTMLElement): QuestionNav | null {
   const view = node.getBoundingClientRect();
-  // The exchange being read is the one crossing the middle of the viewport.
-  const readingLine = view.top + view.height / 2;
   const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
-  let current = -1;
-  for (let index = 0; index < prompts.length; index += 1) {
-    if (prompts[index]!.getBoundingClientRect().top >= readingLine) {
-      break;
-    }
-    current = index;
-  }
-  const prompt = prompts[current];
+  const prompt = prompts.at(-1);
   const key = prompt?.dataset.ogGroupKey;
-  if (!prompt || !key || prompt.getBoundingClientRect().top >= view.top - QUESTION_NAV_HIDDEN_PX) {
+  if (!prompt || !key) return null;
+  const top = prompt.getBoundingClientRect().top;
+  if (top >= view.top - QUESTION_NAV_HIDDEN_PX && top < view.bottom) {
     return null;
   }
-  return {
-    key,
-    previous: prompts[current - 1]?.dataset.ogGroupKey ?? null,
-    next: prompts[current + 1]?.dataset.ogGroupKey ?? null,
-  };
+  return { key };
 }
 
 function sameQuestionNav(a: QuestionNav | null, b: QuestionNav | null): boolean {
-  return (
-    a === b || (!!a && !!b && a.key === b.key && a.previous === b.previous && a.next === b.next)
-  );
-}
-
-/**
- * The newest exchange when its answer is the last message: anchor candidates
- * from the top down (its question, its status row, the answer itself). Rows of
- * work that later machine-triggered turns add below the answer keep it the
- * newest, so they never pull a reader away from it.
- */
-function exchangeAnswerAnchor(
-  groups: readonly { group: TimelineGroup; key: string }[],
-): { answerKey: string; candidates: string[] } | null {
-  let answerIndex = groups.length - 1;
-  while (answerIndex >= 0 && groups[answerIndex]!.group.kind !== "item") {
-    answerIndex -= 1;
-  }
-  const answer = groups[answerIndex];
-  const row = groups[answerIndex - 1];
-  if (
-    answer?.group.kind !== "item" ||
-    answer.group.item.kind !== "agent-message" ||
-    !row ||
-    row.group.kind === "item"
-  ) {
-    return null;
-  }
-  let prompt: string | undefined;
-  for (let index = answerIndex - 2; index >= 0; index -= 1) {
-    const group = groups[index]!.group;
-    if (group.kind === "item" && group.item.kind === "user-message") {
-      prompt = groups[index]!.key;
-      break;
-    }
-  }
-  return {
-    answerKey: answer.key,
-    candidates: prompt ? [prompt, row.key, answer.key] : [row.key, answer.key],
-  };
+  return a === b || (!!a && !!b && a.key === b.key);
 }
 
 /** Escape a value for use inside a CSS attribute selector. */
@@ -545,6 +496,7 @@ export function MessageTimeline({
   loadingNewer = false,
   onLoadNewer,
   onJumpToLatest,
+  onJumpToLatestQuestion,
   trailingState,
   emptyState,
   className,
@@ -668,11 +620,10 @@ export function MessageTimeline({
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
-  // The compact progress presentation folds each exchange behind one row.
-  const foldExchanges = turnSummary?.rolling === true;
+  const readableTurns = turnSummary?.rolling === true;
   const allGroups = useMemo(
-    () => groupTimeline(resolvedItems, { foldExchanges }),
-    [resolvedItems, foldExchanges],
+    () => groupTimeline(resolvedItems, { readableTurns }),
+    [resolvedItems, readableTurns],
   );
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
@@ -714,20 +665,12 @@ export function MessageTimeline({
   );
   const underfillRetryReadyRef = useRef(false);
   const resizeFollowRafRef = useRef<number | null>(null);
-  // Compact presentation: when an answer starts while following the tip, keep
-  // following only until the question (or, when it had already scrolled away,
-  // the status row or the answer itself) reaches the top. Then stop, so the
-  // question and the start of its answer stay on screen together. Both the
-  // stop and a stop already made apply only while that answer is the newest
-  // row; a reader who has not moved since returns to the tip afterwards.
-  const answerAnchorRef = useRef<{
-    answerKey: string;
-    anchorKey: string | null;
-    /** Where following stopped for this answer. */
-    releasedAt?: number | undefined;
-  } | null>(null);
   const questionNavFrameRef = useRef<number | null>(null);
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
+  const [questionTarget, setQuestionTarget] = useState<number | null>(null);
+  const [questionPending, setQuestionPending] = useState(false);
+  const [questionError, setQuestionError] = useState(false);
+  const questionRequestRef = useRef(0);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
@@ -824,18 +767,6 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
   const groups = useStableTimelineGroupKeys(allGroups, !bulkRender);
-  const answerAnchor = foldExchanges ? exchangeAnswerAnchor(groups) : null;
-  // Whether any later top-level group is agent work (per index). A history
-  // window with newer pages is never the live edge.
-  const laterWorkFrom = useMemo(() => {
-    const flags: boolean[] = [];
-    let seen = hasNewer;
-    for (let index = groups.length - 1; index >= 0; index -= 1) {
-      flags[index] = seen;
-      if (groups[index]!.group.kind !== "item") seen = true;
-    }
-    return flags;
-  }, [groups, hasNewer]);
   const turnsWithOutput = useMemo(
     () =>
       new Set(
@@ -1276,16 +1207,25 @@ export function MessageTimeline({
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
   const scheduleQuestionNav = useCallback(() => {
-    if (!foldExchanges || questionNavFrameRef.current != null) {
+    if (!readableTurns || questionNavFrameRef.current != null) {
       return;
     }
     questionNavFrameRef.current = requestFrame(() => {
       questionNavFrameRef.current = null;
       const node = scrollRef.current;
-      const next = node ? readQuestionNav(node) : null;
+      const next = hasNewer
+        ? onJumpToLatestQuestion
+          ? { key: null }
+          : null
+        : node
+          ? (readQuestionNav(node) ??
+            (onJumpToLatestQuestion && !node.querySelector("[data-og-prompt]")
+              ? { key: null }
+              : null))
+          : null;
       setQuestionNav((current) => (sameQuestionNav(current, next) ? current : next));
     });
-  }, [foldExchanges]);
+  }, [readableTurns, hasNewer, onJumpToLatestQuestion]);
   useEffect(
     () => () => {
       if (questionNavFrameRef.current != null) {
@@ -1305,9 +1245,28 @@ export function MessageTimeline({
     releasePinFromReader();
     wantPinRef.current = false;
     disclosureKeepsUnpinnedRef.current = false;
-    writeScrollTop(node, Math.max(0, top - ANSWER_ANCHOR_MARGIN_PX));
+    writeScrollTop(node, Math.max(0, top - QUESTION_NAV_MARGIN_PX));
     syncScrollBaseline(node);
     scheduleQuestionNav();
+  };
+  const jumpToLatestQuestion = async () => {
+    if (!onJumpToLatestQuestion) {
+      if (!hasNewer && questionNav?.key) jumpToQuestion(questionNav.key);
+      return;
+    }
+    const request = ++questionRequestRef.current;
+    releasePinFromReader();
+    wantPinRef.current = false;
+    setQuestionPending(true);
+    setQuestionError(false);
+    try {
+      const sequence = await onJumpToLatestQuestion();
+      if (request === questionRequestRef.current) setQuestionTarget(sequence);
+    } catch {
+      if (request === questionRequestRef.current) setQuestionError(true);
+    } finally {
+      if (request === questionRequestRef.current) setQuestionPending(false);
+    }
   };
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
@@ -1412,19 +1371,6 @@ export function MessageTimeline({
         reducedMotion: prefersReducedMotion(),
         revealed: revealedRef.current,
       });
-      const anchorKey = answerAnchorRef.current?.anchorKey;
-      const anchorCap = anchorKey ? contentTopOf(node, anchorKey) : null;
-      if (anchorCap !== null && result.scrollTop >= anchorCap - ANSWER_ANCHOR_MARGIN_PX) {
-        // The answer has pushed its anchor to the top: stop following here.
-        const anchor = answerAnchorRef.current!;
-        anchor.anchorKey = null;
-        writeScrollTop(node, Math.max(node.scrollTop, anchorCap - ANSWER_ANCHOR_MARGIN_PX));
-        anchor.releasedAt = node.scrollTop;
-        syncScrollBaseline(node);
-        stopFollow();
-        applyPinned(false);
-        return;
-      }
       followRef.current = result.state;
       writeScrollTop(node, result.scrollTop);
       syncScrollBaseline(node);
@@ -1448,14 +1394,7 @@ export function MessageTimeline({
         followFrameRef.current = null;
       }
     },
-    [
-      applyCanSkipTipCatchup,
-      applyPinned,
-      cancelLeaveFallback,
-      stopFollow,
-      syncScrollBaseline,
-      writeScrollTop,
-    ],
+    [applyCanSkipTipCatchup, cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
   );
   driveFollowRef.current = driveFollow;
 
@@ -1545,31 +1484,21 @@ export function MessageTimeline({
         }
       }
     };
-    const anchorState = answerAnchorRef.current;
-    if (anchorState && answerAnchor?.answerKey !== anchorState.answerKey) {
-      // The anchored answer is no longer the newest message: a question, a
-      // newer reply, or the answer turning out to be a note followed it. Its
-      // stop no longer applies. (Loading older history never changes it.)
-      const releasedAt = anchorState.releasedAt;
-      anchorState.anchorKey = null;
-      anchorState.releasedAt = undefined;
-      if (
-        releasedAt !== undefined &&
-        // Still where following stopped, or at the tip because the answer
-        // folding away shrank the content under the reader.
-        (Math.abs(node.scrollTop - releasedAt) <= 2 ||
-          maxScrollOf(node) - node.scrollTop <= PIN_THRESHOLD_PX) &&
-        autoFollow &&
-        !pinnedRef.current &&
-        !hasNewer
-      ) {
-        // Following stopped for that answer and the reader has not moved
-        // since, so they return to the tip.
-        clearPendingReaderLeave();
-        applyPinned(true);
-      }
-    }
-    if (pendingJumpToStartRef.current && firstItemChanged) {
+    const questionGroup =
+      questionTarget === null
+        ? undefined
+        : groups.find(
+            ({ group }) =>
+              group.kind === "item" &&
+              group.item.kind === "user-message" &&
+              (group.item.sourceEvents?.some((source) => source.sequence === questionTarget) ||
+                group.item.annotationSource?.sequence === questionTarget),
+          );
+    if (questionGroup) {
+      // Exact navigation wins over prepend correction on the same commit.
+      jumpToQuestion(questionGroup.key);
+      setQuestionTarget(null);
+    } else if (pendingJumpToStartRef.current && firstItemChanged) {
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
       pendingJumpToStartRef.current = false;
@@ -1627,20 +1556,6 @@ export function MessageTimeline({
         }
       }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
-      if (answerAnchor && answerAnchorRef.current?.answerKey !== answerAnchor.answerKey) {
-        // A new answer started while following. Anchor on the highest of the
-        // question, status row, and answer that is still in view, and never
-        // on anything during the hidden first paint of a loaded history.
-        answerAnchorRef.current = {
-          answerKey: answerAnchor.answerKey,
-          anchorKey: revealedRef.current
-            ? (answerAnchor.candidates.find((key) => {
-                const top = contentTopOf(node, key);
-                return top !== null && top >= node.scrollTop - 1;
-              }) ?? null)
-            : null,
-        };
-      }
       // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
       // Pending unarmed leave: tip *growth* must not yank (Vimium during stream).
       // Flat/shrink commits (fold) still recover — height did not grow under us.
@@ -1660,10 +1575,6 @@ export function MessageTimeline({
     // inside the band (short pages) — that stops the y=0 load loop.
     if (prepended && !pinnedRef.current && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
       rearmOlderPrefetchAfterLeavingTop(node);
-    }
-    if (answerAnchor && answerAnchorRef.current?.answerKey !== answerAnchor.answerKey) {
-      // The answer started while the reader was elsewhere: nothing to anchor.
-      answerAnchorRef.current = { answerKey: answerAnchor.answerKey, anchorKey: null };
     }
     scheduleQuestionNav();
     previousFirstItemIdRef.current = firstItemId;
@@ -1803,7 +1714,6 @@ export function MessageTimeline({
     firstItemContentTopRef.current = null;
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
-    answerAnchorRef.current = null;
     disclosureKeepsUnpinnedRef.current = false;
     clearReaderIntent();
     contentShrinkBaselineRef.current = null;
@@ -2399,7 +2309,6 @@ export function MessageTimeline({
                                   groupKey={key}
                                   group={group}
                                   nextGroup={groups[index + 1]?.group}
-                                  laterWork={laterWorkFrom[index] === true}
                                   startupDismissed={
                                     group.kind === "activity" &&
                                     group.items.some(
@@ -2475,41 +2384,22 @@ export function MessageTimeline({
                           className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center"
                         >
                           <div className="pointer-events-auto inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
-                            {questionNav.previous ? (
-                              <button
-                                type="button"
-                                aria-label="Previous question"
-                                title="Previous question"
-                                onClick={() => jumpToQuestion(questionNav.previous!)}
-                                className="inline-flex size-8 items-center justify-center rounded-full text-og-fg-muted hover:text-og-fg pointer-coarse:size-11"
-                              >
-                                <ChevronUpIcon aria-hidden className="size-3.5" />
-                              </button>
-                            ) : null}
                             <button
                               type="button"
                               data-og-jump-to-question=""
-                              onClick={() => jumpToQuestion(questionNav.key)}
-                              className={cn(
-                                "inline-flex items-center gap-1.5 py-1.5 hover:text-og-fg pointer-coarse:min-h-11",
-                                questionNav.previous ? "pl-0.5" : "pl-3",
-                                questionNav.next ? "pr-0.5" : "pr-3",
-                              )}
+                              onClick={() => void jumpToLatestQuestion()}
+                              disabled={questionPending}
+                              aria-busy={questionPending}
+                              title={
+                                questionError
+                                  ? "Could not load the latest question. Try again."
+                                  : undefined
+                              }
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
                             >
                               <ArrowUpIcon aria-hidden className="size-3.5" />
-                              Your question
+                              Latest question
                             </button>
-                            {questionNav.next ? (
-                              <button
-                                type="button"
-                                aria-label="Next question"
-                                title="Next question"
-                                onClick={() => jumpToQuestion(questionNav.next!)}
-                                className="inline-flex size-8 items-center justify-center rounded-full text-og-fg-muted hover:text-og-fg pointer-coarse:size-11"
-                              >
-                                <ChevronDownIcon aria-hidden className="size-3.5" />
-                              </button>
-                            ) : null}
                           </div>
                         </motion.div>
                       ) : null}
@@ -2665,16 +2555,9 @@ function useStableTimelineGroupKeys(
               child.kind === "activity" &&
               child.items.every((item) => item.kind === "startup-phase"),
           );
-        // One exchange row alternates between its live cluster and its settled
-        // turn as turns start and end; it stays the same row throughout.
-        const sameExchangeRow =
-          previous?.group.kind !== "item" &&
-          group.kind !== "item" &&
-          group.id.startsWith("exchange-") &&
-          previous?.group.id === group.id;
         if (
           previous &&
-          (previous.group.kind === group.kind || startupCompletion || sameExchangeRow) &&
+          (previous.group.kind === group.kind || startupCompletion) &&
           !usedKeys.has(previous.key)
         ) {
           retainedGroup = previous;
@@ -2796,8 +2679,6 @@ type TimelineGroupEntryProps = {
   groupKey: string;
   group: TimelineGroup;
   nextGroup?: TimelineGroup | undefined;
-  /** A later top-level group is agent work, so this row is no longer the live edge. */
-  laterWork: boolean;
   startupDismissed: boolean;
   entranceEnabled: boolean;
   liveEntranceEnabled?: boolean | undefined;
@@ -2836,7 +2717,6 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
   groupKey,
   group,
   nextGroup,
-  laterWork,
   startupDismissed,
   entranceEnabled,
   liveEntranceEnabled,
@@ -2862,15 +2742,6 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         startupDismissed={startupDismissed}
         trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
         contextCompactionCount={contextCompactionCount > 0 ? contextCompactionCount : undefined}
-        exchangeNext={group.kind === "item" ? undefined : exchangeNextState(nextGroup, laterWork)}
-        exchangeNextAt={
-          group.kind === "item" || nextGroup?.kind !== "item"
-            ? undefined
-            : nextGroup.item.kind === "agent-message"
-              ? // The answer's start, which completion does not move.
-                (nextGroup.item.startedAt ?? nextGroup.item.occurredAt)
-              : nextGroup.item.occurredAt
-        }
       />
     </ActivityNoteTextContext.Provider>
   );
@@ -2897,7 +2768,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
                     key={
                       !startupDismissed &&
                       group.kind === "activity" &&
-                      !group.earlier?.length &&
+                      !group.work?.details?.length &&
                       group.items.every(
                         (item) =>
                           item.kind === "startup-phase" ||
@@ -2947,8 +2818,6 @@ const TimelineGroupView = memo(function TimelineGroupView({
   startupDismissed = false,
   trailingAgentText,
   contextCompactionCount,
-  exchangeNext,
-  exchangeNextAt,
 }: {
   group: TimelineGroup;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
@@ -2990,10 +2859,6 @@ const TimelineGroupView = memo(function TimelineGroupView({
   trailingAgentText?: string | undefined;
   /** Secondary chip facet when this fold sits next to a compaction landmark. */
   contextCompactionCount?: number | undefined;
-  /** What follows a top-level row (see {@link ExchangeNext}). */
-  exchangeNext?: ExchangeNext | undefined;
-  /** When the following item happened (answer start, approval request). */
-  exchangeNextAt?: string | undefined;
 }) {
   const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
@@ -3038,16 +2903,71 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const settleFold =
     !turnSummary?.rolling &&
     (group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle);
-  const exchangeRow = !!turnSummary?.rolling && !insideTurn;
   switch (group.kind) {
     case "activity":
+      if (group.work) {
+        const end = group.work.responseStartedAt ?? group.work.endedAt;
+        const status: TurnSummaryStatus = end
+          ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
+          : group.work.waiting
+            ? { kind: "waiting", ...group.work.waiting }
+            : {
+                kind: "working",
+                since: group.work.startedAt,
+                preview: containsPresentedImage ? undefined : (
+                  <RollingActivity
+                    items={group.items}
+                    toolRegistry={toolRegistry}
+                    showCount={false}
+                  />
+                ),
+              };
+        return (
+          <TurnSummary
+            key={containsPresentedImage ? "primary-image" : "work"}
+            items={group.items}
+            status={status}
+            outcome={group.outcome}
+            failureText={group.failureText}
+            foldKey={group.id}
+            defaultOpen={containsPresentedImage || group.outcome === "failed" ? true : undefined}
+            facets={turnSummary?.facets}
+            contextCompactionCount={compactedLandmarkCount(group.work.details)}
+          >
+            <TurnRailFrame>
+              <ActivityRail
+                items={group.items}
+                bare
+                toolRegistry={toolRegistry}
+                onOpenSession={onOpenSession}
+                onMemoryClick={onMemoryClick}
+                loadRetainedScreenshot={loadRetainedScreenshot}
+                loadRetainedArtifact={loadRetainedArtifact}
+              />
+              {renderFoldedGroups(group.work.details, {
+                renderMessageActions,
+                renderMessageText,
+                onOpenSession,
+                onMemoryClick,
+                onReconnect,
+                renderAuthNeeded,
+                resolveProviderLogo,
+                toolRegistry,
+                loadRetainedScreenshot,
+                loadRetainedArtifact,
+                loadVideoArtifactPlayback,
+                turnSummary,
+              })}
+            </TurnRailFrame>
+          </TurnSummary>
+        );
+      }
       // Preparation is one quiet surface, not a fold with eight technical steps.
       // A later turn of the same exchange keeps its status row instead.
       if (
         !startupDetails &&
         !insideTurn &&
         !group.outcome &&
-        !group.earlier?.length &&
         group.items.every(
           (item) =>
             item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
@@ -3064,83 +2984,6 @@ const TimelineGroupView = memo(function TimelineGroupView({
             loadRetainedScreenshot={loadRetainedScreenshot}
             loadRetainedArtifact={loadRetainedArtifact}
           />
-        );
-      }
-      if (exchangeRow && !group.outcome && !containsPresentedImage) {
-        const earlier = group.earlier ?? [];
-        const workItems = group.items.filter((item) => item.kind !== "agent-message");
-        const startedAt = groupStartedAt(earlier[0]) ?? groupStartedAt(group);
-        const note = exchangeNext === "answer" ? undefined : latestNotePreview([group]);
-        const status: TurnSummaryStatus =
-          exchangeNext === "answer" || exchangeNext === "moved"
-            ? {
-                kind: "worked",
-                durationMs: durationBetween(startedAt ?? "", exchangeNextAt ?? ""),
-                ...(exchangeNext === "moved" ? { note } : {}),
-              }
-            : exchangeNext === "you" || exchangeNext === "blocked"
-              ? {
-                  kind: "waiting",
-                  label: exchangeNext === "you" ? "Waiting for you" : undefined,
-                  since: exchangeNextAt,
-                  note,
-                }
-              : {
-                  kind: "working",
-                  since: startedAt,
-                  note,
-                  preview: workItems.some((item) => item.kind !== "startup-phase") ? (
-                    <RollingActivity
-                      items={workItems}
-                      toolRegistry={toolRegistry}
-                      previousItem={previousSingleActivity.current}
-                      showCount={false}
-                    />
-                  ) : undefined,
-                };
-        if (foldMemory && earlier[0]) {
-          inheritFoldRestingState(foldMemory, group.id, [timelineGroupFoldId(earlier[0])]);
-        }
-        return (
-          <TurnSummary
-            key="exchange"
-            items={flattenActivityItems([group])}
-            outcome={undefined}
-            foldKey={group.id}
-            facets={turnSummary?.facets}
-            status={status}
-            contextCompactionCount={compactedLandmarkCount(earlier) || contextCompactionCount}
-          >
-            <FoldBody>
-              <TurnRailFrame>
-                {earlier.length > 0
-                  ? renderFoldedGroups(earlier, {
-                      renderMessageActions,
-                      renderMessageText,
-                      onOpenSession,
-                      onMemoryClick,
-                      onReconnect,
-                      renderAuthNeeded,
-                      resolveProviderLogo,
-                      toolRegistry,
-                      loadRetainedScreenshot,
-                      loadRetainedArtifact,
-                      loadVideoArtifactPlayback,
-                      turnSummary,
-                    })
-                  : null}
-                <ActivityRail
-                  items={group.items}
-                  onOpenSession={onOpenSession}
-                  onMemoryClick={onMemoryClick}
-                  toolRegistry={toolRegistry}
-                  loadRetainedScreenshot={loadRetainedScreenshot}
-                  loadRetainedArtifact={loadRetainedArtifact}
-                  bare
-                />
-              </TurnRailFrame>
-            </FoldBody>
-          </TurnSummary>
         );
       }
       if (
@@ -3301,41 +3144,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
         turnSummary,
       });
       const durationMs = durationBetween(group.startedAt, group.endedAt);
-      let status: TurnSummaryStatus | undefined;
-      if (exchangeRow && group.outcome === "complete") {
-        const lastChild = group.groups[group.groups.length - 1];
-        const parkedWait =
-          exchangeNext === "end" &&
-          lastChild?.kind === "item" &&
-          lastChild.item.kind === "notice" &&
-          lastChild.item.recordedOutcome &&
-          !lastChild.item.waitEndedAt
-            ? lastChild.item
-            : undefined;
-        // Delivered input at the tail means the agent is picking the work back up.
-        const resuming =
-          exchangeNext === "end" &&
-          lastChild?.kind === "item" &&
-          lastChild.item.kind === "machine-input-batch";
-        const note = exchangeNext === "answer" ? undefined : latestNotePreview(group.groups);
-        // Worked until the answer started, as the live row said while it streamed.
-        const workedMs =
-          exchangeNext === "answer" && exchangeNextAt
-            ? (durationBetween(group.startedAt, exchangeNextAt) ?? durationMs)
-            : durationMs;
-        status = parkedWait
-          ? { kind: "waiting", label: waitingLabel(parkedWait), since: parkedWait.occurredAt, note }
-          : resuming
-            ? { kind: "working", since: group.startedAt, note }
-            : { kind: "worked", durationMs: workedMs, note };
-        if (foldMemory && group.id.startsWith("exchange-") && group.groups[0]) {
-          inheritFoldRestingState(foldMemory, group.id, [timelineGroupFoldId(group.groups[0])]);
-        }
-      }
       return (
         <TurnSummary
-          key={status ? "exchange" : undefined}
-          status={status}
           items={activityItems}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
@@ -3423,96 +3233,6 @@ function renderFoldedGroups(groups: readonly TimelineGroup[], behavior: FoldedGr
   ));
 }
 
-/**
- * What follows a top-level exchange row: its answer; a pending approval or
- * question ("you") or another wait such as capacity ("blocked") with nothing
- * after it; nothing at all ("end"); some other row with no later work
- * ("idle"); or later work, meaning the agent has moved past this row.
- */
-type ExchangeNext = "answer" | "you" | "blocked" | "end" | "idle" | "moved";
-
-function exchangeNextState(next: TimelineGroup | undefined, laterWork: boolean): ExchangeNext {
-  if (next?.kind === "item" && next.item.kind === "agent-message" && next.item.text.trim()) {
-    return "answer";
-  }
-  if (laterWork) {
-    return "moved";
-  }
-  if (!next) {
-    return "end";
-  }
-  if (next.kind !== "item") {
-    return "idle";
-  }
-  const item = next.item;
-  if (item.kind === "session-status" && item.status === "requires_action") {
-    return "you";
-  }
-  if (item.kind === "notice" && item.tone === "waiting" && !item.recordedOutcome) {
-    return item.text.startsWith("Approval needed") ? "you" : "blocked";
-  }
-  return "idle";
-}
-
-/** "Waiting for 2 agents" when the wait knows its delegated workers. */
-function waitingLabel(item: NoticeItem): string {
-  const agents = item.waitingAgents ?? 0;
-  return agents > 0 ? `Waiting for ${agents} ${agents === 1 ? "agent" : "agents"}` : "Waiting";
-}
-
-/** Latest assistant prose inside a row, as one plain line for the status preview. */
-function latestNotePreview(groups: readonly TimelineGroup[]): string | undefined {
-  const text = latestNoteText(groups);
-  return text ? plainNotePreview(text) : undefined;
-}
-
-function latestNoteText(groups: readonly TimelineGroup[]): string | undefined {
-  for (let index = groups.length - 1; index >= 0; index -= 1) {
-    const group = groups[index]!;
-    if (group.kind === "item") {
-      if (group.item.kind === "agent-message" && group.item.text.trim()) {
-        return group.item.text;
-      }
-      continue;
-    }
-    if (group.kind === "activity") {
-      for (let itemIndex = group.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
-        const item = group.items[itemIndex]!;
-        if (item.kind === "agent-message" && item.text.trim()) {
-          return item.text;
-        }
-      }
-      const earlier = latestNoteText(group.earlier ?? []);
-      if (earlier) {
-        return earlier;
-      }
-      continue;
-    }
-    const nested = latestNoteText(group.groups);
-    if (nested) {
-      return nested;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Markdown reduced to readable text for a two-line clamp. Underscores mark
- * emphasis only at word edges, so snake_case names survive.
- */
-function plainNotePreview(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/`([^`]*)`/g, "$1")
-    .replace(/(\*\*|\*|~~)(?=\S)([^*~]*?\S)\1/g, "$2")
-    .replace(/(^|\W)(__?)(?=\S)([^_]*?\S)\2(?!\w)/g, "$1$3")
-    .replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
   return groups.filter(
     (group) =>
@@ -3520,25 +3240,6 @@ function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
       group.item.kind === "context-compaction" &&
       group.item.phase === "compacted",
   ).length;
-}
-
-/** The fold-memory key a group used before it joined an exchange row. */
-function timelineGroupFoldId(group: TimelineGroup): string {
-  return group.kind === "item" ? group.item.id : group.id;
-}
-
-function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
-  if (!group) {
-    return undefined;
-  }
-  switch (group.kind) {
-    case "item":
-      return group.item.occurredAt;
-    case "activity":
-      return groupStartedAt(group.earlier?.[0]) ?? group.items[0]?.occurredAt;
-    case "turn":
-      return group.startedAt;
-  }
 }
 
 /**
@@ -3607,7 +3308,7 @@ function timelineGroupItemIds(group: TimelineGroup): string[] {
       return [group.item.id];
     case "activity":
       return [
-        ...(group.earlier ?? []).flatMap(timelineGroupItemIds),
+        ...(group.work?.details ?? []).flatMap(timelineGroupItemIds),
         ...group.items.map((item) => item.id),
       ];
     case "turn":
@@ -3662,7 +3363,7 @@ function flattenActivityItems(groups: readonly TimelineGroup[]): ActivityItem[] 
   const items: ActivityItem[] = [];
   for (const group of groups) {
     if (group.kind === "activity") {
-      items.push(...flattenActivityItems(group.earlier ?? []), ...group.items);
+      items.push(...flattenActivityItems(group.work?.details ?? []), ...group.items);
     } else if (group.kind === "turn") {
       items.push(...flattenActivityItems(group.groups));
     }
@@ -3681,7 +3382,7 @@ function collectAgentMessageText(groups: readonly TimelineGroup[]): string {
       }
     } else if (group.kind === "activity") {
       // Commentary folded into clusters is still the assistant's own prose.
-      const nested = collectAgentMessageText(group.earlier ?? []);
+      const nested = collectAgentMessageText(group.work?.details ?? []);
       if (nested.length > 0) {
         parts.push(nested);
       }
@@ -3711,7 +3412,7 @@ function collectTurnIdsFromGroups(groups: readonly TimelineGroup[]): Set<string>
         ids.add(turnId);
       }
     } else if (group.kind === "activity") {
-      for (const nested of collectTurnIdsFromGroups(group.earlier ?? [])) {
+      for (const nested of collectTurnIdsFromGroups(group.work?.details ?? [])) {
         ids.add(nested);
       }
       for (const item of group.items) {
@@ -4480,7 +4181,7 @@ function MachineInputBatchRow({
   }
   const singleSummary = single ? cleanMachineInputSummary(single.summary) : "";
   const showCollapsedSummary =
-    single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
+    !item.compact && single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
 
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
