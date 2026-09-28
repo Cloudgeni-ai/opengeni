@@ -1202,6 +1202,37 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("scheduled Slack posting tools take no destination and stay explicit-only", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_prepare_message");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_send_prepared_message");
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["connections:read"], ["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "scheduled-slack-post-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      const prepare = tools.find((tool) => tool.name === "slack_bot_prepare_message");
+      const send = tools.find((tool) => tool.name === "slack_bot_send_prepared_message");
+      // The agent cannot name a channel, user, or bot connection.
+      expect(Object.keys(prepare?.inputSchema.properties ?? {}).sort()).toEqual([
+        "text",
+        "threadTimestamp",
+      ]);
+      expect(Object.keys(send?.inputSchema.properties ?? {})).toEqual(["messageId"]);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+    const sessionless = buildOpenGeniMcpServer(deps(), {
+      ...grant(["connections:read"], ["slack_bot_prepare_message"]),
+      metadata: { firstPartyMcpTools: ["slack_bot_prepare_message"] },
+    });
+    expect(registeredToolNames(sessionless)).not.toContain("slack_bot_prepare_message");
+  });
+
   test("capability discovery is default-visible but separates search from human authorization", async () => {
     const server = buildOpenGeniMcpServer(
       deps(),

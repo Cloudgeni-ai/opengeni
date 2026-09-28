@@ -1,5 +1,15 @@
 # Deployment
 
+## Scheduled Slack channel posts (0530)
+
+`0530_scheduled_slack_bot_messages.sql` is rolling. It adds the private
+`opengeni_private.scheduled_slack_bot_messages` table and its two runtime
+capabilities; the public-schema table inventory of older processes is
+unchanged. Run `db:provision-roles` after it as usual. Older API and worker
+processes ignore the new `slackBotChannelId` task field, so a task keeps
+running without the posting tools until the matching worker creates its next
+run. See [`slack-bot.md`](slack-bot.md#scheduled-tasks).
+
 ## Assistant message phases (0527)
 
 `0527_session_attention_excludes_commentary.sql` is rolling: it builds the

@@ -2141,6 +2141,14 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.scheduled_slack_bot_messages') IS NOT NULL THEN
+      -- Prepared scheduled bot posts are reachable only through their two
+      -- capabilities, so a saved destination can never be rewritten directly.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.prepare_scheduled_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,text,text,text) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.read_scheduled_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
+    END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',
       'validate_mcp_account_bindings(jsonb,jsonb)',
