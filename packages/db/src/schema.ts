@@ -11439,6 +11439,7 @@ export const scheduledTaskRuns = pgTable(
     // authority and never appears in public scheduled-run projections.
     acceptedExecutionSnapshot: jsonb("accepted_execution_snapshot").$type<unknown>(),
     acceptedExecutionDigest: text("accepted_execution_digest"),
+    admissionDiagnostic: jsonb("admission_diagnostic").$type<unknown>(),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

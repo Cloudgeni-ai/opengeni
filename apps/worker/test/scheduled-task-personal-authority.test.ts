@@ -430,12 +430,12 @@ describe("scheduled task personal MCP authority", () => {
       selectedAccepted?.mcpAccountBindings?.map((binding) => binding.connectionId).sort(),
     ).toEqual(selections.map((selection) => selection.connectionId).sort());
     await admin`update connections set status = 'revoked' where id = ${first.connection.id}`;
-    expect(await dispatch()).toEqual({
+    expect(await dispatch()).toMatchObject({
       action: "blocked",
       reason: "connection_account_unavailable",
     });
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      2,
+      3,
     );
   });
 
@@ -549,9 +549,9 @@ describe("scheduled task personal MCP authority", () => {
     });
     expect(
       await scheduler.dispatchScheduledTaskRun({ ...firstInput, producerKey: crypto.randomUUID() }),
-    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    ).toMatchObject({ action: "blocked", reason: "connection_account_unavailable" });
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      3,
+      4,
     );
   });
 

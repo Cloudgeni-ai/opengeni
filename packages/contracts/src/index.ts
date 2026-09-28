@@ -9987,6 +9987,38 @@ export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
 });
 export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
 
+/** Non-secret evidence of a refused connection selection, never execution authority. */
+export const ConnectionAccountSelectionDiagnostic = /* @__PURE__ */ z
+  .object({
+    version: z.literal(1),
+    reason: z.enum([
+      "selected_account_unavailable",
+      "owner_access_unavailable",
+      "ambiguous_account",
+      "parent_accounts_required",
+      "selection_unavailable",
+    ]),
+    accounts: z.array(
+      z
+        .object({
+          serverId: z.string().min(1).max(256),
+          connectionId: z.string().uuid().nullable(),
+          reason: z.enum([
+            "connector_unavailable",
+            "account_not_visible",
+            "account_inactive",
+            "account_mismatch",
+            "selection_unavailable",
+          ]),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+export type ConnectionAccountSelectionDiagnostic = z.infer<
+  typeof ConnectionAccountSelectionDiagnostic
+>;
+
 export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -10009,6 +10041,7 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
   completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
+  admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

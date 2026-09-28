@@ -176,6 +176,7 @@ import {
   SessionGoalSnapshot,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
+  ConnectionAccountSelectionDiagnostic,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
@@ -17713,6 +17714,93 @@ export async function deleteScheduledTask(
         changed,
       };
     });
+  });
+}
+
+/** A terminal refusal is evidence, not accepted execution or permission to retry. */
+export async function recordScheduledTaskAdmissionFailure(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+    taskExecutionDigest: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+    scheduledAt?: Date | null;
+    diagnostic: ConnectionAccountSelectionDiagnostic;
+  },
+): Promise<ScheduledTaskRun> {
+  const diagnostic = ConnectionAccountSelectionDiagnostic.parse(input.diagnostic);
+  if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    // Same task lock as accepted admission; both outcomes share the existing
+    // producer unique key. A committed winner is immutable even after repair.
+    const [task] = await tx
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) throw new Error("Scheduled task not found");
+    const readPrior = async () => {
+      const [prior] = await tx
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (prior && (prior.taskId !== input.taskId || prior.triggerType !== input.triggerType)) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      return prior;
+    };
+    const prior = await readPrior();
+    if (prior) return mapScheduledTaskRun(prior);
+    if (
+      task.status !== "active" ||
+      task.deletedAt ||
+      task.authorityRevision !== input.taskAuthorityRevision ||
+      task.executionDigest !== input.taskExecutionDigest
+    ) {
+      throw new Error("scheduled task changed before refusal recording");
+    }
+    const now = new Date();
+    const [inserted] = await tx
+      .insert(schema.scheduledTaskRuns)
+      .values({
+        accountId: task.accountId,
+        workspaceId: input.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+        triggerType: input.triggerType,
+        producerKey: input.producerKey,
+        scheduledAt: input.scheduledAt ?? null,
+        firedAt: now,
+        completedAt: now,
+        actionKind: "agent_turn",
+        status: "failed",
+        error: "connection_account_unavailable",
+        admissionDiagnostic: diagnostic,
+      })
+      .onConflictDoNothing({
+        target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+        where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+      })
+      .returning();
+    const result = inserted ?? (await readPrior());
+    if (!result) throw new Error("scheduled refusal receipt missing");
+    return mapScheduledTaskRun(result);
   });
 }
 
@@ -82918,6 +83006,10 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     knowledgeSummary: row.knowledgeSummary as ScheduledTaskRun["knowledgeSummary"],
     completedAt: row.completedAt?.toISOString() ?? null,
     error: row.error,
+    admissionDiagnostic:
+      row.admissionDiagnostic == null
+        ? null
+        : ConnectionAccountSelectionDiagnostic.parse(row.admissionDiagnostic),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

@@ -440,6 +440,8 @@ export type DispatchScheduledTaskRunResult =
   | { action: "deleted" }
   | {
       action: "blocked";
+      runId?: string;
+      diagnostic?: import("@opengeni/contracts").ConnectionAccountSelectionDiagnostic;
       reason:
         | "insufficient_credits"
         | "monthly_model_cost_limit"
