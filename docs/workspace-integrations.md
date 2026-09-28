@@ -136,7 +136,9 @@ The body is a thin event; read details through the API:
 ```
 
 Delivery is at least once. Dedupe on `id`, also sent as `OpenGeni-Event-Id`.
-Any 2xx acknowledges; anything else is retried with capped exponential
+Deliveries are sent concurrently and may arrive out of order; use `sequence`
+within a session, or treat the event as a signal to read the session's events
+after your own cursor. Any 2xx acknowledges; anything else is retried with capped exponential
 backoff (5 s doubling to one hour) for 12 attempts, then marked failed.
 `listWorkspaceWebhookDeliveries` shows status, attempts, and the last error,
 and `redeliverWorkspaceWebhookDelivery` queues a settled delivery again.
