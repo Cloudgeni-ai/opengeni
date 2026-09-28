@@ -6,7 +6,7 @@ and selected account identifiers, not credentials or accepted execution. These
 rows cannot acquire a session or execution snapshot or become runnable.
 Reconnection affects a new occurrence, not an already-refused occurrence.
 
-Migration `0531_scheduled_admission_diagnostics.sql` adds this diagnostic-only
+Migration `0532_scheduled_admission_diagnostics.sql` adds this diagnostic-only
 path; ordinary accepted-run checks stay unchanged. Its trigger replacements
 require the scheduled authority and owner triggers from migrations 0275 and 0478.
 Historical migration fixtures that deliberately withhold those prerequisites
