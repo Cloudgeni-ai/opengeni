@@ -161,13 +161,14 @@ scalar windows, returning bounded snippets/cursors, not histories. See
 [`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
-They remain on the turn cancellation fence and stop before finalization, allowing
-an agent to test a preview server without waiting for it to exit.
+They remain on the turn cancellation fence and stop before finalization, letting
+agents test preview servers without awaiting exit.
 
-`wait_for_input` persists a turn and deadline; input or timeout resumes execution.
+`wait_for_input` persists its turn and deadline until input or timeout.
 Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
 drives working/recheck UI separately from unread. `session_wait`/`command_wait`
-are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
+are in-turn reads; child results carry final answers. See
+[durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
@@ -190,10 +191,9 @@ retain backoff.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
-Reports—including secondary audits—use native documents. Operational instructions
-route authoring to the Documents Skill; goal/artifact domains validate persisted
-requirements/current inspection proof. Chat/code/local-file
-exceptions remain. See [`goals.md`](goals.md).
+Reports default to chat; requested or large ones use native documents authored
+via the Documents Skill; goal/artifact domains validate persisted
+requirements/current inspection proof. See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 
@@ -366,15 +366,16 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-Agents run directly on the user's Connected Machine (`selfhosted`); OpenGeni creates no sandbox.
+Agents run on Connected Machines (`selfhosted`), without creating sandboxes.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
 Mac updates preserve signed bundles; writes check ACLs
 ([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
-The machine owns its filesystem, Git authentication, environment, and long-lived
-platform credentials. OpenGeni neither clones repositories nor installs durable
-control-plane credentials there. Only authorized child processes receive the
-narrow transient exception: exact-attempt Codemode authority.
+The machine owns files, Git authentication, environment, and durable credentials.
+OpenGeni neither clones repositories nor installs durable control-plane credentials;
+authorized child processes receive only transient, exact-attempt Codemode authority.
+
+Sandboxless attachment rebuilds native capabilities through [same-turn recovery](run-lifecycle.md), without replaying completed tools.
 
 Machine paths are host-native and session-specific, not universal `/workspace`
 aliases. Unavailability produces a typed operation outcome; text-only reasoning
@@ -390,16 +391,13 @@ Requests carry capability epoch and root. The API binds one route per request;
 target/root changes return retryable conflicts instead of reinterpreting paths
 on another filesystem.
 
-Generated-session schedules follow the same explicit route: they persist an
-exact workspace- or organization-scoped machine target and seed the session's
-active pointer before its first turn. A targetless generated schedule cannot
-resolve to `selfhosted`; ingress rejects that configuration, and dispatch
-revalidates the frozen target rather than falling back to managed compute.
-Manual and generated creates preflight the target's current liveness and
-workspace root before insertion, then recheck durable target authority and
-commit the active pointer in the same transaction as the session row. A
-rejected target therefore leaves no queued session shell for discovery or
-parent-tree projections to mistake for live work.
+Generated-session schedules persist an exact workspace- or organization-scoped
+machine target and seed its active pointer before the first turn. Ingress
+rejects targetless `selfhosted` schedules; dispatch revalidates the frozen target
+without managed-compute fallback. Manual and generated creates preflight target
+liveness and workspace root, then recheck durable authority and atomically
+commit the active pointer with the session row. Rejection leaves no queued
+session shell in discovery or parent-tree projections.
 
 Child workers keep the ordinary low-friction rule: omitting placement shares
 the creator's box. Because a Connected Machine pointer is session-local, that
@@ -443,6 +441,8 @@ Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.t
 or proved provider loss (`packages/db/src/index.ts`). Both require a verified
 CURRENT checkpoint, singleton, quiescence and durable warning; no command
 replay/empty reset. See migrations 0495/0526 and [run lifecycle](run-lifecycle.md).
+Operator reauthorization supersedes verified public recovery;
+[provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
@@ -1171,7 +1171,6 @@ it may not detach a rejecting task or install an `unhandledRejection` handler
 that exits the shared worker. The worker's global rejection listener is a
 last-resort observational boundary, while deliberate restart remains an
 OpenGeni drain-and-checkpoint decision.
-Audited historical recovery preserves generation gaps; see [`run-lifecycle.md`](run-lifecycle.md).
 
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.

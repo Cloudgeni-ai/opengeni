@@ -13,6 +13,34 @@ const browserSessionId = "11111111-1111-4111-8111-111111111111";
 const computerSessionId = "22222222-2222-4222-8222-222222222222";
 
 describe("OpenGeni Codemode interaction facade", () => {
+  test("forwards attached-only discovery scope and returns bridge metadata", async () => {
+    const discovery = {
+      browserRevision: 42,
+      computerRevision: 42,
+      identityRevision: 42,
+      attachedBrowserRevision: 42,
+      browsers: [],
+      computers: [],
+      identities: [],
+      attachedBrowserBridges: [
+        {
+          enrollmentId: "11111111-1111-4111-8111-111111111111",
+          state: "online" as const,
+          bridgeGeneration: "bridge-1",
+          inventoryRevision: 1,
+          connectedProfileCount: 0,
+          lastSeenAt: "2026-09-27T00:00:00.000Z",
+        },
+      ],
+      attachedBrowsers: [],
+    };
+    const fake = fakeClient(() => result(discovery));
+    const options = { scope: "attached_browsers", includeDisconnectedDevices: true } as const;
+    const actual = await createOpenGeniCodemode(fake.client).discover(options);
+    expect(actual.attachedBrowserBridges).toEqual(discovery.attachedBrowserBridges);
+    expect(fake.calls).toEqual([{ path: "interaction.discover", args: options, options: {} }]);
+  });
+
   test("saves a browser screenshot for view_image without returning base64 as text", async () => {
     const png = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",

@@ -34,18 +34,23 @@ extend the same prompt-cache prefix and recovery replays identical authority.
 
 ## Report delivery
 
-A user-facing report is a native document Artifact by default. This includes a
-secondary output such as an audit produced while organizing Knowledge. Routing
-lives in the provider-neutral operational instructions; the bundled
-`opengeni-documents` Skill owns the authoring procedure. The artifact is the
-working document from the start, not a published copy of a sandbox Markdown or
-DOCX report.
+Agents answer in chat by default, including summaries and reports. A native
+document Artifact is the deliverable when the user asks for a document or file,
+or when the result is large (multi-page) or clearly meant to be kept or shared.
+That can include a secondary output such as an audit produced while organizing
+Knowledge. The chat reply then gives a short summary and the artifact link
+rather than restating the document. Routing lives in the provider-neutral
+operational instructions; the bundled `opengeni-documents` Skill owns the
+authoring procedure. The artifact is the working document from the start, not a
+published copy of a sandbox Markdown or DOCX report.
 
 Report requirements are explicit, typed declarations, not a heuristic scan of
-goal text, conversation content or local links. Declare them before authoring:
-initial reports belong in `goal_set` / `GoalSpec.reportRequirements`; reports
-discovered during an active goal are appended through `goal_progress` without
-replacing the objective. Each requirement has a stable `id` and `title`.
+goal text, conversation content or local links. Inside a goal, declare them
+before authoring: initial reports belong in `goal_set` /
+`GoalSpec.reportRequirements`; reports discovered during an active goal are
+appended through `goal_progress` without replacing the objective. Each
+requirement has a stable `id` and `title`. A session without a goal does not
+create one only to declare a document.
 
 Completion must match every persisted requirement to a native document and a
 server-authored inspection receipt. The receipt identifies the exact inspected
@@ -60,9 +65,9 @@ When artifact tooling is unavailable, do not invent a receipt or silently
 substitute a sandbox link. Explain the concrete blocker and retain the unfinished
 deliverable. Ordinary in-chat answers, brief status updates, internal worker
 findings, source-code navigation, and explicitly requested local-file workflows
-are outside this report contract. Without goal tools, the artifact-first
-authoring and handoff procedure still applies, but no goal-completion guard can
-run.
+are outside this report contract. Without a goal, the artifact-first authoring
+and handoff procedure still applies to a document deliverable, but nothing is
+declared and no goal-completion guard runs.
 
 The guard proves delivery of **declared** reports, not the semantic quality or
 completeness of arbitrary prose. Routing instructions make declaration part of
@@ -173,6 +178,15 @@ A goal is `active`, `paused`, or `completed`.
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+  The agent is told to resume only when the user asks it to continue or the
+  blocker it paused for has cleared. A user's question alone is not a reason:
+  the agent answers it and leaves the goal paused. An active goal still
+  continues through its ordinary continuation after that answer. When work the
+  agent started is still in flight (a child, a command, or a timed recheck), it
+  answers and registers `wait_for_input` again instead, even with an active
+  goal, so no continuation spends a turn rediscovering that wait. Each turn's
+  wait sets a fresh deadline, so a re-wait reuses the earlier reason and passes
+  only the time left before the earlier deadline.
 
 Long waits are session-level rather than goal mutations. `wait_for_input {
 reason, timeoutSeconds, idempotencyKey? }` is self-only, requires no goal, and
@@ -236,17 +250,22 @@ The locked decision applies these rules:
    them cannot be missed. See [`durable-agent-inputs.md`](durable-agent-inputs.md)
    for the wake classes.
 3. Before the goal materializer runs, `peekSessionWork` evaluates a current
-   session-level `wait_for_input`. It is current only while the declaring turn
-   remains the newest finished turn and the database deadline is ahead. While
+   session-level `wait_for_input`. It is current only while no newer finished
+   turn has retired it (a turn a person did not start, or a person's turn that
+   consumed immediate machine input) and the database deadline is ahead. While
    held, the workflow re-arms `session_input_wait_deadline` in the durable wake
    outbox and closes without consuming a goal revision. Immediate machine input
    or a queued human/API turn wins and runs normally; deferred child notices
-   remain parked. A newer finished turn clears the wait with
+   remain parked. A human or API turn that neither waits again nor consumes
+   immediate machine input leaves the wait held, so it neither triggers a
+   continuation that only rediscovers the wait nor strands a later child
+   result. A newer finished goal, system, or other machine-input turn, or a
+   person's turn that consumed the awaited input, clears the wait with
    `session.wait.finished{outcome:"input"}`. An unchanged expired deadline
    atomically clears it and queues `session_wait_timeout` input. The active-goal
    projection may report this independent session wait as `blocked` /
-   `held_for_input`, with `nextAttemptAt` and `holdReason`, but goal mutations do
-   not own or clear it.
+   `held_for_input`, with `nextAttemptAt` and `holdReason`, but goal mutations
+   do not own or clear it.
 4. Consecutive no-input continuations are paced, not capped. `auto_continuations`
    counts only consecutive synthesized continuations whose claimed batch
    contained no other machine input and that no human/API/Steer turn

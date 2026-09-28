@@ -85,6 +85,7 @@ import {
   type WorkClaimSubjectFilter,
   type SessionStatus,
   SubmitHumanInputResponseRequest,
+  FIRST_PARTY_MCP_CALLER_META_KEY,
 } from "@opengeni/contracts";
 import {
   countVariableSets,
@@ -288,7 +289,11 @@ import {
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
 import { completeChildReadSequences } from "./child-read-evidence";
-import { acknowledgeConsumedChildEvents } from "@opengeni/db";
+import {
+  acknowledgeConsumedChildEvents,
+  listOutstandingSessionSystemUpdatesForAttempt,
+  recordConsumedChildAnswers,
+} from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
   SESSION_WAIT_DEFAULT_SECONDS,
@@ -299,6 +304,7 @@ import {
   sessionWaitChangeEventMatches,
   sessionWaitCompletionEventMatches,
   waitForSessionChanges,
+  withOwnPendingUpdateKinds,
 } from "./session-wait";
 import {
   mcpMutationReceipt,
@@ -2679,7 +2685,7 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision.",
       inputSchema: {
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
@@ -2860,7 +2866,7 @@ function registerGoalTools(
     "goal_resume",
     {
       description:
-        "Resume this session's paused goal regardless of who paused it or why. Already active is a successful no-op. Preserves the objective and resets continuation counters.",
+        "Resume this session's paused goal when the user asks you to continue (whoever paused it), or when the blocker you paused for has cleared. A user's question alone is not a reason to resume: answer it and leave the goal paused. Already active is a successful no-op. Preserves the objective and resets continuation counters.",
       inputSchema: {},
     },
     async () => {
@@ -4332,6 +4338,55 @@ function registerWorkspaceOrchestrationTools(
       children,
     });
   };
+  // The caller's exact live attempt just returned a direct child's complete
+  // answer to its model. Record it on the reading turn: when that attempt
+  // completes its turn, a pending terminal result repeating only answers the
+  // model already holds is superseded instead of starting another inference.
+  // Only a direct model call counts: a Codemode script may keep the output to
+  // itself. Best-effort: a failure leaves that result to be delivered.
+  const recordConsumedChildResults = async (
+    children: { sessionId: string; sequences: number[] }[],
+    extra: { _meta?: Record<string, unknown> } | undefined,
+  ): Promise<void> => {
+    const claims = exactAgentAttemptClaims(grant);
+    if (
+      extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] !== "model" ||
+      !callerSessionId ||
+      !claims ||
+      claims.sessionId !== callerSessionId ||
+      !children.some((child) => child.sequences.length > 0)
+    )
+      return;
+    try {
+      await recordConsumedChildAnswers(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: callerSessionId,
+        turnId: claims.turnId,
+        attemptId: claims.attemptId,
+        executionGeneration: claims.executionGeneration,
+        children,
+      });
+    } catch (error) {
+      deps.observability?.warn("Failed to record a consumed child answer", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  // The caller's own pending input, less each child result its model already
+  // holds whole: waiting for, or ending the turn to receive, such a result
+  // would only repeat an answer it has.
+  const listOwnPendingUpdates = async (ownSessionId: string) => {
+    const claims = exactAgentAttemptClaims(grant);
+    return claims && claims.sessionId === ownSessionId
+      ? await listOutstandingSessionSystemUpdatesForAttempt(
+          deps.db,
+          grant.workspaceId,
+          ownSessionId,
+          { turnId: claims.turnId, attemptId: claims.attemptId },
+        )
+      : await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, ownSessionId);
+  };
   if (can("sessions:read")) {
     server.registerTool(
       "sessions_list",
@@ -4522,7 +4577,7 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. A snapshot is not new evidence of a child's progress: do not poll it between session_wait calls. For a child that needs minutes, call wait_for_input instead; its terminal result wakes you and carries its final answer (payload.finalAnswer). Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
         inputSchema: {
           sessionId: z4
             .string()
@@ -4634,26 +4689,29 @@ function registerWorkspaceOrchestrationTools(
           latest: z4.enum(SessionEventLatestClass.options).optional(),
         },
       },
-      async ({
-        sessionId,
-        view,
-        cursor,
-        callId,
-        includeArguments,
-        includeOutput,
-        after,
-        before,
-        limit,
-        direction: requestedDirection,
-        mode: requestedMode,
-        payloadMode: requestedPayloadMode,
-        resultMode: requestedResultMode,
-        includeTypes: requestedIncludeTypes,
-        excludeTypes: requestedExcludeTypes,
-        includeClasses,
-        excludeClasses,
-        latest,
-      }) => {
+      async (
+        {
+          sessionId,
+          view,
+          cursor,
+          callId,
+          includeArguments,
+          includeOutput,
+          after,
+          before,
+          limit,
+          direction: requestedDirection,
+          mode: requestedMode,
+          payloadMode: requestedPayloadMode,
+          resultMode: requestedResultMode,
+          includeTypes: requestedIncludeTypes,
+          excludeTypes: requestedExcludeTypes,
+          includeClasses,
+          excludeClasses,
+          latest,
+        },
+        extra,
+      ) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         // Keep the model schema compact without weakening either MCP validation
         // or direct adapter calls: the canonical registry owns accepted types.
@@ -4706,7 +4764,9 @@ function registerWorkspaceOrchestrationTools(
                   listSessionEventPage(deps.db, grant.workspaceId, sessionId, legacyOptions),
               ),
           );
-          await acknowledgeReads([{ sessionId, sequences: completeChildReadSequences(page) }]);
+          const consumed = [{ sessionId, sequences: completeChildReadSequences(page) }];
+          await acknowledgeReads(consumed);
+          await recordConsumedChildResults(consumed, extra);
           return json(page);
         }
         if (
@@ -4774,7 +4834,9 @@ function registerWorkspaceOrchestrationTools(
             !result.truncation.truncated &&
             dbPage.fullPayloadsExact
           ) {
-            await acknowledgeReads([{ sessionId, sequences: [result.sequence] }]);
+            const consumed = [{ sessionId, sequences: [result.sequence] }];
+            await acknowledgeReads(consumed);
+            await recordConsumedChildResults(consumed, extra);
           }
           return json(result);
         }
@@ -4793,9 +4855,9 @@ function registerWorkspaceOrchestrationTools(
           dbPage.fullPayloadsExact &&
           !page.truncation?.reasons.includes("model_payload")
         ) {
-          await acknowledgeReads([
-            { sessionId, sequences: page.events.map((event) => event.sequence) },
-          ]);
+          const consumed = [{ sessionId, sequences: page.events.map((event) => event.sequence) }];
+          await acknowledgeReads(consumed);
+          await recordConsumedChildResults(consumed, extra);
         }
         return json(page);
       },
@@ -4804,7 +4866,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, settled answers, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas, progress commentary, or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence. For long or uncertain waits call wait_for_input once and end the turn.`,
+        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, settled answers, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas, progress commentary, or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence; a session_get snapshot between waits is not new evidence. For long or uncertain waits, including a child that needs minutes, call wait_for_input once and end the turn: the child's terminal result wakes you and carries its final answer (payload.finalAnswer).`,
         inputSchema: {
           targets: z4
             .array(
@@ -4897,22 +4959,34 @@ function registerWorkspaceOrchestrationTools(
               ownSessionId === null
                 ? null
                 : async () =>
-                    (
-                      await listOutstandingSessionSystemUpdates(deps.db, workspaceId, ownSessionId)
-                    ).map((update) => update.kind),
+                    (await listOwnPendingUpdates(ownSessionId)).map((update) => update.kind),
             subscribe: (targetSessionId, onEvents) =>
               deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
           },
         });
         if (!result.aborted && !result.truncated) {
-          await acknowledgeReads(
-            result.changed.map((target) => ({
-              sessionId: target.sessionId,
-              sequences: target.events
-                .filter((event) => event.contentComplete && !incompleteWaitEvents.has(event.id))
-                .map((event) => event.sequence),
-            })),
-          );
+          const consumed = result.changed.map((target) => ({
+            sessionId: target.sessionId,
+            sequences: target.events
+              .filter((event) => event.contentComplete && !incompleteWaitEvents.has(event.id))
+              .map((event) => event.sequence),
+          }));
+          await acknowledgeReads(consumed);
+          await recordConsumedChildResults(consumed, extra);
+          if (result.ownPendingUpdates > 0 && ownSessionId !== null) {
+            // The returned answer may be the pending input this result
+            // counted; report what is still pending so the caller is not told
+            // to end its turn only to receive the answer it already has.
+            const pending = await listOwnPendingUpdates(ownSessionId);
+            if (pending.length !== result.ownPendingUpdates) {
+              return json(
+                withOwnPendingUpdateKinds(
+                  result,
+                  pending.map((update) => update.kind),
+                ),
+              );
+            }
+          }
         }
         return json(result);
       },
@@ -5085,7 +5159,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. A worker costs minutes and a large context of its own: answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; the worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {
@@ -5137,7 +5211,7 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
+          "To continue related work, message a worker you already spawned instead of spawning a new one; it keeps its context. Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),

@@ -534,12 +534,16 @@ const effectiveBudgets = {
     // Keep the established 1.5 KiB headroom; initial, per-file, lazy, and CSS
     // caps stay fixed.
     wholeKibEnvelope(2_475_118, 1.5 * kib),
+    // Result-bearing child completion adds the child final-answer schema to
+    // the shared contracts chunk (its copy helpers tree-shake out). Merged with
+    // main c4d0d1a1a the graph measures 2,477,442 raw bytes on Bun 1.3.14
+    // macOS/arm64 and Linux/x64 CI, 386 bytes over the previous envelope. Keep
+    // the established 1.5 KiB headroom; gzip and every other cap stay fixed.
     // Workspace webhook, credential provider, and sandbox image SDK methods on
-    // the shared client (their settings UI stays lazy): base 9649fcca9 measures
-    // 2,476,971 raw / 700,619 gzip across 35 files; the candidate 2,480,000 /
-    // 701,213 across 36 (Bun 1.4 Linux/x64). Keep the established 1.5 KiB
-    // headroom; gzip, file-count, initial, per-file, lazy, and CSS caps stay fixed.
-    wholeKibEnvelope(2_480_000, 1.5 * kib),
+    // the shared client (their settings UI stays lazy) add 3,029 bytes: merged
+    // with main 7a0866079 the graph measures 2,480,471 raw / 701,324 gzip across
+    // 36 files (Bun 1.4 Linux/x64).
+    wholeKibEnvelope(2_480_471, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

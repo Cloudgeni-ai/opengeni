@@ -85,7 +85,7 @@ also be discoverable in the workspace library.
 
 ## Child sessions
 
-An agent can spawn child sessions for parallel or delegated work. Children run as ordinary sessions, and their terminal results are delivered back to the parent as durable input the parent's next turn sees.
+An agent can spawn child sessions for parallel or delegated work. Children run as ordinary sessions, and their terminal results are delivered back to the parent as durable input the parent's next turn sees. A finished child's result carries its final answer (up to 8 KiB, with a pointer to the full text when longer), so the parent can use it without reading the child's history. A child costs minutes and its own model context, so agents answer directly when the work is small and reuse an existing child for related follow-ups.
 
 ## Visibility
 

@@ -8228,6 +8228,192 @@ export const ChildProgressPayload = z
   .passthrough();
 export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
 
+/**
+ * Bound, in UTF-8 bytes including the truncation marker, on the child's final
+ * answer copied into its `child_terminal_result`. The complete answer stays in
+ * the child's durable `turn.completed` event; `nextAction` points at it.
+ */
+export const CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES = 8 * 1024;
+
+/**
+ * The child's final answer, frozen by the idle settlement that produced the
+ * terminal result. `sequence` is the child's result-bearing `turn.completed`
+ * event whose output `text` copies. A truncated copy keeps the head and the
+ * tail around an explicit marker, and `nextAction` reads the complete answer.
+ *
+ * `goalContinuations` holds the output of each goal-continuation turn that
+ * ran after that answer, oldest first. Such a turn only continued the child's
+ * goal (for example to confirm and complete it), so it never replaces the
+ * answer. Each entry is the exact output of its `turn.completed` event, copied
+ * whole together with the answer when all of them fit the bound.
+ *
+ * When they do not fit, the copy is the newest part instead, marked truncated:
+ * `sequence` and `text` are that part (cut around a marker only if it alone
+ * exceeds the bound), `omittedSequences` lists the earlier parts it leaves
+ * out, `totalBytes` counts every part, and `nextAction` reads all of them from
+ * the first.
+ */
+export const ChildTerminalResultFinalAnswer = z
+  .object({
+    sequence: z.number().int().positive(),
+    text: z.string(),
+    truncated: z.boolean(),
+    totalBytes: z.number().int().nonnegative(),
+    goalContinuations: z
+      .array(
+        z
+          .object({
+            sequence: z.number().int().positive(),
+            text: z.string().min(1),
+          })
+          .passthrough(),
+      )
+      .min(1)
+      .optional(),
+    omittedSequences: z.array(z.number().int().positive()).min(1).max(64).optional(),
+    nextAction: z
+      .object({
+        tool: z.literal("session_events"),
+        arguments: z
+          .object({
+            sessionId: z.string().uuid(),
+            view: z.literal("results"),
+            after: z.number().int().nonnegative(),
+          })
+          .passthrough(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type ChildTerminalResultFinalAnswer = z.infer<typeof ChildTerminalResultFinalAnswer>;
+
+/**
+ * Every child answer event a final-answer copy reports on: the copied answer,
+ * each copied goal continuation, and each earlier part a truncated copy omits.
+ * A parent has consumed the result only once it received all of them whole.
+ */
+export function childTerminalResultFinalAnswerSequences(
+  answer: Pick<
+    ChildTerminalResultFinalAnswer,
+    "sequence" | "goalContinuations" | "omittedSequences"
+  >,
+): number[] {
+  return [
+    answer.sequence,
+    ...(answer.goalContinuations ?? []).map((part) => part.sequence),
+    ...(answer.omittedSequences ?? []),
+  ];
+}
+
+/** Head and tail of `output` around an omission marker, within `maxBytes`. */
+function headTailWithinBytes(
+  output: string,
+  maxBytes: number,
+  marker: (omittedBytes: number) => string,
+): string {
+  const totalBytes = utf8Bytes(output);
+  // Reserve the widest marker first: the real omitted count never has more
+  // digits than the total, so the result always fits the bound.
+  const budget = maxBytes - utf8Bytes(marker(totalBytes));
+  const head = utf8PrefixForResult(output, Math.floor(budget * 0.7));
+  const tail = utf8SuffixForResult(output, budget - utf8Bytes(head));
+  return `${head}${marker(totalBytes - utf8Bytes(head) - utf8Bytes(tail))}${tail}`;
+}
+
+/** Bounded, UTF-8 safe copy of one child's final answer for its parent. */
+export function childTerminalResultFinalAnswer(input: {
+  childSessionId: string;
+  sequence: number;
+  output: string;
+}): ChildTerminalResultFinalAnswer {
+  const totalBytes = utf8Bytes(input.output);
+  if (totalBytes <= CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES) {
+    return { sequence: input.sequence, text: input.output, truncated: false, totalBytes };
+  }
+  return {
+    sequence: input.sequence,
+    text: headTailWithinBytes(
+      input.output,
+      CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES,
+      (omittedBytes) =>
+        `\n\n[... ${omittedBytes} bytes of the final answer omitted here. Call finalAnswer.nextAction to read the complete answer. ...]\n\n`,
+    ),
+    truncated: true,
+    totalBytes,
+    nextAction: {
+      tool: "session_events",
+      arguments: { sessionId: input.childSessionId, view: "results", after: input.sequence - 1 },
+    },
+  };
+}
+
+/**
+ * The child's answer followed by the output of each goal-continuation turn
+ * that ran after it, oldest first. Without continuation output this is
+ * `childTerminalResultFinalAnswer`. With it, the answer and every continuation
+ * are copied whole when together they fit the bound. Otherwise the copy is
+ * the newest continuation, marked truncated, with a leading note that earlier
+ * output was omitted and `nextAction` reading every part from the answer: the
+ * parent is never handed a cut answer or a dropped part as the whole result,
+ * and it still receives at least the newest output.
+ */
+export function childTerminalResultFinalAnswerWithGoalContinuations(input: {
+  childSessionId: string;
+  sequence: number;
+  output: string;
+  goalContinuations: readonly { sequence: number; output: string }[];
+}): ChildTerminalResultFinalAnswer {
+  const goalContinuations = input.goalContinuations.filter(
+    (continuation) => continuation.output.length > 0,
+  );
+  const newest = goalContinuations.at(-1);
+  if (!newest) return childTerminalResultFinalAnswer(input);
+  const totalBytes = utf8Bytes(input.output);
+  const combinedBytes = goalContinuations.reduce(
+    (sum, continuation) => sum + utf8Bytes(continuation.output),
+    totalBytes,
+  );
+  if (combinedBytes <= CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES) {
+    return {
+      sequence: input.sequence,
+      text: input.output,
+      truncated: false,
+      totalBytes,
+      goalContinuations: goalContinuations.map((continuation) => ({
+        sequence: continuation.sequence,
+        text: continuation.output,
+      })),
+    };
+  }
+  const earlier = [
+    { sequence: input.sequence, output: input.output },
+    ...goalContinuations.slice(0, -1),
+  ];
+  const lead = `[... ${combinedBytes - utf8Bytes(newest.output)} bytes of earlier output from this child (${earlier.length === 1 ? "1 turn" : `${earlier.length} turns`}) omitted here. Call finalAnswer.nextAction to read the complete result. ...]\n\n`;
+  const budget = CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES - utf8Bytes(lead);
+  return {
+    sequence: newest.sequence,
+    text: `${lead}${
+      utf8Bytes(newest.output) <= budget
+        ? newest.output
+        : headTailWithinBytes(
+            newest.output,
+            budget,
+            (omittedBytes) =>
+              `\n\n[... ${omittedBytes} bytes of this output omitted here. Call finalAnswer.nextAction to read the complete result. ...]\n\n`,
+          )
+    }`,
+    truncated: true,
+    totalBytes: combinedBytes,
+    omittedSequences: earlier.map((part) => part.sequence),
+    nextAction: {
+      tool: "session_events",
+      arguments: { sessionId: input.childSessionId, view: "results", after: input.sequence - 1 },
+    },
+  };
+}
+
 export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
   z
     .object({
@@ -8291,6 +8477,8 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       type: z.literal("child_terminal_result"),
       childSessionId: z.string().uuid(),
       status: z.enum(["idle", "failed", "cancelled"]),
+      /** Optional so older rows and older producers remain valid. */
+      finalAnswer: ChildTerminalResultFinalAnswer.optional(),
     })
     .passthrough(),
   MediaGenerationResult,
