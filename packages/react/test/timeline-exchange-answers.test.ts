@@ -9,8 +9,7 @@ import {
 import recorded from "./fixtures/exchange-answer-before-machine-turns.json";
 
 /*
- * Answers stay visible in the compact exchange fold. Only work folds: steps,
- * tool calls, waits, machine inputs, and progress notes. A settled answer is
+ * Answers and progress stay visible in readable turns. Only work folds. A settled answer is
  * never demoted into the row because more machine-triggered turns (agent
  * messages, child results, wait timeouts, goal continuations, background
  * command results) followed it in the same exchange.
@@ -130,7 +129,7 @@ function emptyTurn(turnId: string): SessionEvent[] {
 }
 
 function fold(events: SessionEvent[]): TimelineGroup[] {
-  return groupTimeline(buildTimeline(events), { foldExchanges: true });
+  return groupTimeline(buildTimeline(events), { readableTurns: true });
 }
 
 /** Assistant prose a reader sees without expanding anything. */
@@ -161,7 +160,7 @@ function answeredFirstTurn(settle: typeof answer = answer): SessionEvent[] {
   ];
 }
 
-describe("answers stay visible in the exchange fold", () => {
+describe("answers stay visible across readable turns", () => {
   test("recorded exchange: an agent message after the answer starts one more short turn", () => {
     const events = recorded as SessionEvent[];
     const final = buildTimeline(events).find(
@@ -173,10 +172,12 @@ describe("answers stay visible in the exchange fold", () => {
     const groups = fold(events);
     // The answer, with its image and its question, is a normal visible message.
     expect(visibleMessages(groups)).toContain(final!.text);
-    // The routine machine traffic around it still folds.
-    expect(
-      topLevelKinds(groups).filter((kind) => kind === "machine-input-batch" || kind === "notice"),
-    ).toEqual([]);
+    // Turn boundaries and recorded waits remain inspectable, never one exchange fold.
+    expect(topLevelKinds(groups)).toContain("machine-input-batch");
+    expect(topLevelKinds(groups)).toContain("notice");
+    expect(groups.some((group) => group.kind !== "item" && group.id.startsWith("exchange-"))).toBe(
+      false,
+    );
   });
 
   for (const kind of [
@@ -188,7 +189,7 @@ describe("answers stay visible in the exchange fold", () => {
   ]) {
     test(`an answer followed by a ${kind} turn without prose stays visible`, () => {
       const events = [...answeredFirstTurn(), machineInput(kind, "turn-2"), ...quietTurn("turn-2")];
-      expect(visibleMessages(fold(events))).toEqual([ANSWER_A]);
+      expect(visibleMessages(fold(events))).toEqual(["Querying the regional tables.", ANSWER_A]);
     });
 
     test(`an answer followed by a ${kind} turn that answers again keeps both answers`, () => {
@@ -199,7 +200,11 @@ describe("answers stay visible in the exchange fold", () => {
         ...tool("publish", "exec_command", "turn-2"),
         ...answer(ANSWER_B, "turn-2"),
       ];
-      expect(visibleMessages(fold(events))).toEqual([ANSWER_A, ANSWER_B]);
+      expect(visibleMessages(fold(events))).toEqual([
+        "Querying the regional tables.",
+        ANSWER_A,
+        ANSWER_B,
+      ]);
     });
   }
 
@@ -212,7 +217,11 @@ describe("answers stay visible in the exchange fold", () => {
       ...tool("check", "exec_command", "turn-2"),
       ...answer(ANSWER_B, "turn-2"),
     ];
-    expect(visibleMessages(fold(events))).toEqual([ANSWER_A, ANSWER_B]);
+    expect(visibleMessages(fold(events))).toEqual([
+      "Querying the regional tables.",
+      ANSWER_A,
+      ANSWER_B,
+    ]);
   });
 
   test("an answer followed by repeated wait timeouts stays visible", () => {
@@ -220,7 +229,7 @@ describe("answers stay visible in the exchange fold", () => {
     for (const turnId of ["turn-2", "turn-3", "turn-4"]) {
       events.push(machineInput("session_wait_timeout", turnId), ...quietTurn(turnId));
     }
-    expect(visibleMessages(fold(events))).toEqual([ANSWER_A]);
+    expect(visibleMessages(fold(events))).toEqual(["Querying the regional tables.", ANSWER_A]);
   });
 
   test("an answer followed by a turn whose final message is empty stays visible", () => {
@@ -229,7 +238,7 @@ describe("answers stay visible in the exchange fold", () => {
       machineInput("agent_message", "turn-2"),
       ...emptyTurn("turn-2"),
     ];
-    expect(visibleMessages(fold(events))).toEqual([ANSWER_A]);
+    expect(visibleMessages(fold(events))).toEqual(["Querying the regional tables.", ANSWER_A]);
   });
 
   test("a phase-less answer followed by a machine turn stays visible", () => {
@@ -238,7 +247,7 @@ describe("answers stay visible in the exchange fold", () => {
       machineInput("child_terminal_result", "turn-2"),
       ...quietTurn("turn-2"),
     ];
-    expect(visibleMessages(fold(events))).toEqual([ANSWER_A]);
+    expect(visibleMessages(fold(events))).toEqual(["Querying the regional tables.", ANSWER_A]);
   });
 
   test("the answer stays visible while the next machine-triggered turn works", () => {
@@ -249,7 +258,7 @@ describe("answers stay visible in the exchange fold", () => {
       ...tool("follow-up", "exec_command", "turn-2"),
     ];
     const groups = fold(events);
-    expect(visibleMessages(groups)).toEqual([ANSWER_A]);
+    expect(visibleMessages(groups)).toEqual(["Querying the regional tables.", ANSWER_A]);
     // The later turn is one live row below the answer.
     expect(topLevelKinds(groups).at(-1)).toBe("activity");
   });
@@ -300,11 +309,17 @@ describe("answers stay visible in the exchange fold", () => {
     const answered = answeredFirstTurn();
     const input = machineInput("agent_message", "turn-2");
     const groups = fold([...answered, input]);
-    expect(topLevelKinds(groups)).toEqual(["user-message", "turn", "agent-message", "turn"]);
-    expect(visibleMessages(groups)).toEqual([ANSWER_A]);
-    // The row the next turn continues, so it keeps its identity.
+    expect(topLevelKinds(groups)).toEqual([
+      "user-message",
+      "agent-message",
+      "activity",
+      "agent-message",
+      "machine-input-batch",
+    ]);
+    expect(visibleMessages(groups)).toEqual(["Querying the regional tables.", ANSWER_A]);
+    // One small reason identifies the new turn before its work starts.
     const opened = groups.at(-1);
-    expect(opened?.kind === "turn" ? opened.id : null).toBe(`exchange-${input.id}`);
+    expect(opened?.kind === "item" ? opened.item.id : null).toBe(input.id);
     const working = fold([
       ...answered,
       input,
@@ -312,7 +327,7 @@ describe("answers stay visible in the exchange fold", () => {
       ...tool("follow-up", "exec_command", "turn-2"),
     ]);
     const live = working.at(-1);
-    expect(live?.kind === "activity" ? live.id : null).toBe(`exchange-${input.id}`);
+    expect(live?.kind === "activity" ? live.id : null).toBe("work-turn-2");
   });
 
   test("a later turn that writes only a note keeps the answer and folds its own work", () => {
@@ -329,18 +344,21 @@ describe("answers stay visible in the exchange fold", () => {
     // The note stands in for the later turn's missing answer, below its row.
     expect(topLevelKinds(groups)).toEqual([
       "user-message",
-      "turn",
       "agent-message",
-      "turn",
+      "activity",
+      "agent-message",
+      "machine-input-batch",
+      "activity",
       "agent-message",
     ]);
     expect(visibleMessages(groups)).toEqual([
+      "Querying the regional tables.",
       ANSWER_A,
       "The worker finished; nothing else changed.",
     ]);
   });
 
-  test("a note that more work followed still folds, next to the answer", () => {
+  test("a note that more work followed stays visible beside the earlier answer", () => {
     const events = [
       ...answeredFirstTurn(),
       machineInput("child_terminal_result", "turn-2"),
@@ -351,8 +369,23 @@ describe("answers stay visible in the exchange fold", () => {
       ...[machineInput("session_wait_timeout", "turn-3"), ...quietTurn("turn-3")],
     ];
     const groups = fold(events);
-    expect(visibleMessages(groups)).toEqual([ANSWER_A]);
-    expect(topLevelKinds(groups)).toEqual(["user-message", "turn", "agent-message", "turn"]);
+    expect(visibleMessages(groups)).toEqual([
+      "Querying the regional tables.",
+      ANSWER_A,
+      "Checking the worker result.",
+    ]);
+    expect(topLevelKinds(groups)).toEqual([
+      "user-message",
+      "agent-message",
+      "activity",
+      "agent-message",
+      "machine-input-batch",
+      "activity",
+      "agent-message",
+      "machine-input-batch",
+      "activity",
+      "notice",
+    ]);
   });
 
   test("a declared final answer that a trailing step of its turn follows stays visible", () => {
@@ -375,8 +408,16 @@ describe("answers stay visible in the exchange fold", () => {
     ];
     const groups = fold(events);
     // The answer, not the earlier progress note, is the turn's visible reply.
-    expect(visibleMessages(groups)).toEqual([ANSWER_A]);
-    expect(topLevelKinds(groups)).toEqual(["user-message", "turn", "agent-message", "turn"]);
+    expect(visibleMessages(groups)).toEqual(["Querying the regional tables.", ANSWER_A]);
+    expect(topLevelKinds(groups)).toEqual([
+      "user-message",
+      "agent-message",
+      "activity",
+      "agent-message",
+      "machine-input-batch",
+      "activity",
+      "notice",
+    ]);
   });
 
   test("the classic grouping is unchanged", () => {

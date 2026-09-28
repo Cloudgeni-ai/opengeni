@@ -298,23 +298,24 @@ describe("TurnSummary status line", () => {
     await r.unmount();
   });
 
-  test("a live exchange keeps one short line and previews its note while closed", async () => {
+  test("live work keeps one short line and previews only its current step", async () => {
     const r = await renderComponent(
       <TurnSummary
         items={[toolCall("1", "exec_command"), toolCall("2", "exec_command", "running")]}
         status={{
           kind: "working",
           since: new Date(Date.now() - 134_000).toISOString(),
-          note: "Checking the second file.",
+          preview: <span>Checking the second file.</span>,
         }}
       >
         details
       </TurnSummary>,
     );
     expect(summaryText(r.container)).toMatch(/^Working · 2m 1[3-5]s · 2 steps$/);
-    expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
+    expect(r.container.querySelector("[data-og-exchange-preview]")?.textContent).toBe(
       "Checking the second file.",
     );
+    expect(r.container.querySelector("[data-og-exchange-note]")).toBeNull();
     await r.unmount();
   });
 });
