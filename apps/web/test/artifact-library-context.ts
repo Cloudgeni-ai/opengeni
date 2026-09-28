@@ -155,6 +155,9 @@ export function useAppContext() {
       fixtureActivity.prompts.push(input.text);
       return null;
     },
-    accessContext: { subjectId: "fixture" },
+    accessContext: {
+      subjectId: "fixture",
+      workspaceGrants: [{ workspaceId, permissions: ["sessions:create"] }],
+    },
   } as unknown as AppContextValue;
 }

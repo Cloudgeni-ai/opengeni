@@ -57,10 +57,8 @@ try {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${baseUrl}/test/artifact-library.html`, { waitUntil: "networkidle" });
-    await page.getByRole("link", { name: "Open Project mark", exact: true }).waitFor();
-    await page
-      .getByRole("link", { name: "Open Project mark", exact: true })
-      .scrollIntoViewIfNeeded();
+    await page.getByRole("link", { name: "Project mark", exact: true }).waitFor();
+    await page.getByRole("link", { name: "Project mark", exact: true }).scrollIntoViewIfNeeded();
     await page.getByRole("img", { name: "Project mark", exact: true }).waitFor();
     await page.locator('[data-slot="content-page"]').evaluate((element) => {
       element.scrollTop = 0;
@@ -76,24 +74,15 @@ try {
       false,
       "no horizontal overflow",
     );
-    await page.screenshot({ path: `${output}/grid-${suffix}.png`, fullPage: true });
-    await page.getByRole("button", { name: "List view", exact: true }).click();
-    await page.reload({ waitUntil: "networkidle" });
-    assert.equal(
-      await page
-        .getByRole("button", { name: "List view", exact: true })
-        .getAttribute("aria-pressed"),
-      "true",
-    );
     await page.screenshot({ path: `${output}/list-${suffix}.png`, fullPage: true });
-    await page.getByRole("button", { name: "Images", exact: true }).click();
+    await page.getByRole("tab", { name: "Images", exact: true }).click();
     assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 2);
     await page.getByRole("button", { name: "New artifact", exact: true }).click();
     assert.equal(
       (await activity()).prompts.at(-1),
       "Help me create a workspace image. Ask what it should contain before creating it.",
     );
-    await page.getByRole("link", { name: "Open Project mark", exact: true }).click();
+    await page.getByRole("link", { name: "Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
     const imageBounds = await page
       .getByRole("img", { name: "Project mark.svg", exact: true })
@@ -112,8 +101,8 @@ try {
     const download = page.waitForEvent("download");
     await page.getByRole("button", { name: "Download", exact: true }).click();
     assert.equal((await download).suggestedFilename(), "Project mark.svg");
-    await page.getByRole("link", { name: "All artifacts", exact: true }).click();
-    await page.getByRole("link", { name: "Open Generated cover", exact: true }).click();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Generated cover", exact: true }).click();
     await page.getByRole("button", { name: "Expand Generated cover.svg", exact: true }).waitFor();
     assert.match(
       (await page
@@ -121,21 +110,24 @@ try {
         .getAttribute("src")) ?? "",
       /\/test\/artifact-library-image\.svg$/,
     );
-    await page.getByRole("link", { name: "All artifacts", exact: true }).click();
-    await page.getByRole("link", { name: "Open Research export.csv", exact: true }).click();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Research export.csv", exact: true }).click();
     await page
       .getByText("Preview is not available for this file. Download it to open it.")
       .waitFor();
     const fileDownload = page.waitForEvent("download");
     await page.getByRole("button", { name: "Download", exact: true }).click();
     assert.equal((await fileDownload).suggestedFilename(), "Research export.csv");
-    await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
     await page.getByRole("searchbox", { name: "Search artifacts by title" }).fill("Launch");
-    await page.getByRole("link", { name: "Open Launch brief", exact: true }).waitFor();
-    assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 1);
+    await page.getByRole("link", { name: "Launch brief", exact: true }).waitFor();
+    assert.equal(await page.locator('ul[aria-label="Search results"] > li').count(), 1);
     await page.getByRole("searchbox", { name: "Search artifacts by title" }).fill("");
-    await page.getByRole("combobox", { name: "Artifact status" }).selectOption("archived");
-    await page.getByRole("link", { name: "Open Previous dashboard", exact: true }).waitFor();
+    await page.getByRole("tab", { name: "All", exact: true }).click();
+    await page.getByRole("button", { name: "Filter", exact: true }).click();
+    await page.getByRole("menuitemcheckbox", { name: "Archived", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await page.getByRole("link", { name: "Previous dashboard", exact: true }).waitFor();
     const accessibility = await new AxeBuilder({ page }).analyze();
     assert.deepEqual(
       accessibility.violations
@@ -146,9 +138,9 @@ try {
     await page.goto(`${baseUrl}/test/artifact-library.html?session=1`, {
       waitUntil: "networkidle",
     });
-    await page.getByRole("button", { name: "Open Project mark", exact: true }).click();
+    await page.getByRole("button", { name: "Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
-    assert.equal(await page.getByRole("link", { name: "All artifacts", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("link", { name: "Artifacts", exact: true }).count(), 0);
     assert.equal(await page.getByRole("button", { name: "Browse session artifacts" }).count(), 1);
     const embeddedScroll = await page.locator('[data-slot="content-page"]').evaluate((element) => {
       const bottom = element.getBoundingClientRect().bottom;
@@ -180,11 +172,7 @@ try {
           : page.getByText(state === "error" ? "Couldn't load artifacts" : /No artifacts yet/);
       await expected.waitFor();
     }
-    for (const view of ["grid", "list"]) {
-      await page.evaluate(
-        (mode) => localStorage.setItem("opengeni:artifact-library:view:v1", mode),
-        view,
-      );
+    for (const view of ["list"]) {
       await page.goto(`${baseUrl}/test/artifact-library.html?many=1`, { waitUntil: "networkidle" });
       // Network idleness can precede the fixture's async React render and
       // IntersectionObserver delivery. Observe a loaded nearby thumbnail before
@@ -203,7 +191,7 @@ try {
       assert.ok(!initial.metadata.includes(lastId));
       assert.ok(!initial.downloads.includes(lastId));
       await page
-        .getByRole("link", { name: "Open Gallery image 60", exact: true })
+        .getByRole("link", { name: "Gallery image 60", exact: true })
         .scrollIntoViewIfNeeded();
       await page.getByRole("img", { name: "Gallery image 60", exact: true }).waitFor();
       const scrolled = await activity();
@@ -216,7 +204,7 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
     console.log(
-      `Artifact library ${suffix}: CTA, grid/list, viewport-gated thumbnails, persistence, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
+      `Artifact library ${suffix}: CTA, type tabs, viewport-gated thumbnails, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
     );
   }
 } finally {

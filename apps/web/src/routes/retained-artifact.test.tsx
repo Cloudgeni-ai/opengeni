@@ -101,7 +101,7 @@ async function renderRoute(embedded = false) {
   };
 }
 
-test("malformed retained-file ids show unavailable copy and All artifacts", async () => {
+test("malformed retained-file ids show unavailable copy and the Artifacts back link", async () => {
   artifactId = "does-not-exist";
   loadError = new OpenGeniApiError(
     404,
@@ -112,13 +112,13 @@ test("malformed retained-file ids show unavailable copy and All artifacts", asyn
   try {
     expect(rendered.container.textContent).toContain("Artifact unavailable");
     expect(rendered.container.textContent).toContain("This file isn't available.");
-    expect(rendered.container.textContent).toContain("All artifacts");
+    expect(rendered.container.textContent).toContain("Artifacts");
     expect(rendered.container.textContent).toContain("Support reference");
     expect(rendered.container.textContent).toContain("corr-malformed");
     expect(rendered.container.textContent).not.toContain("OpenGeni API");
     expect(rendered.container.textContent).not.toContain("Retry");
     const link = rendered.container.querySelector("a");
-    expect(link?.textContent).toContain("All artifacts");
+    expect(link?.textContent?.trim()).toBe("Artifacts");
     expect(link?.getAttribute("href")).toBe(`/workspaces/${workspaceId}/artifacts`);
   } finally {
     await rendered.unmount();
@@ -126,7 +126,7 @@ test("malformed retained-file ids show unavailable copy and All artifacts", asyn
 });
 
 for (const state of ["loading", "loaded", "error"] as const) {
-  test(`embedded retained artifact omits All artifacts while ${state}`, async () => {
+  test(`embedded retained artifact omits the Artifacts back link while ${state}`, async () => {
     artifactId = missingUuid;
     loadError = state === "error" ? new Error("Unavailable") : null;
     const originalLoad = context.client.getRetainedArtifact;
@@ -135,7 +135,7 @@ for (const state of ["loading", "loaded", "error"] as const) {
     }
     const rendered = await renderRoute(true);
     try {
-      expect(rendered.container.textContent).not.toContain("All artifacts");
+      expect(rendered.container.textContent).not.toContain("Artifacts");
       expect(rendered.container.textContent).toContain(
         state === "loading"
           ? "Loading artifact"
@@ -222,7 +222,7 @@ test("transient retained-file failures keep retry without raw API prefix", async
   const rendered = await renderRoute();
   try {
     expect(rendered.container.textContent).toContain("Couldn't load this file");
-    expect(rendered.container.textContent).toContain("All artifacts");
+    expect(rendered.container.textContent).toContain("Artifacts");
     expect(rendered.container.textContent).toContain("Retry");
     expect(rendered.container.textContent).toContain("corr-503");
     expect(rendered.container.textContent).not.toContain("OpenGeni API");

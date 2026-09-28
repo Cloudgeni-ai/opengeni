@@ -1,49 +1,46 @@
-import { Link } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
+import { ImageIcon, LinkIcon, MessageSquareIcon, PanelsTopLeftIcon } from "lucide-react";
 import {
-  FileIcon,
-  FileTextIcon,
-  Globe2Icon,
-  ImageIcon,
-  LayoutGridIcon,
-  ListIcon,
-  PresentationIcon,
-  SearchIcon,
-  Table2Icon,
-} from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
+import { toast } from "sonner";
+
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { EmptyState, LoadErrorState } from "@/components/common";
-import { cn } from "@/lib/utils";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { Notice } from "@/components/ui/notice";
+import { RelativeTime } from "@/components/ui/relative-time";
+import { StatusBadge } from "@/components/ui/status-badge";
+import {
+  Toolbar,
+  ToolbarFilterChips,
+  ToolbarFilterMenu,
+  ToolbarGroup,
+  ToolbarSearch,
+  type ToolbarFilterGroup,
+  type ToolbarFilterValue,
+} from "@/components/ui/toolbar";
 import {
   artifactKey,
   artifactKindLabel,
   artifactKinds,
+  artifactPath,
   artifactRoute,
-  readArtifactView,
-  rememberArtifactView,
   type ArtifactCatalogFilters,
   type ArtifactKind,
 } from "@/lib/artifact-catalog";
+
 const InlineChatImage = lazy(() =>
   import("./inline-chat-image").then((module) => ({ default: module.InlineChatImage })),
 );
-
-const icons = {
-  site: Globe2Icon,
-  image: ImageIcon,
-  document: FileTextIcon,
-  spreadsheet: Table2Icon,
-  presentation: PresentationIcon,
-  file: FileIcon,
-};
-export function ArtifactTypeIcon({ kind, className }: { kind: ArtifactKind; className?: string }) {
-  const Icon = icons[kind];
-  return <Icon className={className ?? "size-4"} aria-hidden />;
-}
 
 /** Mount retained-image loaders only near the viewport, not merely their img elements. */
 export function ArtifactThumbnail({ children }: { children: ReactNode }) {
@@ -70,8 +67,156 @@ export function ArtifactThumbnail({ children }: { children: ReactNode }) {
   }, []);
   return (
     <div ref={host} className="flex h-full w-full items-center justify-center">
-      {visible ? children : <ImageIcon className="size-5 text-fg-subtle" aria-hidden />}
+      {visible ? children : <ImageIcon className="size-4 text-fg-subtle" aria-hidden />}
     </div>
+  );
+}
+
+/** An image's own pixels in the 32px row tile, loaded only near the viewport. */
+function ImageTile({ workspaceId, item }: { workspaceId: string; item: ArtifactCatalogItem }) {
+  return (
+    <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] bg-surface-2 [&_img]:size-full [&_img]:object-cover">
+      <ArtifactThumbnail>
+        <Suspense fallback={<ImageIcon className="size-4 text-fg-subtle" aria-hidden />}>
+          <InlineChatImage
+            workspaceId={workspaceId}
+            artifactId={item.id}
+            alt={item.title}
+            thumbnail
+          />
+        </Suspense>
+      </ArtifactThumbnail>
+    </span>
+  );
+}
+
+const TYPE_GROUP: ToolbarFilterGroup = {
+  id: "type",
+  label: "Type",
+  options: artifactKinds
+    .filter(([kind]) => kind !== "all")
+    .map(([kind, label]) => ({ id: kind, label })),
+};
+const STATUS_GROUP: ToolbarFilterGroup = {
+  id: "status",
+  label: "Status",
+  options: [{ id: "archived", label: "Archived" }],
+};
+const SORT_GROUP: ToolbarFilterGroup = {
+  id: "sort",
+  label: "Sort",
+  options: [
+    { id: "newest", label: "Newest first" },
+    { id: "title", label: "Title" },
+  ],
+};
+
+/** The toolbar's filter value for the catalog filters (defaults are no filter). */
+function filterValueFor(filters: ArtifactCatalogFilters, withType: boolean): ToolbarFilterValue {
+  return {
+    ...(withType && filters.kind !== "all" ? { type: [filters.kind] } : {}),
+    ...(filters.status === "archived" ? { status: ["archived"] } : {}),
+    ...(filters.sort !== "updated" ? { sort: [filters.sort] } : {}),
+  };
+}
+
+/** Every group is one value: keep the option picked last. */
+function lastPicked(previous: ToolbarFilterValue, next: ToolbarFilterValue, group: string) {
+  const ids = next[group] ?? [];
+  if (ids.length <= 1) return ids[0];
+  const before = previous[group] ?? [];
+  return ids.filter((id) => !before.includes(id)).at(-1);
+}
+
+function isPlainClick(event: MouseEvent<HTMLElement>) {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+}
+
+export function ArtifactRow({
+  workspaceId,
+  item,
+  sessionId,
+  onSelect,
+}: {
+  workspaceId: string;
+  item: ArtifactCatalogItem;
+  sessionId?: string;
+  onSelect?: (item: ArtifactCatalogItem) => void;
+}) {
+  const navigate = useNavigate();
+  const search = sessionId ? { fromSession: sessionId } : {};
+  const href = artifactPath(workspaceId, item, sessionId);
+  const open = () =>
+    void navigate({
+      to: artifactRoute(item.kind),
+      params: { workspaceId, artifactId: item.id },
+      search,
+    });
+  const archived = item.status === "archived";
+  return (
+    <ListRow
+      // Types are words; only an image shows its own pixels.
+      leading={item.kind === "image" ? <ImageTile workspaceId={workspaceId} item={item} /> : null}
+      title={item.title}
+      meta={[
+        artifactKindLabel[item.kind],
+        <span key="updated">
+          updated <RelativeTime date={item.updatedAt} inSentence />
+        </span>,
+        item.kind === "file" && item.filename && item.filename !== item.title
+          ? item.filename
+          : null,
+        archived ? (
+          <StatusBadge key="status" variant="dot" tone="neutral">
+            Archived
+          </StatusBadge>
+        ) : null,
+      ].filter(Boolean)}
+      {...(onSelect
+        ? { onOpen: () => onSelect(item) }
+        : {
+            href,
+            onOpen: (event: MouseEvent<HTMLElement>) => {
+              if (!isPlainClick(event)) return;
+              event.preventDefault();
+              open();
+            },
+          })}
+      menu={
+        <>
+          <DropdownMenuItem onSelect={() => (onSelect ? onSelect(item) : open())}>
+            <PanelsTopLeftIcon />
+            Open
+          </DropdownMenuItem>
+          {item.sourceSessionId && item.sourceSessionId !== sessionId ? (
+            <DropdownMenuItem
+              onSelect={() =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/sessions/$sessionId",
+                  params: { workspaceId, sessionId: item.sourceSessionId! },
+                })
+              }
+            >
+              <MessageSquareIcon />
+              Open source session
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={() => {
+              void navigator.clipboard
+                ?.writeText(new URL(artifactPath(workspaceId, item), window.location.origin).href)
+                .then(() => toast("Copied a link to this artifact"))
+                .catch(() => toast.error("Couldn't copy the link"));
+            }}
+          >
+            <LinkIcon />
+            Copy link
+          </DropdownMenuItem>
+        </>
+      }
+      menuLabel={`More actions for ${item.title}`}
+    />
   );
 }
 
@@ -88,6 +233,8 @@ export function ArtifactLibrary({
   onLoadMore,
   onSelect,
   compact = false,
+  emptyAction,
+  onEmptyChange,
 }: {
   workspaceId: string;
   sessionId?: string;
@@ -100,248 +247,172 @@ export function ArtifactLibrary({
   nextCursor?: string | null;
   onLoadMore?: () => void;
   onSelect?: (item: ArtifactCatalogItem) => void;
+  /**
+   * The session's artifact panel: no page tabs, so the type filter joins the
+   * Filter menu.
+   */
   compact?: boolean;
+  /** The one action of the first-run empty state ("New artifact"). */
+  emptyAction?: ReactNode;
+  /** Nothing at all yet: the page hides its header action, the empty state has it. */
+  onEmptyChange?: (empty: boolean) => void;
 }) {
-  const [view, setView] = useState(readArtifactView);
-  const update = (patch: Partial<ArtifactCatalogFilters>) =>
-    onFiltersChange({ ...filters, ...patch });
+  const groups = compact ? [TYPE_GROUP, STATUS_GROUP, SORT_GROUP] : [STATUS_GROUP, SORT_GROUP];
+  const filterValue = filterValueFor(filters, compact);
+  const setFilterValue = (next: ToolbarFilterValue) => {
+    const kind = compact ? lastPicked(filterValue, next, "type") : undefined;
+    const status = lastPicked(filterValue, next, "status");
+    const sort = lastPicked(filterValue, next, "sort");
+    onFiltersChange({
+      ...filters,
+      ...(compact ? { kind: (kind as ArtifactKind | undefined) ?? "all" } : {}),
+      status: status === "archived" ? "archived" : "active",
+      sort: (sort as ArtifactCatalogFilters["sort"] | undefined) ?? "updated",
+    });
+  };
+  const searching = filters.q.trim().length > 0;
+  const narrowed =
+    searching ||
+    filters.kind !== "all" ||
+    filters.status !== "active" ||
+    filters.sort !== "updated";
+  const nothingAtAll = !loading && !error && items.length === 0 && !narrowed;
+  useEffect(() => onEmptyChange?.(nothingAtAll), [nothingAtAll, onEmptyChange]);
+  const kindLabel =
+    filters.kind === "all"
+      ? "artifacts"
+      : (artifactKinds.find(([kind]) => kind === filters.kind)?.[1] ?? "").toLocaleLowerCase();
+
+  let body: ReactNode;
+  if (error && items.length === 0) {
+    body = (
+      <Notice
+        tone="failed"
+        title="Couldn't load artifacts"
+        action={
+          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+            Try again
+          </Button>
+        }
+        actionLayout="responsive"
+      >
+        {error.message}
+      </Notice>
+    );
+  } else if (loading && items.length === 0) {
+    body = (
+      <div role="status" aria-label="Loading artifacts">
+        <RowList label="Artifacts" busy>
+          <ListRowSkeleton count={4} />
+        </RowList>
+      </div>
+    );
+  } else if (nothingAtAll) {
+    body = (
+      <EmptyState
+        variant={compact ? "inline" : "page"}
+        icon={<PanelsTopLeftIcon />}
+        title="No artifacts yet"
+        description="Sites, images, documents, spreadsheets and presentations Geni makes show up here."
+        action={emptyAction}
+      />
+    );
+  } else if (items.length === 0) {
+    body = (
+      <EmptyState
+        variant="inline"
+        title={
+          searching
+            ? `No ${kindLabel} match "${filters.q.trim()}".`
+            : filters.status === "archived"
+              ? `No archived ${kindLabel}. Archived Sites keep their versions and can be restored.`
+              : `No ${kindLabel} yet.`
+        }
+        action={
+          searching || filters.status !== "active" || (compact && filters.kind !== "all") ? (
+            <EmptyStateLink
+              onClick={() =>
+                onFiltersChange(
+                  searching
+                    ? { ...filters, q: "" }
+                    : {
+                        ...filters,
+                        q: "",
+                        status: "active",
+                        ...(compact ? { kind: "all" as const } : {}),
+                      },
+                )
+              }
+            >
+              {searching ? "Clear search" : "Clear filters"}
+            </EmptyStateLink>
+          ) : undefined
+        }
+      />
+    );
+  } else {
+    body = (
+      <div className="flex min-w-0 flex-col gap-4">
+        <RowList label={searching ? "Search results" : "Artifacts"} busy={loading}>
+          {items.map((item) => (
+            <ArtifactRow
+              key={artifactKey(item)}
+              workspaceId={workspaceId}
+              item={item}
+              sessionId={sessionId}
+              onSelect={onSelect}
+            />
+          ))}
+        </RowList>
+        {error ? (
+          <p role="alert" className="text-sm text-danger">
+            {error.message}
+          </p>
+        ) : null}
+        {nextCursor && onLoadMore ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="self-start pointer-coarse:h-11"
+            disabled={loading}
+            onClick={onLoadMore}
+          >
+            {loading ? "Loading…" : "Load more"}
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <section
-      className="@container min-w-0"
+      className="flex min-w-0 flex-col gap-4"
       aria-label={sessionId ? "Session artifact library" : "Artifact library"}
     >
-      <div className="mb-5 flex min-w-0 flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative min-w-40 flex-1">
-            <SearchIcon
-              className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-fg-subtle"
-              aria-hidden
+      <div className={nothingAtAll ? "hidden" : "flex min-w-0 flex-col gap-3"}>
+        <Toolbar>
+          <ToolbarSearch
+            value={filters.q}
+            onValueChange={(q) => onFiltersChange({ ...filters, q })}
+            placeholder="Search artifacts"
+            aria-label="Search artifacts by title"
+            maxLength={200}
+          />
+          <ToolbarGroup align="end">
+            <ToolbarFilterMenu groups={groups} value={filterValue} onValueChange={setFilterValue} />
+          </ToolbarGroup>
+        </Toolbar>
+        {Object.keys(filterValue).length > 0 ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <ToolbarFilterChips
+              groups={groups}
+              value={filterValue}
+              onValueChange={setFilterValue}
             />
-            <Input
-              type="search"
-              maxLength={200}
-              aria-label="Search artifacts by title"
-              placeholder="Search artifacts"
-              value={filters.q}
-              onChange={(event) => update({ q: event.target.value })}
-              className="h-10 pl-9"
-            />
           </div>
-          <div className="flex items-center gap-1" role="group" aria-label="Artifact view">
-            {(
-              [
-                ["grid", LayoutGridIcon],
-                ["list", ListIcon],
-              ] as const
-            ).map(([mode, Icon]) => (
-              <Button
-                key={mode}
-                variant={view === mode ? "secondary" : "ghost"}
-                size="icon"
-                className="size-10"
-                aria-label={`${mode === "grid" ? "Grid" : "List"} view`}
-                aria-pressed={view === mode}
-                onClick={() => {
-                  setView(mode);
-                  rememberArtifactView(mode);
-                }}
-              >
-                <Icon className="size-4" />
-              </Button>
-            ))}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div
-            className="flex min-w-full flex-1 flex-wrap gap-1 @4xl:min-w-0"
-            role="group"
-            aria-label="Artifact type"
-          >
-            {artifactKinds.map(([kind, label]) => (
-              <Button
-                key={kind}
-                size="sm"
-                variant={filters.kind === kind ? "secondary" : "ghost"}
-                className="min-h-9 px-2.5"
-                aria-pressed={filters.kind === kind}
-                onClick={() => update({ kind })}
-              >
-                {label}
-              </Button>
-            ))}
-          </div>
-          <Select
-            aria-label="Artifact status"
-            className="h-10 text-xs"
-            value={filters.status}
-            onChange={(event) =>
-              update({ status: event.target.value as ArtifactCatalogFilters["status"] })
-            }
-          >
-            <option value="active">Active</option>
-            <option value="archived">Archived</option>
-          </Select>
-          <Select
-            aria-label="Sort artifacts"
-            className="h-10 text-xs"
-            value={filters.sort}
-            onChange={(event) =>
-              update({ sort: event.target.value as ArtifactCatalogFilters["sort"] })
-            }
-          >
-            <option value="updated">Recently updated</option>
-            <option value="newest">Newest first</option>
-            <option value="title">Title</option>
-          </Select>
-        </div>
+        ) : null}
       </div>
-      {error ? (
-        <LoadErrorState title="Couldn't load artifacts" error={error} onRetry={onRetry} />
-      ) : null}
-      {loading && items.length === 0 ? (
-        <div
-          role="status"
-          aria-label="Loading artifacts"
-          className={cn("grid gap-4", compact ? "grid-cols-2" : "sm:grid-cols-2 xl:grid-cols-3")}
-        >
-          {[0, 1, 2].map((index) => (
-            <Skeleton key={index} className={view === "grid" ? "h-56" : "h-16"} />
-          ))}
-        </div>
-      ) : null}
-      {!loading && !error && items.length === 0 ? (
-        <EmptyState>
-          {filters.q || filters.kind !== "all"
-            ? "No matching artifacts. Try another title or type."
-            : filters.status === "archived"
-              ? "No archived artifacts."
-              : "No artifacts yet. Ask Geni to create a Site, image, document, spreadsheet, or presentation."}
-        </EmptyState>
-      ) : null}
-      <ul
-        aria-label="Artifacts"
-        aria-busy={loading}
-        className={
-          view === "grid"
-            ? cn(
-                "grid min-w-0 gap-4",
-                compact ? "grid-cols-1 @[360px]:grid-cols-2" : "sm:grid-cols-2 xl:grid-cols-3",
-              )
-            : "divide-y divide-border"
-        }
-      >
-        {items.map((item) => {
-          const contents = (
-            <>
-              <div
-                className={cn(
-                  "flex shrink-0 items-center justify-center overflow-hidden bg-surface-2",
-                  view === "grid" ? "aspect-[16/10] w-full rounded-lg" : "size-12 rounded-md",
-                )}
-              >
-                {item.kind === "image" ? (
-                  <ArtifactThumbnail>
-                    <Suspense
-                      fallback={
-                        <span role="status" className="p-2 text-xs text-fg-subtle">
-                          Loading image…
-                        </span>
-                      }
-                    >
-                      <InlineChatImage
-                        workspaceId={workspaceId}
-                        artifactId={item.id}
-                        alt={item.title}
-                        thumbnail
-                      />
-                    </Suspense>
-                  </ArtifactThumbnail>
-                ) : (
-                  <div
-                    className={cn(
-                      "flex min-w-0 flex-col items-center gap-3 px-5 text-center text-fg-subtle",
-                      view === "list" && "gap-0 px-0",
-                    )}
-                  >
-                    <ArtifactTypeIcon
-                      kind={item.kind}
-                      className={view === "grid" ? "size-8 stroke-[1.25]" : "size-5"}
-                    />
-                    {view === "grid" ? (
-                      <>
-                        <span className="text-sm text-fg-muted">
-                          {artifactKindLabel[item.kind]}
-                        </span>
-                        <span className="text-xs">
-                          {item.kind === "file"
-                            ? item.filename || "Download file"
-                            : item.versionId
-                              ? "Preview not available"
-                              : "No published preview"}
-                        </span>
-                      </>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-              <div className={cn("min-w-0", view === "grid" ? "px-1 pb-1 pt-3" : "flex-1")}>
-                <h2 className="truncate text-sm font-medium text-fg" title={item.title}>
-                  {item.title}
-                </h2>
-                <p className="mt-1 flex flex-wrap gap-x-2 text-xs text-fg-subtle">
-                  <span>{artifactKindLabel[item.kind]}</span>
-                  {item.status === "archived" ? <span>Archived</span> : null}
-                  <time dateTime={item.updatedAt}>Updated {formatCatalogDate(item.updatedAt)}</time>
-                </p>
-              </div>
-            </>
-          );
-          const className = cn(
-            "group block min-w-0 w-full rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
-            view === "grid"
-              ? "hover:bg-surface/60"
-              : "flex items-center gap-3 px-2 py-3 hover:bg-surface/60",
-          );
-          return (
-            <li key={artifactKey(item)} className="min-w-0">
-              {onSelect ? (
-                <button
-                  type="button"
-                  className={className}
-                  aria-label={`Open ${item.title}`}
-                  onClick={() => onSelect(item)}
-                >
-                  {contents}
-                </button>
-              ) : (
-                <Link
-                  to={artifactRoute(item.kind)}
-                  params={{ workspaceId, artifactId: item.id }}
-                  search={sessionId ? { fromSession: sessionId } : {}}
-                  className={className}
-                  aria-label={`Open ${item.title}`}
-                >
-                  {contents}
-                </Link>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      {nextCursor && onLoadMore ? (
-        <div className="mt-5 flex justify-center">
-          <Button variant="outline" onClick={onLoadMore} disabled={loading}>
-            {loading ? "Loading artifacts…" : "Load more"}
-          </Button>
-        </div>
-      ) : null}
+      <div className="min-w-0">{body}</div>
     </section>
   );
-}
-
-function formatCatalogDate(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? "Date unavailable"
-    : date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }

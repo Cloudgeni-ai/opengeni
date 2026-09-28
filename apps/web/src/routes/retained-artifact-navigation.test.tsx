@@ -29,7 +29,7 @@ beforeAll(() => {
 afterAll(() => GlobalRegistrator.unregister());
 
 for (const fromSession of [undefined, sessionId]) {
-  test(`real retained route All artifacts preserves return context ${fromSession ?? "absent"}`, async () => {
+  test(`real retained route back link preserves return context ${fromSession ?? "absent"}`, async () => {
     const { RetainedArtifactRoute } = await import("./retained-artifact");
     const route = createRootRoute({
       component: () => (
@@ -53,8 +53,8 @@ for (const fromSession of [undefined, sessionId]) {
         root.render(<RouterProvider router={router} />);
       });
       expect(container.textContent).toContain("notes.txt");
-      const links = [...container.querySelectorAll("a")].filter((link) =>
-        link.textContent?.includes("All artifacts"),
+      const links = [...container.querySelectorAll("a")].filter(
+        (link) => link.textContent?.trim() === "Artifacts",
       );
       expect(links).toHaveLength(1);
       const search = fromSession ? `?fromSession=${fromSession}` : "";

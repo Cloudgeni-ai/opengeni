@@ -119,6 +119,11 @@ async function renderDetail() {
   return { container, root };
 }
 
+/** Archive lives in the page's ⋯ menu. */
+function hasArchive(container: HTMLElement) {
+  return container.querySelector('button[aria-label^="More actions for"]') !== null;
+}
+
 function hasAction(container: HTMLElement, label: string) {
   const needle = label.replace(/\s+/g, " ").trim();
   return [...container.querySelectorAll("button, a")].some((node) => {
@@ -131,7 +136,7 @@ test("loaded Site keeps Archive and Edit with Geni behind permission checks", as
   loadError = null;
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(true);
+    expect(hasArchive(container)).toBe(true);
     expect(hasAction(container, "Edit with Geni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
   } finally {
@@ -144,7 +149,7 @@ test("missing Site hides Archive and Edit with Geni", async () => {
   loadError = new OpenGeniApiError(404, "", { correlationId: "corr-missing-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Geni")).toBe(false);
     expect(container.textContent).toContain("This Site isn't available");
     expect(container.textContent).toContain("Reference: corr-missing-site");
@@ -161,7 +166,7 @@ test("read-only Site hides mutation actions but keeps its preview", async () => 
   accessContext.workspaceGrants[0]!.permissions = [];
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Geni")).toBe(false);
     expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
   } finally {
@@ -175,7 +180,7 @@ test("malformed Site id hides mutation actions", async () => {
   loadError = new OpenGeniApiError(422, "", { correlationId: "corr-malformed-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Geni")).toBe(false);
     expect(container.textContent).toContain("This Site link isn't valid");
   } finally {
@@ -188,7 +193,7 @@ test("transient Site load failure offers retry without mutation actions", async 
   loadError = new OpenGeniApiError(503, "", { correlationId: "corr-transient-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Geni")).toBe(false);
     expect(hasAction(container, "Retry")).toBe(true);
     expect(container.textContent).toContain("Couldn't load this Site");

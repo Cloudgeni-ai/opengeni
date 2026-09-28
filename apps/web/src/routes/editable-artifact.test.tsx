@@ -91,7 +91,7 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
           });
           const links = [...container.querySelectorAll("a")];
           expect(links.map((link) => link.textContent)).toEqual(
-            embedded ? [] : ["All artifacts", "Back to session"],
+            embedded ? [] : ["Artifacts", "Back to session"],
           );
           if (!embedded) {
             expect(links[0]!.getAttribute("href")).toBe(

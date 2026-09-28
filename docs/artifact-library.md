@@ -39,8 +39,8 @@ catalog results contain no storage credentials or temporary download URLs.
 
 ## Presentation and version semantics
 
-The workspace library offers a preview grid and compact list, type filtering,
-title search, sorting, and an archived filter. The session panel uses the same
+The workspace library is one flat list (images show their own thumbnail) with
+type tabs, title search, and a Filter menu for archived items and sorting. The session panel uses the same
 catalog with a source-session filter. Both open the existing type-specific
 viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
 

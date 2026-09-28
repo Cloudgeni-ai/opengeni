@@ -19,21 +19,31 @@ export function ArtifactSessionPage({
   if (!fromSession && !showAllArtifacts) return children;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-border p-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-border px-4 py-2 max-sm:px-2">
         {showAllArtifacts ? (
-          <Button asChild variant="ghost" size="sm" className="mr-auto">
+          <Button
+            asChild
+            variant="ghost"
+            size="sm"
+            className="mr-auto text-fg-muted hover:text-fg pointer-coarse:h-11"
+          >
             <Link
               to="/workspaces/$workspaceId/artifacts"
               params={{ workspaceId }}
               search={fromSession ? { fromSession } : {}}
             >
               <ArrowLeftIcon className="size-4" aria-hidden />
-              All artifacts
+              Artifacts
             </Link>
           </Button>
         ) : null}
         {fromSession ? (
-          <Button asChild variant="ghost" size="sm">
+          <Button
+            asChild
+            variant="ghost"
+            size="sm"
+            className="text-fg-muted hover:text-fg pointer-coarse:h-11"
+          >
             <Link
               to="/workspaces/$workspaceId/sessions/$sessionId"
               params={{ workspaceId, sessionId: fromSession }}

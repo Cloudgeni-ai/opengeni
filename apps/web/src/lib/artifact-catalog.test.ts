@@ -1,12 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
   artifactKey,
+  artifactPath,
   artifactRoute,
   defaultArtifactFilters,
   filterArtifactCatalog,
-  readArtifactView,
-  rememberArtifactView,
 } from "./artifact-catalog";
 
 const item = (
@@ -27,11 +26,6 @@ const items = [
   item("same", "image", "Project logo"),
   item("doc", "document", "Archive notes", "archived"),
 ];
-const storage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-afterEach(() => {
-  if (storage) Object.defineProperty(globalThis, "localStorage", storage);
-  else Reflect.deleteProperty(globalThis, "localStorage");
-});
 describe("artifact catalog", () => {
   test("uses kind and native ID together and preserves domain routes", () => {
     expect(new Set(items.map(artifactKey)).size).toBe(3);
@@ -66,25 +60,12 @@ describe("artifact catalog", () => {
       filterArtifactCatalog([older, items[1]!], { ...defaultArtifactFilters, sort: "newest" })[0],
     ).toBe(items[1]!);
   });
-  test("ignores unknown preferences and survives blocked browser storage", () => {
-    Object.defineProperty(globalThis, "localStorage", {
-      configurable: true,
-      value: {
-        getItem: () => "unsafe",
-        setItem: () => {
-          throw new Error("blocked");
-        },
-      },
-    });
-    expect(readArtifactView()).toBe("grid");
-    expect(() => rememberArtifactView("list")).not.toThrow();
-    Object.defineProperty(globalThis, "localStorage", {
-      configurable: true,
-      get: () => {
-        throw new Error("blocked");
-      },
-    });
-    expect(readArtifactView()).toBe("grid");
-    expect(() => rememberArtifactView("grid")).not.toThrow();
+  test("builds plain artifact URLs with the return-to-session search", () => {
+    expect(artifactPath("ws 1", { kind: "site", id: "a/b" })).toBe(
+      "/workspaces/ws%201/artifacts/a%2Fb",
+    );
+    expect(artifactPath("ws", { kind: "image", id: "i" }, "s1")).toBe(
+      "/workspaces/ws/artifacts/files/i?fromSession=s1",
+    );
   });
 });

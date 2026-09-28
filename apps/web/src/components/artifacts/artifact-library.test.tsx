@@ -1,14 +1,16 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, useEffect, useState } from "react";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { act, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, RetainedArtifactReference } from "@opengeni/sdk";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
-import {
-  ARTIFACT_VIEW_KEY,
-  defaultArtifactFilters,
-  filterArtifactCatalog,
-} from "@/lib/artifact-catalog";
+import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 let ArtifactLibrary: typeof import("./artifact-library").ArtifactLibrary;
 let ArtifactThumbnail: typeof import("./artifact-library").ArtifactThumbnail;
 
@@ -143,12 +145,23 @@ const items: ArtifactCatalogItem[] = [
   },
 ];
 
-test("shared library filters, persists list view, and never executes Sites", async () => {
-  const previousView = localStorage.getItem(ARTIFACT_VIEW_KEY);
-  localStorage.removeItem(ARTIFACT_VIEW_KEY);
+async function renderInRouter(root: ReturnType<typeof createRoot>, node: () => ReactNode) {
+  const router = createRouter({
+    routeTree: createRootRoute({ component: () => <>{node()}</> }),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await act(async () => {
+    await router.load();
+    root.render(<RouterProvider router={router} />);
+  });
+}
+
+test("shared library lists flush rows with the type as a word and never executes Sites", async () => {
   const selected: string[] = [];
+  let setKind: (kind: "all" | "document") => void = () => {};
   function Fixture() {
     const [filters, setFilters] = useState(defaultArtifactFilters);
+    setKind = (kind) => setFilters((current) => ({ ...current, kind }));
     return (
       <ArtifactLibrary
         workspaceId="workspace"
@@ -165,32 +178,23 @@ test("shared library filters, persists list view, and never executes Sites", asy
   document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<Fixture />));
-    expect(container.querySelectorAll("ul[aria-label=Artifacts] > li")).toHaveLength(2);
+    await renderInRouter(root, () => <Fixture />);
+    const rows = () => container.querySelectorAll("ul[aria-label=Artifacts] > li");
+    expect(rows()).toHaveLength(2);
     expect(container.querySelector("iframe")).toBeNull();
-    expect(container.textContent).toContain("Preview not available");
-    await act(async () =>
-      (container.querySelector('[aria-label="List view"]') as HTMLButtonElement).click(),
-    );
-    expect(container.querySelector('[aria-label="List view"]')?.getAttribute("aria-pressed")).toBe(
-      "true",
-    );
-    expect(localStorage.getItem("opengeni:artifact-library:view:v1")).toBe("list");
+    expect(rows()[0]!.textContent).toContain("Document");
+    expect(rows()[1]!.textContent).toContain("Site");
+    await act(async () => setKind("document"));
+    expect(rows()).toHaveLength(1);
     await act(async () =>
       Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Documents")!
+        .find((button) => button.textContent === "Project brief")!
         .click(),
-    );
-    expect(container.querySelectorAll("ul[aria-label=Artifacts] > li")).toHaveLength(1);
-    await act(async () =>
-      (container.querySelector('[aria-label="Open Project brief"]') as HTMLButtonElement).click(),
     );
     expect(selected).toEqual(["document:same"]);
   } finally {
     await act(async () => root.unmount());
     container.remove();
-    if (previousView === null) localStorage.removeItem(ARTIFACT_VIEW_KEY);
-    else localStorage.setItem(ARTIFACT_VIEW_KEY, previousView);
   }
 });
 
@@ -209,13 +213,13 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
     },
   };
   try {
-    await act(async () => root.render(<ArtifactLibrary {...props} loading />));
+    await renderInRouter(root, () => <ArtifactLibrary {...props} loading />);
     expect(container.querySelector('[aria-label="Loading artifacts"]')).not.toBeNull();
-    await act(async () => root.render(<ArtifactLibrary {...props} loading={false} />));
+    await renderInRouter(root, () => <ArtifactLibrary {...props} loading={false} />);
     expect(container.textContent).toContain("No artifacts yet");
-    await act(async () =>
-      root.render(<ArtifactLibrary {...props} loading={false} error={new Error("Denied")} />),
-    );
+    await renderInRouter(root, () => (
+      <ArtifactLibrary {...props} loading={false} error={new Error("Denied")} />
+    ));
     expect(container.textContent).toContain("Couldn't load artifacts");
     expect(container.textContent).not.toContain("No artifacts yet");
     const retry = Array.from(container.querySelectorAll("button")).find((button) =>

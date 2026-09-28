@@ -1550,6 +1550,15 @@ if (migrationsUrl) {
   if (seededCount) log(`Wrote conversation history for ${seededCount} sessions`);
 }
 
+// Artifacts for Platform engineering: static Sites (with a second version and
+// one archived) and empty editable documents. Plain API writes, no sessions or
+// model turns. Looked up by title so reruns reuse them.
+{
+  const all = await owner.get<any[]>("/v1/workspaces");
+  const ws = all.find((w) => w.kind === "shared" && w.name === "Platform engineering")?.id;
+  if (ws) await seedArtifacts(owner, ws as string);
+}
+
 log("\nDone. Workspaces:");
 for (const line of workspaceUrls) log(`  ${line}`);
 log(`Owner Personal workspace: ${ORIGIN}/workspaces/${ownerMembership.personalWorkspaceId}`);
@@ -1774,4 +1783,94 @@ async function seedConversations(
     );
   });
   return count;
+}
+
+function siteHtml(title: string, body: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:15px/1.5 system-ui,sans-serif;margin:32px;color:#1f2328}h1{font-size:22px}li{margin:4px 0}</style></head><body><h1>${title}</h1>${body}</body></html>`;
+}
+
+const SITE_SEEDS: {
+  title: string;
+  description: string;
+  versions: string[];
+  archived?: boolean;
+}[] = [
+  {
+    title: "Q3 cost review",
+    description: "Cloud spend by team with the three largest savings.",
+    versions: [
+      siteHtml("Q3 cost review", "<p>Draft.</p>"),
+      siteHtml(
+        "Q3 cost review",
+        "<ul><li>Compute: 41%</li><li>Storage: 23%</li><li>Network: 12%</li></ul>",
+      ),
+    ],
+  },
+  {
+    title: "On-call handbook",
+    description: "Escalation paths and runbooks for the platform rotation.",
+    versions: [siteHtml("On-call handbook", "<ol><li>Acknowledge</li><li>Triage</li></ol>")],
+  },
+  {
+    title: "Launch countdown",
+    description: "A countdown page for the spring release.",
+    versions: [siteHtml("Launch countdown", "<p>12 days to go.</p>")],
+    archived: true,
+  },
+];
+
+const EDITABLE_SEEDS: { title: string; modality: "document" | "spreadsheet" | "presentation" }[] = [
+  { title: "Incident review template", modality: "document" },
+  { title: "Headcount plan 2027", modality: "spreadsheet" },
+  { title: "Platform roadmap", modality: "presentation" },
+];
+
+async function seedArtifacts(client: Client, ws: string) {
+  const base = `/v1/workspaces/${ws}`;
+  const existing = new Set<string>();
+  for (const status of ["active", "archived"]) {
+    const page = await client.get<any>(`${base}/artifact-catalog?status=${status}&limit=100`);
+    for (const item of page.items ?? []) existing.add(`${item.kind}:${item.title}`);
+  }
+  let created = 0;
+  for (const site of SITE_SEEDS) {
+    if (existing.has(`site:${site.title}`)) continue;
+    const key = `design-preview:${ws}:site:${site.title}`;
+    const first = await client.post<any>(`${base}/published-artifacts`, {
+      title: site.title,
+      description: site.description,
+      html: site.versions[0],
+      idempotencyKey: key,
+    });
+    const id = first.artifact.id as string;
+    let versionId = first.version.id as string;
+    for (const [index, html] of site.versions.slice(1).entries()) {
+      const next = await client.post<any>(`${base}/published-artifacts/${id}/versions`, {
+        html,
+        expectedCurrentVersionId: versionId,
+        idempotencyKey: `${key}:v${index + 2}`,
+      });
+      versionId = next.version.id;
+    }
+    if (site.archived) {
+      await client.patch(`${base}/published-artifacts/${id}/status`, {
+        status: "archived",
+        expectedCurrentVersionId: versionId,
+        reason: "Design preview seed",
+        idempotencyKey: `${key}:archive`,
+      });
+    }
+    created++;
+  }
+  for (const editable of EDITABLE_SEEDS) {
+    if (existing.has(`${editable.modality}:${editable.title}`)) continue;
+    await client.post(`${base}/editable-artifacts`, {
+      title: editable.title,
+      modality: editable.modality,
+      replicaId: "de51a9f0e0000001",
+      idempotencyKey: `design-preview.${editable.modality}.${editable.title.replace(/[^A-Za-z0-9]+/g, "-")}`,
+    });
+    created++;
+  }
+  if (created) log(`Seeded ${created} artifacts`);
 }
