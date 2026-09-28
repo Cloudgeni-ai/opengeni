@@ -4,6 +4,7 @@ import type { ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { analyticsAction } from "@/lib/analytics-actions";
 import type { ConnectableSubscriptions } from "@/lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "@/lib/free-model-limit-copy";
 import { FailedSessionActions } from "./failed-session-actions";
@@ -147,6 +148,7 @@ function BuyCreditsLink({ workspaceId }: { workspaceId: string }) {
         to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
         search={{ section: "billing" }}
+        {...analyticsAction("buy_credits")}
       >
         Buy credits
       </Link>
@@ -161,6 +163,7 @@ function ConnectModelLink({ workspaceId, label }: { workspaceId: string; label: 
         to="/workspaces/$workspaceId/settings"
         params={{ workspaceId }}
         search={{ section: "models" }}
+        {...analyticsAction("connect_model")}
       >
         {label}
       </Link>

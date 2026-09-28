@@ -522,6 +522,7 @@ export function SuperGrokConnectPage({
       onClose={onClose}
       submitLabel={signingIn ? "Open xAI again" : "Sign in with xAI"}
       pendingLabel="Opening xAI…"
+      submitAnalyticsAction={signingIn ? null : "connect_supergrok"}
       submitDisabled={!grok.canManage || grok.busy || connected}
       disabledReason={
         grok.canManage ? undefined : "Only people who can manage connections can add an account."

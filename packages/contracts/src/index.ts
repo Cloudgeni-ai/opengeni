@@ -58,6 +58,7 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
+import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
@@ -82,6 +83,7 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./signup-attribution";
+export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
@@ -964,6 +966,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -2214,6 +2218,10 @@ export const SlackReactionChannelListResponse = z.object({
   nextCursor: z.string().max(1_024).nullable(),
 });
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
+
+/** Active, non-shared channels the bot belongs to, offered as a task's fixed destination. */
+export const ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
+export type ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
 
 /** Where one Slack channel starts work. */
 export const SlackChannelRoute = z.object({
@@ -9612,6 +9620,21 @@ export const ScheduledTaskMetadataInput =
     "scheduled task metadata",
   );
 
+/** A Slack public or private channel ID. Direct messages are not destinations. */
+export const ScheduledTaskSlackChannelId = z
+  .string()
+  .regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789");
+
+/**
+ * The only first-party tools that post as the OpenGeni bot. A generated
+ * session receives them only when a person chose its task's Slack channel,
+ * and they refuse every other destination.
+ */
+export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
     .object({
@@ -9645,6 +9668,10 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
+    // The one Slack channel this task's runs may post to as the OpenGeni bot.
+    // Only a person chooses it (never an agent attempt); it requires
+    // slackBotConnectionId and is read from the task at every post.
+    slackBotChannelId: ScheduledTaskSlackChannelId.optional(),
     model: bounded
       ? scheduledTaskBoundedString(512, "scheduled task model").optional()
       : z.string().min(1).optional(),
@@ -14656,9 +14683,58 @@ export const HostUsageExportBatch = z.object({
 export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
 
 /**
+ * One content-free per-person lifecycle fact (`lifecycle_fact` export kind).
+ * `accountId` is null for facts that belong to a person rather than an
+ * organization (sign-up, email verification, sign-in); `workspaceId` is set
+ * only for workspace-scoped setup facts. `subjectId` is present only for opaque
+ * managed-user and API-key subjects. Type and attribute are bounded tokens so an
+ * older consumer can carry a newer writer's fact during a rolling upgrade; the
+ * known values are `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES`.
+ */
+export const HostLifecycleFact = z.object({
+  id: z.string().uuid(),
+  type: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z_]*\.[a-z][a-z_]*$/),
+  attribute: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .nullable(),
+  subjectKind: z
+    .string()
+    .max(32)
+    .regex(/^[a-z][a-z_]*$/),
+  subjectId: z.string().regex(PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN).nullable(),
+  occurredAt: z.string(),
+});
+export type HostLifecycleFact = z.infer<typeof HostLifecycleFact>;
+
+export const HostLifecycleFactExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  idempotencyKey: z.string().min(1).max(2048),
+  accountId: z.string().uuid().nullable(),
+  workspaceId: z.string().uuid().nullable(),
+  fact: HostLifecycleFact,
+});
+export type HostLifecycleFactExport = z.infer<typeof HostLifecycleFactExport>;
+
+export const HostLifecycleFactExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostLifecycleFactExport).min(1).max(256),
+});
+export type HostLifecycleFactExportBatch = z.infer<typeof HostLifecycleFactExportBatch>;
+
+/**
  * Optional embedded-host sinks. Delivery is at least once: the same batch may
  * be repeated after a process dies between sink success and checkpoint commit,
- * so sinks must deduplicate by event/usage idempotency key.
+ * so sinks must deduplicate by event/usage/fact idempotency key.
  */
 export type HostEventSink = {
   consumerId: HostExportConsumerId;
@@ -14668,6 +14744,11 @@ export type HostEventSink = {
 export type HostUsageSink = {
   consumerId: HostExportConsumerId;
   deliverUsage: (batch: HostUsageExportBatch) => Promise<void>;
+};
+
+export type HostLifecycleFactSink = {
+  consumerId: HostExportConsumerId;
+  deliverLifecycleFacts: (batch: HostLifecycleFactExportBatch) => Promise<void>;
 };
 
 export const SESSION_EVENT_TYPE_MAX_BYTES = 256;

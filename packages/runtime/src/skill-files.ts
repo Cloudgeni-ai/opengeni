@@ -91,6 +91,159 @@ export function readSkillFiles(
   return result;
 }
 
+export const SKILL_SCRIPT_INDEX_MAX_ENTRIES = 32;
+export const SKILL_SCRIPT_INDEX_MAX_BYTES = 4 * 1024;
+export const SKILL_SCRIPT_USAGE_MAX_CHARS = 160;
+const SCRIPT_EXTENSIONS = new Set([
+  "bash",
+  "cjs",
+  "js",
+  "lua",
+  "mjs",
+  "mts",
+  "php",
+  "pl",
+  "ps1",
+  "py",
+  "r",
+  "rb",
+  "sh",
+  "ts",
+  "zsh",
+]);
+const SCRIPT_DIRECTORIES = new Set(["bin", "scripts"]);
+// Documents and data next to scripts are read, not run.
+const NON_RUNNABLE_EXTENSIONS = new Set([
+  "cfg",
+  "conf",
+  "csv",
+  "ini",
+  "json",
+  "lock",
+  "markdown",
+  "md",
+  "rst",
+  "toml",
+  "tsv",
+  "txt",
+  "xml",
+  "yaml",
+  "yml",
+]);
+// Tool pragmas and encoding lines describe the file, not how to run it.
+const PRAGMA =
+  /^(-\*-|vim?:|eslint|prettier|@ts-|pylint|noqa|type:|shellcheck|mypy|flake8|fmt:|isort)/i;
+
+export type SkillScriptIndexEntry = { path: string; usage?: string };
+
+/**
+ * A bounded index of runnable files, derived from content the caller may
+ * already read: each script's path and its first usage line (or first comment
+ * line when none says "usage"). It lets an agent see a Skill's commands
+ * without a sandbox checkout. Returns null when the Skill has no scripts.
+ */
+export function skillScriptIndex(
+  files: readonly SkillTextFile[],
+): { scripts: SkillScriptIndexEntry[]; scriptsOmitted?: number } | null {
+  const candidates = files
+    .filter((file) => file.path !== "SKILL.md" && isSkillScript(file))
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  if (candidates.length === 0) return null;
+  const scripts: SkillScriptIndexEntry[] = [];
+  let bytes = 0;
+  for (const file of candidates) {
+    const usage = scriptUsageLine(file.content);
+    const entry: SkillScriptIndexEntry = usage ? { path: file.path, usage } : { path: file.path };
+    const entryBytes = new TextEncoder().encode(JSON.stringify(entry)).byteLength + 1;
+    if (
+      scripts.length >= SKILL_SCRIPT_INDEX_MAX_ENTRIES ||
+      bytes + entryBytes > SKILL_SCRIPT_INDEX_MAX_BYTES
+    )
+      break;
+    scripts.push(entry);
+    bytes += entryBytes;
+  }
+  const omitted = candidates.length - scripts.length;
+  return omitted > 0 ? { scripts, scriptsOmitted: omitted } : { scripts };
+}
+
+function isSkillScript(file: SkillTextFile): boolean {
+  if (file.content.startsWith("#!")) return true;
+  const name = file.path.split("/").at(-1) ?? "";
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  if (SCRIPT_EXTENSIONS.has(extension)) return true;
+  const top = file.path.split("/")[0] ?? "";
+  return (
+    file.path.includes("/") &&
+    SCRIPT_DIRECTORIES.has(top) &&
+    !NON_RUNNABLE_EXTENSIONS.has(extension)
+  );
+}
+
+function scriptUsageLine(content: string): string | undefined {
+  const lines = content.split(/\r?\n/u, 80);
+  let firstComment: string | undefined;
+  let codeUsage: string | undefined;
+  // The closing marker of an open docstring or block comment.
+  let closer: string | null = null;
+  for (const [index, raw] of lines.entries()) {
+    if (index === 0 && raw.startsWith("#!")) continue;
+    let line = raw.trim();
+    let text: string | null = null;
+    if (closer !== null) {
+      const end = line.indexOf(closer);
+      if (end >= 0) {
+        line = line.slice(0, end);
+        closer = null;
+      }
+      text = line.replace(/^\*+\s?/u, "").trim();
+    } else {
+      const block = /^("""|'''|\/\*+|<#)(.*)$/u.exec(line);
+      if (block) {
+        const close = block[1] === "<#" ? "#>" : block[1]!.startsWith("/*") ? "*/" : block[1]!;
+        const rest = block[2]!;
+        const end = rest.indexOf(close);
+        if (end >= 0) text = rest.slice(0, end).trim();
+        else {
+          text = rest.trim();
+          closer = close;
+        }
+      } else {
+        const comment = /^(?:#+|\/\/+|--+|%+|;+)(.*)$/u.exec(line);
+        if (comment) text = comment[1]!.trim();
+        else codeUsage ??= printedUsage(line);
+      }
+    }
+    if (!text || PRAGMA.test(text)) continue;
+    if (/\busage\b/iu.test(text)) return boundUsage(text);
+    firstComment ??= text;
+  }
+  const usage = codeUsage ?? firstComment;
+  return usage === undefined ? undefined : boundUsage(usage);
+}
+
+/** Code such as echo "Usage: $0 --from DATE" still names the command. */
+function printedUsage(line: string): string | undefined {
+  const at = line.search(/\busage\s*:/iu);
+  if (at < 0) return undefined;
+  let usage = line.slice(at);
+  // Inside a string literal, stop at its closing quote.
+  const quote = /(["'`])[^"'`]*$/u.exec(line.slice(0, at))?.[1];
+  if (quote) {
+    const end = usage.indexOf(quote);
+    if (end >= 0) usage = usage.slice(0, end);
+  }
+  return usage.replace(/[\s;,)]+$/u, "") || undefined;
+}
+
+function boundUsage(text: string): string {
+  const collapsed = text.replace(/\s+/gu, " ");
+  return collapsed.length > SKILL_SCRIPT_USAGE_MAX_CHARS
+    ? `${collapsed.slice(0, SKILL_SCRIPT_USAGE_MAX_CHARS - 3)}...`
+    : collapsed;
+}
+
 /** Partial text edits preserve omitted files; deletion is always explicit. */
 export function applySkillFileChanges(
   current: readonly SkillTextFile[],

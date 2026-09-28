@@ -90,6 +90,7 @@ const DOC_PATTERN = /^(?:docs\/|[^/]+\.md$)/;
 
 export const TEMPORAL_WORKFLOW_INTEGRATION_TESTS = [
   "test/integration/temporal-workflow.integration.ts",
+  "test/integration/session-idle-close.integration.ts",
 ] as const;
 
 const TEMPORAL_WORKFLOW_DEPENDENCIES = [
@@ -350,6 +351,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/project-rename.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/skill-review.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/session-skill-review.browser.e2e.ts": [
     "opengeni-web",

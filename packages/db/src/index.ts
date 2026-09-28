@@ -79,6 +79,7 @@ import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
+export * from "./scheduled-slack-bot-messages";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
@@ -233,6 +234,8 @@ import type {
   GitHubRepositoryScope,
   HostEventExport,
   HostEventExportBatch,
+  HostLifecycleFactExport,
+  HostLifecycleFactExportBatch,
   HostUsageExport,
   HostUsageExportBatch,
   ManagedAccount,
@@ -406,6 +409,8 @@ import {
   HostEventExport as HostEventExportContract,
   HostEventExportBatch as HostEventExportBatchContract,
   HostExportConsumerId,
+  HostLifecycleFactExport as HostLifecycleFactExportContract,
+  HostLifecycleFactExportBatch as HostLifecycleFactExportBatchContract,
   HostUsageExport as HostUsageExportContract,
   HostUsageExportBatch as HostUsageExportBatchContract,
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
@@ -896,7 +901,7 @@ export class SessionSpawnDeniedDbError extends Error {
 // Durable host export
 // ---------------------------------------------------------------------------
 
-export type HostExportKind = "session_event" | "usage_event";
+export type HostExportKind = "session_event" | "usage_event" | "lifecycle_fact";
 
 /**
  * A leased row did not satisfy this consumer build's export contract. Only
@@ -946,8 +951,9 @@ type HostExportRow = {
   lease_through: string | number | bigint;
   export_cursor: string | number | bigint;
   source_id: string;
-  account_id: string;
-  workspace_id: string;
+  // Null only for lifecycle facts (person-level, or organization-level facts).
+  account_id: string | null;
+  workspace_id: string | null;
   session_id: string | null;
   root_session_id: string | null;
   turn_id: string | null;
@@ -999,7 +1005,7 @@ function hostExportTimestamp(value: Date | string): string {
 }
 
 function validateHostExportKind(kind: HostExportKind): void {
-  if (kind !== "session_event" && kind !== "usage_event") {
+  if (kind !== "session_event" && kind !== "usage_event" && kind !== "lifecycle_fact") {
     throw new Error(`Unknown host export kind: ${kind}`);
   }
 }
@@ -1081,6 +1087,18 @@ export async function claimHostExportBatch(
 export async function claimHostExportBatch(
   db: Database,
   input: {
+    kind: "lifecycle_fact";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
     kind: HostExportKind;
     consumerId: string;
     leaseToken: string;
@@ -1089,7 +1107,19 @@ export async function claimHostExportBatch(
     limit?: number;
     maxBytes?: number;
   },
-): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
   const rows = await db.transaction(async (tx) => {
     const transaction = tx as unknown as Database;
@@ -1208,6 +1238,46 @@ export async function claimHostExportBatch(
       checkpoint: hostExportCursor(first.checkpoint),
       throughCursor: hostExportCursor(first.lease_through),
       events,
+    });
+  }
+
+  if (input.kind === "lifecycle_fact") {
+    const facts = rows.map((row): HostLifecycleFactExport => {
+      const payload =
+        row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+          ? (row.payload as Record<string, unknown>)
+          : {};
+      const initiator =
+        row.initiator && typeof row.initiator === "object" && !Array.isArray(row.initiator)
+          ? (row.initiator as Record<string, unknown>)
+          : null;
+      const parsed = HostLifecycleFactExportContract.safeParse({
+        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+        cursor: hostExportCursor(row.export_cursor),
+        idempotencyKey: row.idempotency_key,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        fact: {
+          id: row.source_id,
+          type: row.event_type,
+          attribute: payload.attribute ?? null,
+          subjectKind: payload.subjectKind,
+          subjectId: initiator?.subjectId ?? null,
+          occurredAt: hostExportTimestamp(row.occurred_at),
+        },
+      });
+      if (!parsed.success) {
+        throw hostExportPayloadError(input, row, parsed.error.issues);
+      }
+      return parsed.data;
+    });
+    return HostLifecycleFactExportBatchContract.parse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      consumerId: first.consumer_id,
+      leaseToken: first.lease_token,
+      checkpoint: hostExportCursor(first.checkpoint),
+      throughCursor: hostExportCursor(first.lease_through),
+      events: facts,
     });
   }
 
@@ -74717,6 +74787,43 @@ export async function settleSessionIdleWithParentOutbox(
         )
         .limit(1);
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
+        return { action: "stale", episodeKey: null, events: [] } as const;
+      }
+      // Immediate machine input has no queued turn until claim. Its producer
+      // takes this same session fence, so a post-peek arrival must win before
+      // we publish the preceding episode's terminal result. Use the wake-class
+      // contract, not every pending row: deferred notices and unwaited command
+      // results do not reopen finished work. A late child notice likewise only
+      // reserves new work when its producer queued the session; active goals
+      // and held/due waits are independently protected below.
+      const pendingInputs = await tx
+        .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, sessionId),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+          ),
+        );
+      const pendingSteer = pendingInputs.some(({ kind }) => kind === "agent_steer_instruction");
+      const pendingImmediate = pendingInputs.some(
+        ({ kind }) =>
+          SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] === "immediate" &&
+          kind !== "background_command_result" &&
+          (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
+            session.status === "queued"),
+      );
+      if (
+        pendingSteer ||
+        (pendingImmediate &&
+          !(await latestFinishedTurnHasFailureCodeTx(
+            tx as unknown as Database,
+            workspaceId,
+            sessionId,
+            "context_compaction_failed",
+          )))
+      ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
       const [{ episodeSequence } = { episodeSequence: 0 }] = await tx

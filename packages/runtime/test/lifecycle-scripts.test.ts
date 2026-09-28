@@ -464,6 +464,94 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("an optional repository whose fetch hangs is skipped after its bound while a required one still clones", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-optional-clone-timeout-"));
+    // A server that accepts the connection and never answers: a hung fetch.
+    const sockets: Array<{ end: () => void }> = [];
+    const hanging = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open: (socket) => {
+          sockets.push(socket);
+        },
+        data: () => undefined,
+      },
+    });
+    try {
+      const origin = makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const remote = (name: string) => `https://github.com/opengeni/${name}.git`;
+      const session = hostShellSession(join(root, "home"), {
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: remote("required"),
+          GIT_CONFIG_KEY_1: `url.http://127.0.0.1:${hanging.port}/hung.git.insteadOf`,
+          GIT_CONFIG_VALUE_1: remote("hung"),
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const warn = console.warn;
+      console.warn = () => undefined;
+      const started = Date.now();
+      try {
+        await runRepositoryCloneHook(
+          session as never,
+          [
+            {
+              kind: "repository",
+              uri: remote("required"),
+              ref: "main",
+              mountPath: "repos/test/required",
+            },
+            {
+              kind: "repository",
+              uri: remote("hung"),
+              ref: "main",
+              mountPath: "repos/test/hung",
+              optional: true,
+            },
+          ],
+          {
+            environment: {},
+            onRuntimeEvent: async (event) => {
+              events.push(event as never);
+            },
+          },
+          { optionalCloneTimeoutSeconds: 2 },
+        );
+      } finally {
+        console.warn = warn;
+      }
+      expect(Date.now() - started).toBeLessThan(30_000);
+      expect(readFileSync(join(workspace, "repos", "test", "required", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      expect(events[1]!.payload).toMatchObject({
+        name: "repository-clone",
+        repositoryCount: 2,
+        skippedOptionalRepositories: ["repos/test/hung"],
+      });
+      // The timed-out fetch leaves no partial tree or temporary clone behind.
+      expect(
+        existsSync(join(workspace, "repos", "test", "hung")) &&
+          readdirSync(join(workspace, "repos", "test", "hung")).length > 0,
+      ).toBe(false);
+      expect(
+        readdirSync(join(workspace, "repos", "test")).filter((name) => name.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      for (const socket of sockets) socket.end();
+      hanging.stop(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("keeps exact-path provider remotes distinct when one name ends in .git", () => {
     const command = repositoryCloneCommand([
       {

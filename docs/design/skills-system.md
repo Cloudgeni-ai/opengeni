@@ -141,6 +141,24 @@ skill_read({ skill, paths?, listFiles? })
   read's tool-output event carries a content-free `opengeni/skillUse` fact in
   MCP `_meta` (see [run lifecycle](../run-lifecycle.md)). Neither changes what
   the model receives.
+- The default read also returns a bounded `scripts` index (path plus first
+  usage line of each runnable file), so commands are visible without checkout.
+
+### Checkout
+
+```text
+skill_checkout({ skill, directory, paths? })
+```
+
+- Writes every missing file in one filesystem batch, normally one sandbox
+  command and one workspace mutation admission.
+- Never overwrites: identical files are kept and reported `unchanged`; any
+  different existing entry fails before anything is written, so repeating a
+  checkout into the same directory is safe and fast.
+- `paths` copies exactly those files, for example one script to run.
+- Only a complete checkout that created its directory returns the
+  `skill_publish` base (`revisionId`, `scopeVersion`); other results say
+  `publishable: false`.
 
 ### Search and install
 

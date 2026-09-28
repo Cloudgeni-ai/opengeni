@@ -29,7 +29,6 @@ import {
   type SkillTextFile,
 } from "@opengeni/runtime/skill-library";
 import type { RuntimeSkillArtifact } from "@opengeni/runtime";
-import type { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import {
   createSkillReadAttemptToolDefinition,
   SKILL_READ_TOOL_NAME,
@@ -46,7 +45,9 @@ import { createSkillRemoveAttemptToolDefinition } from "./skill-remove";
 import {
   createSkillCheckoutAttemptToolDefinition,
   createSkillPublishAttemptToolDefinition,
+  type SkillCheckoutObservation,
 } from "./skill-checkout";
+import type { SkillFileSystem } from "./skill-transfer";
 
 export function createWorkspaceSkillTools(input: {
   db: Database;
@@ -56,9 +57,9 @@ export function createWorkspaceSkillTools(input: {
   subjectId?: string;
   actor: Extract<SkillActor, { kind: "agent" }>;
   selected: readonly { id: string; artifact: RuntimeSkillArtifact }[];
-  filesystem: () => Promise<
-    Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWrite" | "fsMkdir">
-  >;
+  filesystem: () => Promise<SkillFileSystem>;
+  /** Content-free skill_checkout timing; it never changes a result. */
+  observeSkillCheckout?: (observation: SkillCheckoutObservation) => void;
   /** The resolved model's bound, which `settings` does not carry. */
   modelToolOutputTruncationTokens: () => number;
   onSkillReadHistoryLookupFailed?: (error: unknown) => void;
@@ -302,6 +303,7 @@ export function createWorkspaceSkillTools(input: {
     createSkillCheckoutAttemptToolDefinition({
       authorize,
       filesystem: input.filesystem,
+      ...(input.observeSkillCheckout ? { observe: input.observeSkillCheckout } : {}),
       load: async (skill) => {
         const content = await load(skill);
         if (!("skillId" in content))
