@@ -924,7 +924,9 @@ const events = useSessionEvents(sessionId);
 
 The single **Latest question** button targets the newest durable user message,
 not the viewport-relative question or the newest message in an older loaded page.
-The resolver uses one filtered lookup and, if needed, two bounded context reads.
+The resolver normally uses one filtered forensic lookup and, if needed, two bounded
+context reads. It pages past legacy worker-completion records using the same
+classification as the timeline, without scanning the intervening activity log.
 Without that callback, local navigation is available only at the live history
 window; the component never guesses from an older page. `onJumpToLatest` retains
 its separate bottom-follow behavior. `groupTimeline(items)` retains classic
