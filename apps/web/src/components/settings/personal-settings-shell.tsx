@@ -31,10 +31,8 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
       ]}
       activeId="security"
       currentPage="Security"
-      page={{
-        title: "Security",
-        description: "Manage how you sign in and protect your account.",
-      }}
+      // The Security page draws its own heading (it is the focus fallback after a dialog).
+      page={null}
     >
       {children}
     </SettingsShell>
