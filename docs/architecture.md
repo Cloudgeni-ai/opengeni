@@ -821,7 +821,7 @@ under the same producer identity. `admissionDiagnostic` contains typed reasons
 and selected account identifiers, not credentials or accepted execution. These
 rows cannot acquire a session or execution snapshot or become runnable.
 Reconnection affects a new occurrence, not an already-refused occurrence.
-Migration 0530 adds this diagnostic-only path; ordinary accepted-run checks stay
+Migration 0531 adds this diagnostic-only path; ordinary accepted-run checks stay
 unchanged.
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;

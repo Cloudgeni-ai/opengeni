@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0530_scheduled_admission_diagnostics.sql",
+          (migration) => migration.path === "0531_scheduled_admission_diagnostics.sql",
         )
-          ? "0530_scheduled_admission_diagnostics.sql"
+          ? "0531_scheduled_admission_diagnostics.sql"
           : sourceContract.migrations.some(
                 (migration) =>
                   migration.path === "0529_slack_interaction_session_defaults_line.sql",
@@ -283,7 +283,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0529_slack_interaction_session_defaults_line.sql",
     );
     const scheduledAdmissionDiagnostics = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0530_scheduled_admission_diagnostics.sql",
+      (migration) => migration.path === "0531_scheduled_admission_diagnostics.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -889,7 +889,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0529_slack_interaction_session_defaults_line.sql" }
         : {}),
       ...(scheduledAdmissionDiagnostics
-        ? { latestMigration: "0530_scheduled_admission_diagnostics.sql" }
+        ? { latestMigration: "0531_scheduled_admission_diagnostics.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -913,7 +913,7 @@ describe("release schema contract", () => {
             "0527_session_attention_excludes_commentary.sql",
             "0528_system_update_outbox_claim_order.sql",
             "0529_slack_interaction_session_defaults_line.sql",
-            "0530_scheduled_admission_diagnostics.sql",
+            "0531_scheduled_admission_diagnostics.sql",
           ].includes(migration.path),
       ),
     };
@@ -2381,7 +2381,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
-      "0530_scheduled_admission_diagnostics.sql",
+      "0531_scheduled_admission_diagnostics.sql",
       "0525_attached_browser_opaque_generations.sql",
       "0527_session_attention_excludes_commentary.sql",
       "0528_system_update_outbox_claim_order.sql",
@@ -2909,7 +2909,7 @@ describe("release schema contract", () => {
       "0527_session_attention_excludes_commentary.sql",
       "0528_system_update_outbox_claim_order.sql",
       "0529_slack_interaction_session_defaults_line.sql",
-      "0530_scheduled_admission_diagnostics.sql",
+      "0531_scheduled_admission_diagnostics.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
