@@ -10,7 +10,6 @@ import {
   ContainerIcon,
   KeyRoundIcon,
   LaptopIcon,
-  NetworkIcon,
   PanelsTopLeftIcon,
   PencilIcon,
   PlugIcon,
@@ -44,7 +43,6 @@ import {
   type NavItemSize,
 } from "@/components/ui/settings-nav";
 import { Switch } from "@/components/ui/switch";
-import { DEFAULT_RAIL_DESTINATIONS } from "@/lib/rail-destinations";
 import { cn } from "@/lib/utils";
 
 import {
@@ -78,20 +76,12 @@ interface Destination {
 const RAIL: Destination[] = [
   { id: "new-session", label: "New session", icon: SquarePenIcon },
   { id: "for-you", label: "For you", icon: SendIcon, badge: "2" },
-  { id: "agents", label: "Agents", icon: NetworkIcon },
+  { id: "capabilities", label: "Capabilities", icon: PlugIcon },
+  { id: "knowledge", label: "Agent Knowledge", icon: BrainCircuitIcon, attention: true },
   { id: "schedules", label: "Schedules", icon: CalendarClockIcon },
   { id: "artifacts", label: "Artifacts", icon: PanelsTopLeftIcon },
-  { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon, attention: true },
-  { id: "capabilities", label: "Capabilities", icon: PlugIcon },
-  { id: "insights", label: "Insights", icon: BarChart3Icon },
-  { id: "settings", label: "Settings", icon: SettingsIcon },
+  { id: "settings", label: "Settings", icon: SlidersHorizontalIcon },
 ];
-
-/** Where a rail destination sits by default: in the rail, or under More. */
-function railPlace(id: string): string {
-  if (id === "new-session" || id === "settings") return "Main rail";
-  return (DEFAULT_RAIL_DESTINATIONS as readonly string[]).includes(id) ? "Main rail" : "More";
-}
 
 const SETTINGS: Destination[] = [
   {
@@ -920,7 +910,7 @@ export default function NavigationSection() {
                 <Icon aria-hidden="true" className="size-4 shrink-0 text-fg-muted" />
                 <span className="min-w-0 truncate">{item.label}</span>
                 <span className="ml-auto shrink-0 text-xs text-fg-subtle">
-                  {RAIL.includes(item) ? railPlace(item.id) : "Settings"}
+                  {RAIL.includes(item) ? "Main rail" : "Settings"}
                 </span>
               </li>
             );
@@ -931,7 +921,7 @@ export default function NavigationSection() {
       <UsageNotes
         use={[
           "Every destination once, with one name and one icon. Rail label = page title = route noun.",
-          "The main rail stays brief: New session, Schedules, Artifacts, Knowledge, Capabilities, More, then Settings. More holds the rest and Customize rail.",
+          "The main rail: New session, For you, Capabilities, Agent Knowledge, Schedules, Artifacts, then Settings in the footer. Settings opens in the content area with its own sub-nav.",
           "Group labels in 12px sentence case, only when a group needs a name (Runtime, Chats).",
           "Hide destinations the viewer can't use. Disable only when access is on its way.",
           "A trailing arrow when the item leaves this area (Organization settings).",

@@ -85,7 +85,7 @@ async function renderShell(
 }
 
 describe("workspace settings frame", () => {
-  test("lists configuration only: no dashboards, Memory, Capabilities or Danger zone", async () => {
+  test("lists settings plus the Agents and Insights dashboards; no Memory, Capabilities or Danger zone", async () => {
     workspacePermissions = ["workspace:admin"];
     // The settings list itself (narrow frames show it as a page).
     const view = await renderShell({ kind: "settings", section: null });
@@ -100,19 +100,27 @@ describe("workspace settings frame", () => {
         "Sandbox environments",
         "Machines",
         "CloudGeni",
+        "Workspace activity",
+        "Agents",
+        "Insights",
       ]) {
         expect(text).toContain(label);
       }
-      for (const label of [
-        "Members",
-        "Memory",
-        "Insights",
-        "Agents",
-        "Danger zone",
-        "Capabilities",
-      ]) {
+      for (const label of ["Members", "Memory", "Danger zone", "Capabilities"]) {
         expect(text).not.toContain(label);
       }
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("hides Insights from people who are not workspace admins", async () => {
+    workspacePermissions = ["sessions:create"];
+    const view = await renderShell({ kind: "settings", section: null });
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Agents");
+      expect(text).not.toContain("Insights");
     } finally {
       await view.unmount();
     }

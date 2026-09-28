@@ -11,6 +11,8 @@ export {
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  BarChart3Icon,
+  BotIcon,
   Building2Icon,
   ContainerIcon,
   GraduationCapIcon,
@@ -30,6 +32,8 @@ import {
   type SettingsFramePage,
 } from "./settings-frame";
 import { NavItem } from "@/components/ui/settings-nav";
+import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 
 /** One name, one icon and one description per settings page. */
 export const WORKSPACE_SETTINGS_COPY: Record<
@@ -78,6 +82,23 @@ const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "api-keys",
 ];
 
+// Workspace dashboards reached from settings, as before settings moved into the
+// content area. They open as their own full-width pages.
+const ACTIVITY_PAGES = [
+  {
+    to: "/workspaces/$workspaceId/agents" as const,
+    label: "Agents",
+    icon: BotIcon,
+    requiresAdmin: false,
+  },
+  {
+    to: "/workspaces/$workspaceId/insights" as const,
+    label: "Insights",
+    icon: BarChart3Icon,
+    requiresAdmin: true,
+  },
+] as const;
+
 const RUNTIME_PAGES = [
   {
     to: "/workspaces/$workspaceId/variable-sets" as const,
@@ -125,6 +146,12 @@ export function WorkspaceManagementShell({
   organizationSettingsWorkspaceId?: string;
   children: ReactNode;
 }) {
+  const context = useAppContext();
+  const canReadInsights = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
+  );
   const search = useRouterState({
     select: (state) => state.location.search as Record<string, unknown>,
   });
@@ -153,6 +180,17 @@ export function WorkspaceManagementShell({
     },
   ];
   if (!organizationManagementOnly) {
+    groups.push({
+      label: "Workspace activity",
+      items: ACTIVITY_PAGES.filter((page) => !page.requiresAdmin || canReadInsights).map(
+        (page) => ({
+          id: page.to,
+          label: page.label,
+          icon: page.icon,
+          link: <Link to={page.to} params={{ workspaceId }} />,
+        }),
+      ),
+    });
     groups.push({
       label: "Runtime",
       items: RUNTIME_PAGES.map((page) => ({

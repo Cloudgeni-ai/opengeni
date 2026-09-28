@@ -8,6 +8,7 @@ import {
 } from "./workspace-nav-data";
 
 const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`).text();
+const workspaceRouteSource = await Bun.file(`${import.meta.dir}/../../routes/workspace.tsx`).text();
 
 describe("workspace rail destinations", () => {
   test("labels the settings entry without changing its destination", () => {
@@ -46,5 +47,12 @@ describe("workspace rail destinations", () => {
         "/workspaces/$workspaceId/artifacts",
       ),
     ).toBe(true);
+  });
+
+  test("settings open in the content area while the main rail stays", () => {
+    // The footer Settings entry is the way in; the frame renders inside RailShell.
+    const shell = workspaceRouteSource.slice(workspaceRouteSource.indexOf("<RailShell>"));
+    expect(shell.indexOf("<WorkspaceManagementShell")).toBeGreaterThan(0);
+    expect(shell.indexOf("<WorkspaceManagementShell")).toBeLessThan(shell.indexOf("</RailShell>"));
   });
 });

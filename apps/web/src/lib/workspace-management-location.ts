@@ -1,7 +1,7 @@
 /**
  * Workspace settings pages, addressed by `?section=` on `/settings`. Settings
- * hold configuration only: dashboards (Agents, Insights) and Knowledge live on
- * the main rail.
+ * hold configuration only: the sub-nav links to the Agents and Insights
+ * dashboards, which open as their own pages.
  */
 export type WorkspaceSettingsSection = "general" | "access" | "models" | "api-keys" | "learning";
 
