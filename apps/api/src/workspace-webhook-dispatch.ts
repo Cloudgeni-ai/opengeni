@@ -17,7 +17,7 @@ import {
 import { pinnedFetch } from "@opengeni/network";
 import type { Observability } from "@opengeni/observability";
 
-const BATCH_SIZE = 32;
+export const WORKSPACE_WEBHOOK_DISPATCH_BATCH_SIZE = 32;
 const CLAIM_SECONDS = 60;
 const POLL_INTERVAL_MS = 2_000;
 const DELIVERY_TIMEOUT_MS = 10_000;
@@ -92,7 +92,7 @@ export async function drainWorkspaceWebhookDeliveries(
   const claimId = randomUUID();
   const claims = await claimWorkspaceWebhookDeliveries(deps.db, {
     claimId,
-    limit: BATCH_SIZE,
+    limit: WORKSPACE_WEBHOOK_DISPATCH_BATCH_SIZE,
     claimSeconds: CLAIM_SECONDS,
   });
   const outcomes = await Promise.all(
@@ -121,9 +121,13 @@ export async function drainWorkspaceWebhookDeliveries(
  */
 export function startWorkspaceWebhookDispatchPump(
   deps: WorkspaceWebhookDispatchDeps,
-  options: { intervalMs?: number } = {},
+  options: {
+    intervalMs?: number;
+    drain?: (deps: WorkspaceWebhookDispatchDeps) => Promise<WorkspaceWebhookBatchResult>;
+  } = {},
 ): () => Promise<void> {
   const intervalMs = Math.max(100, options.intervalMs ?? POLL_INTERVAL_MS);
+  const drain = options.drain ?? drainWorkspaceWebhookDeliveries;
   let stopped = false;
   let running: Promise<void> | undefined;
   let ticks = 0;
@@ -131,8 +135,11 @@ export function startWorkspaceWebhookDispatchPump(
   const tick = (): void => {
     if (stopped || running) return;
     ticks += 1;
+    // A full batch means a backlog: drain it now instead of one batch per interval.
+    let backlog = false;
     running = (async () => {
-      const result = await drainWorkspaceWebhookDeliveries(deps);
+      const result = await drain(deps);
+      backlog = result.claimed >= WORKSPACE_WEBHOOK_DISPATCH_BATCH_SIZE;
       if (result.claimed > 0) deps.observability?.info("Workspace webhook batch settled", result);
       if (ticks % PRUNE_EVERY_TICKS === 0) await pruneWorkspaceWebhookDeliveries(deps.db);
     })()
@@ -141,6 +148,7 @@ export function startWorkspaceWebhookDispatchPump(
       })
       .finally(() => {
         running = undefined;
+        if (backlog && !stopped) queueMicrotask(tick);
       });
   };
 
