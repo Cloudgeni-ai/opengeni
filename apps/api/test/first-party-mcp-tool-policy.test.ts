@@ -483,6 +483,15 @@ describe("first-party MCP tool visibility policy", () => {
       "passing the time remaining, not a fresh full timeout",
     );
     expect(description("wait_for_input")).toContain(
+      "If less than the schema minimum remains or the deadline has passed",
+    );
+    expect(description("wait_for_input")).toContain(
+      "consumed no immediate machine input may finish without replacing the retained wait",
+    );
+    expect(description("wait_for_input")).toContain(
+      "make any unavoidable deadline adjustment explicit",
+    );
+    expect(description("wait_for_input")).toContain(
       "Pending Codemode calls require the same live attempt",
     );
   });

@@ -400,6 +400,13 @@ describe("proportional effort", () => {
       "preservation of an existing deadline when answering a question during a wait",
     );
     expect(guidance).toContain("explicit user/task/Skill monitoring cadence");
+    expect(guidance).toContain(
+      "remaining time is below the tool's minimum or its deadline has passed",
+    );
+    expect(guidance).toContain(
+      "has not consumed immediate machine input may finish without replacing the retained wait",
+    );
+    expect(guidance).toContain("make any unavoidable deadline adjustment explicit");
   });
 
   test("preserves comprehensive audits, scoped evidence reuse, and evidence-based persistence", () => {
