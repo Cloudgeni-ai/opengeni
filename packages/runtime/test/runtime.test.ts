@@ -15,6 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  ToolGatewayInputValidationError,
+  createWorkspaceToolGateway,
+} from "@opengeni/tool-gateway";
+import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
   RunRawModelStreamEvent,
@@ -2103,6 +2107,64 @@ describe("runtime event normalization", () => {
         },
       });
       expect(mcpToolErrorOutput(hostileMessage).content[0]?.text).toContain("MCP tool call failed");
+    });
+
+    test("an argument-validation rejection names the missing properties instead of retrying", async () => {
+      const { gateway } = createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "analytics", toolName: "exec" },
+            modelName: "analytics__exec",
+            inputSchema: {
+              type: "object",
+              properties: {
+                command: { type: "string" },
+                context: { type: "string" },
+                llm_model: { type: "string" },
+              },
+              required: ["command", "context", "llm_model"],
+            },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [{ type: "text", text: "unreachable" }] }),
+          },
+        ],
+      });
+      const rejected = await gateway
+        .callModel({
+          modelName: "analytics__exec",
+          arguments: { command: "synthetic-command-value" },
+          subjectId: "agent:test",
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(rejected).toBeInstanceOf(ToolGatewayInputValidationError);
+      // The agent's MCP errorFunction is the seam that renders this for the model.
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+      const errorFunction = (agent as any).mcpConfig.errorFunction as (args: {
+        context: unknown;
+        error: unknown;
+      }) => ReturnType<typeof mcpToolErrorOutput>;
+      const out = errorFunction({ context: {}, error: rejected });
+      expect(out).toEqual(mcpToolErrorOutput(rejected));
+      expect(out.isError).toBe(true);
+      const text = out.content[0]?.text ?? "";
+      expect(text).toBe(
+        "The tool was not called because its arguments do not match the tool's input schema: " +
+          'missing required property "context"; missing required property "llm_model". ' +
+          "Correct the named properties and call the tool again.",
+      );
+      expect(text).not.toContain("Please try again");
+      expect(text).not.toContain("synthetic-command-value");
+      // Every other thrown failure keeps the generic retry wording.
+      expect(mcpToolErrorOutput(new Error("upstream 503")).content[0]?.text).toBe(
+        "An error occurred while running the tool. Please try again. Error: upstream 503",
+      );
     });
 
     test("mcpToolErrorOutput preserves credential-shaped error details exactly", () => {
@@ -5666,6 +5728,46 @@ describe("runtime event normalization", () => {
     expect(
       repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "modal"),
     ).toBe(true);
+
+    // A best-effort repository always goes through the clone hook on a cloud
+    // box (the manifest's own Git entry cannot tolerate one failure), and is
+    // still never cloned onto a connected machine.
+    const optionalRepo = { ...plainRepo, optional: true };
+    expect(
+      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), optionalRepo),
+    ).toBe(true);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "docker" }),
+        optionalRepo,
+        "selfhosted",
+      ),
+    ).toBe(false);
+  });
+
+  test("marks only optional repositories as best effort in the clone script", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/picked.git",
+        ref: "main",
+        mountPath: "repos/picked",
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/recent.git",
+        ref: "main",
+        mountPath: "repos/recent",
+        optional: true,
+      },
+    ]);
+    const invocations = command
+      .split("\n")
+      .filter((line) => /^start_(optional_)?repository_clone /u.test(line));
+    expect(invocations).toEqual([
+      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' ''",
+      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent'",
+    ]);
   });
 
   test("buildOpenGeniAgent requires and exposes the truthful root for selfhosted targets", () => {

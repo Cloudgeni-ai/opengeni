@@ -4800,6 +4800,15 @@ export const RepositoryResourceRef = z.object({
   connectionId: z.string().min(1).optional(),
   githubInstallationId: z.number().int().positive().optional(),
   githubRepositoryId: z.number().int().positive().optional(),
+  /**
+   * Best-effort materialization. When true, a failed clone of this repository
+   * logs a warning and the session continues without it instead of failing
+   * sandbox setup. OpenGeni sets it on repositories it attaches on the
+   * person's behalf (a Slack task's recently used repositories); a repository
+   * a caller names explicitly stays strict unless the caller opts in. Only
+   * `true` is stored.
+   */
+  optional: z.boolean().optional(),
 });
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
 
@@ -10052,7 +10061,10 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     status: ScheduledTaskStatus.default("active"),
     variableSetId: z.string().uuid().nullable().optional(),
     environmentId: z.string().uuid().nullable().optional(),
-    // The rig each run binds to (M3); its active version is resolved per fire.
+    // The Sandbox Environment each run binds to; its active version is resolved
+    // per fire. Omitted resolves once at create, like session create: the
+    // workspace default (none for a Connected Machine task), or the target
+    // session's own environment for an existing-session task. null means none.
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
   },
@@ -15731,6 +15743,13 @@ export const GitHubRepository = z.object({
   defaultBranch: z.string(),
   accountLogin: z.string(),
   accountType: z.string().nullable(),
+  /** GitHub's archived flag, when the provider reported it. */
+  archived: z.boolean().optional(),
+  /**
+   * GitHub's reported repository size in kilobytes, when the provider
+   * reported it. Zero means GitHub considers the repository empty.
+   */
+  sizeKb: z.number().int().nonnegative().optional(),
 });
 export type GitHubRepository = z.infer<typeof GitHubRepository>;
 

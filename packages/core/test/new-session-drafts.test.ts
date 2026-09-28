@@ -8,7 +8,10 @@ import {
 import {
   bindAuthorizedGitHubInstallationRepositories,
   createDb,
+  createRig,
+  createVariableSet,
   saveNewSessionDraftInTransaction,
+  setWorkspaceDefaultRig,
   type Database,
   type DbClient,
   withWorkspaceSubjectRls,
@@ -23,7 +26,7 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import { createSessionForRequest } from "../src/domain/sessions";
 import {
   getActorNewSessionDraft,
-  getActorNewSessionDefaults,
+  getActorNewSessionModelChoice,
   saveActorNewSessionDraft,
 } from "../src/application/new-session-drafts";
 
@@ -328,19 +331,147 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");
     expect(hydrated.latencyMode).toBe("fast");
-    const defaults = await getActorNewSessionDefaults({ db, settings }, grant, workspaceId);
-    expect(defaults).toEqual({
-      resources: [resources[0], resources[2]],
-      tools: [mcp("opengeni")],
+    // Only the chosen model policy is reused by surfaces that start work
+    // without the composer; the draft's resources and tools are its own
+    // narrowing and never leak into them.
+    const choice = await getActorNewSessionModelChoice({ db, settings }, grant, workspaceId);
+    expect(choice).toEqual({
       model: "scripted-model",
       reasoningEffort: "high",
       latencyMode: "fast",
     });
-    const other = await getActorNewSessionDefaults(
+    const other = await getActorNewSessionModelChoice(
       { db, settings },
       { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
       workspaceId,
     );
-    expect(other).toEqual({ resources: [] });
+    expect(other).toEqual({});
+  }, 180_000);
+});
+
+describe("workspace default Sandbox Environment in the composer flow", () => {
+  // The composer's empty environment choice sends no rigId, so the server binds
+  // the workspace default and layers its default Variable Sets into every turn.
+  // A different environment picked for one session must not become the next
+  // form's saved selection, or every later session silently loses the
+  // workspace default and the Variable Sets it carries.
+  const encryptedSettings = testSettings({
+    ...settings,
+    environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+  });
+
+  function routeDeps(): ApiRouteDeps {
+    const noop = async () => undefined;
+    return {
+      settings: encryptedSettings,
+      db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        signalUserMessage: noop,
+        wakeSessionWorkflow: noop,
+        requestSessionWorkflowWakeDispatch: noop,
+        signalApprovalDecision: noop,
+        signalSessionControl: noop,
+        syncScheduledTask: noop,
+        deleteScheduledTaskSchedule: noop,
+        triggerScheduledTask: noop,
+      } as unknown as SessionWorkflowClient,
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: noop },
+      getDocumentServices: () => ({}) as never,
+    } as unknown as ApiRouteDeps;
+  }
+
+  // One composer submit: save the form as the browser does, then create the
+  // session against that exact draft revision.
+  async function submitFromComposer(grant: AccessGrant, text: string, options: { rigId?: string }) {
+    const draftDeps = { db, settings: encryptedSettings, objectStorage: null };
+    const current = await getActorNewSessionDraft(draftDeps, grant, grant.workspaceId!);
+    const saved = await saveActorNewSessionDraft(draftDeps, grant, grant.workspaceId!, {
+      expectedRevision: current.revision,
+      text,
+      resources: [],
+      tools: [],
+      toolsProvided: true,
+      model: encryptedSettings.openaiModel,
+      reasoningEffort: encryptedSettings.openaiReasoningEffort,
+      latencyMode: "standard",
+      options: { visibility: "workspace", ...options },
+    });
+    return await createSessionForRequest(routeDeps(), grant, grant.workspaceId!, {
+      initialMessage: saved.text,
+      visibility: "workspace",
+      resources: [],
+      tools: [],
+      model: saved.model,
+      reasoningEffort: saved.reasoningEffort,
+      latencyMode: saved.latencyMode,
+      ...(options.rigId ? { rigId: options.rigId } : {}),
+      expectedNewSessionDraftRevision: saved.revision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+  }
+
+  async function environmentFixture(withWorkspaceDefault: boolean) {
+    const { grant: baseGrant } = await fixture();
+    const grant: AccessGrant = {
+      ...baseGrant,
+      permissions: [...baseGrant.permissions, "variable-sets:attach"],
+    };
+    const workspaceId = grant.workspaceId!;
+    const credentials = await createVariableSet(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      scope: "workspace",
+      name: "shared credentials",
+    });
+    const rig = (name: string, defaultVariableSetIds: string[] = []) =>
+      createRig(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        name,
+        createdBy: "user:test",
+        initialVersion: { changelog: "v1", defaultVariableSetIds },
+      });
+    const workspaceDefault = await rig("analytics", [credentials.id]);
+    const other = await rig("build tools");
+    if (withWorkspaceDefault) await setWorkspaceDefaultRig(db, workspaceId, workspaceDefault.id);
+    return { grant, workspaceDefault, other };
+  }
+
+  test("another environment covers only its own session; the next one returns to the default", async () => {
+    if (!available) return;
+    const { grant, workspaceDefault, other } = await environmentFixture(true);
+
+    const first = await submitFromComposer(grant, "use the build tools once", {
+      rigId: other.id,
+    });
+    expect(first.rigId).toBe(other.id);
+
+    // The next form starts on the workspace default again.
+    const next = await getActorNewSessionDraft(
+      { db, settings: encryptedSettings },
+      grant,
+      grant.workspaceId!,
+    );
+    expect(next.options).not.toHaveProperty("rigId");
+
+    const second = await submitFromComposer(grant, "how many users signed up today", {});
+    expect(second.rigId).toBe(workspaceDefault.id);
+    expect(second.rigVersionId).toBe(workspaceDefault.activeVersion!.id);
+  }, 180_000);
+
+  test("without a workspace default the chosen environment stays the saved selection", async () => {
+    if (!available) return;
+    const { grant, other } = await environmentFixture(false);
+
+    await submitFromComposer(grant, "use the build tools", { rigId: other.id });
+    const next = await getActorNewSessionDraft(
+      { db, settings: encryptedSettings },
+      grant,
+      grant.workspaceId!,
+    );
+    expect(next.options.rigId).toBe(other.id);
   }, 180_000);
 });

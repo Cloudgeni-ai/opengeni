@@ -331,6 +331,19 @@ export class SlackBotProviderError extends Error {
   }
 }
 
+/**
+ * The post or update ledger already binds this operation id to different
+ * request bytes. Raised from the durable claim, before any Slack write, so a
+ * caller that knows an earlier release wrote other bytes for the same operation
+ * may retry once with those bytes.
+ */
+export class SlackBotOperationConflictError extends Error {
+  constructor(kind: "post" | "update" | "delete") {
+    super(`operationId is already bound to a different Slack ${kind} request`);
+    this.name = "SlackBotOperationConflictError";
+  }
+}
+
 export async function authorizeSlackSharedImageRead(
   channel: {
     isArchived: boolean;
@@ -1312,7 +1325,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("OpenGeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
-        throw new Error("operationId is already bound to a different Slack post request");
+        throw new SlackBotOperationConflictError("post");
       }
       if (claim.kind === "in_progress") {
         throw new Error("Slack post operation is already in progress; retry the same operationId");
@@ -1454,7 +1467,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("OpenGeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
-        throw new Error("operationId is already bound to a different Slack update request");
+        throw new SlackBotOperationConflictError("update");
       }
       if (claim.kind === "in_progress") {
         throw new Error(
@@ -1548,7 +1561,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("OpenGeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
-        throw new Error("operationId is already bound to a different Slack delete request");
+        throw new SlackBotOperationConflictError("delete");
       }
       if (claim.kind === "in_progress") {
         throw new Error(

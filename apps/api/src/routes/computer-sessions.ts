@@ -1033,6 +1033,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         waitSignal,
         operation,
         retryControllerTransport: operation === "computer.read" || operation === "computer.action",
+        ...(expectedPlacementInstanceId && expectedPlacement?.kind === "sandbox_group"
+          ? { retainedInstanceId: expectedPlacementInstanceId }
+          : {}),
       },
       async (handle) => {
         if (expectedPlacement?.kind === "sandbox_group") {

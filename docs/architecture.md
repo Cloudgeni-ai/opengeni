@@ -19,12 +19,10 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is a self-hostable session agent runtime. Postgres owns durable truth;
-Temporal coordinates execution; NATS transports reconstructible events. The
-control plane owns identity, tenancy, sessions, intervention, goals, recovery,
-compute, files, artifacts, usage, and observability. The API authorizes clients
-and bounded browser access to storage, sandboxes, relays, Codex WebRTC, and
-Gateway realtime WebSockets. Workers run in sandboxes or Connected Machines.
+OpenGeni is a self-hostable agent runtime: Postgres persists state, Temporal
+coordinates execution, and NATS transports reconstructible events. The API
+authorizes clients and browser access; workers use sandboxes or Connected Machines.
+Subsystem ownership and access boundaries follow below.
 
 External users require live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
@@ -807,7 +805,9 @@ These producers all converge on the ordinary session/turn runtime:
   trigger revision, and creates an ordinary session/run; and
 - a **child session** is a normal session with explicit lineage, depth, compute,
   visibility, and initiating-authority rules. Omitted child resources inherit
-  repositories only; file attachments require explicit selection (see
+  repositories only; file attachments require explicit selection, and an
+  omitted Sandbox Environment or Variable Set selection resolves like any new
+  session rather than copying the parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
 Schedule indicators derive from authorized, non-deleted reusable-session targets,
@@ -949,9 +949,9 @@ and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
 See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
 
 Knowledge is the product destination for retained sources and findings, with
-Files, Instructions and Skills as persistent tabs on the Agent Knowledge page.
-`apps/web/src/components/knowledge/agent-knowledge-page.tsx` owns that shared
-page navigation, including historical Memory and Documents links. Groups appear
+Library, Instructions and Review tabs on the Knowledge page (`/state`).
+`apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
+navigation, including old Files, Skills, Memory and Documents links. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
 changing its ownership. Connector ingestion runs through ordinary scheduled
@@ -1499,7 +1499,10 @@ deadline batch selects interaction-held leases, including already-draining ones;
 unrelated overdue leases cannot starve it. Lease-free Connected Machine/device
 transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
 fences before mutation visibility. Healthy interactions have no independent age
-limit. See `docs/run-lifecycle.md` for rotation and capture ordering.
+limit. Existing browser/computer control, including suspension, retains its provider across
+image updates. Admission locks and checks provider identity; replacements and
+capture/rotation bypasses are forbidden. New work enforces the deployment image.
+See `docs/run-lifecycle.md` for rotation and capture ordering.
 
 Modal commands use authenticated task-router byte offsets owned by the retained
 process. Output and cursor commit atomically under an expected-cursor fence;

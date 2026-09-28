@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { FormDisclosure } from "@/components/ui/form-disclosure";
-import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
+import { Field } from "@/components/ui/field";
+import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
@@ -14,25 +13,24 @@ import type { ConnectionMetadata } from "@/types";
 type SlackChannelOption = { id: string; name: string | null; isPrivate: boolean };
 
 const MAX_CHANNEL_PAGES = 5;
-
-export function scheduleSlackChannelLabel(
-  channelId: string,
-  channels: readonly SlackChannelOption[],
-): string {
-  const channel = channels.find((candidate) => candidate.id === channelId);
-  return channel?.name ? `#${channel.name}` : "the chosen channel";
-}
+/** Menu value for "no channel"; a Slack channel id is never empty. */
+const DONT_POST = "__dont_post__";
 
 /**
  * The one Slack channel a scheduled task's runs may post to as the OpenGeni
  * workspace bot. A person chooses it here; the agent cannot post anywhere
  * else. Changing it needs permission to manage connections.
+ *
+ * Renders plain fields for the schedule form's Advanced section. Channels load
+ * only once that section is open (`active`) or a channel is already chosen.
  */
 export function ScheduleSlackPosting(props: {
   workspaceId: string;
   connectionId: string;
   channelId: string;
   disabled: boolean;
+  /** The surrounding section is open, so the channel list is worth loading. */
+  active: boolean;
   onChange: (next: { connectionId: string; channelId: string }) => void;
 }) {
   const context = useAppContext();
@@ -43,7 +41,6 @@ export function ScheduleSlackPosting(props: {
     canRead &&
     (context.accessContext === null ||
       hasWorkspacePermission(context.accessContext, props.workspaceId, "connections:write"));
-  const [open, setOpen] = useState(false);
   const [bots, setBots] = useState<ConnectionMetadata[] | null>(null);
   const [botsError, setBotsError] = useState<string | null>(null);
   const [channels, setChannels] = useState<SlackChannelOption[]>([]);
@@ -71,7 +68,7 @@ export function ScheduleSlackPosting(props: {
     props.connectionId || (botOptions.length === 1 ? botOptions[0]!.connection.id : "");
 
   useEffect(() => {
-    if (!canChoose || (!open && !props.channelId) || !effectiveConnectionId) {
+    if (!canChoose || (!props.active && !props.channelId) || !effectiveConnectionId) {
       setChannels([]);
       return;
     }
@@ -108,11 +105,15 @@ export function ScheduleSlackPosting(props: {
     return () => {
       current = false;
     };
-  }, [canChoose, context.client, effectiveConnectionId, open, props.channelId, props.workspaceId]);
+  }, [
+    canChoose,
+    context.client,
+    effectiveConnectionId,
+    props.active,
+    props.channelId,
+    props.workspaceId,
+  ]);
 
-  const summary = props.channelId
-    ? `Posts to ${scheduleSlackChannelLabel(props.channelId, channels)} as the OpenGeni bot`
-    : "Off";
   const storedChannelMissing =
     Boolean(props.channelId) &&
     !channelsLoading &&
@@ -122,84 +123,90 @@ export function ScheduleSlackPosting(props: {
     bots !== null &&
     !botOptions.some((option) => option.connection.id === props.connectionId);
 
+  const hint =
+    "Each run can post to one Slack channel as the OpenGeni bot. The agent cannot post to any " +
+    "other channel. Invite the bot to a channel in Slack to see it here.";
+  const blocked = !canChoose
+    ? "Only people who can manage connections can choose this channel."
+    : botsError
+      ? `Slack connections could not be loaded. ${botsError}`
+      : bots !== null && botOptions.length === 0 && !props.connectionId
+        ? "No OpenGeni Slack bot is installed in this workspace. A task can post only through a " +
+          "bot installed in its own workspace, from Plugins."
+        : null;
+  if (blocked) {
+    return (
+      <Field label="Post to Slack" optional group>
+        <p role={botsError ? "alert" : undefined} className="m-0 text-sm text-fg-muted">
+          {blocked}
+        </p>
+      </Field>
+    );
+  }
+
+  const botMenu: SelectOption[] = [
+    ...(storedBotMissing
+      ? [
+          {
+            value: props.connectionId,
+            label: "The selected bot is unavailable",
+            disabled: true,
+          },
+        ]
+      : []),
+    ...botOptions.map((option) => ({ value: option.connection.id, label: option.label })),
+  ];
+  const channelMenu: SelectOption[] = [
+    { value: DONT_POST, label: "Don't post" },
+    ...(storedChannelMissing
+      ? [{ value: props.channelId, label: "The chosen channel is unavailable", disabled: true }]
+      : []),
+    ...channels.map((channel) => ({
+      value: channel.id,
+      label: channel.name ? `#${channel.name}` : channel.id,
+      ...(channel.isPrivate ? { meta: "Private" } : {}),
+    })),
+  ];
+
   return (
-    <FormDisclosure title="Post to Slack" summary={summary} open={open} onOpenChange={setOpen}>
-      <p className="text-xs text-fg-subtle">
-        Each run can post to one Slack channel as the OpenGeni bot. The agent cannot post to any
-        other channel. Invite the bot to a channel in Slack to see it here.
-      </p>
-      {!canChoose ? (
-        <p className="text-xs text-fg-subtle">
-          Only people who can manage connections can choose this channel.
-        </p>
-      ) : botsError ? (
-        <p role="alert" className="text-xs text-status-failed">
-          Slack connections could not be loaded. {botsError}
-        </p>
-      ) : bots !== null && botOptions.length === 0 && !props.connectionId ? (
-        <p className="text-xs text-fg-subtle">
-          No OpenGeni Slack bot is installed in this workspace. A task can post only through a bot
-          installed in its own workspace, from Plugins.
-        </p>
-      ) : (
-        <>
-          {botOptions.length > 1 || storedBotMissing ? (
-            <div className="grid gap-1.5">
-              <Label>Slack workspace</Label>
-              <Select
-                value={props.connectionId}
-                disabled={props.disabled}
-                onChange={(event) =>
-                  props.onChange({ connectionId: event.target.value, channelId: "" })
-                }
-              >
-                <option value="">Choose the OpenGeni bot</option>
-                {storedBotMissing ? (
-                  <option value={props.connectionId} disabled>
-                    The selected bot is unavailable
-                  </option>
-                ) : null}
-                {botOptions.map((option) => (
-                  <option key={option.connection.id} value={option.connection.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </Select>
-            </div>
-          ) : null}
-          <div className="grid gap-1.5">
-            <Label>Channel</Label>
-            <Select
-              value={props.channelId}
-              disabled={props.disabled || !effectiveConnectionId || channelsLoading}
-              onChange={(event) =>
-                props.onChange({
-                  connectionId: event.target.value ? effectiveConnectionId : props.connectionId,
-                  channelId: event.target.value,
-                })
-              }
-            >
-              <option value="">{channelsLoading ? "Loading channels…" : "Don't post"}</option>
-              {storedChannelMissing ? (
-                <option value={props.channelId} disabled>
-                  The chosen channel is unavailable
-                </option>
-              ) : null}
-              {channels.map((channel) => (
-                <option key={channel.id} value={channel.id}>
-                  {channel.name ? `#${channel.name}` : channel.id}
-                  {channel.isPrivate ? " (private)" : ""}
-                </option>
-              ))}
-            </Select>
-            {channelsError ? (
-              <p role="alert" className="text-xs text-status-failed">
-                Slack channels could not be loaded. {channelsError}
-              </p>
-            ) : null}
-          </div>
-        </>
-      )}
-    </FormDisclosure>
+    <>
+      {botOptions.length > 1 || storedBotMissing ? (
+        <Field label="Slack workspace">
+          <SelectMenu
+            options={botMenu}
+            value={props.connectionId || null}
+            onValueChange={(connectionId) => props.onChange({ connectionId, channelId: "" })}
+            placeholder="Choose the OpenGeni bot"
+            disabled={props.disabled}
+            className="max-w-[360px]"
+          />
+        </Field>
+      ) : null}
+      <Field
+        label="Post to Slack"
+        optional
+        hint={hint}
+        error={channelsError ? `Slack channels could not be loaded. ${channelsError}` : undefined}
+      >
+        <SelectMenu
+          variant={channelMenu.length > 8 ? "combobox" : "menu"}
+          options={channelMenu}
+          value={props.channelId || DONT_POST}
+          onValueChange={(value) =>
+            props.onChange(
+              value === DONT_POST
+                ? { connectionId: props.connectionId, channelId: "" }
+                : { connectionId: effectiveConnectionId, channelId: value },
+            )
+          }
+          placeholder="Choose the OpenGeni bot first"
+          searchPlaceholder="Search channels"
+          disabled={props.disabled || !effectiveConnectionId}
+          loading={channelsLoading}
+          loadingLabel="Loading channels…"
+          className="max-w-[360px]"
+        />
+      </Field>
+    </>
   );
 }

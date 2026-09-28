@@ -16,7 +16,7 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem } from "@/types";
 
 const CodexSubscriptionsCard = lazy(async () => ({
-  default: (await import("@/components/codex-connection")).CodexSubscriptionsCard,
+  default: (await import("@/components/models/codex-models")).CodexSubscriptionsCard,
 }));
 
 /** Recommendations carry identity and rationale, never connection configuration.

@@ -44,7 +44,7 @@ for (const fromSession of [undefined, "33333333-3333-4333-8333-333333333333"]) {
       });
       const links = [...container.querySelectorAll("a")];
       expect(links.map((link) => link.textContent)).toEqual(
-        fromSession ? ["All artifacts", "Back to session"] : ["All artifacts"],
+        fromSession ? ["Artifacts", "Back to session"] : ["Artifacts"],
       );
       expect(links[0]!.getAttribute("href")).toBe(
         fromSession

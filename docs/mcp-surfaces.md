@@ -74,6 +74,22 @@ approvals, and invocation continue through the existing runtime. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.
 
+### Tool argument errors
+
+Every adapter validates arguments against the tool's advertised input schema in
+the shared gateway, including properties a provider lists as required but does
+not itself enforce. A rejected call never reaches the provider. The error names
+each missing, mistyped, or unexpected property (up to eight, then a count of the
+rest) and never quotes argument values:
+
+- Model MCP calls receive an `isError` tool result that says the tool was not
+  called, lists those properties, and asks the model to correct them and call
+  again. Other thrown MCP failures keep the generic retry wording.
+- Workspace HTTP/SDK calls and approvals return `422 validation_failed` with the
+  same summary as `message` and `details: { code: "invalid_tool_arguments",
+  issues, omittedIssueCount }`, where each issue is `{ path, keyword, message }`.
+- Codemode and the unified workspace MCP surface the same error message.
+
 The native Connected Machine Codemode client sends its compiled API contract
 acknowledgement for compatibility with older deployments whose Codemode routes
 were protected by the product mutation fence. Current deployments scope

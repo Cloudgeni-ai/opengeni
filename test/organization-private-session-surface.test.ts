@@ -13,11 +13,13 @@ describe("organization private-session product surface", () => {
     );
     expect(route).toContain("/v1/organizations/:organizationId/private-session-settings");
     const component = await readFile(
-      join(repo, "apps/web/src/components/organization-admin.tsx"),
+      join(repo, "apps/web/src/components/organization/security-page.tsx"),
       "utf8",
     );
-    const start = component.indexOf("export function OrganizationPrivateSessionsSection");
-    const end = component.indexOf("export function OrganizationOverviewSection", start);
+    const start = component.indexOf("function PrivateChatsRow");
+    const end = component.indexOf("function RetentionRow", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
     const surface = component.slice(start, end);
     expect(surface).toContain("getOrganizationPrivateSessionSettings");
     expect(surface).toContain("updateOrganizationPrivateSessionSettings");

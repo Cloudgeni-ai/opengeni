@@ -36,6 +36,7 @@ export function TimelineAnnotationsDialog({
   triggerRef,
   countLabel,
   onDismiss,
+  onCommit,
 }: {
   annotations: readonly TimelineAnnotationLike[];
   editable: boolean;
@@ -47,6 +48,7 @@ export function TimelineAnnotationsDialog({
   triggerRef: RefObject<HTMLButtonElement | null>;
   countLabel: string;
   onDismiss: (restoreFocus: boolean) => void;
+  onCommit: () => void;
 }) {
   const [unavailableId, setUnavailableId] = useState<string | null>(null);
   const [position, setPosition] = useState({ left: 12, top: 12, maxHeight: 0 });
@@ -69,7 +71,7 @@ export function TimelineAnnotationsDialog({
       return (live?.value ?? annotation.note).trim().length === 0;
     });
     if (incomplete.length === 0) {
-      onDismiss(true);
+      onCommit();
       return;
     }
     const fromIndex = annotations.findIndex((annotation) => annotation.id === fromId);

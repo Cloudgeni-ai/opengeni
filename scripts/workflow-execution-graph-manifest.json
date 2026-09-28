@@ -46,7 +46,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "65eda9e447d13bccaecd130c61182fbeddea2c49bda6fcd0529645f5e0eb591e"
+      "sha256": "ca17a460d150a375f6d3404e6dfe586a146917d3d2e36dcd0f93ec3f29538887"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -857,7 +857,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Admit protected main source",
-      "sha256": "faec0df74f1ec9d6b83e2b21389f8cc52ec16d8f7873ecbec89edaec0cbc1bf8"
+      "sha256": "6590c803e20faf9692c6f63fe4e23f8c131e38f604f13d1288da3d709cdddc6e"
     },
     {
       "workflow": ".github/workflows/publish-canary.yml",
@@ -875,7 +875,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Verify exact source",
-      "sha256": "e10d2a67ae143c5223960cad1b2433bdeba7046fecd1a05ae1519a8a880e5022"
+      "sha256": "614d4b19bde5f2c3b017a6127b62ef698b9a7c0e78f56f1f5aacf146885067e2"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",

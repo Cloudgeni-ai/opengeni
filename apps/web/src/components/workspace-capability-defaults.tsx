@@ -6,6 +6,8 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { SettingRow } from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
 import { builtInMcpCapability, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
 import {
@@ -72,6 +74,76 @@ export function WorkspaceCapabilityDefaults({
         toast.success("Defaults for new sessions updated");
         return true;
       }}
+    />
+  );
+}
+
+/**
+ * Settings > General > "Use connected apps automatically": new sessions start
+ * with every connected app, including ones connected later. Off keeps today's
+ * connected apps as a fixed list. Saves on change.
+ */
+export function ConnectedAppsDefaultRow({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
+  const configured = resolveWorkspaceSessionToolDefaults(workspace?.settings);
+  const inherit =
+    configured?.mcpServerIds !== undefined ? configured.inheritConnectedMcpServers === true : true;
+  const mcpServerIds =
+    configured?.mcpServerIds ?? context.toolMcpServers.map((server) => server.id);
+  const [saving, setSaving] = useState(false);
+
+  async function save(next: boolean) {
+    if (!canManage || saving) return;
+    const invocation = context.captureWorkspaceInvocation(workspaceId);
+    if (!invocation) return;
+    setSaving(true);
+    try {
+      const connected = context.toolMcpServers
+        .filter((server) => !builtInMcpCapability(server))
+        .map((server) => server.id);
+      // Built-in selections are kept; turning it off freezes today's connected apps.
+      const nextIds = next ? mcpServerIds : [...new Set([...mcpServerIds, ...connected])];
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        sessionToolDefaults: {
+          mcpServerIds: [...nextIds].sort(),
+          inheritConnectedMcpServers: next,
+        },
+      });
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, invocation)) {
+        toast.success(
+          next
+            ? "New sessions start with your connected apps"
+            : "New sessions start with today's connected apps only",
+        );
+      }
+    } catch {
+      if (context.ownsWorkspaceInvocation(workspaceId, invocation))
+        toast.error("Couldn't update connected apps for new sessions");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <SettingRow
+      label="Use connected apps automatically"
+      description="New sessions start with every connected app, including ones connected later. Off keeps today's apps only. People can still change apps in a session."
+      control={
+        <Switch
+          checked={inherit}
+          pending={saving}
+          disabled={!canManage}
+          disabledReason={canManage ? undefined : "Only workspace admins can change this."}
+          onCheckedChange={(next) => void save(next)}
+        />
+      }
     />
   );
 }

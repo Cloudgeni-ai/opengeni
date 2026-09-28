@@ -179,10 +179,11 @@ function Fixture() {
           Connect workspace-owned providers and curate the exact model slugs available to your team.
         </p>
       </header>
-      <section aria-labelledby="gateway-heading" className="grid gap-2">
-        <h2 id="gateway-heading" className="text-sm font-semibold">
-          Vercel AI Gateway
-        </h2>
+      <section
+        aria-label="Vercel AI Gateway"
+        data-testid="vercel-ai-gateway-connection-card"
+        className="grid gap-2"
+      >
         <AiGatewayConnectionCardWithClient
           client={clientRef.current}
           workspaceId={workspaceId}
@@ -191,10 +192,11 @@ function Fixture() {
           onConnectionChange={() => connectionChanged("gateway")}
         />
       </section>
-      <section aria-labelledby="openrouter-heading" className="grid gap-2">
-        <h2 id="openrouter-heading" className="text-sm font-semibold">
-          OpenRouter
-        </h2>
+      <section
+        aria-label="OpenRouter"
+        data-testid="openrouter-connection-card"
+        className="grid gap-2"
+      >
         <OpenRouterConnectionCardWithClient
           client={clientRef.current}
           workspaceId={workspaceId}

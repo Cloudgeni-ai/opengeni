@@ -8,7 +8,6 @@ import {
   Clock3Icon,
   GitForkIcon,
   ListTreeIcon,
-  NetworkIcon,
   PauseIcon,
   SearchIcon,
   WorkflowIcon,
@@ -16,7 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { PageHeader } from "@/components/common";
+import { PageHeader } from "@/components/ui/page-header";
 import { RelatedWorkAdvisory } from "@/components/related-work-advisory";
 import { Button } from "@/components/ui/button";
 import { ContentPage, ContentSurface } from "@/components/ui/content-layout";
@@ -356,7 +355,6 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   return (
     <ContentPage width="wide" className="gap-5" data-agent-topology>
       <PageHeader
-        icon={<NetworkIcon className="size-4" />}
         title="Agents"
         description="Every visible agent workstream, connected to the agents it spawned. Open a node to inspect its session, goal, turns, and output."
       />
@@ -1030,7 +1028,6 @@ export function AgentTopologyPreviewRoute() {
     <div className="flex min-h-dvh bg-bg text-fg">
       <ContentPage width="wide" className="gap-5">
         <PageHeader
-          icon={<NetworkIcon className="size-4" />}
           title="Agents"
           description="Every visible agent workstream, connected to the agents it spawned. This static development preview uses the same tree renderer as the workspace page."
         />

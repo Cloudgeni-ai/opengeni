@@ -83,7 +83,7 @@ not get the tool, because its search commands are POSIX shell scripts.
 | --- | --- | --- |
 | Deployment | `OPENGENI_JEV_API_KEY` | Required. Without a usable key, every Jev feature is off. |
 | Deployment | `OPENGENI_CODE_SEARCH_MODE` | `off` (default) never offers the tool. `opt_in` offers it where the workspace turns it on. `default_on` gives it to every workspace that has not turned it off. `experiment` gives it to a fixed half of sessions in workspaces without their own setting. |
-| Workspace | `settings.codeSearchEnabled` | Settings → Session defaults → **Fast code search**: Default, On or Off. `true` or `false` overrides the deployment default for new sessions; `null` or absent follows it. `false` also switches the tool off in running sessions. The row is hidden when the deployment does not offer the tool. |
+| Workspace | `settings.codeSearchEnabled` | Settings → General → New session defaults → **Fast code search**: Default, On or Off. `true` or `false` overrides the deployment default for new sessions; `null` or absent follows it. `false` also switches the tool off in running sessions. The row is hidden when the deployment does not offer the tool. |
 | Worker process | Circuit breaker | Three consecutive Jev outages make `code_search` calls on that worker fail at once for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until it ends or has run for 10 minutes. A search that never needed Jev neither closes nor reopens it. The breaker never hides the tool. |
 
 `OPENGENI_JEV_BASE_URL`, `OPENGENI_JEV_MODEL` and

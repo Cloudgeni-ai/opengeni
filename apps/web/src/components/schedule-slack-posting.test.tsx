@@ -1,9 +1,15 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts";
 import type { ConnectionMetadata, SlackReactionChannelListResponse } from "@opengeni/sdk";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
+
+// Register the DOM before React DOM and Radix load: Radix picks a no-op layout
+// effect when it is imported without a document, and the menu never mounts.
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+const { act } = await import("react");
+const { createRoot } = await import("react-dom/client");
 
 const WORKSPACE_ID = "workspace-a";
 const BOT_ID = "33333333-3333-4333-8333-333333333333";
@@ -72,11 +78,12 @@ function botConnection(): ConnectionMetadata {
   } as ConnectionMetadata;
 }
 
+// Radix mounts the menu content a tick after it opens.
 function flush(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => setTimeout(resolve, 20));
 }
 
-async function render(channelId = "", onChange = mock(() => {})) {
+async function render(channelId = "", onChange = mock(() => {}), active = true) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -87,6 +94,7 @@ async function render(channelId = "", onChange = mock(() => {})) {
         connectionId=""
         channelId={channelId}
         disabled={false}
+        active={active}
         onChange={onChange}
       />,
     );
@@ -94,13 +102,6 @@ async function render(channelId = "", onChange = mock(() => {})) {
   });
   return { container, onChange, root };
 }
-
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
 
 afterAll(() => {
   mock.restore();
@@ -118,47 +119,79 @@ beforeEach(() => {
   ]);
 });
 
+function optionLabels(): string[] {
+  return [...document.querySelectorAll<HTMLElement>('[role="option"]')].map(
+    (option) => option.textContent ?? "",
+  );
+}
+
+async function openChannelMenu(container: HTMLElement): Promise<HTMLButtonElement> {
+  const triggers = container.querySelectorAll<HTMLButtonElement>('[role="combobox"]');
+  const trigger = triggers[triggers.length - 1]!;
+  await act(async () => {
+    trigger.click();
+    await flush();
+  });
+  return trigger;
+}
+
 describe("ScheduleSlackPosting", () => {
   test("a person picks one bot channel; the only bot is used implicitly", async () => {
     const { container, onChange, root } = await render();
     expect(container.textContent).toContain("Post to Slack");
-    expect(container.textContent).toContain("Off");
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>("button")!.click();
-      await flush();
-    });
     expect(listScheduledTaskSlackChannels).toHaveBeenCalledWith(WORKSPACE_ID, BOT_ID, undefined);
-    const selects = container.querySelectorAll<HTMLSelectElement>("select");
     // A single installed bot needs no workspace picker.
-    expect(selects).toHaveLength(1);
-    expect([...selects[0]!.options].map((option) => option.textContent)).toEqual([
-      "Don't post",
-      "#daily-updates",
-      "#ops (private)",
-    ]);
+    expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(1);
+    expect(container.textContent).toContain("Don't post");
+    await openChannelMenu(container);
+    const labels = optionLabels();
+    expect(labels[0]).toContain("Don't post");
+    expect(labels[1]).toContain("#daily-updates");
+    expect(labels[2]).toContain("#ops");
+    expect(labels[2]).toContain("Private");
     await act(async () => {
-      selects[0]!.value = "C0SCHED01";
-      selects[0]!.dispatchEvent(new Event("change", { bubbles: true }));
+      document.querySelectorAll<HTMLElement>('[role="option"]')[1]!.click();
+      await flush();
     });
     expect(onChange).toHaveBeenCalledWith({ connectionId: BOT_ID, channelId: "C0SCHED01" });
     await act(async () => root.unmount());
   });
 
-  test("shows the chosen channel by name when closed", async () => {
-    const { container, root } = await render("C0SCHED01");
-    expect(container.textContent).toContain("Posts to #daily-updates as the OpenGeni bot");
+  test("channels load only once the section is open or a channel is chosen", async () => {
+    const closed = await render(
+      "",
+      mock(() => {}),
+      false,
+    );
+    expect(listScheduledTaskSlackChannels).not.toHaveBeenCalled();
+    await act(async () => closed.root.unmount());
+
+    const chosen = await render(
+      "C0SCHED01",
+      mock(() => {}),
+      false,
+    );
+    expect(listScheduledTaskSlackChannels).toHaveBeenCalledTimes(1);
+    expect(chosen.container.textContent).toContain("#daily-updates");
+    await act(async () => chosen.root.unmount());
+  });
+
+  test("choosing Don't post clears the channel", async () => {
+    const { container, onChange, root } = await render("C0SCHED01");
+    await openChannelMenu(container);
+    await act(async () => {
+      document.querySelectorAll<HTMLElement>('[role="option"]')[0]!.click();
+      await flush();
+    });
+    expect(onChange).toHaveBeenCalledWith({ connectionId: "", channelId: "" });
     await act(async () => root.unmount());
   });
 
   test("people who cannot manage connections cannot change the channel", async () => {
     context.accessContext = accessContext(["scheduled_tasks:manage", "connections:read"]);
     const { container, root } = await render();
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>("button")!.click();
-      await flush();
-    });
     expect(container.textContent).toContain("Only people who can manage connections");
-    expect(container.querySelector("select")).toBeNull();
+    expect(container.querySelector('[role="combobox"]')).toBeNull();
     expect(listScheduledTaskSlackChannels).not.toHaveBeenCalled();
     await act(async () => root.unmount());
   });

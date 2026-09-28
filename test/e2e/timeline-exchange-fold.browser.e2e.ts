@@ -3,8 +3,9 @@
 // the tip stops once the answer pushes the question to the top, the next
 // question resumes following, "Your question" returns a reader to the question
 // they are reading, a short answer never leaves a stale stop behind, progress
-// notes streamed without a phase never read as the answer, and loading older
-// history keeps the reader in place.
+// notes streamed without a phase never read as the answer, loading older
+// history keeps the reader in place, and an answer stays a visible message
+// that keeps its reader in place when a machine-triggered turn follows it.
 import { existsSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
@@ -247,6 +248,111 @@ describe("timeline exchange fold browser regression", () => {
       expect(done.status).toBe("worked");
       expect(done.rowsBetween).toBe(1);
       expect(done.lastText).toContain("171 in total");
+    } finally {
+      await page.context().close();
+    }
+  }, 60_000);
+
+  test("an answer stays a visible message when a machine-triggered turn follows it", async () => {
+    const page = await openHarness("machine-follow-up");
+    try {
+      const total = await page.evaluate(() => window.exchangeFoldHarness!.total);
+      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), total);
+      await nextPaint(page);
+      await page.waitForTimeout(200);
+      const state = await page.evaluate(() => {
+        const question = "Do you approve this four-at-a-time layout?";
+        const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+        const message = [
+          ...scroller.querySelectorAll<HTMLElement>("[data-og-wide-table-message]"),
+        ].find(
+          (candidate) =>
+            candidate.textContent?.includes(question) &&
+            !candidate.closest("[data-og-fold-content]"),
+        );
+        return {
+          // The question is readable without expanding anything...
+          answerVisible: !!message && message.getBoundingClientRect().height > 0,
+          // ...and is not squeezed into a muted status-row preview.
+          inStatusNote: [...scroller.querySelectorAll("[data-og-exchange-note]")].some((note) =>
+            note.textContent?.includes(question),
+          ),
+        };
+      });
+      expect(state).toEqual({ answerVisible: true, inStatusNote: false });
+    } finally {
+      await page.context().close();
+    }
+  }, 60_000);
+
+  test("work after an answer never pulls a reader away from it", async () => {
+    const page = await openHarness("machine-follow-up");
+    try {
+      const harness = await page.evaluate(() => {
+        const driver = window.exchangeFoldHarness!;
+        return {
+          total: driver.total,
+          answer: driver.indexOf("agent.message.delta").at(-1)!,
+          input: driver.indexOf("system.update.delivered").at(-1)!,
+        };
+      });
+      // Everything up to the answer, with the reader following the tip.
+      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), harness.answer);
+      await nextPaint(page);
+      await page.waitForTimeout(300);
+      await page
+        .locator("[data-og-jump-to-latest]")
+        .click({ timeout: 1_000 })
+        .catch(() => undefined);
+      await page.waitForFunction(
+        () =>
+          document.querySelector<HTMLElement>("[data-og-timeline-scroller]")?.dataset
+            .ogBottomFollow === "true",
+        undefined,
+        { timeout: 4_000 },
+      );
+      const read = () =>
+        page.evaluate(() => {
+          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          const message = [
+            ...scroller.querySelectorAll<HTMLElement>("[data-og-wide-table-message]"),
+          ].find(
+            (candidate) =>
+              candidate.textContent?.includes("The layout preview is ready.") &&
+              !candidate.closest("[data-og-fold-content]"),
+          );
+          return {
+            following: scroller.dataset.ogBottomFollow === "true",
+            answerTop: message
+              ? Math.round(
+                  message.getBoundingClientRect().top - scroller.getBoundingClientRect().top,
+                )
+              : null,
+            status:
+              [...scroller.querySelectorAll<HTMLElement>("[data-og-exchange-status]")]
+                .at(-1)
+                ?.getAttribute("data-og-exchange-status") ?? null,
+          };
+        });
+      let stopped: Awaited<ReturnType<typeof read>> | null = null;
+      for (let count = harness.answer + 1; count <= harness.total; count += 1) {
+        await page.evaluate((value) => window.exchangeFoldHarness!.show(value), count);
+        await nextPaint(page);
+        await page.waitForTimeout(120);
+        const state = await read();
+        if (!stopped) {
+          if (!state.following) stopped = state;
+          continue;
+        }
+        // The next machine-triggered turn works and settles in a row below the
+        // answer; the reader stays exactly where following stopped.
+        expect(state).toMatchObject({ following: false, answerTop: stopped.answerTop });
+        if (count === harness.input + 1) expect(state.status).toBe("working");
+      }
+      expect(stopped).not.toBeNull();
+      // Following stopped with the answer on screen.
+      expect(stopped!.answerTop).toBeGreaterThanOrEqual(0);
+      expect(stopped!.answerTop).toBeLessThan(560);
     } finally {
       await page.context().close();
     }

@@ -38,7 +38,7 @@ describe("Site conversation navigation", () => {
   }, 30_000);
 
   for (const theme of ["light", "dark"])
-    test(`${theme}: linked origin, group disclosure, paginated/searchable host sheet`, async () => {
+    test(`${theme}: linked origin, group disclosure, paginated/searchable host panel`, async () => {
       const errors: string[] = [];
       const onError = (error: Error) => errors.push(error.message);
       page.on("pageerror", onError);
@@ -65,18 +65,15 @@ describe("Site conversation navigation", () => {
             .getByRole("button", { name: "Collapse conversations from Product analytics" })
             .getAttribute("aria-expanded"),
         ).toBe("true");
-        await page.getByRole("button", { name: "Conversations", exact: true }).click();
         await page.getByRole("link", { name: "Review conversion trends" }).waitFor();
         await page.getByRole("button", { name: "Load older conversations" }).click();
         await page.getByRole("link", { name: "Investigate onboarding drop-off" }).waitFor();
-        await page.getByRole("textbox", { name: "Search Site conversations" }).fill("conversion");
+        await page.getByRole("searchbox", { name: "Search Site conversations" }).fill("conversion");
         await page
           .getByRole("link", { name: "Explain last week’s activity" })
           .waitFor({ state: "hidden" });
-        await page.getByRole("button", { name: "Archived", exact: true }).click();
+        await page.getByRole("radio", { name: "Archived", exact: true }).click();
         await page.getByText("No matching conversations.").waitFor();
-        await page.keyboard.press("Escape");
-        await page.getByRole("dialog").waitFor({ state: "hidden" });
         expect(errors).toEqual([]);
       } finally {
         page.off("pageerror", onError);

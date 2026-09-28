@@ -161,6 +161,8 @@ export type ChannelAContext = {
   retryControllerTransport?: boolean | undefined;
   /** Ephemeral browser callbacks must never replay after an ambiguous result. */
   allowOperationReplay?: boolean | undefined;
+  /** Exact existing interaction provider; may not spawn/rotate on image drift. */
+  retainedInstanceId?: string | undefined;
 };
 
 export type ChannelAOperationFailureReason =
@@ -839,6 +841,7 @@ async function withChannelAOperation<T>(
       },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
+      ...(ctx.retainedInstanceId ? { retainedInstanceId: ctx.retainedInstanceId } : {}),
       rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,

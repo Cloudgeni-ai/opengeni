@@ -461,14 +461,20 @@ function sameQuestionNav(a: QuestionNav | null, b: QuestionNav | null): boolean 
 }
 
 /**
- * The newest exchange when its answer is the last row: anchor candidates from
- * the top down (its question, its status row, the answer itself).
+ * The newest exchange when its answer is the last message: anchor candidates
+ * from the top down (its question, its status row, the answer itself). Rows of
+ * work that later machine-triggered turns add below the answer keep it the
+ * newest, so they never pull a reader away from it.
  */
 function exchangeAnswerAnchor(
   groups: readonly { group: TimelineGroup; key: string }[],
 ): { answerKey: string; candidates: string[] } | null {
-  const answer = groups[groups.length - 1];
-  const row = groups[groups.length - 2];
+  let answerIndex = groups.length - 1;
+  while (answerIndex >= 0 && groups[answerIndex]!.group.kind !== "item") {
+    answerIndex -= 1;
+  }
+  const answer = groups[answerIndex];
+  const row = groups[answerIndex - 1];
   if (
     answer?.group.kind !== "item" ||
     answer.group.item.kind !== "agent-message" ||
@@ -478,7 +484,7 @@ function exchangeAnswerAnchor(
     return null;
   }
   let prompt: string | undefined;
-  for (let index = groups.length - 3; index >= 0; index -= 1) {
+  for (let index = answerIndex - 2; index >= 0; index -= 1) {
     const group = groups[index]!.group;
     if (group.kind === "item" && group.item.kind === "user-message") {
       prompt = groups[index]!.key;
@@ -1541,9 +1547,9 @@ export function MessageTimeline({
     };
     const anchorState = answerAnchorRef.current;
     if (anchorState && answerAnchor?.answerKey !== anchorState.answerKey) {
-      // The anchored answer is no longer the newest row: a question, more
-      // work, or the answer turning out to be a note followed it. Its stop no
-      // longer applies. (Loading older history never changes the newest row.)
+      // The anchored answer is no longer the newest message: a question, a
+      // newer reply, or the answer turning out to be a note followed it. Its
+      // stop no longer applies. (Loading older history never changes it.)
       const releasedAt = anchorState.releasedAt;
       anchorState.anchorKey = null;
       anchorState.releasedAt = undefined;

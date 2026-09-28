@@ -244,7 +244,7 @@ The new control worker registers the Knowledge indexing schedule. Search caches
 are rebuildable; original files, canonical revisions, evidence and review
 receipts are retained authorities. Old learning source exceptions remain
 historical evidence: set future exceptions on the relevant chat or scheduled
-task in Settings → Agent learning. Existing category opt-outs are preserved.
+task. Existing category opt-outs are preserved.
 See [Knowledge](knowledge.md) for scope, review and compatibility behavior.
 
 ### Native instance resolver registration (0463)
@@ -1778,7 +1778,11 @@ Site authoring installs exact registry versions. Stable builds use their source
 SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish packages
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
-`site-package-versions-<sha>` artifact. The runtime includes these pins beside
+`site-package-versions-<sha>` artifact. The publisher runs from protected `main`
+and admits an exact ancestor commit, so branch movement does not invalidate a
+frozen candidate. Standard npm provenance identifies the trusted workflow
+controller; the verified checkout and source-named receipt identify the package
+source, which can be older. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.

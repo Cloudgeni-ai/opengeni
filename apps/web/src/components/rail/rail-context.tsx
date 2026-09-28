@@ -1,7 +1,7 @@
 // Shared state for the left rail: collapsed (icon-only) persistence, the mobile
 // overlay-drawer toggle, and the workspace-scoped navigation helpers every rail
 // section reuses (open a workspace, start a new session, switch org/workspace).
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouter } from "@tanstack/react-router";
 import {
   createContext,
   useCallback,
@@ -17,6 +17,7 @@ import {
 import { useAppContext } from "@/context";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
 import { OPEN_SESSION_SEARCH_EVENT } from "@/lib/session-search-route";
+import { workspaceManagementLocation } from "@/lib/workspace-management-location";
 
 const SessionSearchDialog = lazy(() => import("@/components/session/session-search-dialog"));
 
@@ -102,6 +103,7 @@ export function RailProvider({
   children: ReactNode;
 }) {
   const navigate = useNavigate();
+  const router = useRouter();
   const appContext = useAppContext();
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchMounted, setSearchMounted] = useState(false);
@@ -160,12 +162,31 @@ export function RailProvider({
     (nextWorkspaceId: string) => {
       appContext.resetSessionView();
       setDrawerOpen(false);
+      // In settings, switching workspace keeps the same settings page.
+      const current = router.state.location;
+      const settings = workspaceManagementLocation(
+        current.pathname,
+        workspaceId,
+        (current.search as { section?: unknown }).section,
+      );
+      if (settings?.kind === "settings") {
+        void navigate({
+          to: "/workspaces/$workspaceId/settings",
+          params: { workspaceId: nextWorkspaceId },
+          search: settings.section ? { section: settings.section } : {},
+        });
+        return;
+      }
+      if (settings?.kind === "page") {
+        void navigate({ to: settings.target, params: { workspaceId: nextWorkspaceId } });
+        return;
+      }
       void navigate({
         to: "/workspaces/$workspaceId/sessions",
         params: { workspaceId: nextWorkspaceId },
       });
     },
-    [appContext, navigate],
+    [appContext, navigate, router, workspaceId],
   );
 
   const openOrg = useCallback(

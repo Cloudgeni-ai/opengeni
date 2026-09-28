@@ -71,7 +71,9 @@ test("an imported inventory refresh survives opening a skill and ignores an olde
       "existing",
       "imported",
     ]);
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Existing skill");
+    expect(document.querySelector("[data-capability-page]")?.textContent).toContain(
+      "Existing skill",
+    );
     first.resolve({ skills: [skill] });
     await flush();
     expect(onSkillsChange.mock.calls.at(-1)?.[0].map((row) => row.id)).toEqual([
