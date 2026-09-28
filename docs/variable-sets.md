@@ -26,6 +26,17 @@ remembered flags cannot re-enable a set. This preference is not synchronized
 between browsers, and blocked storage falls back to in-memory editing. No API,
 authorization, database, or inspector restart contract changes are involved.
 
+A Variable Set has no "attach to every session" flag, and a set's workspace
+scope only says who can see it. Explicit sets in the composer's saved new-session
+selection carry forward only for the person who picked them. To give every new
+session in a workspace a set, put it in the `defaultVariableSetIds` of the
+workspace default [Sandbox Environment](rigs.md#default-sandbox-environment-resolution):
+web sessions on the composer's default choice, scheduled tasks that omit
+`rigId`, API sessions that omit `rigId`, and agent-created children that omit
+`rigId` all bind that environment, and its default sets are layered into every
+turn. A child session never copies its parent's explicit sets; it names them in
+`variableSetIds` when it needs them.
+
 The web creation form makes this scope a required, explicit choice and every
 list row carries the same Organization, Workspace, or Only me label. Scope is a
 property of the resource, not a duplicate navigation hierarchy. Only an active
