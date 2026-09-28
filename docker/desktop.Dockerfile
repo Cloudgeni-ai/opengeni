@@ -269,7 +269,7 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
 ARG CHECKOV_VERSION=3.2.526
 ARG UV_VERSION=0.12.18
-ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1"
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6"
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
@@ -292,7 +292,7 @@ RUN set -eux; \
       "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
       > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     base_packages=" \
-        bash ca-certificates coreutils curl gpg git jq openssh-client \
+        bash ca-certificates coreutils curl gpg git jq openssh-client postgresql-client \
         fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv python-is-python3 \
         apt-transport-https net-tools netcat-openbsd sudo util-linux xxd file \
     "; \
@@ -301,7 +301,8 @@ RUN set -eux; \
         apt-get update && apt-get install -y --no-install-recommends $base_packages && break; \
         if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
     done; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    psql --version
 
 # Node.js LTS from NodeSource. Pin the 20.x LTS line instead of inheriting the
 # distribution's moving Node release, mirroring the gh keyring+repo layer.
@@ -482,7 +483,10 @@ RUN set -eux; \
 # uv caches live in /var/cache, outside the snapshotted HOME=/workspace, because
 # installed packages under /usr/local are per-box anyway. --exclude-newer freezes
 # the transitive closure to what PyPI had published at that instant, so every
-# rebuild of either image resolves the same versions.
+# rebuild of either image resolves the same versions. psycopg is pinned together
+# with its matching psycopg-binary wheel (exactly what `psycopg[binary]` resolves
+# to on CPython), which bundles its own libpq, so Postgres access never depends
+# on the distro libpq that postgresql-client pulls in.
 RUN set -eux; \
     printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\ncache-dir = /var/cache/pip\n' > /etc/pip.conf; \
     install -d -m 0755 /etc/uv; \
@@ -508,7 +512,8 @@ RUN set -eux; \
     uv pip install --system --no-cache --compile-bytecode --only-binary :all: \
       --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
-    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'; \
+    python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'; \
     pytest --version; \
     rm -rf /root/.cache /var/cache/pip /var/cache/uv
 RUN set -eux; \

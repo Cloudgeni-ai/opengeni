@@ -5,7 +5,15 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dir, "..");
 const BLOCK_START = "# Agent Python toolchain";
 const BLOCK_END = "rm -rf /root/.cache /var/cache/pip /var/cache/uv\n";
-const PREINSTALLED = ["matplotlib", "numpy", "pandas", "pytest", "requests"];
+const PREINSTALLED = [
+  "matplotlib",
+  "numpy",
+  "pandas",
+  "psycopg",
+  "psycopg-binary",
+  "pytest",
+  "requests",
+];
 
 async function readDockerfiles() {
   const [sandbox, desktop] = await Promise.all([
@@ -21,6 +29,12 @@ function toolchainBlock(dockerfile: string): string {
   const end = dockerfile.indexOf(BLOCK_END, start);
   expect(end).toBeGreaterThan(start);
   return dockerfile.slice(start, end + BLOCK_END.length);
+}
+
+function finalStage(dockerfile: string): string {
+  const start = dockerfile.lastIndexOf("\nFROM ");
+  expect(start).toBeGreaterThan(-1);
+  return dockerfile.slice(start);
 }
 
 function argDefault(dockerfile: string, name: string): string {
@@ -49,6 +63,34 @@ describe("sandbox Python toolchain", () => {
     const excludeNewer = argDefault(sandbox, "OPENGENI_PYTHON_EXCLUDE_NEWER");
     expect(excludeNewer).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u);
     expect(argDefault(desktop, "OPENGENI_PYTHON_EXCLUDE_NEWER")).toBe(excludeNewer);
+  });
+
+  test("pins psycopg with its matching bundled-libpq binary wheel", async () => {
+    const { sandbox } = await readDockerfiles();
+    const versions = new Map(
+      argDefault(sandbox, "OPENGENI_PYTHON_PACKAGES")
+        .split(" ")
+        .map((pin) => pin.split("==") as [string, string]),
+    );
+    // `psycopg[binary]` resolves to exactly these two distributions on
+    // CPython, and its binary extra requires the identical version. Two plain
+    // pins keep the unquoted shell word list free of glob brackets.
+    expect(versions.get("psycopg")).toBeDefined();
+    expect(versions.get("psycopg-binary")).toBe(versions.get("psycopg"));
+
+    const block = toolchainBlock(sandbox);
+    expect(block).toContain(
+      `python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'`,
+    );
+  });
+
+  test("installs the PostgreSQL client in both stock images", async () => {
+    const { sandbox, desktop } = await readDockerfiles();
+    expect(finalStage(sandbox)).toMatch(/\bpackages="[^"]*\bpostgresql-client\b[^"]*"/u);
+    expect(finalStage(desktop)).toMatch(/base_packages="[^"]*\bpostgresql-client\b[^"]*"/u);
+    for (const dockerfile of [sandbox, desktop]) {
+      expect(finalStage(dockerfile)).toContain("psql --version");
+    }
   });
 
   test("keeps pip and uv caches out of the snapshotted workspace", async () => {
@@ -82,7 +124,7 @@ describe("sandbox Python toolchain", () => {
       "python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}",
     );
     expect(block).toContain(
-      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'`,
+      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'`,
     );
   });
 
@@ -101,9 +143,9 @@ describe("sandbox Python toolchain", () => {
   test("stays in the source-invariant toolchain ahead of the exact artifact runtime", async () => {
     const { sandbox, desktop } = await readDockerfiles();
     for (const dockerfile of [sandbox, desktop]) {
-      const finalStage = dockerfile.lastIndexOf("\nFROM ");
+      const finalStageStart = dockerfile.lastIndexOf("\nFROM ");
       const toolchain = dockerfile.indexOf(BLOCK_START);
-      expect(toolchain).toBeGreaterThan(finalStage);
+      expect(toolchain).toBeGreaterThan(finalStageStart);
       expect(toolchain).toBeLessThan(
         dockerfile.indexOf("COPY --from=artifact-runtime-builder /opt/opengeni/artifact-runtime"),
       );
