@@ -51,6 +51,7 @@ import {
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
   getSessionAuthorityProjection,
+  getWorkspaceDefaultRigId,
   withSessionRlsActorContext,
   nestedPostgresSqlState,
   requireWorkspace,
@@ -265,6 +266,8 @@ export async function createValidatedScheduledTask(input: {
     runMode: input.payload.runMode,
     variableSetId: input.payload.variableSetId,
     rigId: input.payload.rigId,
+    // An omitted Sandbox Environment adopts the target session's own one below.
+    adoptTargetRig: !knowledgeAction && input.payload.rigId === undefined,
     agentConfig,
   });
   if (
@@ -321,6 +324,17 @@ export async function createValidatedScheduledTask(input: {
       input.payload.rigId,
     );
   }
+  const rigId = knowledgeAction
+    ? (input.payload.rigId ?? null)
+    : await resolveScheduledTaskCreateRigId({
+        settings: input.settings,
+        db: input.db,
+        grant: input.grant,
+        requestedRigId: input.payload.rigId,
+        runMode: input.payload.runMode,
+        target,
+        agentConfig,
+      });
   const runtimeSettings = knowledgeAction
     ? null
     : await settingsWithEnabledCapabilityMcpServers(
@@ -432,7 +446,7 @@ export async function createValidatedScheduledTask(input: {
         creatorPolicy,
         targetSessionId: target?.id ?? null,
         variableSetId: input.payload.variableSetId ?? null,
-        rigId: input.payload.rigId ?? null,
+        rigId,
         metadata: input.payload.metadata,
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       });
@@ -675,6 +689,11 @@ export async function validateScheduledTaskTarget(input: {
   runMode: ScheduledTask["runMode"];
   variableSetId: string | null | undefined;
   rigId: string | null | undefined;
+  /**
+   * Skip the Sandbox Environment match because the caller omitted one and
+   * will store the target session's own environment instead.
+   */
+  adoptTargetRig?: boolean;
   agentConfig: ScheduledTaskAgentConfig;
   missingTargetStatus?: 404 | 422;
 }): Promise<Session | null> {
@@ -746,7 +765,7 @@ export async function validateScheduledTaskTarget(input: {
       message: "target session variableSet attachment does not match the scheduled task",
     });
   }
-  if ((session.rigId ?? null) !== (input.rigId ?? null)) {
+  if (!input.adoptTargetRig && (session.rigId ?? null) !== (input.rigId ?? null)) {
     throw new HTTPException(422, {
       message: "target session sandbox environment does not match the scheduled task",
     });
@@ -878,6 +897,56 @@ export function scheduledTaskAuthorityUpdateForGrant(
     ...(writer.context ? { authorityUpdatedByContext: writer.context } : {}),
     authorityUpdatedByActor: writer.actor ?? null,
   };
+}
+
+/**
+ * The Sandbox Environment a new task stores. An explicit id or null is the
+ * caller's choice. An omitted value is resolved once, here, and frozen on the
+ * task, the way session create resolves an omitted rigId:
+ * - an existing-session task keeps its target session's own environment;
+ * - a Connected Machine task stores none: environment setup and Variable Set
+ *   injection never reach a machine, so a binding would only add a fire-time
+ *   failure mode;
+ * - otherwise the workspace default, when the creator can see it and it has an
+ *   active version. A stale default degrades to none, like session create.
+ * The default's own Variable Sets must be attachable by the creator, exactly
+ * as session create requires, so a workspace default never gives a task
+ * secrets its creator could not attach. Later changes to the workspace default
+ * do not move an existing task.
+ */
+async function resolveScheduledTaskCreateRigId(input: {
+  settings: Settings;
+  db: Database;
+  grant: AccessGrant;
+  requestedRigId: string | null | undefined;
+  runMode: ScheduledTask["runMode"];
+  target: Session | null;
+  agentConfig: ScheduledTaskAgentConfig;
+}): Promise<string | null> {
+  if (input.requestedRigId !== undefined) return input.requestedRigId;
+  if (input.runMode === "existing_session") return input.target?.rigId ?? null;
+  if (input.agentConfig.machineTarget) return null;
+  const defaultRigId = await getWorkspaceDefaultRigId(input.db, input.grant.workspaceId);
+  if (!defaultRigId) return null;
+  const rig = await getRig(
+    input.db,
+    {
+      accountId: input.grant.accountId,
+      workspaceId: input.grant.workspaceId,
+      subjectId: input.grant.subjectId,
+    },
+    defaultRigId,
+  );
+  if (!rig?.activeVersion) return null;
+  for (const variableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
+    await validateVariableSetAttachment(
+      { settings: input.settings, db: input.db },
+      input.grant,
+      input.grant.workspaceId,
+      variableSetId,
+    );
+  }
+  return rig.id;
 }
 
 // Validate a scheduled task's rig reference: it must name a rig in the

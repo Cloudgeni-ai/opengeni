@@ -807,7 +807,9 @@ These producers all converge on the ordinary session/turn runtime:
   trigger revision, and creates an ordinary session/run; and
 - a **child session** is a normal session with explicit lineage, depth, compute,
   visibility, and initiating-authority rules. Omitted child resources inherit
-  repositories only; file attachments require explicit selection (see
+  repositories only; file attachments require explicit selection, and an
+  omitted Sandbox Environment or Variable Set selection resolves like any new
+  session rather than copying the parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
 Schedule indicators derive from authorized, non-deleted reusable-session targets,
