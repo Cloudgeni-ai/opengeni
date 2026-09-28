@@ -44730,6 +44730,10 @@ export interface AcquireLeaseInput {
   // durable capture-and-drain rotation, N-holders throw SandboxImageConflictError. Omitted
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
+  /** Direct control of an already-owned interaction instance. Admit only that
+   * live provider, retaining its image across deployment changes. Never spawn
+   * or rotate a replacement for this request. Capture/rotation fences still apply. */
+  retainedInstanceId?: string;
   // The frozen rig version this run rides (M3). Stamped on the cold-create + CAS
   // and conflicted exactly like `image`: a live multi-holder box under a DIFFERENT
   // rig version throws SandboxRigConflictError; a solo holder requests durable
@@ -46008,6 +46012,14 @@ async function acquireLeaseOnce(
   if (input.kind === "process") {
     throw new Error("Process lease holders are created only by atomic retained-process promotion");
   }
+  if (
+    input.retainedInstanceId !== undefined &&
+    (input.kind !== "direct" || input.retainedInstanceId.length === 0)
+  ) {
+    throw new Error(
+      "Retained instance admission requires a direct holder and exact provider identity",
+    );
+  }
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
@@ -46063,6 +46075,21 @@ async function acquireLeaseOnce(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+        // Existing browser control and suspension must remain possible after a
+        // deployment changes the image for new boxes. Check under the lease lock
+        // before any holder, re-arm, billing admission or cold-spawner election.
+        if (
+          input.retainedInstanceId !== undefined &&
+          (row.instance_id !== input.retainedInstanceId ||
+            row.backend !== backend ||
+            (liveness !== "warm" && liveness !== "draining"))
+        ) {
+          return {
+            role: "fenced" as const,
+            reason: "superseded" as const,
+            lease: mapLeaseRow(row),
+          };
+        }
         const existingSnapshot = warmBillingSnapshot(row);
         if (row.resume_state?.opengeniWarmBilling && !existingSnapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
@@ -46179,7 +46206,11 @@ async function acquireLeaseOnce(
         // Each axis is enforced only when BOTH sides are known; a cold row / a legacy null /
         // an unset input never conflicts (the selfhosted path passes neither; a rig-less run
         // passes no rigVersionId, so it never stamps or conflicts on rig).
-        const imageConflict = image !== null && row.image !== null && row.image !== image;
+        const imageConflict =
+          input.retainedInstanceId === undefined &&
+          image !== null &&
+          row.image !== null &&
+          row.image !== image;
         const rigConflict =
           rigVersionId !== null &&
           row.rig_version_id !== null &&

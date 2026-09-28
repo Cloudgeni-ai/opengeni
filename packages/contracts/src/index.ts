@@ -10036,7 +10036,10 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     status: ScheduledTaskStatus.default("active"),
     variableSetId: z.string().uuid().nullable().optional(),
     environmentId: z.string().uuid().nullable().optional(),
-    // The rig each run binds to (M3); its active version is resolved per fire.
+    // The Sandbox Environment each run binds to; its active version is resolved
+    // per fire. Omitted resolves once at create, like session create: the
+    // workspace default (none for a Connected Machine task), or the target
+    // session's own environment for an existing-session task. null means none.
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
   },

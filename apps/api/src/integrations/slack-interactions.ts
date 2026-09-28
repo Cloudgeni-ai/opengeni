@@ -147,8 +147,10 @@ import {
   SLACK_REACTION_IMAGE_MAX_BYTES,
   type OpenGeniSlackBotClient,
   type SlackMessageBlock,
+  SlackBotOperationConflictError,
   SlackBotProviderError,
 } from "./slack-bot";
+import { slackMrkdwnFromMarkdown } from "./slack-mrkdwn";
 import {
   isSlackDirectMessageConversation,
   resolveSlackWorkspaceRoute,
@@ -3988,13 +3990,16 @@ async function publishSlackSharedResult(
       text: `${mention}This result is no longer available for publication.`,
     };
   }
-  await client.postMessage({
-    operationId: deterministicUuid(
-      `slack-shared-result:${origin.interactionId}:${event.id}:${origin.policyActivationVersion}`,
-    ),
-    channelId: origin.sourceChannelId,
-    threadTimestamp: origin.sourceThreadTs,
-    text: `<@${origin.initiatingSlackUserId}> ${boundedOutput(output)}`,
+  const publicationOperationId = deterministicUuid(
+    `slack-shared-result:${origin.interactionId}:${event.id}:${origin.policyActivationVersion}`,
+  );
+  await deliverSlackModelText(async (format) => {
+    await client.postMessage({
+      operationId: publicationOperationId,
+      channelId: origin.sourceChannelId,
+      threadTimestamp: origin.sourceThreadTs,
+      text: `<@${origin.initiatingSlackUserId}> ${boundedOutput(format(output))}`,
+    });
   });
   return {
     result: "published",
@@ -4669,13 +4674,15 @@ async function deliverSlackSessionEvents(
           throw new Error("Slack progress delivery lost its durable interaction claim");
         }
         if (progress.kind === "claimed") {
-          await postDelivery(
-            client,
-            interaction,
-            event,
-            latestAssistantText,
-            "progress",
-            progress.delivery.operationId,
+          await deliverSlackModelText((format) =>
+            postDelivery(
+              client,
+              interaction,
+              event,
+              format(latestAssistantText),
+              "progress",
+              progress.delivery.operationId,
+            ),
           );
         }
       }
@@ -4751,7 +4758,15 @@ async function deliverSlackSessionEvents(
           ? null
           : turnCompletedReply(event.payload);
         if (reply) {
-          await postDelivery(client, interaction, event, `${requester.mention}${reply}`, "reply");
+          await deliverSlackModelText((format) =>
+            postDelivery(
+              client,
+              interaction,
+              event,
+              `${requester.mention}${format(reply)}`,
+              "reply",
+            ),
+          );
         }
         terminal = null;
         continue;
@@ -4777,13 +4792,17 @@ async function deliverSlackSessionEvents(
         // replica observed turn.completed. Reconcile the same provider
         // operation id (including response-loss retries) instead of inventing
         // a second final post.
-        await postDelivery(
-          client,
-          interaction,
-          event,
-          boundedOutput(existingProgress.text),
-          "progress",
-          existingProgress.operationId,
+        // Render exactly as the progress post did: the same bounded text
+        // through the same formatter, under the same operation.
+        await deliverSlackModelText((format) =>
+          postDelivery(
+            client,
+            interaction,
+            event,
+            format(boundedOutput(existingProgress.text)),
+            "progress",
+            existingProgress.operationId,
+          ),
         );
         const posted = await getSlackBotPostOperation(
           deps.db,
@@ -4792,43 +4811,45 @@ async function deliverSlackSessionEvents(
           existingProgress.operationId,
         );
         if (posted?.slackChannelId && posted.slackMessageTimestamp) {
-          // The result is the result. Continuation prose and the recurring
-          // action live on the control/Status card and `<command> info`.
-          const text = boundedOutput(`${requester.mention}${existingProgress.text}`);
-          // This rewrites a message that already carried the line, so it has to
-          // carry it too, or the update would quietly strip it.
-          const rendered = withWorkspaceLine(
-            interaction.routedWorkspaceLabel,
-            text,
-            publicationBlocks.length > 0
-              ? ([
-                  { type: "section", text: { type: "mrkdwn", text } },
-                  ...publicationBlocks,
-                ] as SlackMessageBlock[])
-              : undefined,
+          const { slackChannelId, slackMessageTimestamp } = posted;
+          const updateOperationId = deterministicUuid(
+            slackPostSeed(interaction, `slack-terminal-update:${interaction.id}:${event.sequence}`),
           );
-          await client.updateMessage({
-            operationId: deterministicUuid(
-              slackPostSeed(
-                interaction,
-                `slack-terminal-update:${interaction.id}:${event.sequence}`,
-              ),
-            ),
-            channelId: posted.slackChannelId,
-            timestamp: posted.slackMessageTimestamp,
-            text: rendered.text,
-            ...(rendered.blocks
-              ? {
-                  blocks: rendered.blocks,
-                }
-              : {}),
+          await deliverSlackModelText(async (format) => {
+            // The result is the result. Continuation prose and the recurring
+            // action live on the control/Status card and `<command> info`.
+            const text = boundedOutput(
+              `${requester.mention}${format(boundedOutput(existingProgress.text))}`,
+            );
+            // This rewrites a message that already carried the line, so it has to
+            // carry it too, or the update would quietly strip it.
+            const rendered = withWorkspaceLine(
+              interaction.routedWorkspaceLabel,
+              text,
+              publicationBlocks.length > 0
+                ? ([
+                    { type: "section", text: { type: "mrkdwn", text } },
+                    ...publicationBlocks,
+                  ] as SlackMessageBlock[])
+                : undefined,
+            );
+            await client.updateMessage({
+              operationId: updateOperationId,
+              channelId: slackChannelId,
+              timestamp: slackMessageTimestamp,
+              text: rendered.text,
+              ...(rendered.blocks
+                ? {
+                    blocks: rendered.blocks,
+                  }
+                : {}),
+            });
           });
         }
       } else {
         const operationId = deterministicUuid(
           slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:final`),
         );
-        const text = boundedOutput(`${requester.mention}${output}`);
         const publicationBlocks = hasPublishableOutput
           ? await slackSharedResultPublicationBlocks(
               deps,
@@ -4838,17 +4859,20 @@ async function deliverSlackSessionEvents(
               operationId,
             )
           : [];
-        await postDelivery(
-          client,
-          interaction,
-          event,
-          text,
-          "final",
-          operationId,
-          publicationBlocks.length > 0
-            ? [{ type: "section", text: { type: "mrkdwn", text } }, ...publicationBlocks]
-            : undefined,
-        );
+        await deliverSlackModelText((format) => {
+          const text = boundedOutput(`${requester.mention}${format(output)}`);
+          return postDelivery(
+            client,
+            interaction,
+            event,
+            text,
+            "final",
+            operationId,
+            publicationBlocks.length > 0
+              ? [{ type: "section", text: { type: "mrkdwn", text } }, ...publicationBlocks]
+              : undefined,
+          );
+        });
       }
       terminal = "completed";
     } else if (event.type === "turn.failed") {
@@ -4938,6 +4962,41 @@ async function postDelivery(
     text: rendered.text,
     ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
   });
+}
+
+/**
+ * Deliver model-authored text in Slack's own formatting.
+ *
+ * Agents write Markdown for the OpenGeni console; `slackMrkdwnFromMarkdown`
+ * rewrites it for Slack at this sink only, so stored events and history keep
+ * the exact text. Pass every model-authored part of the message through
+ * `format`, and nothing else: fixed prose, mentions, and cards are already
+ * Slack syntax.
+ *
+ * The post and update ledgers bind an operation id to a digest over the exact
+ * bytes, and an operation an earlier release already bound to the unformatted
+ * bytes (a claimed-but-unposted row, a response-loss retry, or a page replayed
+ * across the deploy) must keep them, or every retry would conflict and wedge
+ * the interaction. The ledger reports that conflict from its durable claim,
+ * before any Slack write, so one retry with the unformatted bytes under the
+ * same operation id is safe. The id itself never changes: action handles and
+ * the post lookups keyed on it stay exact, and a new operation always carries
+ * the formatted bytes.
+ */
+async function deliverSlackModelText(
+  deliver: (format: (text: string) => string) => Promise<unknown>,
+): Promise<void> {
+  let formatted = false;
+  try {
+    await deliver((text) => {
+      const slackText = slackMrkdwnFromMarkdown(text);
+      if (slackText !== text) formatted = true;
+      return slackText;
+    });
+  } catch (error) {
+    if (!formatted || !(error instanceof SlackBotOperationConflictError)) throw error;
+    await deliver((text) => text);
+  }
 }
 
 async function enqueueNormalizedSlackInteraction(

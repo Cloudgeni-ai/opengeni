@@ -5525,6 +5525,102 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(row?.instance_id).toBe("sb-live");
   });
 
+  test("retained browser control survives an image update without rotating or relabeling its box", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const base = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    };
+    await acquireLease(db, { ...base, kind: "viewer", holderId: "keeper", image: "img-A" });
+    await commitWarmingToWarm(db, {
+      ...base,
+      expectedEpoch: 0,
+      instanceId: "sb-retained",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal" },
+    });
+    const input = {
+      ...base,
+      kind: "direct" as const,
+      holderId: "browser-suspend",
+      image: "img-B",
+      retainedInstanceId: "sb-retained",
+    };
+    const admitted = await acquireLease(db, input);
+    expect(admitted.role).toBe("attached");
+    expect(admitted.lease).toMatchObject({
+      instanceId: "sb-retained",
+      image: "img-A",
+      // Warming-to-warm commits epoch 1; retained admission must not advance it.
+      leaseEpoch: 1,
+    });
+    // New work still cannot silently share a different runtime.
+    await expect(
+      acquireLease(db, { ...base, kind: "turn", holderId: "new-turn", image: "img-B" }),
+    ).rejects.toThrow(SandboxImageConflictError);
+    // An old browser binding cannot attach to a successor or another backend.
+    expect(
+      await acquireLease(db, { ...input, holderId: "stale", retainedInstanceId: "sb-old" }),
+    ).toMatchObject({ role: "fenced", reason: "superseded" });
+    expect(
+      await acquireLease(db, { ...input, holderId: "wrong-backend", backend: "docker" }),
+    ).toMatchObject({ role: "fenced", reason: "superseded" });
+    await expect(
+      acquireLease(db, { ...input, kind: "turn", holderId: "not-direct" }),
+    ).rejects.toThrow("requires a direct holder");
+    await admin`update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'operator'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(await acquireLease(db, { ...input, holderId: "rotation-fenced" })).toMatchObject({
+      role: "fenced",
+      reason: "rotation_in_progress",
+    });
+    const holders = await admin<
+      { holder_id: string }[]
+    >`select h.holder_id from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id where l.workspace_id = ${workspaceId} and l.sandbox_group_id = ${groupId}`;
+    expect(holders.map((row) => row.holder_id).sort()).toEqual(["browser-suspend", "keeper"]);
+  });
+
+  test("retained browser control cannot elect a cold or warming replacement", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const base = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      backend: "modal",
+      image: "img-B",
+      leaseTtlMs: 45_000,
+    };
+    const retained = {
+      ...base,
+      kind: "direct" as const,
+      holderId: "old-browser",
+      retainedInstanceId: "sb-old",
+    };
+    expect(await acquireLease(db, retained)).toMatchObject({
+      role: "fenced",
+      reason: "superseded",
+      lease: { liveness: "cold", instanceId: null },
+    });
+    const spawn = await acquireLease(db, { ...base, kind: "turn", holderId: "new-turn" });
+    expect(spawn.role).toBe("spawner");
+    expect(await acquireLease(db, retained)).toMatchObject({
+      role: "fenced",
+      reason: "superseded",
+      lease: { liveness: "warming" },
+    });
+    const holders = await admin<
+      { holder_id: string }[]
+    >`select h.holder_id from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id where l.workspace_id = ${workspaceId} and l.sandbox_group_id = ${groupId}`;
+    expect(holders.map((row) => row.holder_id)).toEqual(["new-turn"]);
+  });
+
   test("(13) image B3: a null input image (e.g. selfhosted) NEVER conflicts + never stamps", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();

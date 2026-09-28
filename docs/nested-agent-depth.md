@@ -19,6 +19,16 @@ them, or pass a file ID in the task for on-demand retrieval. Shared sandbox file
 remain accessible on disk; this rule controls session attachments, not filesystem
 isolation.
 
+A child does not inherit the parent's Sandbox Environment or Variable Sets. An
+omitted `rigId` resolves to the workspace default environment, as for any new
+session, and omitted `variableSetIds` attach none. When that differs from the
+parent's box, the omitted-`sandbox` default gives the child its own box instead
+of sharing. An agent that needs the parent's credentials or setup in a child
+names them explicitly in `session_create` (`rigId`, `variableSetIds`); the
+default worker token holds `variable-sets:attach` and `variable-sets:use`, and
+every named set is revalidated for the child's creator. A child with the same
+environment and sets as the parent shares the parent's box.
+
 ## Depth and precedence
 
 - A root session has depth `0` and its `rootSessionId` is its own id.

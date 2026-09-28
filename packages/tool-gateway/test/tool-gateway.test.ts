@@ -1,5 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
+  TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS,
+  TOOL_GATEWAY_INPUT_ISSUES_MAX,
   ToolGatewayApprovalRequiredError,
   ToolGatewayCatalogIntegrityError,
   ToolGatewayInputValidationError,
@@ -251,5 +253,204 @@ describe("ToolGateway", () => {
         ],
       }),
     ).toThrow(ToolGatewayPathCollisionError);
+  });
+});
+
+describe("ToolGateway argument validation errors", () => {
+  // A hosted analytics MCP advertises `context` and `llm_model` as required on
+  // `exec` but does not enforce them, so models regularly omit them.
+  const execSchema = {
+    type: "object",
+    properties: {
+      command: { type: "string", description: "CLI-style command to run." },
+      context: { type: "string", description: "Why the command is being run." },
+      llm_model: { type: "string", description: "Model issuing the call." },
+    },
+    required: ["command", "context", "llm_model"],
+  };
+
+  function gatewayFor(inputSchema: ToolGatewayDefinition["inputSchema"]) {
+    const executed: Record<string, unknown>[] = [];
+    const { gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          identity: { serverId: "analytics", toolName: "exec" },
+          modelName: "analytics__exec",
+          inputSchema,
+          source: "mcp",
+          approval: "none",
+          execute: async (argumentsValue) => {
+            executed.push(argumentsValue);
+            return { content: [{ type: "text", text: "ok" }] };
+          },
+        },
+      ],
+    });
+    const callModel = (argumentsValue: Record<string, unknown>) =>
+      gateway.callModel({
+        modelName: "analytics__exec",
+        arguments: argumentsValue,
+        subjectId: "agent:test",
+      });
+    return { callModel, executed };
+  }
+
+  async function rejection(promise: Promise<unknown>): Promise<ToolGatewayInputValidationError> {
+    const error = await promise.then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ToolGatewayInputValidationError);
+    return error as ToolGatewayInputValidationError;
+  }
+
+  test("names every missing required property and executes the corrected call", async () => {
+    const { callModel, executed } = gatewayFor(execSchema);
+    const error = await rejection(callModel({ command: "search project-get" }));
+    expect(error.code).toBe("invalid_tool_arguments");
+    expect(error.issues).toEqual([
+      { path: "context", keyword: "required", message: 'missing required property "context"' },
+      {
+        path: "llm_model",
+        keyword: "required",
+        message: 'missing required property "llm_model"',
+      },
+    ]);
+    expect(error.omittedIssueCount).toBe(0);
+    expect(error.message).toBe(
+      'Tool arguments do not match the tool\'s input schema: missing required property "context"; missing required property "llm_model"',
+    );
+    expect(error.message).not.toContain("search project-get");
+    expect(executed).toEqual([]);
+
+    const corrected = {
+      command: "search project-get",
+      context: "Find the project id",
+      llm_model: "scripted",
+    };
+    await expect(callModel(corrected)).resolves.toMatchObject({
+      content: [{ type: "text", text: "ok" }],
+    });
+    expect(executed).toEqual([corrected]);
+  });
+
+  test("names mistyped, unexpected, and nested properties without echoing values", async () => {
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        limit: { type: "integer" },
+        mode: { enum: ["fast", "exact"] },
+        filters: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { field: { type: "string" } },
+            required: ["field"],
+          },
+        },
+      },
+      required: ["command"],
+      additionalProperties: false,
+    });
+    const error = await rejection(
+      callModel({
+        command: 42,
+        limit: "synthetic-limit-value",
+        mode: "synthetic-mode-value",
+        filters: [{ value: "synthetic-filter-value" }],
+        extra: "synthetic-extra-value",
+      }),
+    );
+    expect(error.issues.map((issue) => issue.message)).toEqual([
+      'property "extra" is not allowed',
+      '"command" must be string',
+      '"limit" must be integer',
+      '"mode" must be one of "fast", "exact"',
+      'missing required property "filters[0].field"',
+    ]);
+    expect(error.message).not.toContain("synthetic-");
+    expect(error.message).not.toContain("42");
+    expect(executed).toEqual([]);
+  });
+
+  test("names the object, not the key, when a property name is not allowed", async () => {
+    const { callModel } = gatewayFor({
+      type: "object",
+      properties: { labels: { type: "object", propertyNames: { pattern: "^[a-z]+$" } } },
+    });
+    const error = await rejection(callModel({ labels: { "Synthetic-Key-Name": "x" } }));
+    expect(error.summary).toBe('"labels" has a property name the schema does not allow');
+    expect(error.message).not.toContain("Synthetic-Key-Name");
+  });
+
+  test("caps the reported problems and counts the rest", async () => {
+    const names = Array.from({ length: TOOL_GATEWAY_INPUT_ISSUES_MAX + 4 }, (_, i) => `p${i}`);
+    const { callModel } = gatewayFor({
+      type: "object",
+      properties: Object.fromEntries(names.map((name) => [name, { type: "string" }])),
+      required: names,
+    });
+    const error = await rejection(callModel({}));
+    expect(error.issues).toHaveLength(TOOL_GATEWAY_INPUT_ISSUES_MAX);
+    expect(error.omittedIssueCount).toBe(4);
+    expect(error.message.endsWith("; and 4 more problems")).toBe(true);
+  });
+
+  test("reports only the first problem for arguments above the diagnostic budget", async () => {
+    const { callModel } = gatewayFor({
+      ...execSchema,
+      properties: { ...execSchema.properties, query: { type: "string" } },
+    });
+    const error = await rejection(
+      callModel({
+        command: "run",
+        query: "q".repeat(TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS),
+      }),
+    );
+    expect(error.issues).toEqual([
+      { path: "context", keyword: "required", message: 'missing required property "context"' },
+    ]);
+  });
+
+  test("never runs a pattern on a string longer than the schema's maxLength", async () => {
+    // Backtracking-heavy on a long non-matching string; `maxLength` is what
+    // keeps the accept/reject validator from ever running it on one.
+    const pattern = "^(\\w+\\s?)*$";
+    const { callModel } = gatewayFor({
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        tags: { type: "array", items: { type: "string", maxLength: 16, pattern } },
+      },
+      required: ["command", "context"],
+    });
+    const patternInputLengths: number[] = [];
+    const originalTest = RegExp.prototype.test;
+    const spy = spyOn(RegExp.prototype, "test").mockImplementation(function (
+      this: RegExp,
+      value: string,
+    ) {
+      if (this.source === pattern) patternInputLengths.push(String(value).length);
+      return originalTest.call(this, value);
+    });
+    let error: ToolGatewayInputValidationError;
+    try {
+      error = await rejection(
+        callModel({ command: "run", tags: ["short tag", `${"a".repeat(40)}!`, "bad!"] }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(error.issues.map((issue) => issue.message)).toEqual([
+      'missing required property "context"',
+      '"tags[1]" must NOT have more than 16 characters',
+      '"tags[2]" must match pattern "^(\\w+\\s?)*$"',
+    ]);
+    expect(patternInputLengths.length).toBeGreaterThan(0);
+    expect(patternInputLengths.every((length) => length <= 16)).toBe(true);
   });
 });

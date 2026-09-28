@@ -1452,7 +1452,14 @@ export function buildOpenGeniMcpServer(
           // strip it before the contract parse maps it (rename back-compat).
           environmentId: z4.string().uuid().optional(),
           // Bind the task to a rig; declared so MCP validation doesn't strip it.
-          rigId: z4.string().uuid().nullable().optional(),
+          rigId: z4
+            .string()
+            .uuid()
+            .nullable()
+            .optional()
+            .describe(
+              "Sandbox Environment for generated sessions. Omit to fix the workspace default at creation (an existing-session task keeps its target's); null for none.",
+            ),
           metadata: z4.record(z4.string(), z4.unknown()).optional(),
         },
       },

@@ -143,8 +143,11 @@ marks the still-pending `child_requires_action` of that boundary `superseded`
 (one accepted response advances the boundary; a later re-freeze is a new
 generation and a new notice), a newer `child_progress` supersedes the older
 pending one, and the parent timeline records `system.update.cancelled` with
-`reason: superseded_by_resolution | superseded_by_newer_progress`. Like child
-results, an immediate child notice may autonomously wake a parent with either
+`reason: superseded_by_resolution | superseded_by_newer_progress`. Supersession
+and the parent's claim order both follow delivery order, so the reaper claims a
+backlog oldest first (`created_at`, `id`) and delivers it in exactly that order;
+the claim returns its rows sorted instead of in heap order (migration 0528). Like
+child results, an immediate child notice may autonomously wake a parent with either
 an active goal or a current session-level wait. Without either durable
 obligation, child lifecycle notices remain pending until new intent arrives.
 
