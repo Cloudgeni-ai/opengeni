@@ -324,13 +324,61 @@ The locked decision applies these rules:
    That conversation comes from `session_history_items`, the one SDK-native
    model-memory store (see `docs/run-lifecycle.md`).
 
-The canonical continuation prompt treats every continuation as re-entry into
-the full objective, not as a request to perform one more step. It first
-reconciles authoritative current state, treats prior assistant claims only as
-pointers to evidence, continues through the full requested end state within the
-turn, and avoids repeating a state-setting action whose desired state already
-holds. It calls `goal_complete` only after authoritative evidence proves the
-whole objective.
+The canonical continuation prompt identifies itself as generated input, not a
+new user request or grant of authority. The current applied goal frozen for the
+turn, its criteria, root constraints, and report requirements remain the
+objective; no revision summary, synthesized progress, or evidence-validity
+claim is injected. Pending proposals and historical objectives do not replace
+that objective.
+
+Ordinary continuation resumes established work rather than restarting discovery
+or full reconciliation on every turn. Reuse authoritative evidence only for the
+requirement, scope, version, and state it establishes; recheck changed, stale,
+uncertain, or insufficient evidence. Assistant claims and summaries locate
+evidence, not prove it. Full reconciliation or a comprehensive audit remains
+substantive work when the goal, user, or applicable Skill requests it, when
+uncertainty or recovery warrants it, or when risk or gates require it. Before
+`goal_complete`, the full completion audit still covers every requirement and
+deliverable with authoritative evidence, including fresh checks wherever
+required. Evidence reuse does not weaken report-delivery or other gates.
+
+Persistence is evidence-based, not a minimum number of blocked turns. Try
+plausible safe authorized alternatives for recoverable failures; neither
+unbounded exhaustion nor repeated unchanged failure is required. A definitive
+missing permission, human decision, or external prerequisite with no actionable
+authorized path can justify an immediate pause, with the blocker, evidence or
+attempted alternatives, and the change needed to resume. Tool approvals remain
+human-only. Work in flight or a meaningful timed recheck uses the available
+waiting mechanism instead; continue independent authorized work first.
+
+There is no required preliminary short wait or status recheck before
+`wait_for_input`. Its safety deadline follows the dependency or a meaningful
+monitoring cadence, potentially hours or days within the tool's limits, not the
+execution-wait limits of `session_wait` or `command_wait`. Monitoring and user
+notification cadences are separate. Active work gets useful milestone/context
+updates; suspended work does not wake just to reassure, unless an explicit
+user/task/Skill update cadence calls for it. Existing live-attempt limitations
+(including pending Codemode calls), event cursors, wake registration, and
+question-turn deadline preservation still apply.
+
+### Guidance validation scenarios
+
+These are review cases for the instruction contract, not claims of measured
+model behavior. Source tests pin the emitted guidance and retained safeguards;
+they do not establish that a model follows them in live execution.
+
+| Scenario | Expected instruction-level decision |
+| --- | --- |
+| Goal explicitly requires a comprehensive audit | Audit/reconcile the whole requested scope; proportionality must not shrink it. |
+| Ordinary continuation with valid exact-scope evidence | Resume established work and reuse that evidence; still audit all requirements before completion. |
+| Evidence is stale, changed, uncertain, or insufficient | Recheck the affected state; broaden reconciliation when the uncertainty or required gate warrants it. |
+| Child will run overnight | With no other work, register an out-of-turn wait and an appropriate safety deadline; no preliminary poll or short wait. Consume the terminal result before dependent completion. |
+| External deployment needs checks at a meaningful interval | Use the available monitoring/wait mechanism at that cadence; notify on useful changes rather than at every check by default. |
+| User requests frequent updates even while waiting | Honor the explicit cadence within authority and tool limits; this is an exception to the no-reassurance-wake default. |
+| User asks a question during an existing wait | Answer only the question, re-register the in-flight wait, and preserve the original deadline using the time remaining. |
+| Definitive missing permission or required human choice | Pause immediately if no meaningful authorized work remains; identify what must change. Never approve a tool for a human. |
+| Recoverable transient failure | Investigate and try plausible authorized alternatives; retry only with reason to expect progress, not a fixed quota or unlimited search. |
+| Short task explicitly requires a fresh independent worker | Honor the request despite the direct-handling/reuse default; keep the independent deliverable distinct and join its result. |
 
 The resulting internal-update inference is an ordinary billed run: it meters
 `agent_run.created` with source `session_system_update` and streams like a

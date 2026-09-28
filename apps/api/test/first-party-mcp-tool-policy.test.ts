@@ -421,7 +421,7 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
-  test("delegation tools price a child and steer long waits to the result-bearing wake", () => {
+  test("delegation tools default to reuse but honor fresh workers and result-bearing wakes", () => {
     const names: FirstPartyMcpToolName[] = [
       "session_create",
       "session_wait",
@@ -440,7 +440,14 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(server)).toEqual([...names].sort());
     const description = (name: FirstPartyMcpToolName) => registered[name]!.description;
     expect(description("session_create")).toContain(
-      "A worker costs minutes and a large context of its own",
+      "Delegation has setup and coordination overhead: by default",
+    );
+    expect(description("session_create")).not.toContain("A worker costs minutes");
+    expect(description("session_create")).toContain(
+      "Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority",
+    );
+    expect(description("session_send_message")).toContain(
+      "override that default within existing authority",
     );
     expect(description("session_create")).toContain(
       "send a related follow-up to a worker you already spawned with session_send_message",
@@ -451,9 +458,9 @@ describe("first-party MCP tool visibility policy", () => {
     expect(description("session_send_message")).toContain(
       "message a worker you already spawned instead of spawning a new one",
     );
-    expect(description("session_get")).toContain("A snapshot is not new evidence");
+    expect(description("session_get")).toContain("An unchanged snapshot is not new evidence");
     expect(description("session_wait")).toContain(
-      "a session_get snapshot between waits is not new evidence",
+      "an unchanged session_get snapshot between waits is not new evidence",
     );
     for (const name of [
       "session_create",
@@ -463,6 +470,42 @@ describe("first-party MCP tool visibility policy", () => {
     ] as const) {
       expect(description(name)).toContain("payload.finalAnswer");
     }
+    expect(description("wait_for_input")).toContain(
+      "No preliminary short wait or status recheck is required",
+    );
+    expect(description("wait_for_input")).toContain(
+      "potentially hours or days within the schema limits",
+    );
+    expect(description("wait_for_input")).toContain(
+      "unless an explicit update cadence requires it",
+    );
+    expect(description("wait_for_input")).toContain(
+      "passing the time remaining, not a fresh full timeout",
+    );
+    expect(description("wait_for_input")).toContain(
+      "Pending Codemode calls require the same live attempt",
+    );
+  });
+
+  test("goal pause and resume descriptions preserve evidence and human authority", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["goals:manage"], ["goal_pause", "goal_resume"]),
+    );
+    const registered = (
+      server as unknown as { _registeredTools: Record<string, { description: string }> }
+    )._registeredTools;
+    expect(registered.goal_pause!.description).toContain(
+      "no fixed turn or retry count is required",
+    );
+    expect(registered.goal_pause!.description).toContain("can justify pausing immediately");
+    expect(registered.goal_pause!.description).toContain(
+      "Work already in flight or a meaningful timed recheck",
+    );
+    expect(registered.goal_pause!.description).toContain("Tool approvals remain human-only");
+    expect(registered.goal_resume!.description).toContain(
+      "A user's question alone is not a reason to resume",
+    );
   });
 
   test("session_get tools/list and generated attempt declarations allow an omitted ID", async () => {
