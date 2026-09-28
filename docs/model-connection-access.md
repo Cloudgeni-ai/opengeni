@@ -49,6 +49,9 @@ assigned organization pool resolves to the first eligible assigned account,
 without changing the organization default. Policy never authorizes a fallback
 to a different provider or payment source.
 
-The shared `ConnectionAccessSettings` component renders the same workspace and
-model choices under each connected account. The legacy workspace policy remains
-under a collapsed Workspace restrictions section and lists ready models only.
+In the web app, Settings > Models shows one row per connected account; each
+account's own page carries "Available in" and "Models it can serve"
+(`apps/web/src/components/connection-access-settings.tsx`), edited on a form
+page. In a workspace the per-account model list shows only once an account is
+limited; the workspace-wide "Allowed models" row (the workspace policy) is the
+main control and lists ready models only.

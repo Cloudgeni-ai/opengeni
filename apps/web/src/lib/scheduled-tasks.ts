@@ -97,6 +97,8 @@ export type ScheduledTaskFormState = {
   mcpServerIds?: string[];
   connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
+  /** Channel a person chose for the OpenGeni bot's posts; empty means no posting. */
+  slackBotChannelId: string;
   resources: ResourceRef[];
 };
 
@@ -171,6 +173,7 @@ export function newScheduledTaskFormState(
     overlapPolicy: "allow_concurrent",
     includeOpenGeniTool,
     slackBotConnectionId: "",
+    slackBotChannelId: "",
     resources,
   };
 }
@@ -267,6 +270,7 @@ export function formStateFromScheduledTask(
     workingDir: task.agentConfig.machineTarget?.workingDir ?? "",
     overlapPolicy: task.overlapPolicy,
     slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
+    slackBotChannelId: task.agentConfig.slackBotChannelId ?? "",
   };
 }
 
@@ -384,6 +388,10 @@ export function agentConfigFromFormState(
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
     ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
+    // A task that continues an existing chat never posts on its own.
+    ...(form.slackBotConnectionId && form.slackBotChannelId && form.runMode !== "existing_session"
+      ? { slackBotChannelId: form.slackBotChannelId }
+      : {}),
     ...(form.modelFollowsDefault
       ? {}
       : {

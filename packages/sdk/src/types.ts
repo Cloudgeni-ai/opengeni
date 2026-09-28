@@ -570,6 +570,12 @@ export type RepositoryResourceRef = {
   connectionId?: string | undefined;
   githubInstallationId?: number | undefined;
   githubRepositoryId?: number | undefined;
+  /**
+   * Best-effort materialization: a failed clone logs a warning and the
+   * session continues without this repository instead of failing sandbox
+   * setup. Omit it to keep a failed clone fatal.
+   */
+  optional?: boolean | undefined;
 };
 
 /** Value mirror of `@opengeni/contracts`; parity-tested without importing it from ordinary SDK entries. */
@@ -2890,6 +2896,8 @@ export type ScheduledTaskAgentConfig = {
   tools: ToolRef[];
   metadata: Record<string, unknown>;
   slackBotConnectionId?: string | undefined;
+  /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
+  slackBotChannelId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -3262,6 +3270,8 @@ export type FirstPartyMcpToolName =
   | "slack_bot_file_content"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "slack_bot_prepare_message"
+  | "slack_bot_send_prepared_message"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -5457,6 +5467,8 @@ export type ScheduledTaskAgentConfigInput = {
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   slackBotConnectionId?: string | undefined;
+  /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
+  slackBotChannelId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -7358,6 +7370,10 @@ export type GitHubRepository = {
   defaultBranch: string;
   accountLogin: string;
   accountType: string | null;
+  /** GitHub's archived flag, when the provider reported it. */
+  archived?: boolean | undefined;
+  /** GitHub's reported size in kilobytes, when reported. Zero means empty. */
+  sizeKb?: number | undefined;
 };
 
 export type GitHubRepositoryScope = "all" | "selected";

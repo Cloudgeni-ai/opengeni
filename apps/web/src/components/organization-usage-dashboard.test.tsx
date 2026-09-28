@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { OrganizationUsageSummary } from "@opengeni/contracts";
-import { formatExactUsage, organizationUsageChart } from "./organization-usage-dashboard";
+import {
+  formatExactUsage,
+  formatUsageAmount,
+  organizationUsageChart,
+} from "./organization-usage-dashboard";
 import { usageMetricLabel, usageUnitLabel } from "@/lib/usage-metric";
 
 describe("organization usage presentation", () => {
@@ -16,6 +20,14 @@ describe("organization usage presentation", () => {
     expect(formatExactUsage("9007199254740993", "usd_micros")).toBe("$9,007,199,254.740993");
     expect(formatExactUsage("-1", "usd_micros")).toBe("-$0.000001");
     expect(formatExactUsage("9007199254740993", "tokens")).toBe("9,007,199,254,740,993 tokens");
+  });
+  test("reads money in cents and says when an amount is under a cent", () => {
+    expect(formatUsageAmount("12345678", "usd_micros")).toBe("$12.35");
+    expect(formatUsageAmount("9007199254740993", "usd_micros")).toBe("$9,007,199,254.74");
+    expect(formatUsageAmount("100", "usd_micros")).toBe("< $0.01");
+    expect(formatUsageAmount("0", "usd_micros")).toBe("$0.00");
+    expect(formatUsageAmount("-2500000", "usd_micros")).toBe("-$2.50");
+    expect(formatUsageAmount("1200", "tokens")).toBe("1,200 tokens");
   });
   test("fills UTC gaps and keeps units separate", () => {
     const selected = {

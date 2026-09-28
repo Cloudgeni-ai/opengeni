@@ -231,6 +231,8 @@ export type IntegrationViewModel = {
     };
     diagnostics?: IntegrationFact[];
   };
+  /** What it lets agents do, in product words (up to four). Shown on the page's About section. */
+  outcomes?: Array<{ title: string; description?: string }>;
   /** The tools this connection actually publishes; omitted when unavailable. */
   tools?: IntegrationToolsBlock;
   /** Optional plain-language notice shown above the blocks (state explanations). */

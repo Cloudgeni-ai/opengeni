@@ -26,8 +26,13 @@ import {
   completeSlackBotDeleteOperation,
   completeSlackBotPostOperation,
   completeSlackBotUpdateOperation,
+  getScheduledTask,
   getSession,
+  getSlackBotPostOperation,
   listConnectionsMetadata,
+  prepareScheduledSlackBotMessage,
+  readScheduledSlackBotMessage,
+  ScheduledSlackBotMessageRefusedError,
   markSlackBotDeleteOperationProviderStarted,
   markSlackBotPostOperationProviderStarted,
   recordAuditEvent,
@@ -528,6 +533,206 @@ export async function resolveSlackBotConnectionForTool(input: {
           : null,
     },
   };
+}
+
+/**
+ * The one destination a scheduled run may post to as the OpenGeni bot: the
+ * channel a person chose on the task, through the bot connection frozen on the
+ * run's session. The agent never supplies a channel. Every call re-reads the
+ * task, so a person clearing or changing the channel takes effect at once.
+ */
+export async function resolveScheduledSlackBotPostTarget(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string | null;
+}): Promise<
+  Awaited<ReturnType<typeof resolveSlackBotConnectionForTool>> & {
+    scheduledTaskId: string;
+    channelId: string;
+  }
+> {
+  const refuse = (reason: string): never => {
+    throw new Error(`Posting to the task's Slack channel is unavailable: ${reason}`);
+  };
+  if (!input.sessionId) refuse("this is not a scheduled task run");
+  const session = await getSession(input.db, input.grant.workspaceId, input.sessionId!);
+  if (!session || !isTrustedScheduledSlackBotSession(session)) {
+    refuse("this is not a scheduled task run with an OpenGeni Slack bot");
+  }
+  const connectionId = scheduledSlackBotConnectionId(session!.metadata)!;
+  const scheduledTaskId = String(session!.metadata.scheduledTaskId);
+  const task = await getScheduledTask(input.db, input.grant.workspaceId, scheduledTaskId);
+  if (!task) refuse("the scheduled task was deleted");
+  if (task!.runMode === "existing_session") refuse("the task continues an existing chat");
+  if (task!.agentConfig.slackBotConnectionId !== connectionId) {
+    refuse("the task no longer uses this OpenGeni Slack bot");
+  }
+  const channelId = task!.agentConfig.slackBotChannelId;
+  if (!channelId) refuse("no one has chosen a Slack channel for this task");
+  const resolved = await resolveSlackBotConnectionForTool({
+    db: input.db,
+    grant: input.grant,
+    sessionId: input.sessionId,
+    requestedConnectionId: connectionId,
+  });
+  return { ...resolved, scheduledTaskId, channelId: channelId! };
+}
+
+/**
+ * Save one message for the task's channel without sending it. The returned id
+ * is server-owned and becomes the Slack post operation id, so retrying the
+ * send can never post the same message twice.
+ */
+export async function prepareScheduledSlackBotPost(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string | null;
+  text: string;
+  threadTimestamp?: string | undefined;
+}) {
+  const target = await resolveScheduledSlackBotPostTarget(input);
+  const message = await prepareScheduledSlackBotMessage(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId!,
+    scheduledTaskId: target.scheduledTaskId,
+    connectionId: target.connection.id,
+    connectionVersion: target.connection.version,
+    channelId: target.channelId,
+    threadTimestamp: input.threadTimestamp ?? null,
+    text: input.text,
+  }).catch((error: unknown) => {
+    if (error instanceof ScheduledSlackBotMessageRefusedError) {
+      throw new Error(`Posting to the task's Slack channel is unavailable: ${error.message}`);
+    }
+    throw error;
+  });
+  return {
+    messageId: message.id,
+    identity: "workspace_bot" as const,
+    channelId: message.channelId,
+    threadTimestamp: message.threadTimestamp,
+    text: message.text,
+    sent: false,
+  };
+}
+
+/**
+ * Send a message this run prepared, exactly as saved. The destination must
+ * still be the task's channel and the bot connection unchanged; otherwise the
+ * send is refused rather than redirected.
+ */
+export async function sendScheduledSlackBotPost(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  sessionId: string | null;
+  messageId: string;
+  slackFetch?: typeof fetch;
+  authorizeProviderRequest?: SlackProviderAuthorization;
+}) {
+  const target = await resolveScheduledSlackBotPostTarget(input);
+  const message = await readScheduledSlackBotMessage(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId!,
+    id: input.messageId,
+  });
+  if (!message) {
+    throw new Error("This prepared Slack message does not exist in this chat");
+  }
+  const channelChanged =
+    message.channelId !== target.channelId || message.scheduledTaskId !== target.scheduledTaskId;
+  const botChanged =
+    message.connectionId !== target.connection.id ||
+    message.connectionVersion !== target.connection.version;
+  const client = createOpenGeniSlackBotClient(
+    {
+      db: input.db,
+      settings: input.settings,
+      ...(input.slackFetch ? { slackFetch: input.slackFetch } : {}),
+      ...(input.authorizeProviderRequest
+        ? { authorizeProviderRequest: input.authorizeProviderRequest }
+        : {}),
+    },
+    target,
+  );
+  const post = () =>
+    client.postMessage({
+      operationId: message.id,
+      channelId: message.channelId,
+      ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
+      text: message.text,
+      requireActiveNonSharedChannel: true,
+    });
+  if (!channelChanged && !botChanged) return await post();
+  // The destination moved after this message was prepared, so it is never sent
+  // now. Say truthfully whether an earlier send already reached Slack, so the
+  // agent does not post the same content again believing nothing was sent.
+  const earlier = await getSlackBotPostOperation(
+    input.db,
+    input.grant.workspaceId,
+    message.connectionId,
+    message.id,
+  );
+  if (earlier?.status === "completed" && message.connectionId === target.connection.id) {
+    // Replays the recorded result from the post ledger; no Slack call is made.
+    return await post();
+  }
+  const reason = channelChanged
+    ? "The task's Slack channel changed after this message was prepared"
+    : "The OpenGeni Slack bot changed after this message was prepared";
+  if (earlier?.status === "completed") {
+    throw new Error(`${reason}. It had already been posted, so it was not sent again.`);
+  }
+  if (earlier && earlier.status !== "pending") {
+    throw new Error(
+      `${reason}. An earlier send was interrupted, so it may already have been posted to the previous channel; it was not sent again.`,
+    );
+  }
+  throw new Error(`${reason}, so it was not sent. Prepare a new message for the current channel.`);
+}
+
+/**
+ * Check, with the bot's token, that a person's chosen task channel is one the
+ * bot is a member of, active, and not shared with another organization.
+ */
+export async function verifyScheduledTaskSlackChannel(
+  deps: { db: Database; settings: Settings; slackFetch?: typeof fetch },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    channelId: string;
+  },
+): Promise<void> {
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    connectionId: input.connectionId,
+    subjectId: input.subjectId,
+  });
+  let channel: Awaited<ReturnType<OpenGeniSlackBotClient["verifyChannelAccess"]>>;
+  try {
+    channel = await client.verifyChannelAccess(input.channelId);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: `The OpenGeni bot cannot post in that Slack channel. Invite it to the channel first. (${safeFailureCode(error)})`,
+    });
+  }
+  if (
+    channel.isDirectMessage ||
+    channel.isArchived ||
+    channel.isShared ||
+    channel.isExternallyShared ||
+    channel.isOrgShared
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "Scheduled posts need an active Slack channel that is not shared with another organization",
+    });
+  }
 }
 
 export class OpenGeniSlackBotClient {

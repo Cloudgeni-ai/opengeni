@@ -897,8 +897,8 @@ type ModelAvailabilityV1 = {
 };
 ```
 
-Workspace admins manage the hard allowlist from **Workspace Settings → Model
-access**. The UI supports an unrestricted policy or an exact canonical model-id
+Workspace admins manage the hard allowlist from **Workspace settings → Models →
+Allowed models**. The UI supports an unrestricted policy or an exact canonical model-id
 allowlist, including future/custom IDs that are not yet present in the catalog.
 It uses the existing model-policy routes through the typed SDK methods
 `getWorkspaceModelAccessPolicy` and `updateWorkspaceModelAccessPolicy`:

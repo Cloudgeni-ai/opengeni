@@ -84,13 +84,18 @@ the web app enables. It groups with `groupTimeline(items, { foldExchanges: true 
   until its turn ends or it grows past 1,000 characters (a length recorded notes
   rarely reach); a declared `final_answer` phase is an answer at once. A long
   message that turns out to be a note folds back once work follows it.
-- **One row per exchange.** Everything between two human boundaries folds behind
-  one status row. Only human messages, structured human input, and input notices
+- **One row per stretch of work.** Only work folds: the work between two human
+  boundaries folds behind one status row, and an answer always stays a normal
+  visible message. Only human messages, structured human input, and input notices
   start a new exchange. Routine machine inputs (child results and progress, agent
-  messages, background command results, wait timeouts, goal continuations),
-  recorded waits, and completed compaction fold inside; compaction also counts as
-  the chip's `compacted` facet. Failed turns, approvals, auth recovery, scheduled
-  prompts, generated media, and presented images stay visible between folds.
+  messages and steer instructions, background command results, wait timeouts,
+  goal continuations), recorded waits, progress notes, and completed compaction
+  fold inside; compaction also counts as the chip's `compacted` facet. When such
+  input continues the exchange after an answer, its turns fold into a new row
+  below that answer. The row opens as soon as the input is delivered, and the
+  later turn's own answer renders below it. Failed turns, approvals, auth
+  recovery, scheduled prompts, generated media, and presented images stay visible
+  between folds.
 - **Live status.** While the agent works, the row reads "Working · 2m 14s · 12
   steps" with a live clock and the step count (notes are not steps). Below it, the
   latest progress note is previewed muted and clamped to two lines, replaced when a
@@ -102,7 +107,8 @@ the web app enables. It groups with `groupTimeline(items, { foldExchanges: true 
 - **Answer.** The answer renders below a "Worked for 4m 10s" separator that carries
   the remaining facets; the time runs until the answer started, so it does not
   change when the answer completes. A turn that ends without an answer still lifts
-  its latest note as the visible reply, unless it parked in a wait.
+  its latest note as the visible reply, unless it parked in a wait or more work
+  followed it; then the note folds into the row like any other progress note.
 
 The recorded wait itself reads "Waited for 1 agent · 3m 5s" once later input, a
 pause, or the session failing or being cancelled ended it, or "Waiting · since
@@ -110,9 +116,10 @@ pause, or the session failing or being cancelled ended it, or "Waiting · since
 
 Following the tip stops once an answer pushes its question to the top of the
 viewport (or, when the question had already scrolled away, the status row or the
-answer itself). The stop applies only while that answer is the newest row: once a
-question, more work, or the answer folding back into a note follows it, a reader
-who has not moved since returns to the tip. When the question of the exchange
+answer itself). The stop applies while that answer is the newest message: rows of
+machine-triggered work below it never move the reader. Once a question, a newer
+reply, or the answer folding back into a note follows it, a reader who has not
+moved since returns to the tip. When the question of the exchange
 being read has scrolled away, a "Your question" control returns to it, with
 previous and next question buttons.
 
@@ -125,8 +132,11 @@ seconds. Reduced motion disables both animations.
 stage (working, waiting, resumed, answering, done, follow-up) with a compact or
 classic toggle and light/dark themes; `?scenario=follow-up`, `notes`, and `history`
 replay messages streamed the way the runtime records them today (identified,
-phase-less deltas). `/rolling-steps.html` loops sample commands. Neither needs
-model calls. `test/e2e/timeline-exchange-fold.browser.e2e.ts` covers, in the
+phase-less deltas), and `?scenario=machine-follow-up` replays an anonymized
+recorded exchange whose answer (with an image and a question) is followed by one
+more machine-triggered turn. `/rolling-steps.html` loops sample commands. Neither
+needs model calls. `test/e2e/timeline-exchange-fold.browser.e2e.ts` covers, in the
 compact presentation and in Chromium, the answer anchoring, a short answer
 followed by a new question, phase-less progress notes, loading older history
-inside an exchange, and question navigation.
+inside an exchange, question navigation, and an answer that stays visible, with
+its reader in place, when a machine-triggered turn follows it.

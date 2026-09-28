@@ -18,6 +18,16 @@ const workspaceRouteContracts = {
     kind: "page",
     source: "routes/variable-sets.tsx",
   },
+  // The list and each set's page only match the URL; the parent's single
+  // VariableSetsRoute component renders both inside one ContentPage.
+  workspaceVariableSetsIndexRoute: {
+    kind: "page",
+    source: "routes/variable-sets.tsx",
+  },
+  workspaceVariableSetDetailRoute: {
+    kind: "page",
+    source: "routes/variable-sets.tsx",
+  },
   workspaceEnvironmentsRoute: { kind: "redirect" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
@@ -33,20 +43,15 @@ const workspaceRouteContracts = {
   },
   workspaceLegacyCapabilitiesRoute: { kind: "redirect" },
   workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceDocumentsRoute: {
-    kind: "page",
-    source: "routes/documents.tsx",
-    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
-  },
-  workspaceMemoryRoute: {
-    kind: "page",
-    source: "routes/memory.tsx",
-    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
-  },
+  workspaceScheduleNewRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleDetailRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceScheduleEditRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceDocumentsRoute: { kind: "redirect" },
+  workspaceMemoryRoute: { kind: "redirect" },
   workspaceStateRoute: {
     kind: "page",
     source: "routes/workspace-state.tsx",
-    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
+    scrollSource: "components/knowledge/knowledge-page.tsx",
   },
   workspaceArtifactsRoute: { kind: "page", source: "routes/artifacts.tsx" },
   workspaceArtifactDetailRoute: {
@@ -61,11 +66,12 @@ const workspaceRouteContracts = {
   workspaceSettingsRoute: {
     kind: "page",
     source: "routes/workspace-settings.tsx",
-    scrollSource: "components/settings/workspace-settings-shell.tsx",
+    scrollSource: "components/settings/settings-sidebar.tsx",
   },
   workspaceOrganizationRoute: {
-    kind: "self-managed",
-    source: "components/settings/organization-settings-shell.tsx",
+    kind: "page",
+    source: "routes/org-settings.tsx",
+    scrollSource: "components/settings/settings-sidebar.tsx",
   },
   workspaceAccountRoute: { kind: "redirect" },
 } satisfies Record<string, ScrollContract>;
@@ -83,7 +89,9 @@ describe("workspace route scroll ownership", () => {
     if (!workspaceChildrenSource) throw new Error("Workspace route children were not found");
 
     const registeredRoutes = Array.from(
-      workspaceChildrenSource.matchAll(/^\s+(workspace[A-Z]\w+Route),$/gm),
+      // Leaf routes (`workspaceXRoute,`) and parents with nested children
+      // (`workspaceXRoute.addChildren([`).
+      workspaceChildrenSource.matchAll(/^\s+(workspace[A-Z]\w+Route)(?:,|\.addChildren\(\[)$/gm),
       (match) => match[1],
     ).sort();
 
@@ -131,15 +139,13 @@ describe("workspace route scroll ownership", () => {
     for (const path of [
       "components/settings/workspace-settings-shell.tsx",
       "components/settings/organization-settings-shell.tsx",
+      "components/settings/personal-settings-shell.tsx",
     ]) {
       const shellSource = await source(path);
-      expect(shellSource, `${path} must use the shared bounded settings layout`).toContain(
-        "className={SETTINGS_SHELL_CLASS}",
+      expect(shellSource, `${path} must render the shared settings shell`).toContain(
+        "<SettingsShell",
       );
-      expect(
-        shellSource,
-        `${path} must not clip app chrome by reclaiming the viewport`,
-      ).not.toContain("h-dvh");
+      expect(shellSource).not.toContain("h-dvh");
     }
   });
 

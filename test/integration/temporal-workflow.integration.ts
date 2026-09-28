@@ -96,7 +96,7 @@ const postHeartbeatIdlePauseTestTimeoutMs = 60_000;
 const goalContinuationTestTimeoutMs = 60_000;
 
 // continueAsNew tests legitimately span a continueAsNew chain (the handle only
-// resolves on the FINAL run) plus a possible 5s idle-wait window before the
+// resolves on the FINAL run) before the
 // continued run re-claims the durable-queue turn that arrived after the
 // boundary. Run last after two real heartbeat-timeout proofs, a loaded host can
 // spend more than 120s polling and draining the three-run chain even though the
@@ -136,9 +136,11 @@ describe("Temporal workflow integration", () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const calls: unknown[] = [];
+      const claimedEvents: string[] = [];
       const queuedTurns = [queuedTurn("event-1")];
-      const admission = createTurnAdmission(queuedTurns, async (input) => {
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
         calls.push(input);
+        claimedEvents.push(turn.triggerEventId);
         return { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
@@ -152,21 +154,26 @@ describe("Temporal workflow integration", () => {
       const run = worker.run();
       try {
         const client = new Client({ connection });
-        const handle = await client.workflow.start("sessionWorkflow", {
+        const options = {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [
-            {
-              ...scope,
-              sessionId: crypto.randomUUID(),
-              initialEventId: "event-1",
-            },
-          ],
-        });
+          args: [{ ...scope, sessionId: crypto.randomUUID() }],
+        };
+        await client.workflow.start("sessionWorkflow", options);
         await waitFor(() => calls.length === 1);
         queuedTurns.push(queuedTurn("event-2"));
-        await handle.signal("userMessage", "event-2");
-        await waitFor(() => calls.length === 2);
+        // Normal idle may already have closed. Production wakes the same
+        // durable session with signalWithStart, not a grace-window-only signal.
+        const followUp = await client.workflow.signalWithStart("sessionWorkflow", {
+          ...options,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          signal: "userMessage",
+          signalArgs: ["event-2"],
+        });
+        await followUp.result();
+        expect(calls).toHaveLength(2);
+        expect(claimedEvents).toEqual(["event-1", "event-2"]);
+        expect(queuedTurns).toEqual([]);
       } finally {
         worker.shutdown();
         await run;
@@ -2611,11 +2618,10 @@ describe("Temporal workflow integration", () => {
           .map((timeout) => Number(timeout!.seconds ?? 0) * 1_000 + (timeout!.nanos ?? 0) / 1e6);
         // The reset timer keeps its own deadline and each spread is a separate
         // bounded timer (a zero draw creates none), so bound them rather than
-        // count them. The 5 s timers are the ordinary idle window after the turn.
-        const capacityTimers = timerMs.filter((duration) => duration !== 5_000);
-        expect(capacityTimers.length).toBeGreaterThanOrEqual(1);
-        expect(capacityTimers.length).toBeLessThanOrEqual(3);
-        for (const duration of capacityTimers) {
+        // count them. Normal idle completion must not add a grace timer.
+        expect(timerMs.length).toBeGreaterThanOrEqual(1);
+        expect(timerMs.length).toBeLessThanOrEqual(3);
+        for (const duration of timerMs) {
           expect(duration).toBeLessThanOrEqual(Math.max(baseTimerMs, jitterCeilingMs));
         }
         expect(patchIds(history)).toContain("session-capacity-wake-jitter-v1");

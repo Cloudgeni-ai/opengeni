@@ -657,6 +657,72 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(await getSessionForSubject(db, target.workspaceId, child.id, owner)).not.toBeNull();
   });
 
+  test("freezes the acknowledgement defaults line with the first bind only", async () => {
+    if (!available) return;
+    const target = await workspace("defaults-line");
+    const owner = "user:slack-defaults-line-owner";
+    await member(target, owner);
+    const connection = await botConnection(target, "T_DEFAULTS_LINE", {
+      botId: "B_DEFAULTS_LINE",
+      botUserId: "U_DEFAULTS_LINE_BOT",
+    });
+    const { interaction } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_DEFAULTS_LINE",
+      slackChannelId: "C_DEFAULTS_LINE",
+      slackThreadTs: "1710000000.000020",
+      routeKey: "C_DEFAULTS_LINE:1710000000.000020",
+      triggeringProviderEventId: "E_DEFAULTS_LINE",
+      owningSubjectId: owner,
+      visibility: "workspace",
+    });
+    expect(interaction.sessionDefaultsLine).toBeNull();
+    const session = await createSession(db, {
+      ...target,
+      requestedSessionId: interaction.sessionReservationId,
+      initialMessage: "defaults line",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const line = "Using connectors: Linear; repos: project.";
+    expect(
+      await bindSlackInteractionSession(db, {
+        ...interaction,
+        owningSubjectId: owner,
+        sessionId: session.id,
+        sessionDefaultsLine: line,
+      }),
+    ).toMatchObject({ sessionId: session.id, sessionDefaultsLine: line });
+    // A replayed bind that rendered different bytes keeps the frozen line, so
+    // an acknowledgement repair posts exactly what the first attempt posted.
+    expect(
+      await bindSlackInteractionSession(db, {
+        ...interaction,
+        owningSubjectId: owner,
+        sessionId: session.id,
+        sessionDefaultsLine: "Using connectors: none; repos: none.",
+      }),
+    ).toMatchObject({ sessionId: session.id, sessionDefaultsLine: line });
+    const [row] = await admin<{ session_defaults_line: string | null }[]>`
+      select session_defaults_line from slack_interactions where id = ${interaction.id}`;
+    expect(row!.session_defaults_line).toBe(line);
+    // The column is bounded: never empty, never over 1024 bytes. A postgres.js
+    // query runs only once awaited, so each one runs inside its own function.
+    for (const value of ["", "x".repeat(1025)]) {
+      await expect(
+        (async () => {
+          await admin`update slack_interactions set session_defaults_line = ${value} where id = ${interaction.id}`;
+        })(),
+      ).rejects.toThrow("slack_interactions_session_defaults_line_check");
+    }
+  }, 60_000);
+
   test("reserves opaque requester-bound actions and settles one card once", async () => {
     if (!available) return;
     const target = await workspace("native-actions");

@@ -6,6 +6,9 @@
 @import "@opengeni/react/responsive.css";
 
 @source "../../../packages/react/src";
+/* The DEV-only UI kit styles itself (src/dev/ui-kit/kit.css); keep its
+   previews out of the production stylesheet. */
+@source not "./dev/ui-kit";
 
 @custom-variant dark (&:where(.dark, .dark *));
 

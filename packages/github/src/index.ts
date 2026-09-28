@@ -1651,6 +1651,10 @@ function repositoryFromPayload(
     defaultBranch: String(payload.default_branch ?? "main"),
     accountLogin: String(account.login ?? fullName.split("/", 1)[0]),
     accountType: typeof account.type === "string" ? account.type : null,
+    ...(typeof payload.archived === "boolean" ? { archived: payload.archived } : {}),
+    ...(typeof payload.size === "number" && Number.isInteger(payload.size) && payload.size >= 0
+      ? { sizeKb: payload.size }
+      : {}),
   };
 }
 

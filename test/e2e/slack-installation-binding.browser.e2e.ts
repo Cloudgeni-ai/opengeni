@@ -91,7 +91,14 @@ describe("Slack installation binding browser acceptance", () => {
       expect(((await settings.textContent()) ?? "").toLowerCase()).not.toContain("authorization");
       expect((await settings.textContent()) ?? "").not.toContain(accountId);
       expect((await settings.textContent()) ?? "").not.toContain(workspaceId);
-      expect(await settings.getByRole("button", { name: "Reconnect" }).isDisabled()).toBe(false);
+      // Healthy: Reconnect is a secondary action in the page's ⋯ menu, and it is available.
+      expect(await settings.getByRole("button", { name: "Reconnect" }).count()).toBe(0);
+      await settings.getByRole("button", { name: "More actions for Slack", exact: true }).click();
+      const reconnectItem = page.getByRole("menuitem", { name: "Reconnect", exact: true });
+      await reconnectItem.waitFor();
+      expect(await reconnectItem.getAttribute("aria-disabled")).toBeNull();
+      await page.keyboard.press("Escape");
+      await reconnectItem.waitFor({ state: "detached" });
 
       state.bindingState = "quarantined";
       state.connectionStatus = "needs_reauth";
@@ -115,17 +122,22 @@ describe("Slack installation binding browser acceptance", () => {
 
 async function openSlackSettings(page: Page, chip: string) {
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  const row = page
-    .locator(".og-connection-installed")
-    .getByRole("button", { name: new RegExp(`Slack.*${chip}`) });
+  // One row per provider; its status sits at the end of the row.
+  const row = page.getByRole("button", { name: new RegExp(`^Slack\\b.*${chip}$`) });
   await row.waitFor({ state: "visible", timeout: 15_000 });
-  expect(await row.getAttribute("aria-label")).toContain(chip);
+  expect(await row.locator("[data-status]").textContent()).toBe(chip);
   await row.click();
-  const settings = page.getByRole("region", { name: "Slack settings" });
+  // The connection opens as its own Capabilities page.
+  const settings = page.locator("[data-capability-page]");
   await settings.waitFor({ state: "visible", timeout: 15_000 });
-  expect(await settings.getByRole("button", { name: "Reconnect" }).isVisible()).toBe(false);
-  await settings.getByText("More options", { exact: true }).click();
-  await settings.getByText("Connection details", { exact: true }).click();
+  expect(await settings.locator("h1").textContent()).toBe("Slack");
+  expect(new URL(page.url()).searchParams.get("open")).toBe("integration:slack");
+  expect(
+    await settings
+      .locator('[data-slot="detail-page-header"] [data-slot="status-badge"]')
+      .textContent(),
+  ).toBe(chip);
+  await settings.getByRole("button", { name: /^Technical details/ }).click();
   return settings;
 }
 

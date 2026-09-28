@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
@@ -308,12 +309,13 @@ function InlineArtifactBody({
           </Button>
         </p>
       )}
-      <a
-        href={`/workspaces/${workspaceId}/artifacts/files/${artifactId}`}
+      <Link
+        to="/workspaces/$workspaceId/artifacts/files/$artifactId"
+        params={{ workspaceId, artifactId }}
         className="text-sm underline"
       >
         Open {alt || "artifact"} in Artifacts
-      </a>
+      </Link>
     </div>
   );
 }

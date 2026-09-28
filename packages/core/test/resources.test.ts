@@ -6,6 +6,21 @@ import {
 } from "../src/domain/resources";
 
 describe("repository resource normalization", () => {
+  test("keeps only a true best-effort flag", () => {
+    const repository = {
+      kind: "repository" as const,
+      uri: "https://github.com/example-owner/project.git",
+      ref: "main",
+    };
+    expect(normalizeResources([{ ...repository, optional: true }])[0]).toMatchObject({
+      optional: true,
+    });
+    expect(normalizeResources([{ ...repository, optional: false }])[0]).not.toHaveProperty(
+      "optional",
+    );
+    expect(normalizeResources([repository])[0]).not.toHaveProperty("optional");
+  });
+
   test("preserves Azure DevOps clone paths without appending a GitHub-style suffix", () => {
     expect(
       normalizeResources([

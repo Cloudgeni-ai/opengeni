@@ -28,10 +28,10 @@ raw inventories, structural gaps, proposal queues, portable export, and the
 historical Knowledge inspector are not presented on the default product page.
 
 The small always-on organization identity and mission are administered from
-**Organization settings → Knowledge**. Products, customers, goals, constraints,
+**Organization settings → Organization identity**. Products, customers, goals, constraints,
 and other company facts live in company-scoped Documents on that same surface
-and are retrieved when relevant. Learning mode is administered from **Workspace
-settings → General → Workspace instruction & Skill autonomy**. Neither is a workspace instruction
+and are retrieved when relevant. Learning mode is administered from **Knowledge →
+Learning**. Neither is a workspace instruction
 or Skill.
 
 ## Authority boundaries
@@ -66,7 +66,7 @@ be inactive, provenance-linked drafts until an authorized policy operation
 explicitly activates them.
 
 The account-scoped company profile remains a separate organization authority.
-Its agent-assisted product entry point is Organization settings → Knowledge;
+Its agent-assisted product entry point is Organization settings → Organization identity;
 Workspace State does not own or duplicate it. See
 [`company-profile.md`](company-profile.md).
 

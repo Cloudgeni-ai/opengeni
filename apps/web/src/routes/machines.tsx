@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // Machines: the workspace's bring-your-own-compute fleet — enrolled selfhosted
 // machines, each with its connection-status pill, state badges, latest metrics
@@ -464,12 +465,13 @@ export function MachineRemovalBlockNotice({
         <ul className="mt-2 space-y-1">
           {result.dependentSessions.map((session) => (
             <li key={session.id}>
-              <a
-                href={`/workspaces/${workspaceId}/sessions/${session.id}`}
+              <Link
+                to="/workspaces/$workspaceId/sessions/$sessionId"
+                params={{ workspaceId, sessionId: session.id }}
                 className="font-medium text-fg underline decoration-border-strong underline-offset-2 hover:text-brand"
               >
                 {session.title?.trim() || session.id}
-              </a>
+              </Link>
             </li>
           ))}
         </ul>

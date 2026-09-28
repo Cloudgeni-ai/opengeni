@@ -958,6 +958,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -2191,6 +2193,10 @@ export const SlackReactionChannelListResponse = z.object({
   nextCursor: z.string().max(1_024).nullable(),
 });
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
+
+/** Active, non-shared channels the bot belongs to, offered as a task's fixed destination. */
+export const ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
+export type ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
 
 /** Where one Slack channel starts work. */
 export const SlackChannelRoute = z.object({
@@ -4796,6 +4802,15 @@ export const RepositoryResourceRef = z.object({
   connectionId: z.string().min(1).optional(),
   githubInstallationId: z.number().int().positive().optional(),
   githubRepositoryId: z.number().int().positive().optional(),
+  /**
+   * Best-effort materialization. When true, a failed clone of this repository
+   * logs a warning and the session continues without it instead of failing
+   * sandbox setup. OpenGeni sets it on repositories it attaches on the
+   * person's behalf (a Slack task's recently used repositories); a repository
+   * a caller names explicitly stays strict unless the caller opts in. Only
+   * `true` is stored.
+   */
+  optional: z.boolean().optional(),
 });
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
 
@@ -9580,6 +9595,21 @@ export const ScheduledTaskMetadataInput =
     "scheduled task metadata",
   );
 
+/** A Slack public or private channel ID. Direct messages are not destinations. */
+export const ScheduledTaskSlackChannelId = z
+  .string()
+  .regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789");
+
+/**
+ * The only first-party tools that post as the OpenGeni bot. A generated
+ * session receives them only when a person chose its task's Slack channel,
+ * and they refuse every other destination.
+ */
+export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
     .object({
@@ -9613,6 +9643,10 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
+    // The one Slack channel this task's runs may post to as the OpenGeni bot.
+    // Only a person chooses it (never an agent attempt); it requires
+    // slackBotConnectionId and is read from the task at every post.
+    slackBotChannelId: ScheduledTaskSlackChannelId.optional(),
     model: bounded
       ? scheduledTaskBoundedString(512, "scheduled task model").optional()
       : z.string().min(1).optional(),
@@ -15765,6 +15799,13 @@ export const GitHubRepository = z.object({
   defaultBranch: z.string(),
   accountLogin: z.string(),
   accountType: z.string().nullable(),
+  /** GitHub's archived flag, when the provider reported it. */
+  archived: z.boolean().optional(),
+  /**
+   * GitHub's reported repository size in kilobytes, when the provider
+   * reported it. Zero means GitHub considers the repository empty.
+   */
+  sizeKb: z.number().int().nonnegative().optional(),
 });
 export type GitHubRepository = z.infer<typeof GitHubRepository>;
 

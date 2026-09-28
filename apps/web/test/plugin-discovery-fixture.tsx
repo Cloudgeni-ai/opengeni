@@ -1,6 +1,8 @@
+import { useMemo, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { PluginDiscoveryItem, PluginInstallationSummary } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { CapabilityPageSlotContext } from "../src/components/capabilities/capability-page-slot";
 import { PluginDiscovery } from "../src/components/capabilities/plugin-discovery";
 import "@opengeni/react/connect.css";
 import "../src/styles.css";
@@ -58,17 +60,42 @@ const client = {
   installPlugin: async () => ({}),
 } as unknown as OpenGeniBrowserClient;
 
+/** The Capabilities route's page slot: the catalog hides while a page is open. */
+function PageSlot({ children }: { children: ReactNode }) {
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  const value = useMemo(
+    () => ({
+      target,
+      openKey,
+      open: (key: string) => setOpenKey(key),
+      close: () => setOpenKey(null),
+    }),
+    [target, openKey],
+  );
+  return (
+    <CapabilityPageSlotContext.Provider value={value}>
+      <div ref={setTarget} data-capability-page-slot="" />
+      <div hidden={openKey !== null}>{children}</div>
+    </CapabilityPageSlotContext.Provider>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
-  <main className="mx-auto max-w-5xl p-6 sm:p-12">
-    <h1 className="mb-2 text-xl font-semibold">Capabilities</h1>
-    <p className="mb-8 text-sm text-fg-muted">Extend OpenGeni with skills and plugins.</p>
-    <PluginDiscovery
-      client={client}
-      workspaceId="workspace"
-      query=""
-      canManage={!params.has("readonly")}
-      installedPlugins={params.has("installed") ? [installed] : []}
-      onOpenConnection={() => {}}
-    />
+  <main>
+    <PageSlot>
+      <div className="mx-auto max-w-5xl p-6 sm:p-12">
+        <h1 className="mb-2 text-xl font-semibold">Capabilities</h1>
+        <p className="mb-8 text-sm text-fg-muted">Extend OpenGeni with skills and plugins.</p>
+        <PluginDiscovery
+          client={client}
+          workspaceId="workspace"
+          query=""
+          canManage={!params.has("readonly")}
+          installedPlugins={params.has("installed") ? [installed] : []}
+          onOpenConnection={() => {}}
+        />
+      </div>
+    </PageSlot>
   </main>,
 );
