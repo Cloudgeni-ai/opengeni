@@ -10873,13 +10873,163 @@ export async function refreshGitCredentialBindingTokenFiles(
 
 const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository resource ";
 
+/**
+ * Wall-clock bound for one automatically attached (optional) repository clone,
+ * and the share of the repository-clone lifecycle command all optional clones
+ * may use. Both stay below SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS so a hung
+ * optional fetch is skipped with a warning instead of failing sandbox setup.
+ * Explicitly attached repositories are not bounded here.
+ */
+export const OPTIONAL_REPOSITORY_CLONE_TIMEOUT_SECONDS = 60;
+const OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS = 90;
+
+const cloneRepositoryFunctionLines: readonly string[] = [
+  "clone_repository() {",
+  '  target="$1"',
+  '  uri="$2"',
+  '  ref="$3"',
+  '  subpath="$4"',
+  '  expected_commit="${5:-}"',
+  '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
+  // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
+  // proof of a completed materialization: an interrupted clone (worker crash /
+  // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
+  // this check forever. A full-repo target must actually BE a work tree to be
+  // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
+  // the mount path before the repo exists). Subpath extracts are not git repos —
+  // for those the plain non-empty check stands (no stronger signal available).
+  '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
+  "      fi",
+  '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "    fi",
+  '    echo "Re-materializing partial repository resource at $target" >&2',
+  '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
+  "  fi",
+  '  mkdir -p "$(dirname "$target")"',
+  '  tmp="${target}.tmp.$$"',
+  '  rm -rf "$tmp"',
+  // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
+  // (set -eu would exit before any cleanup).
+  '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+  '    rm -rf "$tmp"',
+  '    echo "Repository resource fetch failed for $target" >&2',
+  '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
+  "    exit 1",
+  "  fi",
+  // origin/HEAD is best-effort: workspace capture diffs the branch against it
+  // when present and already treats a missing origin/HEAD as additive. `git
+  // remote set-head` only accepts a branch that the fetch materialized under
+  // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
+  // must not turn a successful fetch into a failed clone.
+  '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+  '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+  "  fi",
+  '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '    rm -rf "$tmp"',
+  '    echo "Repository resource fetch failed for $target" >&2',
+  "    exit 1",
+  "  fi",
+  '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+  '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
+  '    rm -rf "$tmp"',
+  "    exit 1",
+  "  fi",
+  '  if [ -n "$subpath" ]; then',
+  '    if [ ! -e "$tmp/$subpath" ]; then',
+  '      echo "Repository subpath not found: $subpath" >&2',
+  '      rm -rf "$tmp"',
+  "      exit 1",
+  "    fi",
+  '    if [ -d "$tmp/$subpath" ]; then',
+  '      mkdir -p "$target"',
+  '      cp -a "$tmp/$subpath/." "$target/"',
+  "    else",
+  '      rmdir "$target" 2>/dev/null || true',
+  '      cp -a "$tmp/$subpath" "$target"',
+  "    fi",
+  '    rm -rf "$tmp"',
+  "  else",
+  '    rmdir "$target" 2>/dev/null || true',
+  // Two concurrent turn holders can race this install: without the existence
+  // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
+  // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
+  // accept it; a non-empty non-repo survivor here is a mount point the manifest
+  // re-filled — install into it by content copy instead of rename.
+  '    if [ -e "$target" ]; then',
+  '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
+  '        rm -rf "$tmp"',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
+  "      fi",
+  '      cp -a "$tmp/." "$target/"',
+  '      rm -rf "$tmp"',
+  "    else",
+  '      mv "$tmp" "$target"',
+  "    fi",
+  '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+  "  fi",
+  '  if [ ! -e "$target" ]; then',
+  '    echo "Repository resource was not materialized at $target" >&2',
+  "    exit 1",
+  "  fi",
+  '  echo "Repository resource ready at $target"',
+  "}",
+];
+
+/**
+ * The optional-clone runner, emitted only when a repository is optional. Each
+ * optional clone runs `clone_repository` in its own `sh` under `timeout`, which
+ * signals the whole process group, so a hung `git fetch` cannot outlive its
+ * bound and hold the lifecycle command open. The trap removes the temporary
+ * clone of a timed-out fetch. All optional clones share one deadline so they
+ * never push the command past OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS. Without
+ * a usable `timeout` binary an optional clone runs unbounded, as before.
+ */
+function optionalRepositoryCloneRunnerLines(timeoutSeconds: number): string[] {
+  const script = [
+    "set -eu",
+    ...cloneRepositoryFunctionLines,
+    `trap 'rm -rf "\${tmp:-/nonexistent-opengeni-optional-clone}"; exit 143' TERM INT`,
+    'clone_repository "$@"',
+  ].join("\n");
+  return [
+    `optional_clone_script=${shellQuote(script)}`,
+    `optional_clone_deadline=$(( $(date +%s) + ${Math.max(OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS, timeoutSeconds)} ))`,
+    "optional_clone_timeout=''",
+    "if command -v timeout >/dev/null 2>&1 && timeout -k 1 5 true >/dev/null 2>&1; then",
+    "  optional_clone_timeout=timeout",
+    "fi",
+    "run_optional_repository_clone() {",
+    `  limit=${timeoutSeconds}`,
+    "  remaining=$(( optional_clone_deadline - $(date +%s) ))",
+    '  if [ "$remaining" -lt "$limit" ]; then limit=$remaining; fi',
+    '  if [ "$limit" -le 0 ]; then',
+    "    return 124",
+    "  fi",
+    '  if [ -n "$optional_clone_timeout" ]; then',
+    '    "$optional_clone_timeout" -k 5 "$limit" sh -c "$optional_clone_script" optional-repository-clone "$@"',
+    "  else",
+    '    ( set -e; clone_repository "$@" )',
+    "  fi",
+    "}",
+  ];
+}
+
 export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+  options: { optionalCloneTimeoutSeconds?: number } = {},
 ): string {
   const cloneConcurrency = 4;
   assertUniqueResourceMountPaths(resources);
+  const optionalCloneTimeoutSeconds = Math.max(
+    1,
+    Math.floor(options.optionalCloneTimeoutSeconds ?? OPTIONAL_REPOSITORY_CLONE_TIMEOUT_SECONDS),
+  );
   const commands = [
     "set +x",
     "set -eu",
@@ -10902,99 +11052,10 @@ export function repositoryCloneCommand(
     "}",
     "ensure_git",
     ...gitCredentialHelperCommandLines(resources, bindings, stagedSeeds),
-    "clone_repository() {",
-    '  target="$1"',
-    '  uri="$2"',
-    '  ref="$3"',
-    '  subpath="$4"',
-    '  expected_commit="${5:-}"',
-    '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
-    // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
-    // proof of a completed materialization: an interrupted clone (worker crash /
-    // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
-    // this check forever. A full-repo target must actually BE a work tree to be
-    // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
-    // the mount path before the repo exists). Subpath extracts are not git repos —
-    // for those the plain non-empty check stands (no stronger signal available).
-    '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-    '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
-    '        echo "Repository resource already present at $target"',
-    "        return 0",
-    "      fi",
-    '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
-    "    fi",
-    '    echo "Re-materializing partial repository resource at $target" >&2',
-    '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
-    "  fi",
-    '  mkdir -p "$(dirname "$target")"',
-    '  tmp="${target}.tmp.$$"',
-    '  rm -rf "$tmp"',
-    // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
-    // (set -eu would exit before any cleanup).
-    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
-    '    rm -rf "$tmp"',
-    '    echo "Repository resource fetch failed for $target" >&2',
-    '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
-    "    exit 1",
-    "  fi",
-    // origin/HEAD is best-effort: workspace capture diffs the branch against it
-    // when present and already treats a missing origin/HEAD as additive. `git
-    // remote set-head` only accepts a branch that the fetch materialized under
-    // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
-    // must not turn a successful fetch into a failed clone.
-    '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-    '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
-    "  fi",
-    '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
-    '    rm -rf "$tmp"',
-    '    echo "Repository resource fetch failed for $target" >&2',
-    "    exit 1",
-    "  fi",
-    '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
-    '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
-    '    rm -rf "$tmp"',
-    "    exit 1",
-    "  fi",
-    '  if [ -n "$subpath" ]; then',
-    '    if [ ! -e "$tmp/$subpath" ]; then',
-    '      echo "Repository subpath not found: $subpath" >&2',
-    '      rm -rf "$tmp"',
-    "      exit 1",
-    "    fi",
-    '    if [ -d "$tmp/$subpath" ]; then',
-    '      mkdir -p "$target"',
-    '      cp -a "$tmp/$subpath/." "$target/"',
-    "    else",
-    '      rmdir "$target" 2>/dev/null || true',
-    '      cp -a "$tmp/$subpath" "$target"',
-    "    fi",
-    '    rm -rf "$tmp"',
-    "  else",
-    '    rmdir "$target" 2>/dev/null || true',
-    // Two concurrent turn holders can race this install: without the existence
-    // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
-    // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
-    // accept it; a non-empty non-repo survivor here is a mount point the manifest
-    // re-filled — install into it by content copy instead of rename.
-    '    if [ -e "$target" ]; then',
-    '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
-    '        rm -rf "$tmp"',
-    '        echo "Repository resource already present at $target"',
-    "        return 0",
-    "      fi",
-    '      cp -a "$tmp/." "$target/"',
-    '      rm -rf "$tmp"',
-    "    else",
-    '      mv "$tmp" "$target"',
-    "    fi",
-    '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
-    "  fi",
-    '  if [ ! -e "$target" ]; then',
-    '    echo "Repository resource was not materialized at $target" >&2',
-    "    exit 1",
-    "  fi",
-    '  echo "Repository resource ready at $target"',
-    "}",
+    ...cloneRepositoryFunctionLines,
+    ...(resources.some((resource) => resource.optional === true)
+      ? optionalRepositoryCloneRunnerLines(optionalCloneTimeoutSeconds)
+      : []),
     "clone_pids=''",
     "clone_failed=0",
     "start_repository_clone() {",
@@ -11006,12 +11067,16 @@ export function repositoryCloneCommand(
     // failure is reported as a warning while the job itself succeeds, so one
     // empty, deleted or unreachable repository never fails the whole setup.
     // The sixth argument is the workspace-relative mount path, for the report.
+    // A clone that does not finish within its bound (timeout's 124, or 137
+    // after the follow-up KILL) is skipped the same way.
     "start_optional_repository_clone() {",
     "  (",
     "    set +e",
-    '    ( set -e; clone_repository "$1" "$2" "$3" "$4" "$5" )',
+    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5"',
     "    clone_status=$?",
-    '    if [ "$clone_status" -ne 0 ]; then',
+    '    if [ "$clone_status" -eq 124 ] || [ "$clone_status" -eq 137 ]; then',
+    `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone did not finish in time); the session continues without it" >&2`,
+    '    elif [ "$clone_status" -ne 0 ]; then',
     `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone exited with status $clone_status); the session continues without it" >&2`,
     "    fi",
     "    exit 0",
@@ -11561,6 +11626,8 @@ export async function runRepositoryCloneHook(
   session: SandboxSessionLike,
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
+  /** Test seam: the per-repository optional clone bound, in seconds. */
+  options: { optionalCloneTimeoutSeconds?: number } = {},
 ): Promise<void> {
   const payload = {
     name: "repository-clone",
@@ -11599,6 +11666,7 @@ export async function runRepositoryCloneHook(
       resources,
       gitCredentialBindings,
       stagedBrokerSeeds.staged,
+      options,
     );
     const command = sandboxGitProvisioningCommand(
       seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand,

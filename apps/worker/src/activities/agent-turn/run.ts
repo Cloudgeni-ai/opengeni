@@ -93,6 +93,7 @@ import { selectXaiTurnCapacity } from "./xai-capacity";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
+import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
 
 /**
@@ -1093,7 +1094,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // set. A Connected Machine receives no platform Git credential, so its
           // resources stay exactly as stored. Resolution never fails the turn;
           // an unusable bound repository stays bare and is reported visibly.
-          const { turnResources, runtimeResources } = await waitForTurnOperation(
+          const boundResources = await waitForTurnOperation(
             applyTurnGitHubRepositoryBindings({
               db,
               settings: runSettings,
@@ -1102,6 +1103,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeSandboxBackend,
               claimedTurnResources,
               claimedRuntimeResources,
+              publish: async (events) => {
+                await eventing.publish!(events, true);
+              },
+              warn: (message, fields) => observability.warn(message, fields),
+            }),
+            cancellationSignal,
+            undefined,
+          );
+          // An automatically attached (optional) repository that lost its
+          // allowlist entry or its GitHub App access since the session started
+          // sits this turn out with a warning, before the strict allowlist
+          // recheck and token mint below would fail the whole turn for it.
+          const { turnResources, runtimeResources } = await waitForTurnOperation(
+            dropUnavailableOptionalRepositories({
+              db,
+              settings: runSettings,
+              workspaceId: input.workspaceId,
+              activeSandboxBackend,
+              hostMintsGitCredentials: Boolean(connectionCredentials?.gitCredentials),
+              turnResources: boundResources.turnResources,
+              runtimeResources: boundResources.runtimeResources,
               publish: async (events) => {
                 await eventing.publish!(events, true);
               },

@@ -542,10 +542,17 @@ mount path in `skippedOptionalRepositories` on the `repository-clone`
 Without the flag a failed clone fails sandbox setup, as before. OpenGeni sets
 it only on repositories it attaches on a person's behalf (a Slack task's
 recently used repositories); it grants no access and changes no credential
-routing. The flag covers the clone step only: the per-turn GitHub App
-authorization and installation-token mint that run before it stay strict, so a
-GitHub App repository the workspace no longer authorizes, or one the
-installation can no longer reach, still fails the turn.
+routing. An optional clone is bounded to 60 seconds (90 seconds for all
+optional clones of one setup command) when the sandbox has a `timeout` binary,
+so a hung fetch is skipped the same way. Before each turn's strict GitHub App
+allowlist recheck and installation-token mint, the worker also drops, for that
+turn only, an optional GitHub App repository that the workspace allowlist no
+longer admits or, when OpenGeni's own App mints the token (no host
+`gitCredentials` port), that the installation can no longer reach; it reports
+them as `skippedOptionalRepositories` on a `sandbox.operation.completed` event
+named `optional-repository-access`. This only removes repositories from the
+turn. A repository without the flag keeps the strict checks and still fails
+the turn when its access is gone.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
