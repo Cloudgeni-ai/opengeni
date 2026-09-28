@@ -4794,6 +4794,15 @@ export const RepositoryResourceRef = z.object({
   connectionId: z.string().min(1).optional(),
   githubInstallationId: z.number().int().positive().optional(),
   githubRepositoryId: z.number().int().positive().optional(),
+  /**
+   * Best-effort materialization. When true, a failed clone of this repository
+   * logs a warning and the session continues without it instead of failing
+   * sandbox setup. OpenGeni sets it on repositories it attaches on the
+   * person's behalf (a Slack task's recently used repositories); a repository
+   * a caller names explicitly stays strict unless the caller opts in. Only
+   * `true` is stored.
+   */
+  optional: z.boolean().optional(),
 });
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
 
@@ -15706,6 +15715,13 @@ export const GitHubRepository = z.object({
   defaultBranch: z.string(),
   accountLogin: z.string(),
   accountType: z.string().nullable(),
+  /** GitHub's archived flag, when the provider reported it. */
+  archived: z.boolean().optional(),
+  /**
+   * GitHub's reported repository size in kilobytes, when the provider
+   * reported it. Zero means GitHub considers the repository empty.
+   */
+  sizeKb: z.number().int().nonnegative().optional(),
 });
 export type GitHubRepository = z.infer<typeof GitHubRepository>;
 

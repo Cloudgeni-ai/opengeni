@@ -2,12 +2,21 @@ import {
   resourceMountPath,
   resourceMountPathCollisionKey,
   type AccessGrant,
+  type GitHubRepository,
+  type McpConnectionAccountBinding,
+  type McpPersonalConnectionDelegation,
   type RepositoryResourceRef,
   type ResourceRef,
   type SessionToolPolicy,
   type ToolRef,
 } from "@opengeni/contracts";
-import { getRig, getWorkspace } from "@opengeni/db";
+import type { McpServerConfig } from "@opengeni/config";
+import {
+  getRig,
+  getSessionFirstTurnConnectionAuthority,
+  getWorkspace,
+  listRecentSessionRepositoryResources,
+} from "@opengeni/db";
 import {
   hasPermission,
   resolveSessionToolPolicy,
@@ -19,12 +28,14 @@ import { githubRepositoryResourceRef, listWorkspaceGitHubRepositories } from "..
 import { escapeSlackMrkdwn } from "./slack-app-home";
 
 /**
- * A Slack task starts with the workspace's GitHub App repositories. Clones are
- * shallow and blob-filtered, but every repository is still one fetch before
- * the first command, so a workspace that granted the App a very large
- * selection gets the first ones by name rather than all of them.
+ * A Slack task starts with at most this many repositories. Each one is a
+ * shallow, blob-filtered fetch before the first command, so the set stays
+ * small: the person's own most recently used repositories, not a catalog.
  */
-export const SLACK_SESSION_DEFAULT_REPOSITORY_LIMIT = 20;
+export const SLACK_SESSION_RECENT_REPOSITORY_LIMIT = 5;
+
+/** How far back the person's own sessions count as recent use. */
+export const SLACK_SESSION_RECENT_REPOSITORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Connectors every session carries; naming them in Slack is noise. */
 const ALWAYS_ATTACHED_SERVER_IDS: ReadonlySet<string> = new Set(["opengeni", "files", "docs"]);
@@ -34,30 +45,125 @@ const MAX_NAME_CHARS = 48;
 /** UTF-8 bytes. The column allows 1024; stay well inside it. */
 const MAX_LINE_BYTES = 480;
 
+function githubUriKey(uri: string): string | null {
+  try {
+    const url = new URL(uri);
+    const path = url.pathname
+      .replace(/^\/+|\/+$/gu, "")
+      .replace(/\.git$/iu, "")
+      .toLowerCase();
+    return path ? `${url.host.toLowerCase()}/${path}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function positiveRepositoryId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^[1-9]\d{0,15}$/u.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 /**
- * The workspace GitHub App repositories a Slack task starts with.
+ * Pick a Slack task's repositories: the person's recently used repositories,
+ * in recency order, that the workspace GitHub App catalog still offers them.
  *
- * This is the same catalog the website offers (`GET /github/repositories`),
- * gated by the same `github:use` permission, so a Slack task never reaches a
- * repository the person could not attach on the website. Every returned
- * resource is revalidated against the workspace's installation grant when
- * the session is created.
- *
- * A GitHub outage or an unconfigured App starts the task without
- * repositories instead of failing it; the acknowledgement then says so.
+ * `recent` is a usage signal only, and only repositories the person attached
+ * themselves count: an automatically attached (`optional`) one never does. A
+ * repository reaches the task only through its current catalog entry (the
+ * same catalog and `github:use` permission as the website picker), on its
+ * default branch, so a Slack task never reaches a repository the person could
+ * not attach on the website today. Archived and
+ * empty repositories are skipped when GitHub reported that, because a clone of
+ * an empty repository has nothing to check out. Every returned resource is
+ * best effort (`optional`): one failed clone warns instead of failing setup.
  */
-export async function slackWorkspaceRepositoryResources(
+export function selectRecentRepositoryResources(
+  recent: readonly RepositoryResourceRef[],
+  catalog: readonly GitHubRepository[],
+  limit = SLACK_SESSION_RECENT_REPOSITORY_LIMIT,
+): RepositoryResourceRef[] {
+  const byId = new Map<number, GitHubRepository[]>();
+  const byUri = new Map<string, GitHubRepository>();
+  const ordered = [...catalog].sort(
+    (left, right) => left.installationId - right.installationId || left.id - right.id,
+  );
+  for (const repository of ordered) {
+    byId.set(repository.id, [...(byId.get(repository.id) ?? []), repository]);
+    const key = githubUriKey(repository.cloneUrl);
+    if (key && !byUri.has(key)) byUri.set(key, repository);
+  }
+  const chosen = new Set<string>();
+  const mountKeys = new Set<string>();
+  const resources: RepositoryResourceRef[] = [];
+  for (const used of recent) {
+    if (resources.length >= limit) break;
+    // A repository OpenGeni attached automatically is not a choice the person
+    // made; counting it would keep re-attaching it to every later Slack task.
+    if (used.optional === true) continue;
+    const repositoryId = positiveRepositoryId(
+      used.githubRepositoryId ?? (used.provider === "github" ? used.repositoryId : undefined),
+    );
+    const installationId = positiveRepositoryId(
+      used.githubInstallationId ?? (used.provider === "github" ? used.installationId : undefined),
+    );
+    const candidates = repositoryId !== null ? (byId.get(repositoryId) ?? []) : [];
+    const uriKey = githubUriKey(used.uri);
+    const match =
+      candidates.find((candidate) => candidate.installationId === installationId) ??
+      candidates[0] ??
+      (uriKey ? byUri.get(uriKey) : undefined);
+    if (!match) continue;
+    const identity = `${match.installationId}:${match.id}`;
+    if (chosen.has(identity)) continue;
+    chosen.add(identity);
+    if (match.archived === true || match.sizeKb === 0) continue;
+    let resource: RepositoryResourceRef;
+    try {
+      resource = { ...githubRepositoryResourceRef(match), optional: true };
+    } catch {
+      // A malformed provider URL is one unusable repository, not a failed task.
+      continue;
+    }
+    const mountKey = resourceMountPathCollisionKey(resourceMountPath(resource));
+    if (mountKeys.has(mountKey)) continue;
+    mountKeys.add(mountKey);
+    resources.push(resource);
+  }
+  return resources;
+}
+
+/**
+ * The repositories a new Slack task starts with: the person's own recently
+ * used repositories in this workspace (their own top-level sessions active in
+ * the last 30 days, most recent first, at most five), limited to what the
+ * workspace GitHub App catalog offers them now. None when they have none; the
+ * agent can still find and clone repositories through its GitHub tools.
+ *
+ * GitHub is asked only when there is something to look up. A GitHub outage or
+ * an unconfigured App starts the task without repositories instead of failing
+ * it, with a log line so the acknowledgement's "repos: none" is explainable.
+ */
+export async function slackRecentRepositoryResources(
   deps: ApiRouteDeps,
-  grant: Pick<AccessGrant, "permissions">,
+  grant: Pick<AccessGrant, "permissions" | "subjectId">,
   workspaceId: string,
+  now: Date = new Date(),
 ): Promise<RepositoryResourceRef[]> {
   if (!hasPermission(grant.permissions, "github:use")) return [];
-  let repositories: Awaited<ReturnType<typeof listWorkspaceGitHubRepositories>>;
+  const recent = await listRecentSessionRepositoryResources(deps.db, {
+    workspaceId,
+    subjectId: grant.subjectId,
+    since: new Date(now.getTime() - SLACK_SESSION_RECENT_REPOSITORY_WINDOW_MS),
+  });
+  if (!recent.some((resource) => resource.optional !== true)) return [];
+  let catalog: GitHubRepository[];
   try {
-    repositories = await listWorkspaceGitHubRepositories(deps, workspaceId);
+    catalog = await listWorkspaceGitHubRepositories(deps, workspaceId);
   } catch (error) {
-    // Still start the task, but leave a trace: "repos: none" in the
-    // acknowledgement otherwise hides an outage or a broken App configuration.
     console.error("[slack-interactions] workspace repositories unavailable", {
       workspaceId,
       errorCode: (error instanceof Error ? error.name : "unknown")
@@ -67,28 +173,7 @@ export async function slackWorkspaceRepositoryResources(
     });
     return [];
   }
-  const seen = new Set<string>();
-  const resources: RepositoryResourceRef[] = [];
-  for (const repository of [...repositories].sort(
-    (left, right) =>
-      left.fullName.localeCompare(right.fullName) ||
-      left.installationId - right.installationId ||
-      left.id - right.id,
-  )) {
-    if (resources.length >= SLACK_SESSION_DEFAULT_REPOSITORY_LIMIT) break;
-    let resource: RepositoryResourceRef;
-    try {
-      resource = githubRepositoryResourceRef(repository);
-    } catch {
-      // A malformed provider URL is one unusable repository, not a failed task.
-      continue;
-    }
-    const key = resourceMountPathCollisionKey(resourceMountPath(resource));
-    if (seen.has(key)) continue;
-    seen.add(key);
-    resources.push(resource);
-  }
-  return resources;
+  return selectRecentRepositoryResources(recent, catalog);
 }
 
 export type SlackSessionDefaultsSummary = {
@@ -175,24 +260,63 @@ function repositoryLabels(resources: readonly ResourceRef[]): string[] {
   });
 }
 
+export type SlackSessionConnectionAuthority = {
+  mcpAccountBindings: readonly McpConnectionAccountBinding[] | null;
+  personalConnectionDelegations: readonly McpPersonalConnectionDelegation[];
+} | null;
+
 /**
- * Summarize a just-created Slack session from its durable row: the connectors
- * its tool policy resolves to today, its repositories, and its Sandbox
- * Environment. The same resolver the worker and the website use decides the
- * connectors, so the line never claims a connector the session cannot reach.
+ * Whether the first accepted turn's frozen connection authority can reach a
+ * connector. A connector without a connection reference needs no account. One
+ * with a reference is reachable only through an account frozen on that turn:
+ * a workspace connection or the person's own personal connection. A
+ * personal-only connector the person never connected, or one only another
+ * member connected, is therefore left out of the line.
+ */
+export function slackConnectorReachable(
+  server: Pick<McpServerConfig, "id" | "connectionRef">,
+  authority: SlackSessionConnectionAuthority,
+): boolean {
+  const ref = server.connectionRef;
+  if (!ref) return true;
+  if (ref.authoritySource === "host" || !authority) return false;
+  if (authority.mcpAccountBindings?.some((binding) => binding.canonicalServerId === server.id)) {
+    return true;
+  }
+  if (
+    authority.personalConnectionDelegations.some(
+      (delegation) => (delegation.canonicalServerId ?? delegation.serverId) === server.id,
+    )
+  ) {
+    return true;
+  }
+  // A turn from before per-account bindings resolves an exact workspace
+  // reference directly; a personal one always needs a frozen delegation.
+  return (
+    authority.mcpAccountBindings === null && ref.subjectScope !== "subject" && !!ref.connectionId
+  );
+}
+
+/**
+ * Summarize a just-created Slack session from its durable rows: the connectors
+ * its tool policy resolves to today that its first turn's frozen connection
+ * authority can reach, its repositories, and its Sandbox Environment. The same
+ * resolver the worker and the website use decides the connectors, so the line
+ * never claims a connector the session cannot reach.
  */
 export async function summarizeSlackSessionDefaults(
   deps: ApiRouteDeps,
   grant: Pick<AccessGrant, "accountId" | "subjectId">,
   workspaceId: string,
   session: {
+    id: string;
     toolPolicy: SessionToolPolicy;
     tools: ToolRef[];
     resources: ResourceRef[];
     rigId?: string | null;
   },
 ): Promise<SlackSessionDefaultsSummary> {
-  const [runtime, workspace, rig] = await Promise.all([
+  const [runtime, workspace, rig, authority] = await Promise.all([
     settingsWithEnabledCapabilityMcpServers(deps.db, workspaceId, deps.settings, {
       subjectId: grant.subjectId,
     }),
@@ -204,6 +328,7 @@ export async function summarizeSlackSessionDefaults(
           session.rigId,
         )
       : Promise.resolve(null),
+    getSessionFirstTurnConnectionAuthority(deps.db, workspaceId, session.id),
   ]);
   const resolved = resolveSessionToolPolicy({
     toolPolicy: session.toolPolicy,
@@ -214,12 +339,16 @@ export async function summarizeSlackSessionDefaults(
       workspace?.settings,
     ),
   });
-  const names = new Map(runtime.mcpServers.map((server) => [server.id, server.name ?? server.id]));
+  const servers = new Map(runtime.mcpServers.map((server) => [server.id, server]));
   const connectors = [
     ...new Set(
       resolved.toolRefs
-        .filter((tool) => !ALWAYS_ATTACHED_SERVER_IDS.has(tool.id))
-        .map((tool) => boundedName(names.get(tool.id) ?? tool.id)),
+        .filter((tool) => {
+          if (ALWAYS_ATTACHED_SERVER_IDS.has(tool.id)) return false;
+          const server = servers.get(tool.id);
+          return server ? slackConnectorReachable(server, authority) : true;
+        })
+        .map((tool) => boundedName(servers.get(tool.id)?.name ?? tool.id)),
     ),
   ].sort((left, right) => left.localeCompare(right));
   return {

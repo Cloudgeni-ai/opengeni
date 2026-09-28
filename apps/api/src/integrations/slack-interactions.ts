@@ -137,7 +137,7 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   otherDeploymentLinkContext,
   renderSlackSessionDefaultsLine,
-  slackWorkspaceRepositoryResources,
+  slackRecentRepositoryResources,
   summarizeSlackSessionDefaults,
 } from "./slack-session-defaults";
 import type { Context, Hono } from "hono";
@@ -2474,6 +2474,18 @@ async function prepareSlackInvocationEntry(
   };
 }
 
+/**
+ * The model-context note for links to another OpenGeni deployment. A pure
+ * function of the accepted text and this deployment's web origin, so a retried
+ * delivery composes the same bytes.
+ */
+function slackOtherDeploymentModelContext(
+  deps: Pick<ApiRouteDeps, "settings">,
+  text: string,
+): string | null {
+  return otherDeploymentLinkContext(text, deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl);
+}
+
 function slackInvocationPreparedMessage(
   deps: Pick<ApiRouteDeps, "settings">,
   entry: SlackInteractionInboxEntry,
@@ -2485,11 +2497,9 @@ function slackInvocationPreparedMessage(
     "Imported invocation attachments",
     "invocation",
   );
-  // A pure function of the accepted text and this deployment's web origin, so
-  // a retried delivery composes the same context.
-  const otherDeployment = otherDeploymentLinkContext(
+  const otherDeployment = slackOtherDeploymentModelContext(
+    deps,
     [entry.text, modelContext ?? ""].join("\n"),
-    deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
   );
   const combinedModelContext = [modelContext, manifest, otherDeployment]
     .filter(Boolean)
@@ -2867,6 +2877,9 @@ async function processSlackReactionInboxEntry(
     grant.subjectId,
   );
   const preparedEntry = slackReactionPreparedEntry(entry, context, preparedTask);
+  // The reacted message and its thread are the accepted text, so a link to
+  // another deployment there gets the same note as one in a mention.
+  const reactionModelContext = slackOtherDeploymentModelContext(deps, preparedEntry.text);
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
   try {
     const defaults = await slackNewSessionDefaults(
@@ -2883,6 +2896,7 @@ async function processSlackReactionInboxEntry(
         ...defaults,
         requestedSessionId: interaction.sessionReservationId,
         initialMessage: preparedEntry.text,
+        ...(reactionModelContext ? { modelContext: reactionModelContext } : {}),
         instructions: SLACK_SESSION_INSTRUCTIONS,
         // Reaction context stays bounded: connectors and first-party tools
         // follow the workspace defaults, without adding the Slack read tools.
@@ -3031,9 +3045,10 @@ type SlackNewSessionDefaults = {
  * never narrows it. Connectors, first-party tools, Variable Sets, Sandbox
  * Environment and compute are left to session creation, which applies the
  * workspace defaults and freezes the person's own connections through the
- * ordinary delegation snapshot. Repositories are the workspace's GitHub App
- * repositories the person can use. Only an explicitly chosen model carries
- * over, because choosing a model narrows nothing.
+ * ordinary delegation snapshot. Repositories are the person's own recently
+ * used repositories that the workspace GitHub App still offers them, attached
+ * best effort. Only an explicitly chosen model carries over, because choosing
+ * a model narrows nothing.
  *
  * A create can commit its reserved shell before initial-event acceptance. Keep
  * that shell's exact selections on retry instead of resolving defaults again.
@@ -3052,7 +3067,7 @@ async function slackNewSessionDefaults(
   if (!pending) {
     const [modelChoice, resources] = await Promise.all([
       getActorNewSessionModelChoice(deps, grant, interaction.workspaceId),
-      slackWorkspaceRepositoryResources(deps, grant, interaction.workspaceId),
+      slackRecentRepositoryResources(deps, grant, interaction.workspaceId),
     ]);
     return { ...modelChoice, resources };
   }
@@ -3409,6 +3424,7 @@ async function acceptSlackReactionTask(
     }
     return;
   }
+  const modelContext = slackOtherDeploymentModelContext(deps, entry.text);
   await acceptSessionUserMessage(
     await withCatalogSettings(deps, grant),
     grant,
@@ -3416,6 +3432,7 @@ async function acceptSlackReactionTask(
     sessionId,
     {
       text: entry.text,
+      ...(modelContext ? { modelContext } : {}),
       resources,
       clientEventId,
     },

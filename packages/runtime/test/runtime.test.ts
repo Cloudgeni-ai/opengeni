@@ -5666,6 +5666,46 @@ describe("runtime event normalization", () => {
     expect(
       repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "modal"),
     ).toBe(true);
+
+    // A best-effort repository always goes through the clone hook on a cloud
+    // box (the manifest's own Git entry cannot tolerate one failure), and is
+    // still never cloned onto a connected machine.
+    const optionalRepo = { ...plainRepo, optional: true };
+    expect(
+      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), optionalRepo),
+    ).toBe(true);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "docker" }),
+        optionalRepo,
+        "selfhosted",
+      ),
+    ).toBe(false);
+  });
+
+  test("marks only optional repositories as best effort in the clone script", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/picked.git",
+        ref: "main",
+        mountPath: "repos/picked",
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/recent.git",
+        ref: "main",
+        mountPath: "repos/recent",
+        optional: true,
+      },
+    ]);
+    const invocations = command
+      .split("\n")
+      .filter((line) => /^start_(optional_)?repository_clone /u.test(line));
+    expect(invocations).toEqual([
+      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' ''",
+      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent'",
+    ]);
   });
 
   test("buildOpenGeniAgent requires and exposes the truthful root for selfhosted targets", () => {

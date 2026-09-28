@@ -627,6 +627,7 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
+export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -34451,6 +34452,52 @@ export async function getSessionTurnMcpAccountBindings(
     async (scopedDb) =>
       await mcpAccountBindingsForTurnInTransaction(scopedDb, workspaceId, sessionId, turnId),
   );
+}
+
+/**
+ * The connector authority frozen on a session's first accepted turn: its exact
+ * MCP account bindings and personal connection delegations. For display only
+ * (Slack's "Using" line names just the connectors this snapshot can reach);
+ * runtime authority keeps reading the claimed turn itself. Null when the
+ * session has no turn yet.
+ */
+export async function getSessionFirstTurnConnectionAuthority(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        id: schema.sessionTurns.id,
+        bindings: schema.sessionTurns.mcpAccountBindings,
+        delegations: schema.sessionTurns.personalConnectionDelegations,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+        ),
+      )
+      .orderBy(
+        asc(schema.sessionTurns.position),
+        asc(schema.sessionTurns.createdAt),
+        asc(schema.sessionTurns.id),
+      )
+      .limit(1);
+    if (!row) return null;
+    return {
+      mcpAccountBindings: parseAcceptedMcpAccountBindings(row.bindings),
+      personalConnectionDelegations: parsedPersonalConnectionDelegations(
+        row.delegations,
+        `session_turns:${workspaceId}:${sessionId}:${row.id}`,
+      ),
+    };
+  });
 }
 
 export async function getSessionParentMcpAccountBindings(
