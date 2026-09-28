@@ -85,6 +85,89 @@ export type SkillReadActiveHistory = Readonly<{
 
 const IDENTITY_KEYS = ["skillId", "revisionId", "scopeVersion", "installationVersion"] as const;
 
+export const SKILL_UNAVAILABLE_MESSAGE = "Skill is not available in this session.";
+/** Bounds on the Skill list an unresolved identifier returns. */
+export const SKILL_UNAVAILABLE_LIST_MAX_ENTRIES = 25;
+export const SKILL_UNAVAILABLE_LIST_MAX_BYTES = 4 * 1024;
+// A shorter shared edge is chance: random hex ids share 1-3 leading characters often.
+const MIN_RESEMBLANCE = 4;
+
+export type AvailableSkill = Readonly<{ id: string; name: string }>;
+
+/**
+ * The error for an identifier that resolves to no Skill. It lists available
+ * Skills by id and name only, the descriptors the Skill index and skill_search
+ * already show the model, so the caller can retry instead of rediscovering
+ * the work from scratch. Entries resembling the requested identifier (shared
+ * prefix, suffix, or containment) come first, so a mistyped or spliced id
+ * keeps its likely targets inside the bound. The requested identifier is
+ * never echoed.
+ */
+export function unavailableSkillError(
+  requested: string,
+  available: readonly AvailableSkill[],
+): Error {
+  const byId = new Map<string, AvailableSkill>();
+  for (const entry of available) if (!byId.has(entry.id)) byId.set(entry.id, entry);
+  const wanted = requested.toLowerCase();
+  const ranked = [...byId.values()]
+    .map((entry) => ({ entry, score: resemblance(wanted, entry) }))
+    .sort(
+      (a, b) =>
+        b.score - a.score || compare(a.entry.name, b.entry.name) || compare(a.entry.id, b.entry.id),
+    );
+  const header = [
+    SKILL_UNAVAILABLE_MESSAGE,
+    ...(wanted.startsWith("repository:")
+      ? ["Repository Skills are read with repository_skill_read."]
+      : []),
+    ranked.length === 0
+      ? "No configured Skills are available in this session."
+      : "Retry with an exact id from these available Skills:",
+  ].join("\n");
+  const lines = [header];
+  // Reserve room for the omission notice so the whole message stays bounded.
+  const budget = SKILL_UNAVAILABLE_LIST_MAX_BYTES - 128;
+  let bytes = Buffer.byteLength(header, "utf8");
+  let listed = 0;
+  for (const { entry } of ranked) {
+    const line = `- ${JSON.stringify({ id: entry.id, name: entry.name })}`;
+    const lineBytes = Buffer.byteLength(line, "utf8") + 1;
+    if (listed >= SKILL_UNAVAILABLE_LIST_MAX_ENTRIES || bytes + lineBytes > budget) continue;
+    lines.push(line);
+    bytes += lineBytes;
+    listed += 1;
+  }
+  const omitted = ranked.length - listed;
+  if (omitted > 0)
+    lines.push(`${omitted} more available Skills are not listed. Use skill_search to find them.`);
+  return new Error(lines.join("\n"));
+}
+
+function resemblance(wanted: string, entry: AvailableSkill): number {
+  let best = 0;
+  for (const key of [entry.id.toLowerCase(), entry.name.toLowerCase()]) {
+    const contained =
+      wanted.includes(key) || key.includes(wanted) ? Math.min(wanted.length, key.length) : 0;
+    let prefix = 0;
+    while (prefix < wanted.length && prefix < key.length && wanted[prefix] === key[prefix])
+      prefix += 1;
+    let suffix = 0;
+    while (
+      suffix < wanted.length &&
+      suffix < key.length &&
+      wanted[wanted.length - 1 - suffix] === key[key.length - 1 - suffix]
+    )
+      suffix += 1;
+    best = Math.max(best, contained, prefix, suffix);
+  }
+  return best >= MIN_RESEMBLANCE ? best : 0;
+}
+
+function compare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** A first-party gateway definition, not a sandbox capability or second backend. */
 export function createSkillReadAttemptToolDefinition(input: {
   authorize: () => Promise<void>;

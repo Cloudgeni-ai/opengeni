@@ -127,6 +127,12 @@ skill_read({ skill, paths?, listFiles? })
 - Proposed: return files with their paths; report missing paths explicitly.
   Never silently omit files or present truncation as complete content.
 - Resolve ambiguous names explicitly rather than choosing a source silently.
+- An identifier that resolves to no Skill returns an error listing the
+  available Skills by id and name only, the descriptors the index and
+  `skill_search` already show, so the caller can retry. Entries resembling the
+  requested identifier come first; the list is bounded (25 entries, 4 KiB) and
+  points to `skill_search` for the rest. `skill_checkout` resolves through the
+  same reader and returns the same list.
 - Set `listFiles: true` without `paths`: return only relative `paths` (at most
   1,024) and available revision identity, with no file bodies and no sandbox.
   Combining inventory with `paths` is rejected. Inventory is on demand, never
