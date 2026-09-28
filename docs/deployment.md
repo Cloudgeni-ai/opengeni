@@ -234,7 +234,7 @@ The new control worker registers the Knowledge indexing schedule. Search caches
 are rebuildable; original files, canonical revisions, evidence and review
 receipts are retained authorities. Old learning source exceptions remain
 historical evidence: set future exceptions on the relevant chat or scheduled
-task in Settings → Agent learning. Existing category opt-outs are preserved.
+task. Existing category opt-outs are preserved.
 See [Knowledge](knowledge.md) for scope, review and compatibility behavior.
 
 ### Native instance resolver registration (0463)

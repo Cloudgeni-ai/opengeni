@@ -949,9 +949,9 @@ and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
 See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
 
 Knowledge is the product destination for retained sources and findings, with
-Files, Instructions and Skills as persistent tabs on the Agent Knowledge page.
-`apps/web/src/components/knowledge/agent-knowledge-page.tsx` owns that shared
-page navigation, including historical Memory and Documents links. Groups appear
+Library, Instructions and Review tabs on the Knowledge page (`/state`).
+`apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
+navigation, including old Files, Skills, Memory and Documents links. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
 changing its ownership. Connector ingestion runs through ordinary scheduled

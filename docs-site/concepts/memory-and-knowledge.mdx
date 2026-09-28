@@ -47,17 +47,16 @@ serve different purposes:
 
 Original bytes live in object storage. Source text, findings, collections,
 relationships and revision history live in Postgres. Search indexes are
-rebuildable. The **Agent Knowledge** page brings these together with Knowledge,
-Files, Instructions and Skills tabs. Files open their preview, extracted text
-and related entries. Knowledge uses a compact folder tree: expand a collection to
-see its entries and nested collections, then click an entry to read it. Short
-collection descriptions stay visible below folder names. An entry can appear in
+rebuildable. The **Knowledge** page brings these together with Library,
+Instructions and Review tabs (Review appears while proposals wait). Files are a
+Type filter in the Library and open their preview, extracted text and related
+entries. The Library shows a flat list or a **By collection** layout; click an
+entry or collection to open its page. An entry can appear in
 several collections without being copied. Before saving, the agent can fetch
 the collection structure and descriptions together with related published and
 pending entries. It reuses unchanged knowledge and updates existing entries
 instead of appending duplicates. File sources open their original preview with
-extracted text available below it. A collection's menu opens its details
-or adds knowledge and subcollections. Search finds entries across the tree.
+extracted text available below it. Search finds entries across collections.
 
 A scheduled task reads its configured source through an agent, just as ordinary
 chat work does. It saves through the same Knowledge service and uses its own
@@ -82,7 +81,7 @@ See [product integration](/guides/integrate-your-product#choose-agent-access-and
 
 ## Agent learning and review
 
-**Settings → Agent learning** puts these categories in one place:
+**Knowledge → Learning** puts these categories in one place:
 
 | Category               | Default   | What changes                               |
 | ---------------------- | --------- | ------------------------------------------ |
@@ -95,7 +94,7 @@ chat or scheduled-task overrides, or policies already accepted by a running turn
 
 Each category supports **Automatic**, **Review first** and **Off**. Workspace or
 personal defaults apply unless a chat or scheduled task overrides that category.
-Chat options and a schedule's collapsed learning settings provide shortcuts;
+Chat options and the Advanced section of a schedule's form set overrides;
 existing schedule edits apply with Save and Cancel discards them.
 
 In **+ → Chat settings**, the choices are phrased as permissions: **Allow updates**,
