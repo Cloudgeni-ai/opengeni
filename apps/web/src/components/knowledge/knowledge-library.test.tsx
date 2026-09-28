@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 let rows = true;
 let tree = false;
+let paginatedRoots = false;
 
 const RUNBOOKS = "00000000-0000-4000-8000-000000000020";
 const PAYMENTS = "00000000-0000-4000-8000-000000000021";
@@ -50,34 +51,50 @@ function treeEntries(request: KnowledgeEntryListRequest) {
 }
 
 const listKnowledgeEntries = mock(
-  async (_workspace: string, request: KnowledgeEntryListRequest) => ({
-    entries: tree
-      ? treeEntries(request)
-      : rows && !request.query
-        ? [
-            {
-              id: "00000000-0000-4000-8000-000000000010",
-              scope: "personal",
-              version: 2,
-              publishedRevisionId: "00000000-0000-4000-8000-000000000011",
-              latestRevisionId: "00000000-0000-4000-8000-000000000011",
-              archived: false,
-              createdAt: "2026-09-01T00:00:00.000Z",
-              updatedAt: "2026-09-20T00:00:00.000Z",
-              excerpts: [],
-              revision: {
-                id: "00000000-0000-4000-8000-000000000011",
-                title: "Production deploys need a second reviewer",
-                kind: "decision",
-                preview: "Every deploy needs a second engineer.",
-                groupIds: [],
-                sourceKind: null,
+  async (_workspace: string, request: KnowledgeEntryListRequest) => {
+    if (paginatedRoots) {
+      const groups = Array.from({ length: 50 }, (_, index) =>
+        summary(`root-group-${index}`, `Collection ${index}`, "group"),
+      );
+      if (request.kind === "group") return { entries: groups, nextCursor: null };
+      if (request.rootOnly)
+        return request.cursor
+          ? {
+              entries: [summary("older-loose-fact", "Older loose fact", "fact")],
+              nextCursor: null,
+            }
+          : { entries: groups, nextCursor: "uncollected-on-page2" };
+      return { entries: [], nextCursor: null };
+    }
+    return {
+      entries: tree
+        ? treeEntries(request)
+        : rows && !request.query
+          ? [
+              {
+                id: "00000000-0000-4000-8000-000000000010",
+                scope: "personal",
+                version: 2,
+                publishedRevisionId: "00000000-0000-4000-8000-000000000011",
+                latestRevisionId: "00000000-0000-4000-8000-000000000011",
+                archived: false,
+                createdAt: "2026-09-01T00:00:00.000Z",
+                updatedAt: "2026-09-20T00:00:00.000Z",
+                excerpts: [],
+                revision: {
+                  id: "00000000-0000-4000-8000-000000000011",
+                  title: "Production deploys need a second reviewer",
+                  kind: "decision",
+                  preview: "Every deploy needs a second engineer.",
+                  groupIds: [],
+                  sourceKind: null,
+                },
               },
-            },
-          ]
-        : [],
-    nextCursor: null,
-  }),
+            ]
+          : [],
+      nextCursor: null,
+    };
+  },
 );
 const context = {
   client: { listKnowledgeEntries },
@@ -224,3 +241,37 @@ test("By collection shows only top-level collections, sub-collections first as r
     tree = false;
   }
 });
+
+test("By collection can reach loose facts after a groups-only root page", async () => {
+  paginatedRoots = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness collections />));
+    await settle();
+    expect(container.textContent).not.toContain("Older loose fact");
+    const more = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Load more",
+    );
+    expect(more).toBeDefined();
+    await act(async () => more!.click());
+    await settle();
+    expect(listKnowledgeEntries).toHaveBeenCalledWith(workspaceId, {
+      rootOnly: true,
+      view: "published",
+      limit: 50,
+      cursor: "uncollected-on-page2",
+    });
+    const section = container.querySelector('section[aria-label="Not in a collection"]');
+    expect(section?.textContent).toContain("Older loose fact");
+    const row = section!.querySelector<HTMLElement>("[data-row-action]");
+    await act(async () => row!.click());
+    expect(opened.at(-1)).toBe("older-loose-fact");
+    expect(section!.textContent).not.toContain("Load more");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    paginatedRoots = false;
+  }
+}, 15_000);

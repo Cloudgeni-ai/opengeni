@@ -679,7 +679,8 @@ function CollectionsLayout({
       </Notice>
     );
   }
-  if (!groups.entries.length && !loose.length) return <>{empty}</>;
+  if (!groups.entries.length && !loose.length && !groups.cursor && !roots.cursor)
+    return <>{empty}</>;
   return (
     <div className="flex min-w-0 flex-col gap-6">
       {groups.entries.map((group) => (
@@ -703,11 +704,11 @@ function CollectionsLayout({
           More collections
         </Button>
       ) : null}
-      {loose.length ? (
+      {loose.length || roots.cursor ? (
         <section aria-label="Not in a collection" className="min-w-0">
           <GroupHeading
             name="Not in a collection"
-            count={loose.length}
+            count={loose.length || null}
             more={Boolean(roots.cursor)}
           />
           <EntryList label="Not in a collection" entries={loose} actions={actions} />
