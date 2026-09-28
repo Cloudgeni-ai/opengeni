@@ -223,9 +223,9 @@ installation identity, current bot scope, and channel membership are rechecked
 before provider requests. Routed tasks use the installation's home credential
 while their file and delivery ledger remain in the source task's workspace.
 
-The source-local `slack_file_uploads` ledger binds an operation to its exact file,
-session, interaction, principal, and request digest. It checkpoints the allocated
-Slack file ID before transferring bytes and marks completion started before
+The source-local `opengeni_private.slack_file_upload_operations` ledger binds an
+operation to its exact file, session, interaction, principal, and request digest.
+It checkpoints the allocated Slack file ID before transferring bytes and marks completion started before
 `files.completeUploadExternal` can share them. Temporary upload URLs and original
 bytes never enter the ledger, tool result, or audit metadata. A completed retry
 returns its original identity without another upload. A lost byte-transfer
