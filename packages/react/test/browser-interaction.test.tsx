@@ -2319,6 +2319,35 @@ describe("BrowserViewer", () => {
     });
   }
 
+  test("a live frame does not hide an unavailable browser control channel", async () => {
+    const canvasMock = mockBrowserCanvas();
+    const fixture = await renderViewerInputFixture(async () => {
+      throw new OpenGeniApiError(503, "Browser control unavailable");
+    });
+    try {
+      await fixture.frame(1);
+      expect(fixture.canvas.className).not.toContain("invisible");
+      await actRun(() => {
+        fixture.keyboard.value = "a";
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: "a" }));
+      });
+      await flush(50);
+      // Frames can continue arriving while the independent action API is down.
+      await fixture.frame(2);
+      expect(fixture.actions).toHaveLength(1);
+      expect(fixture.canvas.className).toContain("invisible");
+      expect(fixture.rendered.container.textContent).toContain("Browser controls unavailable");
+      expect(fixture.rendered.container.textContent).not.toContain(
+        "Page controls remain available",
+      );
+      expect(fixture.keyboard.disabled).toBe(true);
+      expect(fixture.rendered.container.textContent).toContain("Browser control unavailable");
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
   test("discards buffered typing batches behind an uncertain action without retry", async () => {
     const canvasMock = mockBrowserCanvas();
     let reject!: (error: Error) => void;

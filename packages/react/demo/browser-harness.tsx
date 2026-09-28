@@ -1,4 +1,4 @@
-import { OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { OpenGeniProvider } from "@opengeni/react";
 import { BrowserViewer } from "@opengeni/react/interaction";
 import { createRoot } from "react-dom/client";
@@ -26,6 +26,13 @@ const webSocketFactory =
     : undefined;
 
 async function renderHarness() {
+  if (client instanceof MockOpenGeniClient && params.get("controlFailure") === "1") {
+    // Keep the independent frame channel healthy to reproduce stale "Live"
+    // status when a controller rejects clicks or typing.
+    client.actInBrowser = async () => {
+      throw new OpenGeniApiError(503, "Browser control temporarily unavailable");
+    };
+  }
   // Reproduce narrow docks and human handoff banners without a live sandbox.
   if (client instanceof MockOpenGeniClient && params.get("handoff") === "1") {
     const session = await client.getBrowserSession(workspaceId, DEMO_BROWSER_SESSION_ID);
