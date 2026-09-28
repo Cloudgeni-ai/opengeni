@@ -6,9 +6,8 @@ import recordedAnswerExchange from "../test/fixtures/exchange-answer-before-mach
 import "./styles.css";
 
 /*
- * Exchange fold studio: scripted exchanges replayed through the production
- * MessageTimeline. Compare the compact presentation (one status row per
- * exchange, answer below a "Worked for" separator) with the classic grouping,
+ * Readable timeline studio: scripted turns replayed through the production
+ * MessageTimeline. Compare the readable per-turn presentation with classic grouping,
  * in both themes, at any viewport width. `?scenario=` picks the script:
  * `delegated` (default), `follow-up`, `notes`, `history`, or
  * `machine-follow-up`. `follow-up`, `notes`, and `history` stream messages the
@@ -301,6 +300,7 @@ function App() {
   const drafts = useMemo(() => (SCENARIOS[scenarioName] ?? delegatedScenario)(), [scenarioName]);
   const [count, setCount] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
+  const [historyMode, setHistoryMode] = useState(false);
   // The regression suite delivers older history on demand, so it can measure
   // the reader's position right before the prepend lands.
   const deferOlder = useRef(false);
@@ -316,11 +316,13 @@ function App() {
     window.exchangeFoldHarness = {
       total: drafts.length,
       show: (value) => {
+        setHistoryMode(false);
         setPlaying(false);
         setWindowStart(0);
         setCount(value);
       },
       showWindow: (start, value) => {
+        setHistoryMode(true);
         setPlaying(false);
         deferOlder.current = true;
         olderRequested.current = false;
@@ -368,7 +370,7 @@ function App() {
   // Timestamps end "now", so live clocks read like a real exchange.
   const events = useMemo<SessionEvent[]>(() => {
     const shown = drafts.slice(0, count);
-    const last = shown.at(-1)?.at ?? 0;
+    const last = drafts.at(-1)?.at ?? 0;
     return shown.slice(windowStart).map((draft, offset) => ({
       id: `exchange-${windowStart + offset + 1}`,
       workspaceId: "demo",
@@ -383,7 +385,7 @@ function App() {
   return (
     <div className="mx-auto flex h-screen max-w-4xl flex-col px-4 py-4 sm:px-8">
       <header className="flex flex-wrap items-center gap-2 border-b border-og-border pb-3">
-        <span className="mr-2 text-og-sm font-medium">Exchange fold</span>
+        <span className="mr-2 text-og-sm font-medium">Readable turns</span>
         {(scenarioName === "delegated" ? STAGES : []).map((stage, index) => (
           <button
             key={stage.label}
@@ -410,7 +412,7 @@ function App() {
         </button>
         <span className="ml-auto flex gap-2">
           <button className={BUTTON} aria-pressed={!compact} onClick={() => setCompact(!compact)}>
-            {compact ? "Compact" : "Classic"}
+            {compact ? "Readable" : "Classic"}
           </button>
           <button className={BUTTON} onClick={() => setDark(!dark)}>
             {dark ? "Dark" : "Light"}
@@ -424,6 +426,19 @@ function App() {
           events={events}
           turnSummary={{ rolling: compact }}
           hasOlder={windowStart > 0}
+          hasNewer={historyMode && count < drafts.length}
+          onJumpToLatestQuestion={async () => {
+            const end = historyMode ? drafts.length : count;
+            const target =
+              drafts
+                .slice(0, end)
+                .flatMap((draft, index) => (draft.type === "user.message" ? [index] : []))
+                .at(-1) ?? -1;
+            if (target < 0) return null;
+            setWindowStart(Math.max(0, target - 2));
+            setCount(end);
+            return target + 1;
+          }}
           onLoadOlder={() => {
             olderRequested.current = true;
             if (!deferOlder.current) setWindowStart(0);

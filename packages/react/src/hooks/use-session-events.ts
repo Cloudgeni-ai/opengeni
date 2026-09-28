@@ -73,6 +73,9 @@ export type UseSessionEventsResult = {
    * "Jump to latest" when the tip is not in memory (history view).
    */
   jumpToLatest: () => Promise<void>;
+  /** Resolve the newest durable user message, then load just its bounded context.
+   * Returns its sequence (or null when the session has no user message). */
+  jumpToLatestQuestion: () => Promise<number | null>;
   /** Replace history with a bounded window containing this exact durable event. */
   jumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   loadingTarget: boolean;
@@ -924,6 +927,29 @@ export function useSessionEvents(
     [client, workspaceId, sessionId, streamKey, enabled],
   );
 
+  const jumpToLatestQuestion = useCallback(async (): Promise<number | null> => {
+    if (!sessionId) return null;
+    const identity = navigationIdentityRef.current;
+    const generation = navigationGenerationRef.current;
+    const latest = await client.listEvents(workspaceId, sessionId, {
+      direction: "before",
+      includeTypes: ["user.message"],
+      limit: 1,
+      payloadMode: "full",
+    });
+    if (
+      identity.client !== navigationIdentityRef.current.client ||
+      identity.streamKey !== navigationIdentityRef.current.streamKey ||
+      identity.enabled !== navigationIdentityRef.current.enabled ||
+      generation !== navigationGenerationRef.current
+    )
+      return null;
+    const question = latest.filter((event) => event.type === "user.message").at(-1);
+    if (!question) return null;
+    const loaded = eventWindowRef.current.events.some((event) => event.id === question.id);
+    return loaded || (await jumpToSequence(question.sequence)) ? question.sequence : null;
+  }, [client, workspaceId, sessionId, jumpToSequence]);
+
   const jumpToLatest = useCallback(async (): Promise<void> => {
     if (loadingTargetRef.current) {
       navigationGenerationRef.current += 1;
@@ -998,6 +1024,7 @@ export function useSessionEvents(
     loadOldest,
     loadingLatest: !identityMatches ? false : loadingLatest,
     jumpToLatest,
+    jumpToLatestQuestion,
     jumpToSequence,
     loadingTarget: identityMatches && loadingTarget,
     error: identityMatches ? (newerError ?? error) : null,

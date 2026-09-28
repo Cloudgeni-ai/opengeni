@@ -452,6 +452,8 @@ export type MachineInputBatchItem = {
   id: string;
   turnId: string | null;
   members: MachineInputMember[];
+  /** Readable-turn presentation keeps machine payload prose inside the disclosure. */
+  compact?: boolean;
   occurredAt: string;
 };
 
@@ -538,8 +540,7 @@ export type TimelineItem = (
 
 /**
  * Activity items cluster between chat messages (reasoning, tools, workers,
- * sandbox, memory). With `groupTimeline(items, { foldExchanges: true })`,
- * assistant commentary (progress notes) joins the cluster as well.
+ * sandbox, memory). Assistant prose is rendered separately.
  */
 export type ActivityItem =
   | ReasoningItem
@@ -560,12 +561,14 @@ export type TimelineGroup =
       items: ActivityItem[];
       outcome?: TurnOutcome;
       failureText?: string;
-      /**
-       * Exchange fold only: earlier settled work of the same exchange (turns,
-       * routine machine inputs, recorded waits, compaction) that this live
-       * cluster continues. Rendered behind the same live status row.
-       */
-      earlier?: TimelineGroup[];
+      /** A single readable turn: only work and compacted context enter its details. */
+      work?: {
+        startedAt: string;
+        endedAt?: string;
+        responseStartedAt?: string;
+        waiting?: { label: string; since: string };
+        details: TimelineGroup[];
+      };
     }
   | {
       kind: "turn";
