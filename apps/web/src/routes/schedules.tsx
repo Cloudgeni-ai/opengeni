@@ -9,6 +9,11 @@ import {
   markScheduledTaskAttentionSeen,
   notifyScheduledTaskAttentionUpdated,
 } from "@/components/rail/use-scheduled-task-attention";
+import {
+  carryScheduledTaskDriftDismissal,
+  dismissScheduledTaskDrift,
+  scheduledTaskDriftDismissal,
+} from "@/lib/scheduled-task-drift-dismissals";
 // Shared schedules for agent turns, including connected-source Knowledge tasks,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
@@ -85,7 +90,10 @@ import {
   scheduleLabel,
   scheduledTaskCadence,
   scheduledTaskAccessFailuresText,
+  scheduledTaskDriftIsDismissible,
   scheduledTaskPolicyDriftLines,
+  scheduledTaskUnavailableAccountsText,
+  visibleScheduledTaskPolicyDrift,
   scheduledTaskRunLabel,
   scheduledTaskRunSessionAccess,
   scheduledTaskRunTriggerIsRedundant,
@@ -213,6 +221,8 @@ export function SchedulesRoute({
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
   const [clock, setClock] = useState(() => new Date());
+  // Bumped when the owner hides drift in this browser, so the cards re-read it.
+  const [, setDriftDismissals] = useState(0);
   const canAttachOpenGeniTool = context.clientConfig.mcpServers.some(
     (server) => server.id === "opengeni",
   );
@@ -630,12 +640,31 @@ export function SchedulesRoute({
 
   // One click re-freezes this schedule with the signed-in person's current
   // access. The server recomputes the refresh and refuses a changed schedule.
+  // Defaults the owner hid on this card stay off: the refresh leaves them out,
+  // and the choice moves to the refreshed task head.
   async function refreshAccess(task: ScheduledTask) {
     setBusyTaskId(task.id);
     try {
-      await client.refreshScheduledTaskAccess(workspaceId, task.id, {
+      const dismissal = scheduledTaskDriftDismissal(workspaceId, task);
+      const drift = task.policyDrift;
+      const connectors = drift?.missingConnectors
+        .map((item) => item.id)
+        .filter((id) => dismissal?.connectors.includes(id));
+      const openGeniTools = drift?.missingOpenGeniTools.filter((tool) =>
+        dismissal?.openGeniTools.includes(tool),
+      );
+      const refreshed = await client.refreshScheduledTaskAccess(workspaceId, task.id, {
         executionDigest: task.executionDigest,
+        ...(connectors?.length || openGeniTools?.length
+          ? {
+              leaveOut: {
+                ...(connectors?.length ? { connectors } : {}),
+                ...(openGeniTools?.length ? { openGeniTools } : {}),
+              },
+            }
+          : {}),
       });
+      carryScheduledTaskDriftDismissal(workspaceId, task.id, dismissal, refreshed.executionDigest);
       toast.success("Access refreshed", {
         description: "New runs of this schedule use it. Run it now to check.",
       });
@@ -647,6 +676,17 @@ export function SchedulesRoute({
       });
     } finally {
       setBusyTaskId(null);
+    }
+  }
+
+  // A display choice in this browser only: the defaults stay reported by the
+  // server and nothing about the schedule changes.
+  function dismissDrift(task: ScheduledTask) {
+    if (!task.policyDrift) return;
+    if (dismissScheduledTaskDrift(workspaceId, task, task.policyDrift)) {
+      setDriftDismissals((value) => value + 1);
+    } else {
+      toast.error("Couldn't hide this in this browser");
     }
   }
 
@@ -700,7 +740,13 @@ export function SchedulesRoute({
           history={runHistory[task.id]}
           probedLastRun={list.lastRuns[task.id]}
           attention={list.attention[task.id] ?? null}
+          policyDrift={visibleScheduledTaskPolicyDrift(
+            task.policyDrift,
+            scheduledTaskDriftDismissal(workspaceId, task),
+            task.executionDigest,
+          )}
           onRefreshAccess={() => void refreshAccess(task)}
+          onDismissDrift={() => dismissDrift(task)}
           now={clock}
           canReadSessionIds={canReadSessionIds}
           onExpandedChange={(next) => setRunsExpanded(task, next)}
@@ -954,9 +1000,12 @@ function ScheduledTaskCard(props: {
   busy: boolean;
   history: TaskRunHistory | undefined;
   probedLastRun: ScheduledTaskRun | null | undefined;
-  /** The latest run could not use a connector; only its owner receives this. */
+  /** The latest run could not use a connector, or a chosen account is gone; owner only. */
   attention: ScheduledTaskAccessAttention | null;
+  /** The task's drift minus what the owner hid in this browser. */
+  policyDrift: ScheduledTask["policyDrift"];
   onRefreshAccess: () => void;
+  onDismissDrift: () => void;
   now: Date;
   canReadSessionIds: boolean;
   onExpandedChange: (next: boolean) => void;
@@ -983,7 +1032,7 @@ function ScheduledTaskCard(props: {
   // disclosure goes inert rather than silently discarding an in-progress edit.
   const expanded = props.expanded && !props.editing;
   const nextRun = state.active ? nextScheduledRunLabel(task.schedule, props.now) : null;
-  const attentionText = scheduledTaskAccessFailuresText(props.attention?.failures);
+  const attentionText = scheduledTaskAttentionText(props.attention);
 
   return (
     <Collapsible open={expanded} onOpenChange={props.onExpandedChange} asChild>
@@ -1129,11 +1178,12 @@ function ScheduledTaskCard(props: {
         </div>
 
         <ScheduledTaskAccessNotices
-          policyDrift={task.policyDrift}
+          policyDrift={props.policyDrift}
           attention={props.attention}
           ownsTask={ownsTask}
           busy={props.busy}
           onRefreshAccess={props.onRefreshAccess}
+          onDismissDrift={props.onDismissDrift}
         />
 
         {props.editing ? props.renderEditor() : null}
@@ -1179,10 +1229,21 @@ function ScheduledTaskCard(props: {
   );
 }
 
+/** Everything the attention list says about one schedule, in one line of text. */
+function scheduledTaskAttentionText(attention: ScheduledTaskAccessAttention | null): string | null {
+  const parts = [
+    scheduledTaskUnavailableAccountsText(attention?.unavailableAccounts),
+    scheduledTaskAccessFailuresText(attention?.failures),
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 /**
- * What the task's owner needs to know about its frozen access: the latest run
- * could not use a connector, and what an access refresh would change. The
- * refresh is offered only to a signed-in person who can manage schedules.
+ * What the task's owner needs to know about its frozen access: new runs cannot
+ * start because a chosen account is gone, the latest run could not use a
+ * connector, and what an access refresh would change. The refresh is offered
+ * only to a signed-in person who can manage schedules. Defaults the owner does
+ * not want can be hidden for this task head.
  */
 export function ScheduledTaskAccessNotices(props: {
   policyDrift: ScheduledTask["policyDrift"];
@@ -1190,19 +1251,55 @@ export function ScheduledTaskAccessNotices(props: {
   ownsTask: boolean;
   busy: boolean;
   onRefreshAccess: () => void;
+  onDismissDrift?: () => void;
 }) {
-  const driftLines = scheduledTaskPolicyDriftLines(props.policyDrift);
+  const blockedText = scheduledTaskUnavailableAccountsText(props.attention?.unavailableAccounts);
+  const failuresText = scheduledTaskAccessFailuresText(props.attention?.failures);
+  // The blocked-account sentence is said once, in the louder notice.
+  const driftLines = scheduledTaskPolicyDriftLines(props.policyDrift, {
+    omitUnavailableAccounts: Boolean(blockedText),
+  });
   const canRefreshAccess = Boolean(props.policyDrift?.canRefresh) && props.ownsTask;
-  const attentionText = scheduledTaskAccessFailuresText(props.attention?.failures);
-  if (!attentionText && driftLines.length === 0) return null;
+  const dismissible =
+    Boolean(props.onDismissDrift) && scheduledTaskDriftIsDismissible(props.policyDrift);
+  if (!blockedText && !failuresText && driftLines.length === 0) return null;
+  const refreshButton = canRefreshAccess ? (
+    <Button
+      type="button"
+      variant="secondary"
+      size="xs"
+      disabled={props.busy}
+      onClick={props.onRefreshAccess}
+      title="Save this schedule again with your current connectors, accounts and tools"
+    >
+      <ShieldCheckIcon className="size-3" />
+      Refresh access
+    </Button>
+  ) : null;
+  const refreshInDrift = driftLines.length > 0;
+  const hint = canRefreshAccess
+    ? refreshInDrift
+      ? "Refreshing access below may fix it."
+      : "Refreshing access uses the accounts you can use now."
+    : blockedText && !failuresText
+      ? "Reconnect the account in Capabilities, or edit the schedule to choose another one."
+      : "Check the connection in Capabilities, then run the schedule again.";
   return (
     <div className="mt-2 grid gap-2" data-scheduled-task-access>
-      {attentionText ? (
-        <Notice tone="failed" title="The last run could not use a connector">
-          {attentionText}{" "}
-          {driftLines.length > 0 && canRefreshAccess
-            ? "Refreshing access below may fix it."
-            : "Check the connection in Capabilities, then run the schedule again."}
+      {blockedText || failuresText ? (
+        <Notice
+          tone="failed"
+          title={
+            blockedText
+              ? "New runs of this schedule cannot start"
+              : "The last run could not use a connector"
+          }
+          action={refreshInDrift ? null : refreshButton}
+        >
+          {[blockedText, failuresText && blockedText ? `Last run: ${failuresText}` : failuresText]
+            .filter(Boolean)
+            .join(" ")}{" "}
+          {hint}
         </Notice>
       ) : null}
       {driftLines.length > 0 ? (
@@ -1210,18 +1307,22 @@ export function ScheduledTaskAccessNotices(props: {
           tone="waiting"
           title="This schedule's access is out of date"
           action={
-            canRefreshAccess ? (
-              <Button
-                type="button"
-                variant="secondary"
-                size="xs"
-                disabled={props.busy}
-                onClick={props.onRefreshAccess}
-                title="Save this schedule again with your current connectors, accounts and tools"
-              >
-                <ShieldCheckIcon className="size-3" />
-                Refresh access
-              </Button>
+            refreshButton || dismissible ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {dismissible ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    disabled={props.busy}
+                    onClick={props.onDismissDrift}
+                    title="Stop showing these defaults for this schedule in this browser. A refresh leaves them out."
+                  >
+                    Keep without these
+                  </Button>
+                ) : null}
+                {refreshButton}
+              </div>
             ) : null
           }
         >

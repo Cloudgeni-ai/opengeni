@@ -39,7 +39,8 @@ Session goals support `GET`, `PATCH`, and idempotent `DELETE` on
 `/v1/workspaces/:workspaceId/sessions/:id/goal`; see [`goals.md`](goals.md).
 
 Scheduled tasks add `GET /v1/workspaces/:workspaceId/scheduled-tasks/attention`
-and the owner-only `POST .../scheduled-tasks/:taskId/refresh-access`; see
+(failed runs and schedules blocked by an unusable account) and the owner-only
+`POST .../scheduled-tasks/:taskId/refresh-access`; see
 [`scheduled-task-access.md`](scheduled-task-access.md).
 
 Expired offboarded personal data and the organization-tenancy parity check are

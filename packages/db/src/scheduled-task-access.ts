@@ -82,6 +82,8 @@ export async function listScheduledTaskRunAuthNeededEvents(
 export type ScheduledTaskAccessAttentionEvent = ScheduledTaskRunAuthNeededEvent & {
   taskId: string;
   taskName: string;
+  /** The task's current execution digest (its frozen head). */
+  taskExecutionDigest: string;
   firedAt: string;
 };
 
@@ -99,12 +101,17 @@ export async function listScheduledTaskAccessAttentionEvents(
   const taskLimit = Math.max(1, Math.min(500, Math.floor(input.taskLimit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await rawRows<
-      EventRow & { task_id: string; task_name: string; fired_at: Date | string }
+      EventRow & {
+        task_id: string;
+        task_name: string;
+        task_execution_digest: string;
+        fired_at: Date | string;
+      }
     >(
       scopedDb,
       sql`
         with owned as (
-          select task.id, task.name, task.workspace_id
+          select task.id, task.name, task.execution_digest, task.workspace_id
           from scheduled_tasks task
           where task.workspace_id = ${workspaceId}::uuid
             and task.deleted_at is null
@@ -116,7 +123,8 @@ export async function listScheduledTaskAccessAttentionEvents(
             )
         ),
         latest as (
-          select owned.id as task_id, owned.name as task_name, run.id as run_id,
+          select owned.id as task_id, owned.name as task_name,
+            owned.execution_digest as task_execution_digest, run.id as run_id,
             run.fired_at, run.turn_id, owned.workspace_id
           from owned
           cross join lateral (
@@ -145,7 +153,8 @@ export async function listScheduledTaskAccessAttentionEvents(
           order by latest.fired_at desc, latest.task_id
           limit ${taskLimit}
         )
-        select failing.task_id, failing.task_name, failing.run_id, failing.fired_at,
+        select failing.task_id, failing.task_name, failing.task_execution_digest,
+          failing.run_id, failing.fired_at,
           event.payload, event.payload_codec_version, event.occurred_at
         from failing
         cross join lateral (
@@ -167,6 +176,7 @@ export async function listScheduledTaskAccessAttentionEvents(
       ...eventFromRow(row),
       taskId: row.task_id,
       taskName: row.task_name,
+      taskExecutionDigest: row.task_execution_digest,
       firedAt:
         row.fired_at instanceof Date
           ? row.fired_at.toISOString()

@@ -17512,6 +17512,42 @@ export async function listScheduledTasks(
 }
 
 /**
+ * Active agent-turn tasks that chose connector accounts, owned by `subjectId`
+ * (and, with `includeOwnerless`, tasks without an owner). Only these can have
+ * a fresh occurrence refused before it creates a run because a chosen account
+ * is gone, so the owner's access attention list checks each one's account
+ * plan. A caller without a subject passes an empty id, which owns nothing.
+ */
+export async function listActiveScheduledTasksWithConnectionAccounts(
+  db: Database,
+  workspaceId: string,
+  input: { subjectId: string; includeOwnerless: boolean; limit: number },
+): Promise<ScheduledTask[]> {
+  const limit = Math.max(1, Math.min(500, Math.floor(input.limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const owner = eq(schema.scheduledTasks.ownerSubjectId, input.subjectId);
+    const rows = await scopedDb
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          isNull(schema.scheduledTasks.deletedAt),
+          eq(schema.scheduledTasks.status, "active"),
+          sql`${schema.scheduledTasks.action} ->> 'kind' = 'agent_turn'`,
+          sql`(case when jsonb_typeof(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts') = 'array'
+            then jsonb_array_length(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts')
+            else 0 end) > 0`,
+          input.includeOwnerless ? or(owner, isNull(schema.scheduledTasks.ownerSubjectId)) : owner,
+        ),
+      )
+      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
+      .limit(limit);
+    return rows.map(mapScheduledTask);
+  });
+}
+
+/**
  * Internal connector-control traversal. Keep the whole keyset walk on one
  * repeatable-read snapshot so task creation/update performed after discovery
  * cannot make an older row move between offset pages or hide a matching task.

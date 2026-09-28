@@ -44,7 +44,8 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   creates a run, so the refresh attaches every account the owner can use now.
   A frozen connector with no account while one is now available is reported as
   `attachableAccounts`. The Google Drive publication and personal GitHub
-  surfaces keep their own account contract and pass through unchanged.
+  surfaces keep their own account contract and pass through unchanged; a
+  blocked occurrence caused by one of them is not reported yet.
 - **OpenGeni tools** (agent-created tasks only). A human- or API-created task
   has no creator policy and already follows the deployment default at each run.
   For a frozen creator policy, the default tools it lacks are reported
@@ -100,6 +101,29 @@ This is the one writer of the creator policy's tools and permissions after
 create. Auto-following workspace defaults at each run was considered and
 rejected: it would conflict with the creator-policy freeze.
 
+The optional `leaveOut` (`{ connectors?, openGeniTools? }`) names workspace
+default connectors and OpenGeni tools the person wants kept off this schedule.
+The plan then neither adds them nor, for an OpenGeni tool, the permissions it
+would need. It only narrows what the refresh adds; it never removes anything
+the task already has, and an unknown tool name is refused (400).
+
+## Keeping defaults off
+
+A person may deliberately leave a default connector or OpenGeni tool off a
+schedule, and drift would otherwise name it forever. The task card offers
+"Keep without these" next to missing defaults. It records, in that browser, the
+missing connectors and OpenGeni tools for the task head the person looked at
+(its `executionDigest`); the card then hides them, and "Refresh access" sends
+them as `leaveOut`, carrying the choice to the refreshed head. A new default
+that appears later is shown again, and editing the task any other way (a new
+head) is a fresh look. A chosen account that can no longer be used, a connector
+the workspace removed, and a connector without an account are never hidden.
+
+The choice is a display preference: the server keeps reporting the drift and
+nothing about what a run may use changes. It is per browser because OpenGeni has
+no per-person preference store for it; a durable per-person choice would need
+its own column and is left for later.
+
 ## Failed-access notice
 
 OpenGeni has no general notification channel for this. Product email is
@@ -116,17 +140,34 @@ in-app:
   not a failure and is left out.
 - **Per run.** `GET .../scheduled-tasks/:taskId/runs` adds `accessFailures`
   (connector, reason and count) for a viewer who can act on the task.
+- **Blocked before a run.** When a chosen connector account can no longer be
+  used (for example the owner revoked their personal connection), the
+  scheduler refuses every fresh occurrence before it creates a run, so there is
+  no run and no turn to carry a fact. The attention list therefore also checks
+  each active agent task that chose accounts with the same account plan the
+  drift uses, and lists it with `unavailableAccounts` (the connectors) and a
+  null `runId`/`firedAt`. It clears once the account is usable again or the
+  owner refreshes or edits the accounts. This is read-time only: no migration,
+  no stored notice.
 - **Attention list.** `GET .../scheduled-tasks/attention` lists the active
-  schedules whose latest run with a turn failed closed on access: for a person,
-  the schedules they own; for an organization key, configured key or service
-  that manages schedules, the schedules without an owner (nobody else is told
-  about those, so members are not notified for every service task). A later run
-  that could use every connector clears it; pausing the schedule removes it.
+  schedules that need attention, one item per schedule: the latest run with a
+  turn failed closed on access (`runId`, `failures`), a chosen account can no
+  longer be used (`unavailableAccounts`), or both. Schedules that cannot start
+  are listed first. For a person, it lists the schedules they own; for an
+  organization key, configured key or service that manages schedules, the
+  schedules without an owner (nobody else is told about those, so members are
+  not notified for every service task). A later run that could use every
+  connector clears a run failure; pausing the schedule removes it. Each item
+  carries the task's `executionDigest`, so the web can tell a new blocked
+  notice (after a refresh or edit) from one the owner has already seen.
 - **Where the owner sees it.** A dot on the Schedules item in the navigation
   rail, shown until the owner opens Schedules (the "seen" marker is per
-  browser; the durable truth stays on the server), a "Needs attention" chip and
-  notice on the task card, and the failure text on each run row. The card
-  offers "Refresh access" when the plan would change something.
+  browser; the durable truth stays on the server). A new failed run is a new
+  notice; so is a blocked account on a new task head. The task card shows a
+  "Needs attention" chip and a notice ("New runs of this schedule cannot start"
+  or "The last run could not use a connector"), and each run row shows its
+  failure text. The card offers "Refresh access" when the plan would change
+  something.
 
 A proactive channel (email or a Slack message from the bot) would need its own
 durable delivery outbox and is not part of this change.

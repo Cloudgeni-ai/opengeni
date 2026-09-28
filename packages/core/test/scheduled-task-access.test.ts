@@ -10,6 +10,7 @@ import { testSettings } from "@opengeni/testing";
 import type { AccessGrantAuthorization } from "../src/access";
 import {
   isScheduledTaskAccessRefreshHuman,
+  orderScheduledTaskAccessAttention,
   planScheduledTaskConnectionAccounts,
   planScheduledTaskConnectors,
   planScheduledTaskOpenGeniTools,
@@ -44,6 +45,25 @@ describe("scheduled task connector drift", () => {
     expect(plan.tools).toEqual([
       { kind: "mcp", id: "linear" },
       { kind: "mcp", id: "gmail", optional: true },
+    ]);
+  });
+
+  test("leaves out the defaults the owner chose to keep off, and only those", () => {
+    const plan = planScheduledTaskConnectors({
+      taskTools: [{ kind: "mcp", id: "linear" }],
+      defaultTools: [
+        { kind: "mcp", id: "gmail", optional: true },
+        { kind: "mcp", id: "notion", optional: true },
+      ],
+      availableServerIds: new Set(["linear", "gmail", "notion"]),
+      names,
+      // A connector the task already has is never removed by leaving it out.
+      leaveOut: new Set(["gmail", "linear"]),
+    });
+    expect(plan.missing).toEqual([{ id: "notion", name: "Notion" }]);
+    expect(plan.tools).toEqual([
+      { kind: "mcp", id: "linear" },
+      { kind: "mcp", id: "notion", optional: true },
     ]);
   });
 
@@ -239,6 +259,35 @@ describe("agent-created task OpenGeni tools (migration 0428 creator policy)", ()
     ).toEqual({ missing: [], policy: null });
   });
 
+  test("a tool the owner kept off is neither added nor given its permissions", () => {
+    const plan = planScheduledTaskOpenGeniTools({
+      creatorPolicy: {
+        firstPartyMcpTools: ["sessions_list"] as FirstPartyMcpToolName[],
+        firstPartyMcpPermissions: ["sessions:read"],
+      },
+      settings,
+      grantPermissions: ["sessions:read", "rigs:use"],
+      permissionsRequiredByTools,
+      leaveOut: new Set<FirstPartyMcpToolName>(["rig_list"]),
+    });
+    expect(plan.missing).toEqual(["browser_read"]);
+    expect(plan.policy?.firstPartyMcpTools).toEqual(["sessions_list", "browser_read"]);
+    expect(plan.policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
+    // Keeping every new tool off leaves nothing to change.
+    expect(
+      planScheduledTaskOpenGeniTools({
+        creatorPolicy: {
+          firstPartyMcpTools: ["sessions_list"] as FirstPartyMcpToolName[],
+          firstPartyMcpPermissions: ["sessions:read"],
+        },
+        settings,
+        grantPermissions: ["sessions:read", "rigs:use"],
+        permissionsRequiredByTools,
+        leaveOut: new Set<FirstPartyMcpToolName>(["rig_list", "browser_read"]),
+      }),
+    ).toEqual({ missing: [], policy: null });
+  });
+
   test("an up-to-date policy the person fully holds is left alone", () => {
     const tools = ["sessions_list", "rig_list", "browser_read"] as FirstPartyMcpToolName[];
     const permissions = [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS] as Permission[];
@@ -409,6 +458,30 @@ describe("who sees and refreshes scheduled task access", () => {
     ).toEqual({ ownerSubjectId: "user:owner", includeOwnerless: false });
     expect(scheduledTaskAttentionScope(grant({ principalKind: "agent_attempt" }))).toBeNull();
     expect(scheduledTaskAttentionScope(grant({ metadata: { delegated: true } }))).toBeNull();
+  });
+
+  test("schedules that cannot start come first, then the newest failed runs", () => {
+    const item = (
+      taskId: string,
+      firedAt: string | null,
+      unavailable: boolean,
+    ): Parameters<typeof orderScheduledTaskAccessAttention>[0][number] => ({
+      taskId,
+      taskName: taskId,
+      executionDigest: "a".repeat(64),
+      runId: firedAt ? crypto.randomUUID() : null,
+      firedAt,
+      failures: [],
+      unavailableAccounts: unavailable ? [{ id: "linear", name: "Linear" }] : [],
+    });
+    expect(
+      orderScheduledTaskAccessAttention([
+        item("old-failure", "2026-09-10T08:00:00.000Z", false),
+        item("blocked-b", null, true),
+        item("new-failure", "2026-09-17T08:00:00.000Z", false),
+        item("blocked-a", "2026-09-01T08:00:00.000Z", true),
+      ]).map((entry) => entry.taskId),
+    ).toEqual(["blocked-a", "blocked-b", "new-failure", "old-failure"]);
   });
 
   test("an empty report is not drift", () => {

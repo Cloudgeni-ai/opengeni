@@ -915,8 +915,10 @@ describe("OpenGeniClient scheduled tasks", () => {
               {
                 taskId: TASK_ID,
                 taskName: "Post the daily summary",
+                executionDigest: digest,
                 runId: TASK_ID,
                 firedAt: "2026-09-17T08:00:00.000Z",
+                unavailableAccounts: [{ id: "gmail", name: "Gmail" }],
                 failures: [
                   {
                     serverId: "slack",
@@ -932,18 +934,25 @@ describe("OpenGeniClient scheduled tasks", () => {
           })
         : jsonResponse({ id: TASK_ID }),
     );
-    await client.refreshScheduledTaskAccess(WORKSPACE_ID, TASK_ID, { executionDigest: digest });
+    await client.refreshScheduledTaskAccess(WORKSPACE_ID, TASK_ID, {
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
     const attention = await client.listScheduledTaskAccessAttention(WORKSPACE_ID);
     expect(attention.map((item) => item.failures[0]?.reason)).toEqual([
       "personal_authority_unavailable",
     ]);
+    expect(attention[0]?.unavailableAccounts).toEqual([{ id: "gmail", name: "Gmail" }]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `POST /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/refresh-access`,
         `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/attention`,
       ],
     );
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ executionDigest: digest });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
   });
 });
 

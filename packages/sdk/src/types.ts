@@ -2998,6 +2998,13 @@ export type ScheduledTaskPolicyDrift = {
 /** Re-freeze with the caller's current authority; `executionDigest` is the reviewed head. */
 export type RefreshScheduledTaskAccessRequest = {
   executionDigest: string;
+  /** Default connectors and OpenGeni tools to keep off; only narrows what the refresh adds. */
+  leaveOut?:
+    | {
+        connectors?: string[] | undefined;
+        openGeniTools?: FirstPartyMcpToolName[] | undefined;
+      }
+    | undefined;
 };
 
 export type CreateSessionRequest = {
@@ -5640,13 +5647,21 @@ export type ScheduledTaskRunAccessFailure = {
   firstOccurredAt: string;
 };
 
-/** A schedule whose latest run failed closed on connector access. */
+/**
+ * A schedule that needs its owner's attention: its latest run failed closed on
+ * connector access (`runId`, `failures`), and/or a chosen connector account can
+ * no longer be used so new runs cannot start (`unavailableAccounts`; `runId`
+ * and `firedAt` are null when only this applies).
+ */
 export type ScheduledTaskAccessAttention = {
   taskId: string;
   taskName: string;
-  runId: string;
-  firedAt: string;
+  /** The task head this item was computed against; a new head is a new notice. */
+  executionDigest: string;
+  runId: string | null;
+  firedAt: string | null;
   failures: ScheduledTaskRunAccessFailure[];
+  unavailableAccounts: ScheduledTaskAccessConnector[];
 };
 
 export type ListScheduledTaskAccessAttentionResponse = {

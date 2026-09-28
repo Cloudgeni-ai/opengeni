@@ -10102,23 +10102,41 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
 /**
- * A schedule whose latest run failed closed on connector access and that no
- * later run has cleared: the in-app notice that a schedule needs attention.
- * Listed for its owner; a task without an owner is listed only for a key or
- * service that manages schedules.
+ * A schedule that needs its owner's attention because of connector access:
+ * - its latest run with a turn failed closed on a connector and no later run
+ *   has cleared it (`runId`, `firedAt` and `failures`); and/or
+ * - a connector account it chose can no longer be used
+ *   (`unavailableAccounts`), so every fresh occurrence is refused before it
+ *   creates a run. There is no run to point at, so `runId` and `firedAt` are
+ *   null when only this applies.
+ * At least one of `failures` and `unavailableAccounts` is non-empty. Listed
+ * for its owner; a task without an owner is listed only for a key or service
+ * that manages schedules.
  */
 export const ScheduledTaskAccessAttention = /* @__PURE__ */ z
   .object({
     taskId: z.string().uuid(),
     taskName: z.string(),
-    runId: z.string().uuid(),
-    firedAt: z.string(),
-    failures: z
-      .array(ScheduledTaskRunAccessFailure)
-      .min(1)
-      .max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
+    /** The task head this item was computed against; a new head is a new notice. */
+    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    runId: z.string().uuid().nullable(),
+    firedAt: z.string().nullable(),
+    failures: z.array(ScheduledTaskRunAccessFailure).max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
+    /** Connectors whose chosen account can no longer be used; new runs cannot start. */
+    unavailableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
   })
-  .strict();
+  .strict()
+  .refine((item) => item.failures.length > 0 || item.unavailableAccounts.length > 0, {
+    message: "an attention item names a failed connector or an unavailable account",
+  })
+  .refine((item) => (item.runId === null) === (item.firedAt === null), {
+    message: "runId and firedAt are both set or both null",
+  })
+  .refine((item) => item.failures.length === 0 || item.runId !== null, {
+    message: "a run's access failures name the run",
+  });
 export type ScheduledTaskAccessAttention = z.infer<typeof ScheduledTaskAccessAttention>;
 
 export const SCHEDULED_TASK_ACCESS_ATTENTION_MAX = 100;
@@ -10140,6 +10158,24 @@ export type ListScheduledTaskAccessAttentionResponse = z.infer<
 export const RefreshScheduledTaskAccessRequest = /* @__PURE__ */ z
   .object({
     executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    /**
+     * Workspace default connectors and OpenGeni tools the person chose to keep
+     * off this schedule (the drift they dismissed). It only narrows what the
+     * refresh adds; it never removes anything the schedule already has.
+     */
+    leaveOut: z
+      .object({
+        connectors: z
+          .array(z.string().min(1).max(256))
+          .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX)
+          .optional(),
+        openGeniTools: z
+          .array(FirstPartyMcpToolName)
+          .max(FIRST_PARTY_MCP_TOOL_NAMES.length)
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type RefreshScheduledTaskAccessRequest = z.infer<typeof RefreshScheduledTaskAccessRequest>;

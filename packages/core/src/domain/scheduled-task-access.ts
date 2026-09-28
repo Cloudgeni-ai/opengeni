@@ -44,6 +44,7 @@ import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-d
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   getSession,
+  listActiveScheduledTasksWithConnectionAccounts,
   listScheduledTaskAccessAttentionEvents,
   listScheduledTaskCreatorPolicies,
   listScheduledTaskRunAuthNeededEvents,
@@ -111,14 +112,16 @@ function uniqueById(items: ScheduledTaskAccessConnector[]): ScheduledTaskAccessC
 /**
  * Connectors: keep every connector the task already uses that still exists,
  * drop the ones this workspace no longer sets up, and add the workspace
- * defaults a new schedule would get. A refresh never removes a connector the
- * owner deliberately kept, so it only narrows what no longer exists.
+ * defaults a new schedule would get, except the ones the owner chose to keep
+ * off (`leaveOut`). A refresh never removes a connector the owner deliberately
+ * kept, so it only narrows what no longer exists.
  */
 export function planScheduledTaskConnectors(input: {
   taskTools: readonly ToolRef[];
   defaultTools: readonly ToolRef[];
   availableServerIds: ReadonlySet<string>;
   names: ReadonlyMap<string, string>;
+  leaveOut?: ReadonlySet<string>;
 }): ScheduledTaskConnectorPlan {
   const unavailable = input.taskTools.filter(
     (tool) => tool.id !== ALWAYS_ATTACHED_CONNECTOR && !input.availableServerIds.has(tool.id),
@@ -130,6 +133,7 @@ export function planScheduledTaskConnectors(input: {
     (tool) =>
       tool.id !== ALWAYS_ATTACHED_CONNECTOR &&
       !keptIds.has(tool.id) &&
+      !input.leaveOut?.has(tool.id) &&
       input.availableServerIds.has(tool.id),
   );
   return {
@@ -232,8 +236,9 @@ export type FirstPartyToolPermissionRequirements = (
  * added tools need, within the default worker set and that person's grant. A
  * refresh therefore never lifts a deliberately narrowed permission boundary
  * for tools the task already had, and every addition follows a tool the drift
- * report names. The frozen session policy (agent access, scope, memory) is
- * never touched.
+ * report names. Default tools the owner chose to keep off (`leaveOut`) are
+ * neither reported nor added. The frozen session policy (agent access, scope,
+ * memory) is never touched.
  */
 export function planScheduledTaskOpenGeniTools(input: {
   creatorPolicy: Pick<
@@ -243,12 +248,13 @@ export function planScheduledTaskOpenGeniTools(input: {
   settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">;
   grantPermissions: readonly Permission[];
   permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
+  leaveOut?: ReadonlySet<FirstPartyMcpToolName>;
 }): ScheduledTaskOpenGeniToolPlan {
   const stored = input.creatorPolicy?.firstPartyMcpTools;
   if (!stored) return { missing: [], policy: null };
   const effective = new Set(allowedFirstPartyMcpToolsForSession(input.settings, stored));
   const missing = resolveFirstPartyMcpToolPolicy(input.settings).default.filter(
-    (tool) => !effective.has(tool),
+    (tool) => !effective.has(tool) && !input.leaveOut?.has(tool),
   );
   const tools = [...new Set([...stored, ...missing])];
   // A frozen null permission set runs with the default worker set (see the
@@ -441,6 +447,8 @@ export async function computeScheduledTaskAccessPlan(input: {
   permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
   cache?: ScheduledTaskAccessReadCache;
   workspaceSettings?: unknown;
+  /** Defaults the refreshing person chose to keep off; narrows what the plan adds. */
+  leaveOut?: RefreshScheduledTaskAccessRequest["leaveOut"];
 }): Promise<ScheduledTaskAccessPlan> {
   const { db, task, settings } = input;
   const cache = input.cache ?? scheduledTaskAccessReadCache();
@@ -472,6 +480,7 @@ export async function computeScheduledTaskAccessPlan(input: {
         ),
         availableServerIds: new Set(callerRegistry.mcpServers.map((server) => server.id)),
         names,
+        leaveOut: new Set(input.leaveOut?.connectors ?? []),
       })
     : { tools: [...task.agentConfig.tools], missing: [], unavailable: [] };
   const connectionTools = await scheduledConnectionTools(
@@ -529,6 +538,7 @@ export async function computeScheduledTaskAccessPlan(input: {
         settings,
         grantPermissions: input.grant.permissions,
         permissionsRequiredByTools: input.permissionsRequiredByTools,
+        leaveOut: new Set(input.leaveOut?.openGeniTools ?? []),
       })
     : { missing: [], policy: null };
   const toolKey = (tool: ToolRef) =>
@@ -690,6 +700,7 @@ export async function refreshScheduledTaskAccess(input: {
     source,
     creatorPolicy,
     permissionsRequiredByTools: input.permissionsRequiredByTools,
+    leaveOut: input.request.leaveOut,
   });
   if (!plan.changed) return existing;
   const {
@@ -809,47 +820,176 @@ export function scheduledTaskAttentionScope(
   return { ownerSubjectId, includeOwnerless };
 }
 
+/**
+ * Tasks among `tasks` that a fresh occurrence would refuse before creating a
+ * run because a chosen connector account can no longer be used: the account
+ * plan's `unavailableAccounts`, exactly what the drift reports. Only the
+ * account part of the plan is read, which does not depend on the creator
+ * policy. Advisory: a task whose plan cannot be computed is skipped.
+ */
+export async function scheduledTasksWithUnavailableAccounts(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  tasks: readonly ScheduledTask[];
+  onError?: ((error: unknown) => void) | undefined;
+}): Promise<Array<{ task: ScheduledTask; unavailableAccounts: ScheduledTaskAccessConnector[] }>> {
+  const actionable = input.tasks.filter(
+    (task) =>
+      task.status === "active" &&
+      hasAgentAccess(task) &&
+      (task.agentConfig.connectionAccounts?.length ?? 0) > 0 &&
+      scheduledTaskAccessSource(task, input.grant) !== null,
+  );
+  if (actionable.length === 0) return [];
+  let workspaceSettings: unknown;
+  try {
+    workspaceSettings = (await requireWorkspace(input.db, input.grant.workspaceId)).settings;
+  } catch (error) {
+    input.onError?.(error);
+    return [];
+  }
+  const cache = scheduledTaskAccessReadCache();
+  const blocked: Array<{
+    task: ScheduledTask;
+    unavailableAccounts: ScheduledTaskAccessConnector[];
+  }> = [];
+  for (const task of actionable) {
+    try {
+      const plan = await computeScheduledTaskAccessPlan({
+        db: input.db,
+        settings: input.settings,
+        grant: input.grant,
+        task,
+        source: scheduledTaskAccessSource(task, input.grant)!,
+        creatorPolicy: null,
+        permissionsRequiredByTools: () => [],
+        cache,
+        workspaceSettings,
+      });
+      if (plan.drift.unavailableAccounts.length > 0) {
+        blocked.push({ task, unavailableAccounts: plan.drift.unavailableAccounts });
+      }
+    } catch (error) {
+      input.onError?.(error);
+    }
+  }
+  return blocked;
+}
+
+/**
+ * The owner's in-app notice: schedules whose latest run failed closed on
+ * connector access and that no later run has cleared, plus schedules whose
+ * chosen account can no longer be used. The second kind never creates a run
+ * (the scheduler refuses each fresh occurrence first), so it carries no run
+ * and names the connectors instead. Tasks needing both appear once.
+ */
 export async function listScheduledTaskAccessAttention(input: {
   db: Database;
   settings: Settings;
   grant: AccessGrant;
+  onError?: ((error: unknown) => void) | undefined;
 }): Promise<ScheduledTaskAccessAttention[]> {
   const { grant } = input;
   const scope = scheduledTaskAttentionScope(grant);
   if (!scope) return [];
-  const events = await listScheduledTaskAccessAttentionEvents(input.db, grant.workspaceId, {
+  const query = {
     // A caller without an entitled subject matches no owner: owners are people.
     subjectId: scope.ownerSubjectId ?? "",
     includeOwnerless: scope.includeOwnerless,
-    taskLimit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
+  };
+  const [events, candidates] = await Promise.all([
+    listScheduledTaskAccessAttentionEvents(input.db, grant.workspaceId, {
+      ...query,
+      taskLimit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
+    }),
+    listActiveScheduledTasksWithConnectionAccounts(input.db, grant.workspaceId, {
+      ...query,
+      limit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
+    }),
+  ]);
+  const blocked = await scheduledTasksWithUnavailableAccounts({
+    db: input.db,
+    settings: input.settings,
+    grant,
+    tasks: candidates,
+    onError: input.onError,
   });
-  if (events.length === 0) return [];
-  const names = await connectorNames(input.db, input.settings, grant.workspaceId, grant.subjectId);
-  const tasks = new Map<
+  if (events.length === 0 && blocked.length === 0) return [];
+  const names =
+    events.length > 0
+      ? await connectorNames(input.db, input.settings, grant.workspaceId, grant.subjectId)
+      : new Map<string, string>();
+  const runs = new Map<
     string,
-    { taskName: string; runId: string; firedAt: string; events: typeof events }
+    {
+      taskName: string;
+      executionDigest: string;
+      runId: string;
+      firedAt: string;
+      events: typeof events;
+    }
   >();
   for (const event of events) {
-    const task = tasks.get(event.taskId) ?? {
+    const task = runs.get(event.taskId) ?? {
       taskName: event.taskName,
+      executionDigest: event.taskExecutionDigest,
       runId: event.runId,
       firedAt: event.firedAt,
       events: [],
     };
     task.events.push(event);
-    tasks.set(event.taskId, task);
+    runs.set(event.taskId, task);
   }
-  const attention: ScheduledTaskAccessAttention[] = [];
-  for (const [taskId, task] of tasks) {
+  const attention = new Map<string, ScheduledTaskAccessAttention>();
+  for (const [taskId, task] of runs) {
     const failures = scheduledTaskRunAccessFailures(task.events, names);
     if (failures.length === 0) continue;
-    attention.push({
+    attention.set(taskId, {
       taskId,
       taskName: task.taskName,
+      executionDigest: task.executionDigest,
       runId: task.runId,
       firedAt: task.firedAt,
       failures,
+      unavailableAccounts: [],
     });
   }
-  return attention.slice(0, SCHEDULED_TASK_ACCESS_ATTENTION_MAX);
+  for (const { task, unavailableAccounts } of blocked) {
+    const prior = attention.get(task.id);
+    attention.set(
+      task.id,
+      prior
+        ? { ...prior, executionDigest: task.executionDigest, unavailableAccounts }
+        : {
+            taskId: task.id,
+            taskName: task.name,
+            executionDigest: task.executionDigest,
+            runId: null,
+            firedAt: null,
+            failures: [],
+            unavailableAccounts,
+          },
+    );
+  }
+  return orderScheduledTaskAccessAttention([...attention.values()]).slice(
+    0,
+    SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
+  );
+}
+
+/**
+ * Schedules that cannot start at all come first, then the most recent failed
+ * runs. Ties keep a stable order by task id.
+ */
+export function orderScheduledTaskAccessAttention(
+  items: readonly ScheduledTaskAccessAttention[],
+): ScheduledTaskAccessAttention[] {
+  return [...items].sort((left, right) => {
+    const blocked =
+      Number(right.unavailableAccounts.length > 0) - Number(left.unavailableAccounts.length > 0);
+    if (blocked !== 0) return blocked;
+    const fired = (right.firedAt ?? "").localeCompare(left.firedAt ?? "");
+    return fired !== 0 ? fired : left.taskId.localeCompare(right.taskId);
+  });
 }

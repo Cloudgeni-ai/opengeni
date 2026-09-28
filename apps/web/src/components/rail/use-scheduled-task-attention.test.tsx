@@ -11,8 +11,10 @@ function attention(runId: string): ScheduledTaskAccessAttention {
   return {
     taskId: "task-1",
     taskName: "Post the daily summary",
+    executionDigest: "a".repeat(64),
     runId,
     firedAt: "2026-09-17T08:00:00.000Z",
+    unavailableAccounts: [],
     failures: [
       {
         serverId: "slack",
@@ -86,6 +88,44 @@ test("shows the dot for an unseen failed run, clears once seen, and returns for 
     expect(container.textContent).toBe("none");
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+/** New runs cannot start: there is no run, only the task head and its connectors. */
+function blocked(executionDigest: string): ScheduledTaskAccessAttention {
+  return {
+    taskId: "task-2",
+    taskName: "Weekly Linear digest",
+    executionDigest,
+    runId: null,
+    firedAt: null,
+    failures: [],
+    unavailableAccounts: [{ id: "linear", name: "Linear" }],
+  };
+}
+
+test("notifies about a schedule that cannot start, and again when it breaks after a fix", async () => {
+  list.mockResolvedValue([blocked("b".repeat(64))]);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Probe workspace="one" />));
+    expect(container.textContent).toBe("attention");
+
+    await act(async () => markScheduledTaskAttentionSeen("one", [blocked("b".repeat(64))]));
+    expect(container.textContent).toBe("none");
+
+    // Still blocked on the next poll: the owner already saw it.
+    await act(async () => notifyScheduledTaskAttentionUpdated());
+    expect(container.textContent).toBe("none");
+
+    // Refreshed (a new task head), then the account broke again: a new notice.
+    list.mockResolvedValue([blocked("c".repeat(64))]);
+    await act(async () => notifyScheduledTaskAttentionUpdated());
+    expect(container.textContent).toBe("attention");
+  } finally {
+    await act(async () => root.unmount());
+    list.mockImplementation(async () => [attention("run-1")]);
   }
 });
 

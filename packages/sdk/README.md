@@ -406,9 +406,12 @@ OpenGeni tools. For the owner, `listScheduledTasks` and `getScheduledTask`
 include a read-only `policyDrift` naming what is out of date, and
 `listScheduledTaskRuns` includes `accessFailures` for runs that could not use a
 connector. `listScheduledTaskAccessAttention` lists schedules whose latest run
-failed that way. A signed-in owner re-freezes with their current access through
-`refreshScheduledTaskAccess(workspaceId, taskId, { executionDigest })`; API keys
-and agents cannot. See [`docs/scheduled-task-access.md`](../../docs/scheduled-task-access.md).
+failed that way, and schedules that cannot start because a chosen account can no
+longer be used (`unavailableAccounts`, with a null `runId`). A signed-in owner
+re-freezes with their current access through
+`refreshScheduledTaskAccess(workspaceId, taskId, { executionDigest, leaveOut })`,
+where the optional `leaveOut` keeps named default connectors or OpenGeni tools
+off; API keys and agents cannot. See [`docs/scheduled-task-access.md`](../../docs/scheduled-task-access.md).
 
 Deleting a task is externally idempotent and immediately removes it from live
 lists and quota, but the server retains a tombstone plus run/session/turn audit

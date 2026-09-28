@@ -827,21 +827,30 @@ function openGeniToolLabel(tool: string): string {
   return tool.replaceAll("_", " ");
 }
 
+/** "The account chosen for Slack can no longer be used, so new runs cannot start." */
+export function scheduledTaskUnavailableAccountsText(
+  connectors: readonly { name: string }[] | undefined,
+): string | null {
+  if (!connectors || connectors.length === 0) return null;
+  return `The account chosen for ${namedList(connectors.map((item) => item.name))} can no longer be used, so new runs cannot start.`;
+}
+
 /**
  * Plain sentences naming what the access refresh would change. Empty when the
- * task is up to date (or the viewer cannot act on it).
+ * task is up to date (or the viewer cannot act on it). `omitUnavailableAccounts`
+ * leaves out the blocked-account sentence when a louder notice already says it.
  */
 export function scheduledTaskPolicyDriftLines(
   drift: ScheduledTaskPolicyDrift | null | undefined,
+  options: { omitUnavailableAccounts?: boolean } = {},
 ): string[] {
   if (!drift) return [];
   const lines: string[] = [];
   const names = (items: readonly { name: string }[]) => namedList(items.map((item) => item.name));
-  if (drift.unavailableAccounts.length > 0) {
-    lines.push(
-      `The account chosen for ${names(drift.unavailableAccounts)} can no longer be used, so new runs cannot start.`,
-    );
-  }
+  const unavailableAccounts = options.omitUnavailableAccounts
+    ? null
+    : scheduledTaskUnavailableAccountsText(drift.unavailableAccounts);
+  if (unavailableAccounts) lines.push(unavailableAccounts);
   if (drift.attachableAccounts.length > 0) {
     lines.push(
       `${names(drift.attachableAccounts)} ${drift.attachableAccounts.length === 1 ? "has" : "have"} no account on this schedule, although one is now connected.`,
@@ -867,4 +876,51 @@ export function scheduledTaskPolicyDriftLines(
     );
   }
   return lines;
+}
+
+/**
+ * Defaults the owner chose to keep off one schedule, for the task head they
+ * looked at. Only additions a person may deliberately decline are dismissible:
+ * workspace default connectors and OpenGeni tools. A broken account or a
+ * connector the workspace removed is never hidden.
+ */
+export type ScheduledTaskDriftDismissal = {
+  executionDigest: string;
+  connectors: string[];
+  openGeniTools: string[];
+};
+
+export function scheduledTaskDriftIsDismissible(
+  drift: ScheduledTaskPolicyDrift | null | undefined,
+): boolean {
+  return Boolean(
+    drift && (drift.missingConnectors.length > 0 || drift.missingOpenGeniTools.length > 0),
+  );
+}
+
+/**
+ * The drift still worth showing after the owner's dismissal. A dismissal made
+ * for another task head no longer applies. Null when nothing is left.
+ */
+export function visibleScheduledTaskPolicyDrift(
+  drift: ScheduledTaskPolicyDrift | null | undefined,
+  dismissal: ScheduledTaskDriftDismissal | null,
+  executionDigest: string,
+): ScheduledTaskPolicyDrift | null {
+  if (!drift) return null;
+  if (!dismissal || dismissal.executionDigest !== executionDigest) return drift;
+  const connectors = new Set(dismissal.connectors);
+  const tools = new Set(dismissal.openGeniTools);
+  const visible: ScheduledTaskPolicyDrift = {
+    ...drift,
+    missingConnectors: drift.missingConnectors.filter((item) => !connectors.has(item.id)),
+    missingOpenGeniTools: drift.missingOpenGeniTools.filter((tool) => !tools.has(tool)),
+  };
+  return visible.missingConnectors.length > 0 ||
+    visible.missingOpenGeniTools.length > 0 ||
+    visible.unavailableAccounts.length > 0 ||
+    visible.attachableAccounts.length > 0 ||
+    visible.unavailableConnectors.length > 0
+    ? visible
+    : null;
 }

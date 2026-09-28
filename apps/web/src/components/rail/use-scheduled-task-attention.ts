@@ -14,11 +14,23 @@ export function notifyScheduledTaskAttentionUpdated() {
   window.dispatchEvent(new Event(ATTENTION_UPDATED));
 }
 
-/** A new failing run of the same schedule is a new notice. */
-export function scheduledTaskAttentionKey(
-  item: Pick<ScheduledTaskAccessAttention, "taskId" | "runId">,
-) {
-  return `${item.taskId}:${item.runId}`;
+type AttentionIdentity = Pick<
+  ScheduledTaskAccessAttention,
+  "taskId" | "runId" | "executionDigest" | "unavailableAccounts"
+>;
+
+/**
+ * A new failing run of the same schedule is a new notice. So is a chosen
+ * account becoming unusable: that notice has no run, so it is identified by
+ * the task head and the connectors, and breaking again after a refresh or an
+ * edit (a new head) notifies again.
+ */
+export function scheduledTaskAttentionKey(item: AttentionIdentity) {
+  const run = `${item.taskId}:${item.runId ?? "no-run"}`;
+  const accounts = [...new Set(item.unavailableAccounts.map((connector) => connector.id))].sort();
+  return accounts.length === 0
+    ? run
+    : `${run}:accounts:${item.executionDigest}:${accounts.join(",")}`;
 }
 
 function readSeenStore(): Record<string, string[]> {
@@ -44,7 +56,7 @@ function seenFor(workspaceId: string): Set<string> {
  */
 export function markScheduledTaskAttentionSeen(
   workspaceId: string,
-  items: readonly Pick<ScheduledTaskAccessAttention, "taskId" | "runId">[],
+  items: readonly AttentionIdentity[],
 ) {
   if (items.length === 0) return;
   const seen = seenFor(workspaceId);
@@ -63,7 +75,8 @@ export function markScheduledTaskAttentionSeen(
 
 /**
  * The Schedules navigation dot: a schedule this person can act on has a run
- * that failed closed on connector access, and they have not looked at it yet.
+ * that failed closed on connector access, or cannot start because a chosen
+ * account is gone, and they have not looked at it yet.
  */
 export function useScheduledTaskAttentionIndicator(workspaceId: string, enabled = true) {
   const { client, accessContext } = useAppContext();

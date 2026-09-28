@@ -85,7 +85,19 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-    const tasks = await listScheduledTaskAccessAttention({ db, settings: deps.settings, grant });
+    // The account plan reads only the MCP registry and tool defaults, which the
+    // model catalog does not change, so the deployment settings suffice here.
+    const tasks = await listScheduledTaskAccessAttention({
+      db,
+      settings: deps.settings,
+      grant,
+      onError: (error) => {
+        deps.observability?.warn("Scheduled task account availability could not be computed", {
+          errorClass: error instanceof Error ? error.name : "ScheduledTaskAccessAttentionError",
+          origin: "api",
+        });
+      },
+    });
     return c.json({ tasks });
   });
 

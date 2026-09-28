@@ -19,7 +19,10 @@ import {
   scheduledTaskAccessFailureText,
   scheduledTaskAccessFailuresText,
   scheduledTaskDescription,
+  scheduledTaskDriftIsDismissible,
   scheduledTaskPolicyDriftLines,
+  scheduledTaskUnavailableAccountsText,
+  visibleScheduledTaskPolicyDrift,
   scheduledTaskRunLabel,
   scheduledTaskRunSessionAccess,
   scheduledTaskRunTriggerIsRedundant,
@@ -870,5 +873,72 @@ describe("scheduled task access in plain words", () => {
     ]);
     expect(scheduledTaskPolicyDriftLines(null)).toEqual([]);
     expect(scheduledTaskPolicyDriftLines(undefined)).toEqual([]);
+  });
+
+  test("says a blocked account once when a louder notice already names it", () => {
+    const drift = {
+      missingConnectors: [],
+      unavailableConnectors: [],
+      missingOpenGeniTools: [],
+      unavailableAccounts: [
+        { id: "slack", name: "Slack" },
+        { id: "gmail", name: "Gmail" },
+      ],
+      attachableAccounts: [],
+      canRefresh: true,
+    };
+    expect(scheduledTaskUnavailableAccountsText(drift.unavailableAccounts)).toBe(
+      "The account chosen for Slack and Gmail can no longer be used, so new runs cannot start.",
+    );
+    expect(scheduledTaskUnavailableAccountsText([])).toBeNull();
+    expect(scheduledTaskPolicyDriftLines(drift, { omitUnavailableAccounts: true })).toEqual([]);
+  });
+
+  test("hides only the defaults the owner kept off, and only for the task head they saw", () => {
+    const drift = {
+      missingConnectors: [
+        { id: "gmail", name: "Gmail" },
+        { id: "notion", name: "Notion" },
+      ],
+      unavailableConnectors: [],
+      missingOpenGeniTools: ["browser_read" as const],
+      unavailableAccounts: [],
+      attachableAccounts: [],
+      canRefresh: true,
+    };
+    const head = "a".repeat(64);
+    const dismissal = { executionDigest: head, connectors: ["gmail"], openGeniTools: [] };
+    expect(visibleScheduledTaskPolicyDrift(drift, dismissal, head)).toEqual({
+      ...drift,
+      missingConnectors: [{ id: "notion", name: "Notion" }],
+    });
+    // Everything dismissed: nothing left to show.
+    expect(
+      visibleScheduledTaskPolicyDrift(
+        drift,
+        { executionDigest: head, connectors: ["gmail", "notion"], openGeniTools: ["browser_read"] },
+        head,
+      ),
+    ).toBeNull();
+    // A broken account is never hidden by a dismissal.
+    const blocked = { ...drift, unavailableAccounts: [{ id: "slack", name: "Slack" }] };
+    expect(
+      visibleScheduledTaskPolicyDrift(
+        blocked,
+        { executionDigest: head, connectors: ["gmail", "notion"], openGeniTools: ["browser_read"] },
+        head,
+      ),
+    ).toMatchObject({ missingConnectors: [], unavailableAccounts: [{ id: "slack" }] });
+    // A dismissal made for another task head no longer applies.
+    expect(visibleScheduledTaskPolicyDrift(drift, dismissal, "b".repeat(64))).toBe(drift);
+    expect(visibleScheduledTaskPolicyDrift(null, dismissal, head)).toBeNull();
+    expect(scheduledTaskDriftIsDismissible(drift)).toBe(true);
+    expect(
+      scheduledTaskDriftIsDismissible({
+        ...blocked,
+        missingConnectors: [],
+        missingOpenGeniTools: [],
+      }),
+    ).toBe(false);
   });
 });

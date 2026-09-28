@@ -5,6 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Settings } from "@opengeni/config";
 import type { AccessGrant, Permission, ScheduledTask } from "@opengeni/contracts";
 import {
+  listScheduledTaskAccessAttention,
   refreshScheduledTaskAccess,
   withScheduledTaskPolicyDrift,
   type AccessGrantAuthorization,
@@ -255,6 +256,23 @@ describe("scheduled task access drift and refresh", () => {
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
     expect(memberView).toEqual(task);
+
+    // The chosen Linear account is gone, so the scheduler refuses every fresh
+    // occurrence before it creates a run: the owner's attention list says so.
+    const attention = (grantFor: AccessGrant) =>
+      listScheduledTaskAccessAttention({ db: client.db, settings: settings(), grant: grantFor });
+    expect(await attention(grant(workspace, workspace.owner))).toEqual([
+      {
+        taskId: task.id,
+        taskName: "Weekly Linear digest",
+        executionDigest: task.executionDigest,
+        runId: null,
+        firedAt: null,
+        failures: [],
+        unavailableAccounts: [{ id: "linear", name: "Linear" }],
+      },
+    ]);
+    expect(await attention(grant(workspace, workspace.member))).toEqual([]);
   }, 60_000);
 
   test("refuses keys, other members and a changed head before writing", async () => {
@@ -360,6 +378,45 @@ describe("scheduled task access drift and refresh", () => {
     expect(again.authorityRevision).toBe(refreshed.authorityRevision);
   }, 60_000);
 
+  test("a refresh keeps the defaults the owner chose to leave out off the schedule", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const task = await staleAgentTask(workspace);
+    const refreshed = await refreshScheduledTaskAccess({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      authorization: signedIn(workspace, workspace.owner),
+      taskId: task.id,
+      request: {
+        executionDigest: task.executionDigest,
+        leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+      },
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+    });
+    // The broken account is still fixed and rig_list still added.
+    expect(refreshed.agentConfig.tools).toEqual([{ kind: "mcp", id: "linear" }]);
+    expect(refreshed.agentConfig.connectionAccounts).toEqual([
+      { serverId: "linear", connectionId: workspace.liveConnectionId },
+    ]);
+    const policy = await getScheduledTaskCreatorPolicy(client.db, workspace.workspaceId, task.id);
+    expect(policy?.firstPartyMcpTools).toEqual(["sessions_list", "rig_list"]);
+    // The drift still reports the defaults that were left out; the web hides
+    // them only in the browser of the person who chose to.
+    const [after] = await withScheduledTaskPolicyDrift({
+      db: client.db,
+      settings: settings(),
+      authorization: signedIn(workspace, workspace.owner),
+      tasks: [refreshed],
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+    });
+    expect(after?.policyDrift).toMatchObject({
+      missingConnectors: [{ id: "notion", name: "Notion" }],
+      missingOpenGeniTools: ["browser_read"],
+      unavailableAccounts: [],
+    });
+  }, 60_000);
+
   test("fixing an account never lifts a narrowed agent task's permission boundary", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -446,6 +503,28 @@ describe("scheduled task access drift and refresh", () => {
       metadata: {},
     });
     expect(task.ownerSubjectId).toBeNull();
+    // A service schedule whose chosen workspace account was removed: nobody
+    // owns it, so the key that manages schedules is told.
+    const blocked = await createScheduledTask(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      name: "Service Linear digest",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Summarize",
+        resources: [],
+        tools: [{ kind: "mcp", id: "linear" }],
+        metadata: {},
+        connectionAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
+        connectionAccountsFrozen: true,
+      },
+      createdBy: { kind: "service", subjectId: "scheduler" },
+      metadata: {},
+    });
     const token = randomBytes(24).toString("hex");
     await createOrganizationApiKey(client.db, {
       accountId: workspace.accountId,
@@ -467,7 +546,8 @@ describe("scheduled task access drift and refresh", () => {
       headers,
     });
     expect(listed.status).toBe(200);
-    const [view] = (await listed.json()) as ScheduledTask[];
+    const views = (await listed.json()) as ScheduledTask[];
+    const view = views.find((candidate) => candidate.id === task.id);
     expect(view?.policyDrift).toEqual({
       missingConnectors: [
         { id: "linear", name: "Linear" },
@@ -486,7 +566,19 @@ describe("scheduled task access drift and refresh", () => {
       { headers },
     );
     expect(attention.status).toBe(200);
-    expect(await attention.json()).toEqual({ tasks: [] });
+    expect(await attention.json()).toEqual({
+      tasks: [
+        {
+          taskId: blocked.id,
+          taskName: "Service Linear digest",
+          executionDigest: blocked.executionDigest,
+          runId: null,
+          firedAt: null,
+          failures: [],
+          unavailableAccounts: [{ id: "linear", name: "Linear" }],
+        },
+      ],
+    });
 
     const refused = await app.request(
       `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${task.id}/refresh-access`,
