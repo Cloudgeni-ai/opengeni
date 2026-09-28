@@ -354,8 +354,8 @@ only its trigger, steps, checks, and important failure handling, with long
 references, schemas, or scripts in supporting files. Background, restated
 defaults, and lists of things not to do are omitted, and an edit changes only
 what the request is about. The description is the one part in every prompt
-index, so an agent-written description is capped at 300 characters. The Knowledge lane keeps the wider
-`REMEMBER_CONTENT_MAX_CHARS` (4,000) ceiling because it is retrieval evidence and
+index, so an agent-written description is capped at 300 characters. The
+Knowledge lane keeps the wider `REMEMBER_CONTENT_MAX_CHARS` (4,000) ceiling because it is retrieval evidence and
 never joins the always-composed prefix.
 
 The `remember` confirmation card names the cost before a human agrees to it: its
