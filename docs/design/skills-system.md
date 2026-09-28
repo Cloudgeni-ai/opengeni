@@ -308,8 +308,12 @@ including scheduled sessions, rather than introducing worker-only overrides.
 Persist the distinction between omitted and empty. Unknown explicit ids fail
 validation. Store the resolved choice in sanitized immutable session metadata,
 following the existing create-identity convention; expose it as a typed session
-field. Raw caller metadata cannot override it. Keyed create retries must retain
-the same effective selection. Agent-created schedules inherit or narrow their
+field. Reading that stored choice drops ids the running build does not know
+(for example, a row written by a newer release), so the read narrows the
+selection instead of failing; it never reverts to defaults. Raw caller
+metadata cannot override it. Keyed create retries must retain the same
+effective selection, and compare against the exact stored value rather than
+that narrowed read. Agent-created schedules inherit or narrow their
 creator's choice; an existing-session schedule cannot override its target.
 Adding a new bundled Skill must not expand an explicit host selection.
 
