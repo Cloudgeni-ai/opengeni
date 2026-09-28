@@ -933,6 +933,13 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         .waitFor();
       await approveAndNext.click();
       await change("Review Acme renewal").waitFor();
+      // Approved prerequisites leave the list at once, so no later step can
+      // open or advance onto a decided proposal.
+      for (const decided of ["Review Acme collection", "Review Acme contract"])
+        expect(await acmeChanges.getByRole("button", { name: decided, exact: true }).count()).toBe(
+          0,
+        );
+      expect(await acmeChanges.getByRole("button").count()).toBe(2);
       const diff = page
         .locator("figure")
         .filter({ visible: true })

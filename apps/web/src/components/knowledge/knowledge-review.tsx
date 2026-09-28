@@ -397,6 +397,13 @@ export function ReviewTab({
     onChanged();
   };
 
+  // A prerequisite decided from another change's pane is listed on its own
+  // too: hide it now and refetch, so nothing advances onto a decided proposal.
+  const prerequisiteDone = (entryId: string, revisionId: string) => {
+    setHidden((prior) => new Map(prior).set(`knowledge:${entryId}`, revisionId));
+    onChanged();
+  };
+
   const help = (
     <InlineHelp icon>
       {learningLine} <HelpLink onClick={onOpenLearning}>Change it</HelpLink>
@@ -522,6 +529,7 @@ export function ReviewTab({
       item={selected}
       remaining={items.length}
       onDone={() => next(selected)}
+      onPrerequisiteDone={prerequisiteDone}
       onOpenEntry={onOpenEntry}
     />
   );
@@ -629,12 +637,14 @@ function ReviewDetail({
   item,
   remaining,
   onDone,
+  onPrerequisiteDone,
   onOpenEntry,
 }: {
   workspaceId: string;
   item: ReviewItem;
   remaining: number;
   onDone: () => void;
+  onPrerequisiteDone: (entryId: string, revisionId: string) => void;
   onOpenEntry: (id: string) => void;
 }) {
   const { client } = useAppContext();
@@ -737,6 +747,7 @@ function ReviewDetail({
         // A prerequisite is done; the change the reviewer picked is next.
         setEditing(false);
         setRetry((value) => value + 1);
+        onPrerequisiteDone(loaded.record.id, loaded.record.revision.id);
         notifyKnowledgeReviewUpdated();
       } else {
         onDone();
