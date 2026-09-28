@@ -1,32 +1,80 @@
 // Production app + staged API responses, not a component imitation.
-// Run after building apps/web: bun apps/web/test/session-loading-startup.browser.ts
+// The production artifact is built once and shared by both viewport tests.
+import { afterAll, beforeAll, test } from "bun:test";
 import { strict as assert } from "node:assert";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { chromium, type Page } from "playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { chromium, type Browser, type Page } from "playwright";
+import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
-import { fakeCapabilities } from "../../../packages/react/test/sandbox-fixtures";
+import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
-const repo = new URL("../../..", import.meta.url).pathname;
-const output = `${repo}/.agent/evidence/session-loading-startup`;
+const repo = new URL("../..", import.meta.url).pathname;
+const output =
+  process.env.SESSION_LOADING_ARTIFACT_DIR ?? `${repo}/.agent/evidence/session-loading-startup`;
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
 const turnId = "44444444-4444-4444-8444-444444444444";
-const port = await freePort();
-const base = `http://127.0.0.1:${port}`;
-const web = await startProcess(
-  ["bun", "run", "vite", "preview", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-  {
-    cwd: `${repo}/apps/web`,
-    ready: async () => (await fetch(base).catch(() => null))?.ok === true,
-  },
-);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH ?? "/usr/local/bin/chromium",
-  args: ["--no-sandbox", "--disable-dev-shm-usage"],
-});
-await mkdir(output, { recursive: true });
+let base: string;
+let web: StartedProcess | undefined;
+let browser: Browser;
+
+async function cleanup() {
+  await Promise.allSettled([browser?.close(), web?.stop()]);
+}
+
+beforeAll(async () => {
+  try {
+    // Match session-lazy-panels: production chunks and the unchanged budget gate,
+    // with one build for the suite rather than a build per viewport/state.
+    const build = await runCommand(["bun", "run", "build"], {
+      cwd: `${repo}/apps/web`,
+      env: { NODE_ENV: "production", VITE_API_BASE_URL: "" },
+      timeoutMs: 180_000,
+    });
+    if (build.exitCode !== 0)
+      throw new Error(
+        `Production web build failed:\n${build.stderr}\n${build.stdout.slice(-6000)}`,
+      );
+    const port = await freePort();
+    base = `http://127.0.0.1:${port}`;
+    web = await startProcess(
+      [
+        "bun",
+        "run",
+        "vite",
+        "preview",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(port),
+        "--strictPort",
+      ],
+      {
+        cwd: `${repo}/apps/web`,
+        ready: async () =>
+          (await fetch(base, { signal: AbortSignal.timeout(2000) }).catch(() => null))?.ok === true,
+        timeoutMs: 30_000,
+      },
+    );
+    const executablePath =
+      process.env.CHROMIUM_EXECUTABLE_PATH ??
+      process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ??
+      process.env.OPENGENI_BROWSER_BIN ??
+      ["/opt/google/chrome/chrome", "/usr/local/bin/chromium"].find(existsSync);
+    browser = await chromium.launch({
+      executablePath,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    });
+    await mkdir(output, { recursive: true });
+  } catch (error) {
+    // Includes launch failure after the preview server has already started.
+    await cleanup();
+    throw error;
+  }
+}, 210_000);
+afterAll(cleanup);
 
 function gate() {
   let release!: () => void;
@@ -373,8 +421,8 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
   });
 }
 
-try {
-  for (const width of [1280, 390]) {
+for (const width of [1280, 390]) {
+  test(`production refresh and truthful startup at ${width}px`, async () => {
     const context = await browser.newContext({
       viewport: { width, height: 900 },
       reducedMotion: "reduce",
@@ -513,8 +561,5 @@ try {
       for (const deferred of Object.values(state.gates)) deferred.release();
       await context.close();
     }
-  }
-} finally {
-  await browser.close();
-  await web.stop();
+  }, 90_000);
 }
