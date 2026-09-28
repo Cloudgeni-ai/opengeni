@@ -2435,6 +2435,58 @@ export function recordSkillRead(
   });
 }
 
+/**
+ * One skill_checkout call. Labels are closed sets and never carry Skill ids,
+ * names, or paths. Phases that did not run are not observed.
+ */
+export function recordSkillCheckout(
+  observability: Observability,
+  checkout: {
+    outcome: "written" | "unchanged" | "refused" | "failed";
+    selection: "all" | "paths";
+    written: number;
+    unchanged: number;
+    resolveSeconds: number | null;
+    sandboxSeconds: number | null;
+    writeSeconds: number | null;
+    totalSeconds: number;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_skill_checkouts_total",
+    help: "skill_checkout calls by outcome and whether they selected specific paths.",
+    labels: { outcome: checkout.outcome, selection: checkout.selection },
+  });
+  const phases = [
+    ["resolve", checkout.resolveSeconds],
+    ["sandbox", checkout.sandboxSeconds],
+    ["write", checkout.writeSeconds],
+    ["total", checkout.totalSeconds],
+  ] as const;
+  for (const [phase, seconds] of phases) {
+    if (seconds === null) continue;
+    observability.observeHistogram({
+      name: "opengeni_skill_checkout_duration_seconds",
+      help: "Wall time of skill_checkout phases: resolve (authority and Skill read), sandbox (filesystem handle), write (batched file write, including lazy box start), and total.",
+      buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60],
+      labels: { phase, outcome: checkout.outcome },
+      value: Math.max(0, seconds),
+    });
+  }
+  for (const [result, amount] of [
+    ["written", checkout.written],
+    ["unchanged", checkout.unchanged],
+  ] as const) {
+    if (amount <= 0) continue;
+    observability.incrementCounter({
+      name: "opengeni_skill_checkout_files_total",
+      help: "Files skill_checkout wrote or found already present with the same content.",
+      labels: { result },
+      amount,
+    });
+  }
+}
+
 function skillReadMetricLabel(source: SkillUseSource | null, skill: string): string {
   if (source !== null && source !== "builtin") return "custom";
   // A refused read may name a built-in by its plain name.

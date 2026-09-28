@@ -20,6 +20,7 @@
 // apply-patch-only path which cannot do binary, C4), falling back to
 // `createEditor` for text when `exec` is absent.
 
+import { createHash } from "node:crypto";
 import { constants as zlibConstants, createGunzip } from "node:zlib";
 import type {
   FileSystemRouteIdentity,
@@ -71,6 +72,20 @@ import {
   resolveConnectedMachinePath,
 } from "./selfhosted/workspace-path";
 import { ModalProcessObservationUnavailableError } from "./errors";
+import {
+  directoryCheckFragment,
+  directoryCreateFragment,
+  fileCheckFragment,
+  filePutFragment,
+  parseWriteFilesOutput,
+  quotedLength,
+  WRITE_FILES_COMMAND_MAX_CHARS,
+  writeFilesPrelude,
+  writeFilesScript,
+  type WriteFilesOutput,
+  type WriteFilesScriptDirectory,
+  type WriteFilesScriptFile,
+} from "./write-files-script";
 import {
   hasTypedExecHandleLoss,
   isExecSessionLostBanner,
@@ -224,6 +239,26 @@ export type ChannelARoutedWorkspaceImportBatchRequest = {
   workspaceRoot: string;
   revision: number;
   runAs?: string;
+};
+
+/** Create a directory's missing files without replacing anything. */
+export type FsWriteFilesRequest = {
+  /** Workspace-relative directory; created with its parents when missing. */
+  directory: string;
+  /** Paths are relative to `directory`. */
+  files: readonly { path: string; content: string; encoding?: "utf8" | "base64" }[];
+  route?: FileSystemRouteIdentity;
+};
+
+export type FsWriteFilesResponse = {
+  directory: string;
+  /** Request paths this call created, in request order. */
+  written: string[];
+  /** Request paths that already held exactly these bytes. */
+  unchanged: string[];
+  /** Whether this call created `directory` itself. */
+  createdDirectory: boolean;
+  revision: number;
 };
 
 // ── Errors mapped to HTTP status at the route. ───────────────────────────────
@@ -1110,6 +1145,310 @@ export class SandboxChannelAService {
       "write",
     );
     return { path, sizeBytes: bytes.byteLength, revision: this.revision };
+  }
+
+  /**
+   * Create every missing file beneath one workspace-relative directory in as
+   * few provider commands as possible, normally one. Nothing is replaced: an
+   * existing regular file with the same bytes is reported unchanged, while any
+   * other entry at a file path, a symbolic link on the directory path, or a
+   * path resolving outside the workspace fails before anything is written.
+   * Only a request too large for one command can partially apply; it then
+   * fails with ChannelAPartialMutationError. Repeating a request after any
+   * failure is safe because files it already wrote are reported unchanged.
+   */
+  async fsWriteFiles(req: FsWriteFilesRequest): Promise<FsWriteFilesResponse> {
+    this.assertFileSystemRoute(req.route);
+    const plan = this.planWriteFiles(req);
+    const prelude = writeFilesPrelude({
+      root: this.providerWorkspaceRoot(),
+      realpathFunction: PORTABLE_REALPATH_EXISTING_FUNCTION,
+      sha256Function: PORTABLE_SHA256_FILE_FUNCTION,
+    });
+    // A runAs wrapper quotes the command twice more, multiplying each quote.
+    const budget = this.runAs
+      ? Math.floor(WRITE_FILES_COMMAND_MAX_CHARS / 4)
+      : WRITE_FILES_COMMAND_MAX_CHARS;
+    // Prelude, the bash -c wrapper, and the trailing marker.
+    const fixedCost = prelude.reduce((total, line) => total + quotedLength(line), 0) + 256;
+    const written = new Set<number>();
+    const unchanged = new Set<number>();
+    const createdDirectories = new Set<number>();
+    const emittedSeparately = new Set<number>();
+    const scriptFile = (file: PlannedWriteFile, withContent: boolean): WriteFilesScriptFile => ({
+      index: file.index,
+      providerPath: file.providerPath,
+      sizeBytes: file.sizeBytes,
+      sha256: file.sha256,
+      ...(withContent ? { base64: file.base64 } : {}),
+    });
+    const pack = (files: readonly PlannedWriteFile[], mode: "check" | "write") => {
+      const batches: { files: PlannedWriteFile[]; directories: Set<number> }[] = [];
+      const oversize: PlannedWriteFile[] = [];
+      let current: { files: PlannedWriteFile[]; directories: Set<number> } | null = null;
+      let cost = 0;
+      const directoryCost = (index: number) => {
+        const directory = plan.directories[index]!;
+        return (
+          quotedLength(directoryCheckFragment(directory)) +
+          (mode === "write" ? quotedLength(directoryCreateFragment(directory)) : 0)
+        );
+      };
+      for (const file of files) {
+        const fileCost =
+          quotedLength(fileCheckFragment(scriptFile(file, false), mode)) +
+          (mode === "write" ? quotedLength(filePutFragment(scriptFile(file, true))) : 0);
+        const standalone =
+          fixedCost +
+          fileCost +
+          file.chain.reduce((total, index) => total + directoryCost(index), 0);
+        if (standalone > budget) {
+          oversize.push(file);
+          continue;
+        }
+        const added = file.chain
+          .filter((index) => !current?.directories.has(index))
+          .reduce((total, index) => total + directoryCost(index), 0);
+        if (current && cost + fileCost + added > budget) {
+          batches.push(current);
+          current = null;
+        }
+        if (!current) {
+          current = { files: [], directories: new Set() };
+          cost = fixedCost;
+        }
+        for (const index of file.chain) {
+          if (current.directories.has(index)) continue;
+          current.directories.add(index);
+          cost += directoryCost(index);
+        }
+        current.files.push(file);
+        cost += fileCost;
+      }
+      if (current) batches.push(current);
+      return { batches, oversize };
+    };
+    const command = (
+      mode: "check" | "write",
+      batch: { files: PlannedWriteFile[]; directories: Set<number> },
+    ): string => {
+      const cmd = internalBashCommand(
+        writeFilesScript({
+          prelude,
+          mode,
+          directories: [...batch.directories]
+            .sort((left, right) => left - right)
+            .map((index) => plan.directories[index]!),
+          files: batch.files.map((file) => scriptFile(file, mode === "write")),
+        }),
+      );
+      if (cmd.length > budget) {
+        throw new Error("workspace file batch exceeded its command budget");
+      }
+      return cmd;
+    };
+    const execute = async (
+      mode: "check" | "write",
+      batch: { files: PlannedWriteFile[]; directories: Set<number> },
+    ): Promise<WriteFilesOutput> => {
+      const cmd = command(mode, batch);
+      const result = mode === "check" ? await this.runReadOnly({ cmd }) : await this.run({ cmd });
+      const output = parseWriteFilesOutput(result.stdout);
+      for (const index of output.written) written.add(index);
+      for (const index of output.same) unchanged.add(index);
+      for (const index of output.createdDirectories) createdDirectories.add(index);
+      const reported = new Set([...output.same, ...output.missing, ...output.written]);
+      if (
+        result.sessionId !== undefined ||
+        output.failure ||
+        !output.complete ||
+        (result.exitCode !== null && result.exitCode !== 0) ||
+        batch.files.some((file) => !reported.has(file.index))
+      ) {
+        throw this.writeFilesError(plan, output, result.stderr);
+      }
+      return output;
+    };
+
+    try {
+      const whole = pack(plan.files, "write");
+      if (whole.oversize.length === 0 && whole.batches.length === 1) {
+        await execute("write", whole.batches[0]!);
+      } else {
+        // Too large for one command: prove every path first with read-only
+        // checks, then create only the missing files.
+        const missing = new Set<number>();
+        for (const batch of pack(plan.files, "check").batches) {
+          for (const index of (await execute("check", batch)).missing) missing.add(index);
+        }
+        const remaining = pack(
+          plan.files.filter((file) => missing.has(file.index)),
+          "write",
+        );
+        for (const batch of remaining.batches) await execute("write", batch);
+        // A file too large to inline takes the single-file path, which moves
+        // bytes out of band when the provider can. It emits its own change.
+        for (const file of remaining.oversize) {
+          await this.fsWrite({
+            path: file.workspacePath,
+            content: file.base64,
+            encoding: "base64",
+            overwrite: false,
+            createParents: true,
+          });
+          written.add(file.index);
+          emittedSeparately.add(file.index);
+        }
+      }
+    } catch (error) {
+      await this.emitWriteFilesChanges(plan, written, createdDirectories, emittedSeparately).catch(
+        () => undefined,
+      );
+      if (written.size > 0 && !(error instanceof ChannelAPartialMutationError)) {
+        throw new ChannelAPartialMutationError(
+          "Workspace file batch failed after some files were written; repeating the same request keeps identical files and creates the rest",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    await this.emitWriteFilesChanges(plan, written, createdDirectories, emittedSeparately);
+    return {
+      directory: plan.directory,
+      written: plan.files.filter((file) => written.has(file.index)).map((file) => file.requestPath),
+      unchanged: plan.files
+        .filter((file) => unchanged.has(file.index) && !written.has(file.index))
+        .map((file) => file.requestPath),
+      createdDirectory: createdDirectories.has(plan.directoryIndex),
+      revision: this.revision,
+    };
+  }
+
+  private planWriteFiles(req: FsWriteFilesRequest): WriteFilesPlan {
+    const directory = strictWorkspaceRelativePath(req.directory, "directory");
+    if (req.files.length === 0) throw new ChannelAValidationError("files are required");
+    const directoryPaths = new Map<string, number>();
+    const directorySegments = directory.split("/");
+    const ancestors: string[] = [];
+    for (let depth = 1; depth <= directorySegments.length; depth += 1) {
+      ancestors.push(directorySegments.slice(0, depth).join("/"));
+    }
+    const filePaths = new Set<string>();
+    const prepared = req.files.map((file) => {
+      const requestPath = strictWorkspaceRelativePath(file.path, "file");
+      const workspacePath = `${directory}/${requestPath}`;
+      if (filePaths.has(workspacePath)) {
+        throw new ChannelAValidationError(`duplicate file path: ${requestPath}`);
+      }
+      filePaths.add(workspacePath);
+      const bytes =
+        file.encoding === "base64"
+          ? Buffer.from(file.content, "base64")
+          : Buffer.from(file.content, "utf8");
+      const segments = workspacePath.split("/");
+      const parents: string[] = [];
+      for (let depth = 1; depth < segments.length; depth += 1) {
+        parents.push(segments.slice(0, depth).join("/"));
+      }
+      return { requestPath, workspacePath, bytes, parents };
+    });
+    const allDirectories = new Set<string>(ancestors);
+    for (const file of prepared) for (const parent of file.parents) allDirectories.add(parent);
+    for (const path of allDirectories) {
+      if (filePaths.has(path)) {
+        throw new ChannelAValidationError(`path is both a file and a directory: ${path}`);
+      }
+    }
+    // Parents precede children, so creation runs shallowest first.
+    const ordered = [...allDirectories].sort(
+      (left, right) => left.split("/").length - right.split("/").length || (left < right ? -1 : 1),
+    );
+    const directories = ordered.map((workspacePath, index) => {
+      directoryPaths.set(workspacePath, index);
+      return { index, workspacePath, providerPath: this.joinRoot(workspacePath) };
+    });
+    const files = prepared.map((file, index) => ({
+      index,
+      requestPath: file.requestPath,
+      workspacePath: file.workspacePath,
+      providerPath: this.joinRoot(file.workspacePath),
+      sizeBytes: file.bytes.byteLength,
+      sha256: createHash("sha256").update(file.bytes).digest("hex"),
+      base64: file.bytes.toString("base64"),
+      chain: file.parents.map((parent) => directoryPaths.get(parent)!),
+    }));
+    return { directory, directories, files, directoryIndex: directoryPaths.get(directory)! };
+  }
+
+  private writeFilesError(plan: WriteFilesPlan, output: WriteFilesOutput, stderr: string): Error {
+    const failure = output.failure;
+    const target = failure?.target
+      ? failure.target.kind === "file"
+        ? plan.files[failure.target.index]?.workspacePath
+        : plan.directories[failure.target.index]?.workspacePath
+      : undefined;
+    const detail = stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : "";
+    switch (failure?.code) {
+      case "CONFLICT":
+        return new ChannelAConflictError(
+          `path exists with different content and was not overwritten: ${target ?? "unknown"}`,
+        );
+      case "UNVERIFIED":
+        return new ChannelAConflictError(
+          `path exists and could not be compared, so it was not overwritten: ${target ?? "unknown"}`,
+        );
+      case "NOT_DIR":
+        return new ChannelAConflictError(
+          `path exists and is not a directory: ${target ?? "unknown"}`,
+        );
+      case "SYMLINK":
+        return new ChannelAValidationError(
+          `directory path must not be a symbolic link: ${target ?? "unknown"}`,
+        );
+      case "ESCAPE":
+        return new ChannelAValidationError(
+          `path resolves outside workspace: ${target ?? "unknown"}`,
+        );
+      case "WRITE_FAILED":
+        return new ChannelAValidationError(`failed to write ${target ?? "unknown"}${detail}`);
+      case "NOT_FOUND":
+        if (!target) return new ChannelANotFoundError("workspace root not found");
+        break;
+      default:
+        break;
+    }
+    return new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
+    );
+  }
+
+  private async emitWriteFilesChanges(
+    plan: WriteFilesPlan,
+    written: ReadonlySet<number>,
+    createdDirectories: ReadonlySet<number>,
+    emittedSeparately: ReadonlySet<number>,
+  ): Promise<void> {
+    const changes: FsChangedPayload["changes"] = [
+      ...plan.directories
+        .filter((directory) => createdDirectories.has(directory.index))
+        .map((directory) => ({
+          path: directory.workspacePath,
+          kind: "created" as const,
+          isDir: true,
+          sizeBytes: null,
+        })),
+      ...plan.files
+        .filter((file) => written.has(file.index) && !emittedSeparately.has(file.index))
+        .map((file) => ({
+          path: file.workspacePath,
+          kind: "created" as const,
+          isDir: false,
+          sizeBytes: file.sizeBytes,
+        })),
+    ];
+    if (changes.length === 0) return;
+    this.revision++;
+    await this.emitFsChanged(changes, "write");
   }
 
   /** Import one logical batch of exact signed objects. A routing session keeps
@@ -3137,6 +3476,41 @@ function addedLines(bytes: Buffer): GitDiffHunk["lines"] {
     newNo: index + 1,
     text,
   }));
+}
+
+type PlannedWriteFile = {
+  index: number;
+  requestPath: string;
+  workspacePath: string;
+  providerPath: string;
+  sizeBytes: number;
+  sha256: string;
+  base64: string;
+  /** Directory indexes from the shallowest ancestor to the file's parent. */
+  chain: number[];
+};
+
+type WriteFilesPlan = {
+  directory: string;
+  directories: (WriteFilesScriptDirectory & { workspacePath: string })[];
+  files: PlannedWriteFile[];
+  directoryIndex: number;
+};
+
+/** Batch writes accept only plain relative segments: no absolute paths, dot
+ * segments, backslashes, or control characters. */
+function strictWorkspaceRelativePath(path: string, kind: "directory" | "file"): string {
+  if (
+    typeof path !== "string" ||
+    !path ||
+    path.length > 4_096 ||
+    path.includes("\\") ||
+    /[\u0000-\u001f\u007f]/u.test(path) ||
+    path.split("/").some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    throw new ChannelAValidationError(`${kind} path must be a plain relative path: ${path}`);
+  }
+  return path;
 }
 
 function normalizeRelPath(p: string): string {

@@ -1054,6 +1054,28 @@ it. It holds no Skill text, user text, or Skill title, and it is dropped rather
 than let a result cross the 1 MiB model-visible cap. Codemode results never carry
 it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
 stored event and drops fields a newer worker added instead of the whole fact.
+The default `skill_read` (no `paths`) also returns a bounded `scripts` index:
+each runnable file's path and first usage line (a shebang or script extension, or
+any non-document file under `scripts/` or `bin/`; at most 32 entries and 4 KiB,
+with `scriptsOmitted` for the rest), so the agent sees the commands without a
+checkout. Explicit `paths`, `listFiles`, and the tool schema are unchanged.
+`skill_checkout` writes the selected files through one Channel-A
+`fsWriteFiles` batch: normally one sandbox command, so one workspace mutation
+admission and one `fs.changed` event, instead of several commands per file. It
+never overwrites. A file already holding the same bytes is kept and reported
+`unchanged`; any other existing entry, a symbolic link on the directory path, or
+a path resolving outside the workspace fails before anything is written. A
+request too large for one command (about 88 KiB of encoded content) runs
+read-only checks first, then writes only missing files in batches, and reports a
+later-batch failure as a partial mutation; repeating the same checkout finishes
+it. Optional `paths` copies exactly those files, for example one script to run.
+Only a complete checkout that created its directory returns `revisionId` and
+`scopeVersion` as a `skill_publish` base; any other result says
+`publishable: false`, because a reused directory may hold files outside the
+revision. Each call records `opengeni_skill_checkouts_total{outcome, selection}`,
+`opengeni_skill_checkout_duration_seconds{phase, outcome}` (`resolve`,
+`sandbox`, `write`, `total`; lazy box start falls in `write` when checkout is
+the turn's first sandbox operation) and `opengeni_skill_checkout_files_total{result}`.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound

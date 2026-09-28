@@ -3,7 +3,11 @@ import {
   applySkillFileChanges,
   assertSkillRelativePath,
   readSkillFiles,
+  skillScriptIndex,
   SKILL_READ_MAX_OUTPUT_BYTES,
+  SKILL_SCRIPT_INDEX_MAX_BYTES,
+  SKILL_SCRIPT_INDEX_MAX_ENTRIES,
+  SKILL_SCRIPT_USAGE_MAX_CHARS,
 } from "../src/skill-files";
 
 const folder = [
@@ -97,5 +101,57 @@ describe("partial Skill saves", () => {
     expect(() => applySkillFileChanges(folder, [folder[0]!], ["SKILL.md"])).toThrow("Conflicting");
     expect(() => applySkillFileChanges(folder, [folder[0]!, folder[0]!])).toThrow("Conflicting");
     expect(() => applySkillFileChanges(folder, [], ["missing"])).toThrow("missing");
+  });
+});
+
+describe("Skill script index", () => {
+  test("lists runnable files with their first usage line", () => {
+    const index = skillScriptIndex([
+      { path: "SKILL.md", content: "#!/not/a/script\n" },
+      {
+        path: "scripts/dau.py",
+        content:
+          '#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n"""\nCount daily active users.\n\nUsage: python scripts/dau.py --from 2026-01-01 --to 2026-01-31\n"""\nimport sys\n',
+      },
+      {
+        path: "scripts/export.sh",
+        content: '#!/bin/sh\nset -eu\n[ $# -eq 1 ] || { echo "Usage: $0 TABLE"; exit 2; }\n',
+      },
+      { path: "scripts/query.sql", content: "-- Revenue by week for one account\nselect 1;\n" },
+      { path: "tools/format.ts", content: "// Normalize a CSV export into JSON.\nexport {};\n" },
+      { path: "bin/run", content: "exec python3 main.py\n" },
+      { path: "scripts/README.md", content: "# Scripts\nUsage: read me\n" },
+      { path: "references/api.md", content: "Usage: not a script\n" },
+    ]);
+    expect(index).toEqual({
+      scripts: [
+        { path: "bin/run" },
+        {
+          path: "scripts/dau.py",
+          usage: "Usage: python scripts/dau.py --from 2026-01-01 --to 2026-01-31",
+        },
+        { path: "scripts/export.sh", usage: "Usage: $0 TABLE" },
+        { path: "scripts/query.sql", usage: "Revenue by week for one account" },
+        { path: "tools/format.ts", usage: "Normalize a CSV export into JSON." },
+      ],
+    });
+  });
+
+  test("is absent without scripts and bounded with many", () => {
+    expect(skillScriptIndex([{ path: "SKILL.md", content: "# Only docs" }])).toBeNull();
+    const many = Array.from({ length: 40 }, (_, index) => ({
+      path: `scripts/job-${String(index).padStart(2, "0")}.py`,
+      content: `# Usage: python job.py ${"--flag ".repeat(60)}\n`,
+    }));
+    const index = skillScriptIndex(many)!;
+    expect(index.scripts.length).toBeLessThanOrEqual(SKILL_SCRIPT_INDEX_MAX_ENTRIES);
+    expect(index.scripts.length + index.scriptsOmitted!).toBe(many.length);
+    expect(Buffer.byteLength(JSON.stringify(index.scripts))).toBeLessThanOrEqual(
+      SKILL_SCRIPT_INDEX_MAX_BYTES,
+    );
+    for (const entry of index.scripts) {
+      expect(entry.usage!.length).toBeLessThanOrEqual(SKILL_SCRIPT_USAGE_MAX_CHARS);
+      expect(entry.usage!.endsWith("...")).toBe(true);
+    }
   });
 });
