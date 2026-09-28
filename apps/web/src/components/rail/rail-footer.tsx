@@ -1,4 +1,4 @@
-// Pinned account row with feedback and collapse actions. Settings is a main rail entry.
+// Pinned account row with direct settings, feedback, and collapse actions.
 // In the collapsed rail, the same controls stack with accessible labels.
 import {
   ChartColumnIcon,
@@ -12,6 +12,7 @@ import {
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
+import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Link } from "@tanstack/react-router";
 import { AppearanceMenu } from "@/components/appearance-menu";
 import { HelpMenu } from "@/components/help-menu";
@@ -217,6 +218,7 @@ export function RailFooter() {
           </div>
         )}
 
+        <WorkspaceNav compact />
         {hasWorkspacePermission(context.accessContext, rail.workspaceId, "sessions:create") ? (
           <Tooltip>
             <TooltipTrigger asChild>

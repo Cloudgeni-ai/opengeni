@@ -681,7 +681,7 @@ beforeAll(async () => {
         account_id, workspace_id, subject_id, subject_label, role, permissions
       ) values (
         ${organizationId}::uuid, ${workspaceId}::uuid, ${`user:${ownerUserId}`},
-        ${ownerAccount.email}, 'admin', ${JSON.stringify(allWorkspacePermissions)}::jsonb
+        ${ownerAccount.email}, 'admin', ${transactionSql.json(allWorkspacePermissions)}
       )`;
 
     for (const [index, member] of members.entries()) {
@@ -710,7 +710,7 @@ beforeAll(async () => {
             account_id, workspace_id, subject_id, subject_label, role, permissions
           ) values (
             ${organizationId}::uuid, ${workspaceId}::uuid, ${subjectId},
-            ${member.email}, 'member', ${JSON.stringify(allWorkspacePermissions)}::jsonb
+            ${member.email}, 'member', ${transactionSql.json(allWorkspacePermissions)}
           )`;
       }
     }

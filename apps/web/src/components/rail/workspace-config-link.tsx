@@ -2,14 +2,12 @@
 // rail Workspace menu and the settings Browse strip.
 import { Link } from "@tanstack/react-router";
 import {
-  BarChart3Icon,
   BoxIcon,
   BrainCircuitIcon,
   CalendarClockIcon,
   GaugeIcon,
   LaptopIcon,
   MapIcon,
-  NetworkIcon,
   PanelsTopLeftIcon,
   PlugIcon,
   ServerCogIcon,
@@ -25,8 +23,6 @@ import { cn } from "@/lib/utils";
 
 const WORKSPACE_CONFIG_ICONS = {
   gauge: GaugeIcon,
-  "bar-chart": BarChart3Icon,
-  network: NetworkIcon,
   box: BoxIcon,
   "server-cog": ServerCogIcon,
   laptop: LaptopIcon,

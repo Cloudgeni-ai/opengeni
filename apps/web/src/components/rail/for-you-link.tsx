@@ -13,8 +13,8 @@ import { workspacePriorityPath } from "@/lib/routes";
 import { subscribeToWorkspaceSessionListChanges } from "@/lib/session-list-invalidation";
 import { cn } from "@/lib/utils";
 
-/** Root sessions blocked on a person: the For you count, shared by the link and More. */
-export function useForYouNeedsCount(workspaceId: string): number {
+export function ForYouLink(props: { embedded?: boolean }) {
+  const rail = useRail();
   const { sessions, refresh } = useWorkspaceSessions({
     limit: 50,
     parentSessionId: null,
@@ -22,27 +22,15 @@ export function useForYouNeedsCount(workspaceId: string): number {
   });
   useEffect(
     () =>
-      subscribeToWorkspaceSessionListChanges(workspaceId, () => {
+      subscribeToWorkspaceSessionListChanges(rail.workspaceId, () => {
         void refresh();
       }),
-    [workspaceId, refresh],
+    [rail.workspaceId, refresh],
   );
   // rootNeedsYou is the same leaf predicate buildPriorityFeed classifies its
   // blocked+broken tiers with, so the badge and the page cannot drift. The
   // full feed lib stays un-imported here on purpose (bundle clustering).
-  return useMemo(() => sessions.filter(rootNeedsYou).length, [sessions]);
-}
-
-export function ForYouLink(props: { embedded?: boolean }) {
-  const rail = useRail();
-  const needsYou = useForYouNeedsCount(rail.workspaceId);
-  return <ForYouRailLink embedded={props.embedded} needsYou={needsYou} />;
-}
-
-/** The For you rail entry with a count the caller already has. */
-export function ForYouRailLink(props: { embedded?: boolean; needsYou: number }) {
-  const rail = useRail();
-  const { needsYou } = props;
+  const needsYou = useMemo(() => sessions.filter(rootNeedsYou).length, [sessions]);
   const active = useRouterState({
     select: (state) => state.location.pathname === workspacePriorityPath(rail.workspaceId),
   });
