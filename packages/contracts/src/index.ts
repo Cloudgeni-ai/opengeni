@@ -22,6 +22,13 @@ import {
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
+import {
+  FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+  AnalyticsModelProvider,
+  SessionTurnSurface,
+  ToolFamily,
+} from "./product-analytics";
 export const HostMcpCreateSelections = z
   .array(
     z
@@ -86,6 +93,7 @@ export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
+export * from "./product-analytics";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -1089,6 +1097,23 @@ export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filt
     !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
     !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_TOOL_FAMILY_NAME_SET: ReadonlySet<string> = new Set<string>([
+  ...FIRST_PARTY_MCP_TOOL_NAMES,
+  ...FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  ...FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+]);
+
+/**
+ * Analytics tool family for a tool OpenGeni itself defines. Only names from
+ * OpenGeni's fixed first-party lists qualify; anything else returns null, so a
+ * model-invented or third-party name never becomes an exported value.
+ */
+export function firstPartyToolFamily(toolName: string | null | undefined): ToolFamily | null {
+  return typeof toolName === "string" && FIRST_PARTY_TOOL_FAMILY_NAME_SET.has(toolName)
+    ? toolName
+    : null;
+}
 
 /** Authored CodeMode paths for the canonical collaborative artifact surface. */
 export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
@@ -14531,6 +14556,14 @@ const HostExportAttribution = {
   initiator: HostExportInitiator.nullable(),
   initiatorContext: HostExportInitiatorContext,
   origin: SessionTurnSource.nullable(),
+  /**
+   * Product surface of the attributed turn (see `SessionTurnSurface`). Null
+   * for facts without a turn and for turns captured before surfaces existed.
+   * Optional so an older writer's batch still parses during a rolling upgrade.
+   */
+  surface: SessionTurnSurface.nullable().optional(),
+  /** Model provider family of the attributed turn's accepted execution policy. */
+  modelProvider: AnalyticsModelProvider.nullable().optional(),
 } as const;
 
 /**
@@ -14577,6 +14610,11 @@ export const HostEventExport = z.object({
    */
   rootSessionId: z.string().uuid().nullable(),
   ...HostExportAttribution,
+  /**
+   * Content-free family of an `agent.toolCall.created` event's tool (see
+   * `ToolFamily`). Null for every other event type and for older rows.
+   */
+  toolFamily: ToolFamily.nullable().optional(),
   event: HostSessionEvent,
 });
 export type HostEventExport = z.infer<typeof HostEventExport>;

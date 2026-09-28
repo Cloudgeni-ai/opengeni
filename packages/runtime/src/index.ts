@@ -116,6 +116,10 @@ import {
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
+  IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS,
+  firstPartyToolFamily,
+  integrationToolFamily,
+  type ToolFamily,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
@@ -6805,6 +6809,122 @@ export function withMcpToolDisplayMetadata(
   return display ? { ...item, display } : payload;
 }
 
+/** Catalog identity and source of one tool, as the analytics classifier reads it. */
+export type ToolCallCatalogIdentity = Pick<ToolGatewayCatalogEntry, "identity" | "source">;
+
+/** The registry fields the analytics classifier reads; never URLs in output. */
+export type ToolFamilyRegistryEntry = Pick<
+  Settings["mcpServers"][number],
+  "id" | "url" | "connectionRef"
+>;
+
+function mcpServerHost(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function registryServerToolFamily(
+  serverId: string,
+  toolName: string | undefined,
+  registry: readonly ToolFamilyRegistryEntry[],
+): ToolFamily | null {
+  if (serverId === "opengeni" || serverId === "files" || serverId === "docs") {
+    return firstPartyToolFamily(toolName);
+  }
+  if (serverId === CODEX_APPS_MCP_SERVER_ID) return integrationToolFamily(["chatgpt.com"]);
+  const inProcessDomain = Object.hasOwn(IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS, serverId)
+    ? IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS[serverId]
+    : undefined;
+  if (inProcessDomain) return integrationToolFamily([inProcessDomain]);
+  const config = registry.find((candidate) => candidate.id === serverId);
+  if (!config) return null;
+  return integrationToolFamily([config.connectionRef?.providerDomain, mcpServerHost(config.url)]);
+}
+
+/**
+ * Content-free analytics family for one catalog identity: the first-party
+ * tool name, `integration:<reviewed domain>`, or `custom`. Null when the
+ * identity cannot be placed; a guess is never exported.
+ */
+export function toolFamilyForCatalogIdentity(
+  entry: ToolCallCatalogIdentity,
+  registry: readonly ToolFamilyRegistryEntry[],
+): ToolFamily | null {
+  switch (entry.source) {
+    case "opengeni":
+    case "files":
+    case "docs":
+    case "interaction":
+      return firstPartyToolFamily(entry.identity.toolName);
+    case "codex_apps":
+      return integrationToolFamily(["chatgpt.com"]);
+    case "mcp":
+      return registryServerToolFamily(entry.identity.serverId, entry.identity.toolName, registry);
+  }
+}
+
+function preparedServerHasModelToolName(
+  server: PrefixedMcpServer | DeferredPreparedMcpServer,
+  name: string,
+): boolean {
+  for (const candidate of server.modelToolNames()) {
+    if (candidate === name) return true;
+  }
+  return false;
+}
+
+/**
+ * Content-free analytics family for one model-visible tool-call name. Reads
+ * only already-prepared server facts, like display metadata, and never
+ * triggers a deferred connection.
+ */
+export function toolCallFamily(
+  servers: readonly MCPServer[],
+  registry: readonly ToolFamilyRegistryEntry[],
+  name: string,
+): ToolFamily | null {
+  for (const server of servers) {
+    if (server instanceof AttemptDefinitionMcpServer) {
+      const identity = server.toolCatalogIdentity(name);
+      if (identity) return toolFamilyForCatalogIdentity(identity, registry);
+      continue;
+    }
+    if (
+      (server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer) &&
+      preparedServerHasModelToolName(server, name)
+    ) {
+      const toolName =
+        server instanceof PrefixedMcpServer
+          ? server.unprefixedToolName(name)
+          : server.toolDisplayMetadata(name)?.toolName;
+      return registryServerToolFamily(server.registryId, toolName, registry);
+    }
+  }
+  // Not served by any MCP server: a base runtime, router, media, or hosted tool.
+  return firstPartyToolFamily(name);
+}
+
+/** Stamp the analytics family on an event copy; never rename the executable call. */
+export function withToolCallFamily(
+  servers: readonly MCPServer[],
+  registry: readonly ToolFamilyRegistryEntry[],
+  payload: unknown,
+): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const item = payload as Record<string, unknown>;
+  const raw =
+    item.rawItem && typeof item.rawItem === "object"
+      ? (item.rawItem as Record<string, unknown>)
+      : {};
+  const name = item.name ?? item.toolName ?? raw.name;
+  if (typeof name !== "string") return payload;
+  const toolFamily = toolCallFamily(servers, registry, name);
+  return toolFamily ? { ...item, toolFamily } : payload;
+}
+
 const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
 
 type McpLifecycleFailure = {
@@ -6875,6 +6995,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
   readonly toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
   readonly name = "opengeni-attempt-local-tools";
   private readonly tools: RuntimeMcpTool[];
+  private readonly catalogIdentities = new Map<string, ToolCallCatalogIdentity>();
   private environment: AttemptToolEnvironment | null = null;
   private environmentProvider: (() => Promise<AttemptToolEnvironment>) | null = null;
   private closed = false;
@@ -6884,6 +7005,12 @@ class AttemptDefinitionMcpServer implements MCPServer {
     private readonly aggregateToolBudget: McpAggregateToolListBudget,
     private readonly subjectId: string,
   ) {
+    for (const definition of definitions) {
+      this.catalogIdentities.set(definition.modelName, {
+        identity: definition.identity,
+        source: definition.source,
+      });
+    }
     const descriptors = definitions.map(
       (definition) =>
         ({
@@ -6899,6 +7026,11 @@ class AttemptDefinitionMcpServer implements MCPServer {
     this.tools = [
       ...(this.aggregateToolBudget.replace(this.name, descriptors) as RuntimeMcpTool[]),
     ];
+  }
+
+  /** Canonical identity behind one model-visible name, for analytics only. */
+  toolCatalogIdentity(modelName: string): ToolCallCatalogIdentity | undefined {
+    return this.catalogIdentities.get(modelName);
   }
 
   bindAttemptToolEnvironment(environment: AttemptToolEnvironment): void {
