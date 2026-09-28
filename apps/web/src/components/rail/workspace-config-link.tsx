@@ -47,9 +47,16 @@ export function WorkspaceConfigLink(props: {
   active?: boolean;
   collapsed?: boolean;
   needsReview?: boolean;
+  /** A schedule's latest run could not use a connector and its owner has not looked yet. */
+  needsAttention?: boolean;
   onNavigate?: () => void;
 }) {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
+  const attentionTitle = props.needsReview
+    ? "Knowledge needs review"
+    : props.needsAttention
+      ? "A schedule needs your attention"
+      : null;
 
   if (variant === "rail") {
     const link = (
@@ -61,14 +68,19 @@ export function WorkspaceConfigLink(props: {
           ? { activeProps: { "data-active": "true" as const } }
           : { "data-active": active ? ("true" as const) : undefined })}
         aria-label={
-          props.needsReview ? `${item.label}, needs review` : collapsed ? item.label : undefined
+          props.needsReview
+            ? `${item.label}, needs review`
+            : props.needsAttention
+              ? `${item.label}, needs attention`
+              : collapsed
+                ? item.label
+                : undefined
         }
         title={
-          props.needsReview
-            ? "Knowledge needs review"
-            : collapsed
-              ? [item.label, item.description].filter(Boolean).join(" — ")
-              : item.description
+          attentionTitle ??
+          (collapsed
+            ? [item.label, item.description].filter(Boolean).join(" — ")
+            : item.description)
         }
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted transition-colors pointer-coarse:h-10",
@@ -81,7 +93,7 @@ export function WorkspaceConfigLink(props: {
         <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
         <WorkspaceConfigGlyph icon={item.icon} className="size-4 shrink-0" />
         {!collapsed ? <span className="min-w-0 truncate">{item.label}</span> : null}
-        {props.needsReview ? (
+        {attentionTitle ? (
           <span
             aria-hidden="true"
             className={cn(

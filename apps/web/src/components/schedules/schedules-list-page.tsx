@@ -19,10 +19,18 @@ import { ErrorMessage } from "@/components/ui/error-message";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { Notice } from "@/components/ui/notice";
 import { PageHeader } from "@/components/ui/page-header";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { markScheduledTaskAttentionSeen } from "@/components/rail/use-scheduled-task-attention";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
-import { loadSessionSchedules, scheduledTaskStateLabel } from "@/lib/scheduled-tasks";
-import type { ScheduledTask, ScheduledTaskRun } from "@/types";
+import { scheduledTaskDriftDismissal } from "@/lib/scheduled-task-drift-dismissals";
+import {
+  loadSessionSchedules,
+  scheduledTaskPolicyDriftLines,
+  scheduledTaskStateLabel,
+  visibleScheduledTaskPolicyDrift,
+} from "@/lib/scheduled-tasks";
+import type { ScheduledTask, ScheduledTaskAccessAttention, ScheduledTaskRun } from "@/types";
 
 import {
   SCHEDULE_TEMPLATES,
@@ -45,6 +53,7 @@ import {
   useScheduleAccess,
   useScheduleNavigation,
 } from "./schedule-parts";
+import { scheduledTaskAttentionText } from "./schedule-access-notices";
 import { useScheduleActions } from "./use-schedule-actions";
 import {
   CreateWithOpenGeniButton,
@@ -69,9 +78,11 @@ const SCHEDULES_POLL_MS = 30_000;
 type ScheduleListSnapshot = {
   tasks: ScheduledTask[];
   lastRuns: Record<string, ScheduledTaskRun | null>;
+  /** Schedules whose latest run could not use a connector, or cannot start (owner-only). */
+  attention: Record<string, ScheduledTaskAccessAttention>;
 };
 
-const EMPTY_LIST: ScheduleListSnapshot = { tasks: [], lastRuns: {} };
+const EMPTY_LIST: ScheduleListSnapshot = { tasks: [], lastRuns: {}, attention: {} };
 
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -131,9 +142,13 @@ export function SchedulesListPage({
     async (background = false) => {
       if (!background) setLoading(true);
       try {
-        const next = targetSessionId
-          ? await loadSessionSchedules(client, workspaceId, targetSessionId)
-          : await client.listScheduledTasks(workspaceId);
+        const [next, attention] = await Promise.all([
+          targetSessionId
+            ? loadSessionSchedules(client, workspaceId, targetSessionId)
+            : client.listScheduledTasks(workspaceId),
+          // Advisory: a failed read only hides the notices until the next poll.
+          client.listScheduledTaskAccessAttention(workspaceId).catch(() => null),
+        ]);
         setLoadError(null);
         // One newest-run probe per schedule answers both Last run and nothing
         // else; full history stays on each schedule's page.
@@ -157,7 +172,20 @@ export function SchedulesListPage({
           lastRuns: Object.fromEntries(
             probes.filter((entry): entry is LastRunProbe => entry !== null),
           ),
+          attention: Array.isArray(attention)
+            ? Object.fromEntries(attention.map((item) => [item.taskId, item]))
+            : {},
         });
+        // Showing the notices here is the owner seeing them: clear the
+        // navigation dot. A session-filtered view lists only some schedules,
+        // so only those count.
+        if (Array.isArray(attention)) {
+          const listed = new Set(next.map((task) => task.id));
+          markScheduledTaskAttentionSeen(
+            workspaceId,
+            attention.filter((item) => listed.has(item.taskId)),
+          );
+        }
         setClock(new Date());
       } catch (error) {
         if (!background) {
@@ -288,6 +316,14 @@ export function SchedulesListPage({
                   key={task.id}
                   leading={<ScheduleTile task={task} />}
                   title={muted ? <span className="text-fg-muted">{task.name}</span> : task.name}
+                  titleAddon={
+                    <AccessBadge
+                      task={task}
+                      attention={list.attention[task.id] ?? null}
+                      own={perms.own}
+                      workspaceId={workspaceId}
+                    />
+                  }
                   description={scheduleWords(task.schedule, clock).short}
                   cells={{
                     next: <NextRunValue task={task} now={clock} />,
@@ -343,6 +379,44 @@ export function SchedulesListPage({
       {actions.dialogs}
       {ask.dialog}
     </>
+  );
+}
+
+/**
+ * One quiet badge per row; the schedule's own page says what happened and
+ * offers the refresh. Drift is shown only to the owner, who can act on it.
+ */
+function AccessBadge({
+  task,
+  attention,
+  own,
+  workspaceId,
+}: {
+  task: ScheduledTask;
+  attention: ScheduledTaskAccessAttention | null;
+  own: boolean;
+  workspaceId: string;
+}) {
+  const attentionText = scheduledTaskAttentionText(attention);
+  if (attentionText) {
+    return (
+      <StatusBadge variant="dot" status="needs_you" reason={attentionText}>
+        Needs attention
+      </StatusBadge>
+    );
+  }
+  if (!own) return null;
+  const drift = visibleScheduledTaskPolicyDrift(
+    task.policyDrift,
+    scheduledTaskDriftDismissal(workspaceId, task),
+    task.executionDigest,
+  );
+  const lines = scheduledTaskPolicyDriftLines(drift);
+  if (lines.length === 0) return null;
+  return (
+    <StatusBadge variant="dot" tone="attention" reason={lines.join(" ")}>
+      Access out of date
+    </StatusBadge>
   );
 }
 

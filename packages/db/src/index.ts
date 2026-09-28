@@ -58,6 +58,7 @@ import {
   type CodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
+export * from "./scheduled-task-access";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
   CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
@@ -5736,7 +5737,9 @@ export type ScheduledTaskCreatorSessionPolicy = {
  * null for a human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
  * effective first-party selection and permission set so a narrowed session
- * cannot widen itself through a schedule.
+ * cannot widen itself through a schedule. Only its owner's explicit access
+ * refresh re-freezes the tools and permissions, within that person's grants;
+ * the session policy never changes after create.
  */
 export type ScheduledTaskCreatorPolicy = {
   firstPartyMcpTools: FirstPartyMcpToolName[] | null;
@@ -5795,7 +5798,29 @@ export type UpdateScheduledTaskInput = Partial<{
   beforeUpdateCommit: (tx: Database) => Promise<void>;
 
   captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
+  /**
+   * Refuse the update unless the locked row still has this execution digest:
+   * the head a person reviewed before an explicit access refresh.
+   */
+  expectedExecutionDigest: string;
+  /**
+   * Re-freeze an agent-created task's OpenGeni tools and permissions (the
+   * owner's explicit access refresh). Applies only to a row whose creator
+   * tools are already frozen; the creator session policy is never rewritten.
+   */
+  creatorFirstPartyPolicy: {
+    firstPartyMcpTools: FirstPartyMcpToolName[];
+    firstPartyMcpPermissions: Permission[];
+  };
 }>;
+
+/** The task changed after the caller read it; nothing was written. */
+export class ScheduledTaskHeadChangedError extends Error {
+  constructor() {
+    super("scheduled task changed after it was read");
+    this.name = "ScheduledTaskHeadChangedError";
+  }
+}
 
 export type CreateKnowledgeMemoryInput = {
   accountId: string;
@@ -17187,7 +17212,11 @@ export async function updateScheduledTask(
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [previousLinkRevision] = await scopedDb
-      .select({ authorityRevision: schema.scheduledTasks.authorityRevision })
+      .select({
+        authorityRevision: schema.scheduledTasks.authorityRevision,
+        executionDigest: schema.scheduledTasks.executionDigest,
+        creatorFirstPartyMcpTools: schema.scheduledTasks.creatorFirstPartyMcpTools,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -17197,6 +17226,15 @@ export async function updateScheduledTask(
       )
       .for("update")
       .limit(1);
+    if (
+      input.expectedExecutionDigest !== undefined &&
+      previousLinkRevision?.executionDigest !== input.expectedExecutionDigest
+    ) {
+      throw new ScheduledTaskHeadChangedError();
+    }
+    if (input.creatorFirstPartyPolicy && !previousLinkRevision?.creatorFirstPartyMcpTools) {
+      throw new Error("only an agent-created scheduled task has a creator tool policy to refresh");
+    }
     if (
       input.refreshPersonalResourceAuthority &&
       input.clonePersonalResourceAuthorityFromRevision !== undefined
@@ -17235,6 +17273,14 @@ export async function updateScheduledTask(
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.creatorFirstPartyPolicy
+          ? {
+              creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
+              creatorFirstPartyMcpPermissions: [
+                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ],
+            }
+          : {}),
         ...(input.refreshPersonalResourceAuthority ||
         input.clonePersonalResourceAuthorityFromRevision !== undefined
           ? {
@@ -17422,18 +17468,31 @@ export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
 /**
  * The frozen creator boundary of a scheduled task. Read at fire time (and by
  * recovery of an already-admitted run, which is why a tombstoned task still
- * answers): the columns are written once at create and never updated, so the
- * read is deterministic for the task's whole life. Null when the task has no
- * row at all.
+ * answers). The session policy column is written once at create and never
+ * updated, so recovery re-reads it deterministically. The tools and
+ * permissions change only through the owner's explicit access refresh, and an
+ * admitted run never re-reads them: its accepted execution carries the
+ * resolved tools and permissions. Null when the task has no row at all.
  */
 export async function getScheduledTaskCreatorPolicy(
   db: Database,
   workspaceId: string,
   taskId: string,
 ): Promise<ScheduledTaskCreatorPolicy | null> {
+  return (await listScheduledTaskCreatorPolicies(db, workspaceId, [taskId])).get(taskId) ?? null;
+}
+
+/** Batch form of {@link getScheduledTaskCreatorPolicy}; tasks without a row are absent. */
+export async function listScheduledTaskCreatorPolicies(
+  db: Database,
+  workspaceId: string,
+  taskIds: readonly string[],
+): Promise<Map<string, ScheduledTaskCreatorPolicy>> {
+  if (taskIds.length === 0) return new Map();
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
+    const rows = await scopedDb
       .select({
+        id: schema.scheduledTasks.id,
         firstPartyMcpTools: schema.scheduledTasks.creatorFirstPartyMcpTools,
         firstPartyMcpPermissions: schema.scheduledTasks.creatorFirstPartyMcpPermissions,
         sessionPolicy: schema.scheduledTasks.creatorSessionPolicy,
@@ -17442,28 +17501,38 @@ export async function getScheduledTaskCreatorPolicy(
       .where(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
+          inArray(schema.scheduledTasks.id, [...new Set(taskIds)]),
         ),
-      )
-      .limit(1);
-    if (!row) return null;
-    return {
-      firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
-      firstPartyMcpPermissions: row.firstPartyMcpPermissions
-        ? [...row.firstPartyMcpPermissions]
-        : null,
-      sessionPolicy: row.sessionPolicy
-        ? {
-            agentAccess: row.sessionPolicy.agentAccess ?? null,
-            scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
-            memoryScope:
-              row.sessionPolicy.memoryScope === "session"
-                ? "off"
-                : (row.sessionPolicy.memoryScope ?? null),
-          }
-        : null,
-    };
+      );
+    return new Map(rows.map((row) => [row.id, scheduledTaskCreatorPolicyFromRow(row)]));
   });
+}
+
+function scheduledTaskCreatorPolicyFromRow(row: {
+  firstPartyMcpTools: FirstPartyMcpToolName[] | null;
+  firstPartyMcpPermissions: Permission[] | null;
+  sessionPolicy: {
+    agentAccess?: string | null;
+    scopeSubjectId?: string | null;
+    memoryScope?: string | null;
+  } | null;
+}): ScheduledTaskCreatorPolicy {
+  return {
+    firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
+    firstPartyMcpPermissions: row.firstPartyMcpPermissions
+      ? [...row.firstPartyMcpPermissions]
+      : null,
+    sessionPolicy: row.sessionPolicy
+      ? {
+          agentAccess: row.sessionPolicy.agentAccess ?? null,
+          scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
+          memoryScope:
+            row.sessionPolicy.memoryScope === "session"
+              ? "off"
+              : (row.sessionPolicy.memoryScope ?? null),
+        }
+      : null,
+  };
 }
 
 export async function requireScheduledTask(
@@ -17572,6 +17641,42 @@ export async function listScheduledTasks(
       .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
       .limit(limit)
       .offset(offset);
+    return rows.map(mapScheduledTask);
+  });
+}
+
+/**
+ * Active agent-turn tasks that chose connector accounts, owned by `subjectId`
+ * (and, with `includeOwnerless`, tasks without an owner). Only these can have
+ * a fresh occurrence refused before it creates a run because a chosen account
+ * is gone, so the owner's access attention list checks each one's account
+ * plan. A caller without a subject passes an empty id, which owns nothing.
+ */
+export async function listActiveScheduledTasksWithConnectionAccounts(
+  db: Database,
+  workspaceId: string,
+  input: { subjectId: string; includeOwnerless: boolean; limit: number },
+): Promise<ScheduledTask[]> {
+  const limit = Math.max(1, Math.min(500, Math.floor(input.limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const owner = eq(schema.scheduledTasks.ownerSubjectId, input.subjectId);
+    const rows = await scopedDb
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          isNull(schema.scheduledTasks.deletedAt),
+          eq(schema.scheduledTasks.status, "active"),
+          sql`${schema.scheduledTasks.action} ->> 'kind' = 'agent_turn'`,
+          sql`(case when jsonb_typeof(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts') = 'array'
+            then jsonb_array_length(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts')
+            else 0 end) > 0`,
+          input.includeOwnerless ? or(owner, isNull(schema.scheduledTasks.ownerSubjectId)) : owner,
+        ),
+      )
+      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
+      .limit(limit);
     return rows.map(mapScheduledTask);
   });
 }

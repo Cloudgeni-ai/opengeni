@@ -2979,6 +2979,45 @@ export type ScheduledTask = {
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+  /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
+  policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
+};
+
+/** One connector named in a scheduled task's access report. */
+export type ScheduledTaskAccessConnector = {
+  id: string;
+  name: string;
+};
+
+/**
+ * What a scheduled task's frozen connectors, connector accounts and OpenGeni
+ * tools lack compared with what its owner would get by saving it again now.
+ */
+export type ScheduledTaskPolicyDrift = {
+  /** Workspace default connectors that new schedules get and this one lacks. */
+  missingConnectors: ScheduledTaskAccessConnector[];
+  /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
+  unavailableConnectors: ScheduledTaskAccessConnector[];
+  /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+  missingOpenGeniTools: FirstPartyMcpToolName[];
+  /** Connectors whose chosen account can no longer be used by this schedule. */
+  unavailableAccounts: ScheduledTaskAccessConnector[];
+  /** Connectors this schedule has no account for, although one is now available. */
+  attachableAccounts: ScheduledTaskAccessConnector[];
+  /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
+  canRefresh: boolean;
+};
+
+/** Re-freeze with the caller's current authority; `executionDigest` is the reviewed head. */
+export type RefreshScheduledTaskAccessRequest = {
+  executionDigest: string;
+  /** Default connectors and OpenGeni tools to keep off; only narrows what the refresh adds. */
+  leaveOut?:
+    | {
+        connectors?: string[] | undefined;
+        openGeniTools?: FirstPartyMcpToolName[] | undefined;
+      }
+    | undefined;
 };
 
 export type CreateSessionRequest = {
@@ -5629,6 +5668,48 @@ export type ScheduledTaskRun = {
     | undefined;
   createdAt: string;
   updatedAt: string;
+  /** Connectors this run could not use; projected only for a viewer who can act on the task. */
+  accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+};
+
+export type ScheduledTaskAccessFailureReason =
+  | "missing_connection"
+  | "expired"
+  | "insufficient_scope"
+  | "refresh_failed"
+  | "personal_authority_unavailable"
+  | "unsupported_auth"
+  | "resource_scope_unavailable";
+
+/** A connector a scheduled run's own turn could not use (a `tool.auth_needed` fact). */
+export type ScheduledTaskRunAccessFailure = {
+  serverId: string;
+  name: string;
+  providerDomain: string;
+  reason: ScheduledTaskAccessFailureReason;
+  count: number;
+  firstOccurredAt: string;
+};
+
+/**
+ * A schedule that needs its owner's attention: its latest run failed closed on
+ * connector access (`runId`, `failures`), and/or a chosen connector account can
+ * no longer be used so new runs cannot start (`unavailableAccounts`; `runId`
+ * and `firedAt` are null when only this applies).
+ */
+export type ScheduledTaskAccessAttention = {
+  taskId: string;
+  taskName: string;
+  /** The task head this item was computed against; a new head is a new notice. */
+  executionDigest: string;
+  runId: string | null;
+  firedAt: string | null;
+  failures: ScheduledTaskRunAccessFailure[];
+  unavailableAccounts: ScheduledTaskAccessConnector[];
+};
+
+export type ListScheduledTaskAccessAttentionResponse = {
+  tasks: ScheduledTaskAccessAttention[];
 };
 
 // --- VariableSets -------------------------------------------------------------
