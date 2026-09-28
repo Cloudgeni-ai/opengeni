@@ -143,12 +143,13 @@ in-app:
 - **Blocked before a run.** When a chosen connector account can no longer be
   used (for example the owner revoked their personal connection), the
   scheduler refuses every fresh occurrence before it creates a run, so there is
-  no run and no turn to carry a fact. The attention list therefore also checks
-  each active agent task that chose accounts with the same account plan the
-  drift uses, and lists it with `unavailableAccounts` (the connectors) and a
-  null `runId`/`firedAt`. It clears once the account is usable again or the
-  owner refreshes or edits the accounts. This is read-time only: no migration,
-  no stored notice.
+  no run and no turn to carry a fact. The same happens to a schedule with an
+  owner whose chosen account belongs to a connector the workspace no longer
+  sets up. The attention list therefore also checks each active agent task
+  that chose accounts with the same account plan the drift uses, and lists it
+  with `unavailableAccounts` (the connectors) and a null `runId`/`firedAt`. It
+  clears once the account is usable again or the owner refreshes or edits the
+  accounts. This is read-time only: no migration, no stored notice.
 - **Attention list.** `GET .../scheduled-tasks/attention` lists the active
   schedules that need attention, one item per schedule: the latest run with a
   turn failed closed on access (`runId`, `failures`), a chosen account can no

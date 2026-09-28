@@ -106,6 +106,7 @@ describe("scheduled task connector accounts", () => {
       selections: [{ serverId: "linear", connectionId: "c-1" }],
       unavailable: [],
       attachable: [],
+      dropped: [],
     });
   });
 
@@ -182,6 +183,8 @@ describe("scheduled task connector accounts", () => {
     expect(plan.selections).toEqual([
       { serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID, connectionId: "drive" },
     ]);
+    // The dropped choice is named: for an owned task the scheduler refuses it.
+    expect(plan.dropped).toEqual([{ id: "retired-crm", name: "retired-crm" }]);
   });
 });
 

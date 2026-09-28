@@ -68,11 +68,11 @@ const MAIL_SERVER = {
   },
 };
 
-function settings() {
+function settings(mcpServers: (typeof MAIL_SERVER)[] = [MAIL_SERVER]) {
   return testSettings({
     databaseUrl: shared!.appUrl,
     sandboxBackend: "none",
-    mcpServers: [MAIL_SERVER],
+    mcpServers,
   });
 }
 
@@ -147,23 +147,27 @@ function signedIn(workspace: Fixture, subjectId: string): AccessGrantAuthorizati
   };
 }
 
-function scheduler() {
+function scheduler(mcpServers?: (typeof MAIL_SERVER)[]) {
   return createScheduledTaskActivities(
     async () =>
       ({
-        settings: settings(),
+        settings: settings(mcpServers),
         db: client.db,
         bus: new MemoryEventBus(),
       }) as unknown as ActivityServices,
   );
 }
 
-async function attentionFor(workspace: Fixture, grant: AccessGrant) {
+async function attentionFor(
+  workspace: Fixture,
+  grant: AccessGrant,
+  mcpServers?: (typeof MAIL_SERVER)[],
+) {
   const errors: unknown[] = [];
   const started = performance.now();
   const items = await listScheduledTaskAccessAttention({
     db: client.db,
-    settings: settings(),
+    settings: settings(mcpServers),
     grant,
     onError: (error) => errors.push(error),
   });
@@ -358,6 +362,49 @@ describe("the owner is told when a schedule cannot use a connector", () => {
     expect((await attentionFor(workspace, person(workspace, workspace.owner))).items).toEqual([]);
     expect((await getScheduledTask(client.db, workspace.workspaceId, task.id))?.status).toBe(
       "active",
+    );
+  }, 180_000);
+
+  test("a chosen account whose connector is no longer set up also blocks, and the owner is told", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const account = await connectPersonalMail(workspace);
+    const task = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: person(workspace, workspace.owner),
+      authorization: signedIn(workspace, workspace.owner),
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Inbox digest",
+        schedule: { type: "manual" },
+        agentConfig: { prompt: "Summarize", tools: [{ kind: "mcp", id: "mail" }] },
+        connectionAccounts: [{ serverId: "mail", connectionId: account }],
+      }),
+    });
+    // The workspace stops setting up the mail connector; the account itself is fine.
+    expect(
+      await scheduler([]).dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `scheduled-access-attention:${crypto.randomUUID()}`,
+      }),
+    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    expect((await attentionFor(workspace, person(workspace, workspace.owner), [])).items).toEqual([
+      {
+        taskId: task.id,
+        taskName: "Inbox digest",
+        executionDigest: task.executionDigest,
+        runId: null,
+        firedAt: null,
+        failures: [],
+        unavailableAccounts: [{ id: "mail", name: "mail" }],
+      },
+    ]);
+    expect((await attentionFor(workspace, person(workspace, workspace.member), [])).items).toEqual(
+      [],
     );
   }, 180_000);
 

@@ -147,6 +147,8 @@ export type ScheduledTaskAccountPlan = {
   selections: McpConnectionAccountSelection[];
   unavailable: ScheduledTaskAccessConnector[];
   attachable: ScheduledTaskAccessConnector[];
+  /** Connectors with a chosen account that the task no longer uses; their choice is dropped. */
+  dropped: ScheduledTaskAccessConnector[];
 };
 
 /**
@@ -200,10 +202,18 @@ export function planScheduledTaskConnectionAccounts(input: {
     }
     selections.push(...next.map((connectionId) => ({ serverId, connectionId })));
   }
+  const used = new Set(input.connectionServerIds);
+  const dropped = input.priorSelections
+    .filter(
+      (selection) =>
+        !PRESERVED_ACCOUNT_SURFACES.has(selection.serverId) && !used.has(selection.serverId),
+    )
+    .map((selection) => connector(selection.serverId, input.names));
   return {
     selections,
     unavailable: uniqueById(unavailable),
     attachable: uniqueById(attachable),
+    dropped: uniqueById(dropped),
   };
 }
 
@@ -377,6 +387,8 @@ function hasAgentAccess(task: Pick<ScheduledTask, "action" | "agentConfig">): bo
 
 export type ScheduledTaskAccessPlan = {
   drift: Omit<ScheduledTaskPolicyDrift, "canRefresh">;
+  /** Connectors with a chosen account the task no longer uses (see the account plan). */
+  droppedAccountChoices: ScheduledTaskAccessConnector[];
   tools: ToolRef[];
   connectionAccounts: McpConnectionAccountSelection[];
   creatorFirstPartyPolicy: ScheduledTaskOpenGeniToolPlan["policy"];
@@ -555,6 +567,7 @@ export async function computeScheduledTaskAccessPlan(input: {
       unavailableAccounts: accounts.unavailable,
       attachableAccounts: accounts.attachable,
     },
+    droppedAccountChoices: accounts.dropped,
     tools: connectors.tools,
     connectionAccounts: accounts.selections,
     creatorFirstPartyPolicy: openGeni.policy,
@@ -823,9 +836,14 @@ export function scheduledTaskAttentionScope(
 /**
  * Tasks among `tasks` that a fresh occurrence would refuse before creating a
  * run because a chosen connector account can no longer be used: the account
- * plan's `unavailableAccounts`, exactly what the drift reports. Only the
- * account part of the plan is read, which does not depend on the creator
- * policy. Advisory: a task whose plan cannot be computed is skipped.
+ * plan's `unavailableAccounts`, exactly what the drift reports, plus, for a
+ * task with an owner, a chosen account whose connector the task can no longer
+ * use (the workspace stopped setting it up). The scheduler resolves an owner's
+ * choices against that owner and refuses one that matches no connector it
+ * uses; a task without an owner only binds workspace accounts for connectors
+ * it uses, so such a choice does not block it. Only the account part of the
+ * plan is read, which does not depend on the creator policy. Advisory: a task
+ * whose plan cannot be computed is skipped.
  */
 export async function scheduledTasksWithUnavailableAccounts(input: {
   db: Database;
@@ -867,9 +885,11 @@ export async function scheduledTasksWithUnavailableAccounts(input: {
         cache,
         workspaceSettings,
       });
-      if (plan.drift.unavailableAccounts.length > 0) {
-        blocked.push({ task, unavailableAccounts: plan.drift.unavailableAccounts });
-      }
+      const unavailableAccounts = uniqueById([
+        ...plan.drift.unavailableAccounts,
+        ...(task.ownerSubjectId !== null ? plan.droppedAccountChoices : []),
+      ]);
+      if (unavailableAccounts.length > 0) blocked.push({ task, unavailableAccounts });
     } catch (error) {
       input.onError?.(error);
     }
