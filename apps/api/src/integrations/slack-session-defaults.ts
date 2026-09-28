@@ -55,7 +55,16 @@ export async function slackWorkspaceRepositoryResources(
   let repositories: Awaited<ReturnType<typeof listWorkspaceGitHubRepositories>>;
   try {
     repositories = await listWorkspaceGitHubRepositories(deps, workspaceId);
-  } catch {
+  } catch (error) {
+    // Still start the task, but leave a trace: "repos: none" in the
+    // acknowledgement otherwise hides an outage or a broken App configuration.
+    console.error("[slack-interactions] workspace repositories unavailable", {
+      workspaceId,
+      errorCode: (error instanceof Error ? error.name : "unknown")
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/gu, "_")
+        .slice(0, 128),
+    });
     return [];
   }
   const seen = new Set<string>();

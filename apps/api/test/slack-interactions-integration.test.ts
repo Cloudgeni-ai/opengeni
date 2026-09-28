@@ -5975,6 +5975,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await pressStatus(acknowledgement, "1768000000.000002");
     expect(acknowledgement.text).toContain("OpenGeni task status:");
     expect(acknowledgement.text).toContain("First time here:");
+    // The frozen line naming what the task started with survives the same way.
+    expect(acknowledgement.text).toContain("\nUsing connectors: none; repos: none.");
 
     // The control card posted afterwards is not the acknowledgement, so the
     // hint still appears exactly once.
@@ -5984,6 +5986,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await pressStatus(controlCard, "1768000000.000003");
     expect(controlCard.text).toContain("OpenGeni task status:");
     expect(controlCard.text).not.toContain("First time here:");
+    expect(controlCard.text).not.toContain("Using connectors:");
   }, 60_000);
 
   test("a `stop` thread reply still pauses the mapped session", async () => {
