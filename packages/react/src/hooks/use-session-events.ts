@@ -7,7 +7,12 @@ import {
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { createOlderHistoryLoadReceipt, type OlderHistoryLoadReceipt } from "../older-history";
-import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
+import {
+  buildTimeline,
+  groupTimeline,
+  isTimelineUserQuestion,
+  sessionStatusFromEvents,
+} from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { usePageLiveActivity } from "./internal";
@@ -931,23 +936,44 @@ export function useSessionEvents(
     if (!sessionId) return null;
     const identity = navigationIdentityRef.current;
     const generation = navigationGenerationRef.current;
-    const latest = await client.listEvents(workspaceId, sessionId, {
-      direction: "before",
-      includeTypes: ["user.message"],
-      limit: 1,
-      payloadMode: "full",
-    });
-    if (
-      identity.client !== navigationIdentityRef.current.client ||
-      identity.streamKey !== navigationIdentityRef.current.streamKey ||
-      identity.enabled !== navigationIdentityRef.current.enabled ||
-      generation !== navigationGenerationRef.current
-    )
-      return null;
-    const question = latest.filter((event) => event.type === "user.message").at(-1);
-    if (!question) return null;
-    const loaded = eventWindowRef.current.events.some((event) => event.id === question.id);
-    return loaded || (await jumpToSequence(question.sequence)) ? question.sequence : null;
+    let before: number | undefined;
+    while (true) {
+      const latest = await client.listEvents(workspaceId, sessionId, {
+        direction: "before",
+        includeTypes: ["user.message"],
+        // Most sessions need one row. Historical worker completions also used
+        // user.message; page only this filtered index when they occupy the tail.
+        limit: before === undefined ? 1 : 64,
+        ...(before === undefined ? {} : { before }),
+        payloadMode: "full",
+        mode: "forensic",
+      });
+      if (
+        identity.client !== navigationIdentityRef.current.client ||
+        identity.streamKey !== navigationIdentityRef.current.streamKey ||
+        identity.enabled !== navigationIdentityRef.current.enabled ||
+        generation !== navigationGenerationRef.current
+      )
+        return null;
+      // Reuse canonical projection rather than guessing from text or treating
+      // a legacy childCompletion as a human question. Invalid legacy payloads
+      // intentionally remain ordinary messages, just as they do in the UI.
+      const question = [...latest]
+        .sort((a, b) => b.sequence - a.sequence)
+        .find(isTimelineUserQuestion);
+      if (question) {
+        const loaded = eventWindowRef.current.events.some((event) => event.id === question.id);
+        return loaded || (await jumpToSequence(question.sequence)) ? question.sequence : null;
+      }
+      const oldest = Math.min(...latest.map((event) => event.sequence));
+      if (
+        !Number.isSafeInteger(oldest) ||
+        oldest <= 1 ||
+        (before !== undefined && oldest >= before)
+      )
+        return null;
+      before = oldest;
+    }
   }, [client, workspaceId, sessionId, jumpToSequence]);
 
   const jumpToLatest = useCallback(async (): Promise<void> => {

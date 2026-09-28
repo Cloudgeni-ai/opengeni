@@ -42,6 +42,14 @@ import type {
 
 export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
+/** Message identity only: queue placement needs the surrounding turn history. */
+export function isTimelineUserQuestion(event: SessionEvent): boolean {
+  return (
+    event.type === "user.message" &&
+    workerCompletionPayload(asRecord(event.payload).childCompletion) === null
+  );
+}
+
 /* ----------------------------------------------------------------------------
    Timeline projection
 
