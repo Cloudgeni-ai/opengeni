@@ -11570,6 +11570,12 @@ export type SlackInteraction = {
    * make the ledger's byte comparison raise.
    */
   routedWorkspaceLabel: string | null;
+  /**
+   * One line naming what the bound session started with, frozen when the
+   * session bound so an acknowledgement repair renders the same bytes. Null
+   * means no line.
+   */
+  sessionDefaultsLine: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -12189,6 +12195,8 @@ export async function getOrCreateSlackInteraction(
     // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
     | "firstTaskHint"
     | "routedWorkspaceLabel"
+    // Owned by `bindSlackInteractionSession`, frozen with the bound session.
+    | "sessionDefaultsLine"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -12660,12 +12668,21 @@ export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
     sessionId: string;
+    /**
+     * Written only by the bind that wins; a replayed bind of the same session
+     * returns the line the first bind froze and never rewrites it.
+     */
+    sessionDefaultsLine?: string | null;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.slackInteractions)
-      .set({ sessionId: input.sessionId, updatedAt: sql`now()` })
+      .set({
+        sessionId: input.sessionId,
+        sessionDefaultsLine: input.sessionDefaultsLine ?? null,
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(schema.slackInteractions.id, input.id),
@@ -13197,6 +13214,11 @@ function mapSlackInteraction(
       row,
       "routedWorkspaceLabel",
       "routed_workspace_label",
+    ),
+    sessionDefaultsLine: slackRowNullableString(
+      row,
+      "sessionDefaultsLine",
+      "session_defaults_line",
     ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(

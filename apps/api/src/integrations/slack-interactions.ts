@@ -23,6 +23,8 @@ import {
   type HumanInputQuestion,
   type ResolvedWorkspaceSlackOrchestrationNoticeSettings,
   type ChildRequiresActionPayload,
+  type RepositoryResourceRef,
+  type Session,
   type SessionAuthorizationListScope,
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
@@ -123,7 +125,7 @@ import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
   createSessionForRequest,
-  getActorNewSessionDefaults,
+  getActorNewSessionModelChoice,
   hasPermission,
   requireAccessContext,
   requireAccessGrant,
@@ -132,6 +134,12 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import {
+  otherDeploymentLinkContext,
+  renderSlackSessionDefaultsLine,
+  slackWorkspaceRepositoryResources,
+  summarizeSlackSessionDefaults,
+} from "./slack-session-defaults";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -243,12 +251,22 @@ export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   "slack_bot_file_content",
 ] satisfies readonly FirstPartyMcpToolName[];
 
-function slackTaskFirstPartyMcpTools(settings: Settings): FirstPartyMcpToolName[] {
-  const policy = resolveFirstPartyMcpToolPolicy(settings);
+/**
+ * The workspace's default first-party selection (or the deployment default)
+ * plus the Slack read tools. The read tools are added whatever the base is: a
+ * Slack task that cannot read its own thread cannot do what it was asked.
+ */
+export function slackTaskFirstPartyMcpTools(
+  settings: Settings,
+  workspaceSettings: unknown,
+): FirstPartyMcpToolName[] {
+  const base =
+    resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools ??
+    resolveFirstPartyMcpToolPolicy(settings).default;
   const connectorTools = SLACK_TASK_FIRST_PARTY_MCP_TOOLS.filter(
     (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
   );
-  return allowedFirstPartyMcpToolsForSession(settings, [...policy.default, ...connectorTools]);
+  return allowedFirstPartyMcpToolsForSession(settings, [...base, ...connectorTools]);
 }
 
 export type NormalizedSlackInteraction = {
@@ -1676,6 +1694,34 @@ export function slackPostSeed(
   return interaction.routedWorkspaceLabel ? `${seed}:v2` : seed;
 }
 
+/**
+ * The acknowledgement seed once it carries the "Using" line.
+ *
+ * Same reasoning as the label: the line is written once, when the session
+ * binds, and never changes, so it is a stable discriminator. An interaction
+ * without the line keeps its exact ledger identity. One bound by a newer
+ * image but repaired by an older one during a rolling deploy renders
+ * different bytes under a different id, so the worst case is a second
+ * acknowledgement, never a post operation wedged on a digest conflict.
+ */
+export function slackDefaultsLinePostSeed(
+  interaction: Pick<SlackInteraction, "sessionDefaultsLine">,
+  seed: string,
+): string {
+  return interaction.sessionDefaultsLine ? `${seed}:defaults` : seed;
+}
+
+function slackAcknowledgementOperationId(
+  interaction: Pick<SlackInteraction, "id" | "routedWorkspaceLabel" | "sessionDefaultsLine">,
+): string {
+  return deterministicUuid(
+    slackDefaultsLinePostSeed(
+      interaction,
+      slackPostSeed(interaction, `slack-ack:${interaction.id}`),
+    ),
+  );
+}
+
 /** Sources that mean somebody, or something, actually chose this workspace. */
 const SLACK_ROUTE_SOURCES_WORTH_NAMING: ReadonlySet<string> = new Set([
   // Not "thread": a mapped thread reuses the interaction that already exists,
@@ -2071,6 +2117,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
             ...interaction,
             owningSubjectId: grant.subjectId,
             sessionId: eventSessionId,
+            sessionDefaultsLine: await slackSessionDefaultsLine(
+              deps,
+              grant,
+              interaction.workspaceId,
+              eventSessionId,
+            ),
           });
     if (!boundInteraction) {
       throw new Error("Durable Slack interaction could not bind its reserved session");
@@ -2123,7 +2175,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       existing.sessionId,
       preparedAttachments,
     );
-    const prepared = slackInvocationPreparedMessage(preparedEntry, remounted, preparedModelContext);
+    const prepared = slackInvocationPreparedMessage(
+      deps,
+      preparedEntry,
+      remounted,
+      preparedModelContext,
+    );
     await continueSlackSession(deps, grant, existing, prepared.entry, remounted.resources, {
       modelContext: prepared.modelContext,
     });
@@ -2157,7 +2214,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       interaction.sessionId,
       preparedAttachments,
     );
-    const prepared = slackInvocationPreparedMessage(preparedEntry, remounted, preparedModelContext);
+    const prepared = slackInvocationPreparedMessage(
+      deps,
+      preparedEntry,
+      remounted,
+      preparedModelContext,
+    );
     await continueSlackSession(deps, grant, interaction, prepared.entry, remounted.resources, {
       modelContext: prepared.modelContext,
     });
@@ -2177,10 +2239,8 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       `slack:${entry.connectionId}:${entry.providerEventId}`,
     );
     const workspace = await getWorkspace(deps.db, interaction.workspaceId);
-    const defaultTools =
-      defaults.firstPartyMcpTools ??
-      resolveWorkspaceSessionToolDefaults(workspace?.settings)?.firstPartyMcpTools;
     const prepared = slackInvocationPreparedMessage(
+      deps,
       preparedEntry,
       preparedAttachments,
       preparedModelContext,
@@ -2195,10 +2255,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
         initialMessage: prepared.entry.text,
         ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
         instructions: SLACK_SESSION_INSTRUCTIONS,
+        // A retried create replays the reserved shell's exact selection;
+        // otherwise the workspace default plus the Slack read tools.
         firstPartyMcpTools:
-          defaultTools !== undefined
-            ? allowedFirstPartyMcpToolsForSession(deps.settings, defaultTools)
-            : slackTaskFirstPartyMcpTools(deps.settings),
+          defaults.firstPartyMcpTools !== undefined
+            ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
+            : slackTaskFirstPartyMcpTools(deps.settings, workspace?.settings),
         resources: [...defaults.resources, ...preparedAttachments.resources],
         ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
         idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
@@ -2226,6 +2288,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     ...interaction,
     owningSubjectId: grant.subjectId,
     sessionId: session.id,
+    sessionDefaultsLine: await slackSessionDefaultsLine(
+      deps,
+      grant,
+      interaction.workspaceId,
+      session.id,
+    ),
   });
   if (!bound) throw new Error("Slack route could not bind its durable session");
   await ensureSlackSharedTaskOrigin(deps, bound, entry, home, policyResolution);
@@ -2407,6 +2475,7 @@ async function prepareSlackInvocationEntry(
 }
 
 function slackInvocationPreparedMessage(
+  deps: Pick<ApiRouteDeps, "settings">,
   entry: SlackInteractionInboxEntry,
   attachments: PreparedSlackReactionTask,
   modelContext: string | null,
@@ -2416,7 +2485,15 @@ function slackInvocationPreparedMessage(
     "Imported invocation attachments",
     "invocation",
   );
-  const combinedModelContext = [modelContext, manifest].filter(Boolean).join("\n\n");
+  // A pure function of the accepted text and this deployment's web origin, so
+  // a retried delivery composes the same context.
+  const otherDeployment = otherDeploymentLinkContext(
+    [entry.text, modelContext ?? ""].join("\n"),
+    deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl,
+  );
+  const combinedModelContext = [modelContext, manifest, otherDeployment]
+    .filter(Boolean)
+    .join("\n\n");
   return {
     entry,
     modelContext: combinedModelContext.length > 0 ? combinedModelContext : null,
@@ -2473,7 +2550,7 @@ async function acknowledgeSlackSession(
   const privateHandoff =
     !directMessageShortcut && interaction.visibility === "private" && entry.triggerKind !== "dm";
   const privateBotDm = directMessageShortcut || privateHandoff;
-  const operationId = deterministicUuid(slackPostSeed(interaction, `slack-ack:${interaction.id}`));
+  const operationId = slackAcknowledgementOperationId(interaction);
   // The acknowledgement carries exactly one session link plus the Status/Stop
   // buttons. The how-to prose it used to repeat forever now rides along once,
   // on this Slack identity's first accepted task in this installation.
@@ -2482,6 +2559,9 @@ async function acknowledgeSlackSession(
     : privateHandoff
       ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} Results stay private unless a separate authorized publication is approved.`
       : `OpenGeni started this task. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)}`;
+  const startedWithDefaults = interaction.sessionDefaultsLine
+    ? `${started}\n${interaction.sessionDefaultsLine}`
+    : started;
   // The post ledger binds this fixed operation id to a digest over the message
   // text, and this function re-runs on every acknowledgement repair. Resolving
   // the hint freezes it durably before the post, so a repair renders identical
@@ -2495,7 +2575,7 @@ async function acknowledgeSlackSession(
     slackUserId: entry.slackUserId,
     interactionId: interaction.id,
   });
-  const text = `${started}${showHint ? slackFirstTaskHintText(deps) : ""}`;
+  const text = `${startedWithDefaults}${showHint ? slackFirstTaskHintText(deps) : ""}`;
   const controls = await controlActionBlocks(deps, interaction, {
     messageOperationId: operationId,
     sessionEventSequence: 0,
@@ -2654,6 +2734,12 @@ async function processSlackReactionInboxEntry(
             ...interaction,
             owningSubjectId: grant.subjectId,
             sessionId: eventSessionId,
+            sessionDefaultsLine: await slackSessionDefaultsLine(
+              deps,
+              grant,
+              interaction.workspaceId,
+              eventSessionId,
+            ),
           });
     if (!boundInteraction) {
       throw new Error("Durable Slack reaction route could not bind its reserved session");
@@ -2798,8 +2884,8 @@ async function processSlackReactionInboxEntry(
         requestedSessionId: interaction.sessionReservationId,
         initialMessage: preparedEntry.text,
         instructions: SLACK_SESSION_INSTRUCTIONS,
-        // Reaction context stays bounded; ordinary tools follow the same saved
-        // selection/workspace defaults as the website, without adding Slack tools.
+        // Reaction context stays bounded: connectors and first-party tools
+        // follow the workspace defaults, without adding the Slack read tools.
         resources: [...defaults.resources, ...preparedTask.resources],
         ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
         // Every reaction entry converging on this route must use the same create
@@ -2830,6 +2916,12 @@ async function processSlackReactionInboxEntry(
     ...interaction,
     owningSubjectId: grant.subjectId,
     sessionId: session.id,
+    sessionDefaultsLine: await slackSessionDefaultsLine(
+      deps,
+      grant,
+      interaction.workspaceId,
+      session.id,
+    ),
   });
   if (!bound) throw new Error("Slack reaction route could not bind its durable session");
   await acknowledgeSlackReactionSession(deps, client, bound, settings.emoji);
@@ -2845,10 +2937,16 @@ async function acknowledgeSlackReactionSession(
     throw new Error("Slack reaction acknowledgement requires a bound session");
   }
   const started = `OpenGeni started from the :${emoji}: reaction. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} If the intended action is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
-  const rendered = withWorkspaceLine(interaction.routedWorkspaceLabel, started);
+  const rendered = withWorkspaceLine(
+    interaction.routedWorkspaceLabel,
+    interaction.sessionDefaultsLine ? `${started}\n${interaction.sessionDefaultsLine}` : started,
+  );
   await client.postMessage({
     operationId: deterministicUuid(
-      slackPostSeed(interaction, `slack-reaction-ack:${interaction.id}`),
+      slackDefaultsLinePostSeed(
+        interaction,
+        slackPostSeed(interaction, `slack-reaction-ack:${interaction.id}`),
+      ),
     ),
     channelId: interaction.slackChannelId,
     threadTimestamp: interaction.slackThreadTs,
@@ -2879,20 +2977,85 @@ function slackReactionPreparedEntry(
   };
 }
 
-// A create can commit its reserved shell before initial-event acceptance. Keep
-// that shell's selections on retry instead of reading a subsequently edited draft.
+/**
+ * The acknowledgement line for a session this interaction is about to bind.
+ * Rendered once from the durable session row and frozen by the bind.
+ *
+ * The line is informational. A failure to render it binds no line rather than
+ * holding the task back, because the session already exists and the person is
+ * waiting for the acknowledgement.
+ */
+async function slackSessionDefaultsLine(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  try {
+    const session = await getSession(deps.db, workspaceId, sessionId);
+    if (!session) return null;
+    return renderSlackSessionDefaultsLine(
+      await summarizeSlackSessionDefaults(deps, grant, workspaceId, session),
+    );
+  } catch (error) {
+    console.error("[slack-interactions] session defaults line unavailable", {
+      workspaceId,
+      sessionId,
+      errorCode: safeErrorCode(error),
+    });
+    return null;
+  }
+}
+
+type SlackNewSessionDefaults = {
+  model?: string;
+  reasoningEffort?: Session["reasoningEffort"];
+  latencyMode?: Session["latencyMode"];
+  resources: RepositoryResourceRef[];
+  tools?: Session["tools"];
+  excludedMcpServerIds?: string[] | undefined;
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
+  firstPartyMcpPermissions?: NonNullable<Session["firstPartyMcpPermissions"]>;
+  variableSetIds?: string[];
+  rigId?: string;
+  sandboxBackend?: Session["sandboxBackend"];
+  targetSandboxId?: string;
+  workingDir?: string;
+};
+
+/**
+ * What a new Slack task starts with.
+ *
+ * A Slack message is not the website composer, so the person's last composer
+ * selection (an explicit connector list, a Variable Set, a compute target)
+ * never narrows it. Connectors, first-party tools, Variable Sets, Sandbox
+ * Environment and compute are left to session creation, which applies the
+ * workspace defaults and freezes the person's own connections through the
+ * ordinary delegation snapshot. Repositories are the workspace's GitHub App
+ * repositories the person can use. Only an explicitly chosen model carries
+ * over, because choosing a model narrows nothing.
+ *
+ * A create can commit its reserved shell before initial-event acceptance. Keep
+ * that shell's exact selections on retry instead of resolving defaults again.
+ */
 async function slackNewSessionDefaults(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   interaction: { workspaceId: string; sessionReservationId: string; owningSubjectId: string },
   createKey: string,
-): Promise<Awaited<ReturnType<typeof getActorNewSessionDefaults>>> {
+): Promise<SlackNewSessionDefaults> {
   const pending = await getSessionByCreateIdempotencyKey(
     deps.db,
     interaction.workspaceId,
     createKey,
   );
-  if (!pending) return getActorNewSessionDefaults(deps, grant, interaction.workspaceId);
+  if (!pending) {
+    const [modelChoice, resources] = await Promise.all([
+      getActorNewSessionModelChoice(deps, grant, interaction.workspaceId),
+      slackWorkspaceRepositoryResources(deps, grant, interaction.workspaceId),
+    ]);
+    return { ...modelChoice, resources };
+  }
   if (
     pending.id !== interaction.sessionReservationId ||
     interaction.owningSubjectId !== grant.subjectId ||
@@ -2905,7 +3068,9 @@ async function slackNewSessionDefaults(
     model: pending.model,
     reasoningEffort: pending.reasoningEffort,
     latencyMode: pending.latencyMode,
-    resources: pending.resources.filter((resource) => resource.kind === "repository"),
+    resources: pending.resources.filter(
+      (resource): resource is RepositoryResourceRef => resource.kind === "repository",
+    ),
     ...(pending.toolPolicy.mode === "explicit"
       ? { tools: pending.tools }
       : {
@@ -3473,13 +3638,17 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   // ever shown. The handle's message operation identifies the acknowledgement
   // exactly, independent of route rekeying. Later control cards have their own
   // operation ids, so the hint still appears on exactly one message.
-  const acknowledgementOperationId = deterministicUuid(
-    slackPostSeed(interaction, `slack-ack:${interaction.id}`),
-  );
-  const updateText =
-    interaction.firstTaskHint === true && handle.messageOperationId === acknowledgementOperationId
-      ? `${outcome.text}${slackFirstTaskHintText(deps)}`
+  const onAcknowledgement =
+    handle.messageOperationId === slackAcknowledgementOperationId(interaction);
+  // The same holds for the line naming what the task started with.
+  const outcomeText =
+    onAcknowledgement && interaction.sessionDefaultsLine
+      ? `${outcome.text}\n${interaction.sessionDefaultsLine}`
       : outcome.text;
+  const updateText =
+    interaction.firstTaskHint === true && onAcknowledgement
+      ? `${outcomeText}${slackFirstTaskHintText(deps)}`
+      : outcomeText;
   // A control click replaces a message that already carried the line, so the
   // replacement carries it too rather than quietly stripping it.
   const rendered = withWorkspaceLine(interaction.routedWorkspaceLabel, updateText, [
