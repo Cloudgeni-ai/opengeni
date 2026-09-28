@@ -6765,6 +6765,10 @@ export const sessionTurns = pgTable(
     temporalWorkflowId: text("temporal_workflow_id").notNull(),
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
+    // Immutable, content-free product surface the request entered through
+    // (`SessionTurnSurface`). Analytics only, never an authorization input.
+    // Null is reserved for rolling/legacy writers (migration 0533).
+    surface: text("surface"),
     // Immutable user-facing admission intent. Physical execution still uses
     // status=queued until a worker claims the row; this field keeps that
     // implementation queue distinct from prompts genuinely waiting behind
@@ -6882,6 +6886,13 @@ export const sessionTurns = pgTable(
       "session_turns_model_context_check",
       sql`${table.modelContext} is null
         or opengeni_private.model_context_value_valid(${table.modelContext})`,
+    ),
+    surfaceValid: check(
+      "session_turns_surface_check",
+      sql`${table.surface} is null or ${table.surface} in (
+        'web', 'slack', 'api_key', 'embedded', 'scheduled', 'agent',
+        'voice', 'site', 'automation', 'mcp', 'system'
+      )`,
     ),
   }),
 );
@@ -12097,6 +12108,10 @@ export const hostExportOutbox = pgTable(
       .notNull()
       .default({}),
     origin: text("origin"),
+    // Content-free analytics dimensions captured with the row (migration 0533).
+    surface: text("surface"),
+    modelProvider: text("model_provider"),
+    toolFamily: text("tool_family"),
     payload: jsonb("payload").$type<unknown>().notNull(),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     envelopeBytes: integer("envelope_bytes").notNull(),
@@ -12142,6 +12157,20 @@ export const hostExportOutbox = pgTable(
       sql`${table.origin} is null or ${table.origin} in (
         'user', 'scheduled_task', 'api', 'goal', 'system', 'compaction'
       )`,
+    ),
+    analyticsValid: check(
+      "host_export_outbox_analytics_check",
+      sql`(${table.surface} is null or ${table.surface} in (
+        'web', 'slack', 'api_key', 'embedded', 'scheduled', 'agent',
+        'voice', 'site', 'automation', 'mcp', 'system'
+      ))
+      and (${table.modelProvider} is null or ${table.modelProvider} in (
+        'openai', 'azure', 'codex-subscription', 'supergrok-subscription',
+        'opengeni-gateway', 'workspace-gateway', 'organization-gateway',
+        'openrouter', 'workspace-openrouter', 'organization-openrouter', 'registry'
+      ))
+      and (${table.toolFamily} is null or ${table.toolFamily} ~
+        '^(custom|integration:[a-z0-9]([a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$')`,
     ),
   }),
 );

@@ -45,6 +45,21 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Each accepted turn also freezes a content-free **surface**
+(`session_turns.surface`, `SessionTurnSurface` in
+`packages/contracts/src/product-analytics.ts`): the product surface its request
+entered through (`web`, `slack`, `api_key`, `embedded`, `scheduled`, `agent`,
+`voice`, `site`, `automation`, `mcp`, or `system`). It is an analytics label,
+never authority, and is immutable after admission (migration 0533). Entry points
+that know their surface pass it explicitly (Slack, realtime voice, automations,
+maintenance); core derives the rest once from the verified access path in
+`packages/core/src/turn-surface.ts`. A scheduled occurrence claims `scheduled`
+and another agent's message or Steer claims `agent`; every other internal turn
+(goal continuation, child results, command results, wait timeouts, compaction)
+inherits the surface of the session's latest started turn. `origin`
+(`session_turns.source`) keeps its existing meaning, so a scheduled turn still
+has origin `system`.
+
 After execution ends, every physical finalization stage has a five-minute
 containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded

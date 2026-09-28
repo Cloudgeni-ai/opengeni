@@ -995,7 +995,7 @@ registration repair in `0107_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 Accepted `user.message` events intentionally have no direct turn ID. Migration
-`0461_host_export_message_attribution.sql` derives export initiator and origin
+`0460_host_export_message_attribution.sql` derives export initiator and origin
 from the exact same-account/workspace/session turn whose `trigger_event_id`
 references the message, after the accepting transaction commits its turn. It
 never derives sender authority from payload fields or the session creator.
@@ -1003,6 +1003,23 @@ An unbound event stays unattributed. The event's own turn ID and the existing
 immutable export rows/checkpoints are unchanged; downstream historical
 attribution repair is a separate operator action. Analytics consumers must expose
 unattributed coverage instead of equating missing identity with zero messages.
+
+Migration `0533_turn_surface_analytics.sql` adds three content-free analytics
+fields next to `origin`, each from a fixed list defined in
+`packages/contracts/src/product-analytics.ts`: `surface` (the attributed turn's
+entry surface, see [`run-lifecycle.md`](run-lifecycle.md)), `modelProvider` (the
+provider family from the turn's accepted execution policy; operator-configured
+registry providers export as `registry`), and, on `agent.toolCall.created` only,
+`toolFamily` (an OpenGeni first-party tool name, `integration:<reviewed domain>`,
+or `custom`, so a tenant's own MCP host never leaves the database). The worker
+stamps `toolFamily` on the event payload and the export trigger checks the wire
+format again, exporting NULL for anything malformed. Usage facts carry `surface`
+and `modelProvider` from their turn. The published claim function and its
+root/codec sidecar keep their signatures: SQL consumers read the new columns
+through `opengeni_host_export.host_export_claim_analytics_sidecars(kind,
+consumer, lease)` in the same transaction as the claim, and `createHostExportPump`
+sinks receive them on each `HostEventExport` / `HostUsageExport`. The fields are
+optional on the wire; rows enqueued before the migration export them as null.
 
 
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
