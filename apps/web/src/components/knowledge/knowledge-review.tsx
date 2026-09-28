@@ -116,7 +116,7 @@ export interface ReviewQueue {
   items: ReviewItem[];
   groups: ReviewGroup[];
   count: number;
-  /** More than one page of something is waiting. */
+  /** Some inventories couldn't be fully checked. */
   partial: boolean;
   loading: boolean;
   error: string | null;
@@ -145,51 +145,86 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
   useEffect(() => {
     let current = true;
     const { client } = context;
+    setState(null);
     void (async () => {
       const failures: string[] = [];
       let partial = false;
       const items: ReviewItem[] = [];
-      const [batches, instructions, skills] = await Promise.allSettled([
-        client.listKnowledgeReviewBatches(workspaceId, { limit: 20 }),
+
+      // Instructions and Skills list an inventory, not only proposals. An empty
+      // page with a cursor can't establish that nothing is waiting for review.
+      // Keep earlier pages on a failure and stop reads when this load is stale.
+      const scan = async <Page extends { nextCursor: string | null }>(
+        load: (cursor?: string) => Promise<Page>,
+      ): Promise<Page[]> => {
+        const pages: Page[] = [];
+        const seen = new Set<string>();
+        let cursor: string | undefined;
+        try {
+          do {
+            const page = await load(cursor);
+            if (!current) return pages;
+            pages.push(page);
+            cursor = page.nextCursor ?? undefined;
+            if (cursor) {
+              if (seen.has(cursor)) throw new Error("Couldn't finish checking changes. Try again.");
+              seen.add(cursor);
+            }
+          } while (cursor);
+        } catch (reason) {
+          partial = true;
+          failures.push(errorText(reason));
+        }
+        return pages;
+      };
+
+      const [batchPages, instructionPages, skillPages] = await Promise.all([
+        scan((cursor) =>
+          client.listKnowledgeReviewBatches(workspaceId, {
+            limit: 20,
+            ...(cursor ? { cursor } : {}),
+          }),
+        ),
         canManage
-          ? client.listAgentInstructionReviews(workspaceId)
-          : Promise.resolve({ entries: [], nextCursor: null }),
-        client.listWorkspaceSkills(workspaceId, { limit: 100 }),
+          ? scan((cursor) => client.listAgentInstructionReviews(workspaceId, cursor))
+          : Promise.resolve([]),
+        scan((cursor) =>
+          client.listWorkspaceSkills(workspaceId, {
+            limit: 100,
+            ...(cursor ? { cursor } : {}),
+          }),
+        ),
       ]);
-      if (batches.status === "fulfilled") {
-        partial ||= Boolean(batches.value.nextCursor);
-        const pages = await Promise.allSettled(
-          batches.value.batches.map((batch) =>
+      if (!current) return;
+      const batches = batchPages.flatMap((page) => page.batches);
+      const entryPages = await Promise.all(
+        batches.map((batch) =>
+          scan((cursor) =>
             client.listKnowledgeEntries(workspaceId, {
               view: "needs_review",
               reviewBatchId: batch.id,
               limit: 50,
+              ...(cursor ? { cursor } : {}),
             }),
           ),
-        );
-        pages.forEach((page, index) => {
-          const batch = batches.value.batches[index]!;
-          if (page.status === "rejected") {
-            failures.push(errorText(page.reason));
-            return;
-          }
-          partial ||= Boolean(page.value.nextCursor);
-          for (const entry of page.value.entries) {
-            items.push({
-              kind: "knowledge",
-              key: `knowledge:${entry.id}`,
-              title: entry.revision.title,
-              createdAt: entry.revision.createdAt,
-              origin: batchOrigin(batch),
-              batch,
-              entry,
-            });
-          }
-        });
-      } else failures.push(errorText(batches.reason));
-      if (instructions.status === "fulfilled") {
-        partial ||= Boolean(instructions.value.nextCursor);
-        for (const item of instructions.value.entries) {
+        ),
+      );
+      entryPages.forEach((pages, index) => {
+        const batch = batches[index]!;
+        for (const entry of pages.flatMap((page) => page.entries)) {
+          items.push({
+            kind: "knowledge",
+            key: `knowledge:${entry.id}`,
+            title: entry.revision.title,
+            createdAt: entry.revision.createdAt,
+            origin: batchOrigin(batch),
+            batch,
+            entry,
+          });
+        }
+      });
+      for (const page of instructionPages) {
+        for (const item of page.entries) {
           items.push({
             kind: "instruction",
             key: `instruction:${item.revisionId}`,
@@ -201,10 +236,9 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
             item,
           });
         }
-      } else failures.push(errorText(instructions.reason));
-      if (skills.status === "fulfilled") {
-        partial ||= Boolean(skills.value.nextCursor);
-        for (const skill of skills.value.skills) {
+      }
+      for (const page of skillPages) {
+        for (const skill of page.skills) {
           const allowed =
             skill.scope === "user" ||
             (skill.scope === "organization" ? canManageOrganization : canManage);
@@ -218,8 +252,13 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
             skill,
           });
         }
-      } else failures.push(errorText(skills.reason));
-      if (current) setState({ items, partial, error: failures.length ? failures[0]! : null });
+      }
+      if (current)
+        setState({
+          items: [...new Map(items.map((item) => [item.key, item])).values()],
+          partial,
+          error: failures.length ? failures[0]! : null,
+        });
     })();
     return () => {
       current = false;
@@ -420,6 +459,19 @@ export function ReviewTab({
     );
   }
   if (!selected) {
+    if (queue.partial) {
+      return shell(
+        <Notice
+          title="Some changes haven't been checked"
+          action={
+            <Button type="button" size="sm" variant="outline" onClick={queue.reload}>
+              Try again
+            </Button>
+          }
+          actionLayout="responsive"
+        />,
+      );
+    }
     return shell(
       <EmptyState
         variant="page"
@@ -440,10 +492,10 @@ export function ReviewTab({
               <ApproveAll
                 workspaceId={workspaceId}
                 items={group.items}
-                onDone={() => {
+                onDone={(reviewed) => {
                   setHidden((prior) => {
                     const done = new Set(prior);
-                    for (const item of group.items) done.add(item.key);
+                    for (const entry of reviewed) done.add(`knowledge:${entry.id}`);
                     return done;
                   });
                   notifyKnowledgeReviewUpdated();
@@ -481,7 +533,7 @@ export function ReviewTab({
       ))}
       {queue.partial ? (
         <p className="px-3 text-xs text-fg-muted">
-          More changes are waiting. They show up here as you work through these.
+          Some changes couldn't be checked. Try again to check the rest.
         </p>
       ) : null}
     </div>
@@ -532,11 +584,12 @@ function ApproveAll({
 }: {
   workspaceId: string;
   items: ReviewItem[];
-  onDone: () => void;
+  onDone: (reviewed: KnowledgeEntrySummary[]) => void;
 }) {
   const { client } = useAppContext();
   const [busy, setBusy] = useState(false);
-  const knowledge = items.flatMap((item) => (item.kind === "knowledge" ? [item.entry] : []));
+  const allKnowledge = items.flatMap((item) => (item.kind === "knowledge" ? [item.entry] : []));
+  const knowledge = allKnowledge.slice(0, 100);
   return (
     <button
       type="button"
@@ -545,7 +598,7 @@ function ApproveAll({
         setBusy(true);
         void client
           .reviewKnowledgeEntries(workspaceId, {
-            entries: knowledge.slice(0, 100).map((entry) => ({
+            entries: knowledge.map((entry) => ({
               operationId: crypto.randomUUID(),
               entryId: entry.id,
               revisionId: entry.revision.id,
@@ -555,7 +608,7 @@ function ApproveAll({
           })
           .then(() => {
             toast(`Approved ${knowledge.length} changes`);
-            onDone();
+            onDone(knowledge);
           })
           .catch((reason: unknown) =>
             toast.error("Couldn't approve them all", { description: errorText(reason) }),
@@ -564,7 +617,11 @@ function ApproveAll({
       }}
       className="shrink-0 rounded-[6px] font-medium text-brand underline-offset-2 hover:underline disabled:opacity-60 pointer-coarse:min-h-11"
     >
-      {busy ? "Approving…" : `Approve all ${knowledge.length}`}
+      {busy
+        ? "Approving…"
+        : allKnowledge.length > 100
+          ? "Approve 100"
+          : `Approve all ${knowledge.length}`}
     </button>
   );
 }

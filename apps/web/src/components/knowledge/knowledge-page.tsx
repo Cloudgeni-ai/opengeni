@@ -365,7 +365,8 @@ export function KnowledgePage({
     );
   }
 
-  const showReview = queue.count > 0 || tab === "review";
+  const showReview =
+    queue.count > 0 || queue.loading || queue.partial || Boolean(queue.error) || tab === "review";
   const summary = learningSummary(shared.modes);
 
   return (
