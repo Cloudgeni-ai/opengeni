@@ -389,7 +389,7 @@ export function BrowserAccountsLoadingGate({ children }: { children?: ReactNode 
     );
   }
   if (accounts.phase === "loading" || accounts.projection === null) {
-    return <LoadingPanel label="Loading browser accounts" />;
+    return <LoadingPanel />;
   }
   return children;
 }

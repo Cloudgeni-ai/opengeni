@@ -16,13 +16,32 @@ const degradedConnectionStates: Partial<Record<SessionEventsConnectionState, Con
     error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
   };
 
-export function LoadingPanel({ label }: { label: string }) {
+/** One quiet presentation across bootstrap, access, route and history gates.
+ * Named operation panels retain their existing treatment. Gates still own
+ * when content is authorized; this component never retains data.
+ */
+export function LoadingPanel({ label }: { label?: string }) {
+  if (label) {
+    return (
+      <section className="grid flex-1 place-items-center px-4 text-center">
+        <div className="max-w-sm rounded-lg border border-border bg-surface p-5 text-sm text-fg-muted">
+          <Loader2Icon className="mx-auto mb-3 size-5 animate-spin text-fg" />
+          {label}
+        </div>
+      </section>
+    );
+  }
   return (
-    <section className="grid flex-1 place-items-center px-4 text-center">
-      <div className="max-w-sm rounded-lg border border-border bg-surface p-5 text-sm text-fg-muted">
-        <Loader2Icon className="mx-auto mb-3 size-5 animate-spin text-fg" />
-        {label}
-      </div>
+    <section
+      role="status"
+      aria-label="Loading"
+      className="flex h-full min-h-0 w-full flex-1 items-center justify-center p-4 text-sm text-fg-muted"
+      data-page-loading=""
+    >
+      <span className="inline-flex items-center gap-2">
+        <Loader2Icon aria-hidden className="size-4 animate-spin motion-reduce:animate-none" />
+        Loading…
+      </span>
     </section>
   );
 }
