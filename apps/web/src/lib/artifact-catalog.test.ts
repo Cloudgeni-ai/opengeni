@@ -1,15 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
-  artifactExtension,
   artifactKey,
   artifactPath,
   artifactRoute,
   defaultArtifactFilters,
   filterArtifactCatalog,
-  readArtifactView,
-  rememberArtifactView,
 } from "./artifact-catalog";
+import { artifactExtension, readArtifactView, rememberArtifactView } from "./artifact-library-view";
 
 const item = (
   id: string,

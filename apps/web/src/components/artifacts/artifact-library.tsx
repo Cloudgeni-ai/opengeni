@@ -47,18 +47,20 @@ import {
 } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import {
-  artifactExtension,
   artifactKey,
   artifactKindLabel,
   artifactKinds,
   artifactPath,
   artifactRoute,
-  readArtifactView,
-  rememberArtifactView,
   type ArtifactCatalogFilters,
   type ArtifactKind,
-  type ArtifactView,
 } from "@/lib/artifact-catalog";
+import {
+  artifactExtension,
+  readArtifactView,
+  rememberArtifactView,
+  type ArtifactView,
+} from "@/lib/artifact-library-view";
 import { cn } from "@/lib/utils";
 import { ArtifactTypeIcon } from "./artifact-page-chrome";
 

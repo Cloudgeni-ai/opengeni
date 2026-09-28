@@ -555,6 +555,12 @@ const effectiveBudgets = {
     // Linux/x64 (main alone: 2,477,469 / 700,765). Keep the established
     // 1.5 KiB headroom; initial, per-file and lazy caps stay fixed.
     wholeKibEnvelope(2_523_033, 1.5 * kib),
+    // The Artifacts preview gallery and the settings rail add utilities to the
+    // same single stylesheet (+1,384 raw CSS bytes), and the new lazy routes'
+    // chunk names lengthen the eager preload maps. Their helpers stay out of the
+    // eager graph (lib/artifact-library-view). Measured 2,525,642 raw bytes on
+    // Bun 1.4 Linux/x64; keep the established 1.5 KiB headroom.
+    wholeKibEnvelope(2_525_642, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
