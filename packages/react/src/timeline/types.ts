@@ -350,6 +350,8 @@ export type SessionStatusItem = {
   kind: "session-status";
   id: string;
   status: SessionStatus;
+  /** Presentation-only evidence that this historical attention state resumed. */
+  resolvedAt?: string;
   occurredAt: string;
 };
 
@@ -374,6 +376,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** Presentation-only evidence that a historical approval wait resumed. */
+  resolvedAt?: string;
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
   /**
