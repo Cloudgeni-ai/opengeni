@@ -258,7 +258,7 @@ export function goalContinuationPrompt(
     ? [
         "Waiting on child sessions, background commands, or external events:",
         "- When further progress depends on work already in flight, do not sleep, loop, or poll session or command state repeatedly.",
-        "- Re-check once; if the work is still in flight and the wait is long or uncertain, call opengeni__wait_for_input with a concrete reason and timeoutSeconds, then end your turn immediately. Relevant session input or the safety deadline will start a new turn, and this goal stays active.",
+        "- If progress depends on work already in flight and the wait is long or uncertain, call opengeni__wait_for_input with a concrete reason and timeoutSeconds, then end your turn immediately. A preliminary status check is not required. Relevant session input or the safety deadline will start a new turn, and this goal stays active.",
         "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__wait_for_input and end the turn. Report only material new state or a newly discovered blocker.",
         "- If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
         "",
