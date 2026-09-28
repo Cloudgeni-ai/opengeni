@@ -25,7 +25,7 @@ import {
 } from "../src/index";
 
 // Real PostgreSQL: the turn surface is frozen where each request enters, the
-// migration 0532 export triggers carry it next to origin with the model
+// migration 0533 export triggers carry it next to origin with the model
 // provider and tool family, and only fixed-list values ever leave the database.
 
 let shared: SharedTestDatabase;

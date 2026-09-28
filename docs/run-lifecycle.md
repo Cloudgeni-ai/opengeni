@@ -50,7 +50,7 @@ Each accepted turn also freezes a content-free **surface**
 `packages/contracts/src/product-analytics.ts`): the product surface its request
 entered through (`web`, `slack`, `api_key`, `embedded`, `scheduled`, `agent`,
 `voice`, `site`, `automation`, `mcp`, or `system`). It is an analytics label,
-never authority, and is immutable after admission (migration 0532). Entry points
+never authority, and is immutable after admission (migration 0533). Entry points
 that know their surface pass it explicitly (Slack, realtime voice, automations,
 maintenance); core derives the rest once from the verified access path in
 `packages/core/src/turn-surface.ts`. A scheduled occurrence claims `scheduled`

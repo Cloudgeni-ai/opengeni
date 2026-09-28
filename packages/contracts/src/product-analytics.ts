@@ -54,7 +54,7 @@ export function sessionTurnSurfaceOrNull(value: unknown): SessionTurnSurface | n
  * Model provider families exported for analytics. Reserved OpenGeni provider
  * ids pass through unchanged; every operator-configured registry provider is
  * reported as `registry` so a deployment's own naming never leaves it.
- * `opengeni_private.analytics_model_provider` (migration 0532) mirrors this.
+ * `opengeni_private.analytics_model_provider` (migration 0533) mirrors this.
  */
 export const ANALYTICS_MODEL_PROVIDERS = [
   "openai",

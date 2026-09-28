@@ -75,9 +75,9 @@ describe("product analytics dimensions", () => {
     expect(ToolFamily.safeParse("Exec Command").success).toBe(false);
   });
 
-  test("migration 0532 mirrors the fixed lists", () => {
+  test("migration 0533 mirrors the fixed lists", () => {
     const sql = readFileSync(
-      `${repoRoot}packages/db/drizzle/0532_turn_surface_analytics.sql`,
+      `${repoRoot}packages/db/drizzle/0533_turn_surface_analytics.sql`,
       "utf8",
     );
     for (const surface of SESSION_TURN_SURFACES) expect(sql).toContain(`'${surface}'`);

@@ -6767,7 +6767,7 @@ export const sessionTurns = pgTable(
     source: text("source").notNull().default("user"),
     // Immutable, content-free product surface the request entered through
     // (`SessionTurnSurface`). Analytics only, never an authorization input.
-    // Null is reserved for rolling/legacy writers (migration 0532).
+    // Null is reserved for rolling/legacy writers (migration 0533).
     surface: text("surface"),
     // Immutable user-facing admission intent. Physical execution still uses
     // status=queued until a worker claims the row; this field keeps that
@@ -12108,7 +12108,7 @@ export const hostExportOutbox = pgTable(
       .notNull()
       .default({}),
     origin: text("origin"),
-    // Content-free analytics dimensions captured with the row (migration 0532).
+    // Content-free analytics dimensions captured with the row (migration 0533).
     surface: text("surface"),
     modelProvider: text("model_provider"),
     toolFamily: text("tool_family"),

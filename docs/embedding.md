@@ -1004,7 +1004,7 @@ immutable export rows/checkpoints are unchanged; downstream historical
 attribution repair is a separate operator action. Analytics consumers must expose
 unattributed coverage instead of equating missing identity with zero messages.
 
-Migration `0532_turn_surface_analytics.sql` adds three content-free analytics
+Migration `0533_turn_surface_analytics.sql` adds three content-free analytics
 fields next to `origin`, each from a fixed list defined in
 `packages/contracts/src/product-analytics.ts`: `surface` (the attributed turn's
 entry surface, see [`run-lifecycle.md`](run-lifecycle.md)), `modelProvider` (the
