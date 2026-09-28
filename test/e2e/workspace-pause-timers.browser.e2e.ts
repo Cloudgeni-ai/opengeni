@@ -39,6 +39,9 @@ let page: Page;
 let apiUrl: string;
 let webUrl: string;
 let workspaceId: string;
+// Settings > General > Agent activity: "Running" with Pause, or "Paused" with Change and Resume.
+const runtime = () => page.getByRole("region", { name: "Agent activity" });
+const dialog = () => page.getByRole("dialog");
 const pageErrors: string[] = [];
 beforeAll(async () => {
   shared = (await acquireSharedTestDatabase("pause-timers-browser"))!;
@@ -77,13 +80,13 @@ beforeAll(async () => {
     if (location.origin !== "null")
       localStorage.setItem("opengeni.accessKey", "configured-test-placeholder");
   });
+  context.on("page", (opened) => opened.on("pageerror", (error) => pageErrors.push(String(error))));
   page = await context.newPage();
-  page.on("pageerror", (error) => pageErrors.push(String(error)));
   await page.goto(webUrl);
   await page.waitForURL(/\/workspaces\/[^/]+\/sessions/, { timeout: 60000 });
   workspaceId = page.url().match(/\/workspaces\/([^/]+)/)![1]!;
   await page.goto(`${webUrl}/workspaces/${workspaceId}/settings`);
-  await page.getByRole("region", { name: "Workspace runtime" }).waitFor();
+  await runtime().waitFor();
   await mkdir(shots, { recursive: true });
 }, 180000);
 afterAll(async () => {
@@ -93,10 +96,9 @@ afterAll(async () => {
   await db?.close();
   await shared?.release();
 }, 60000);
-const runtime = () => page.getByRole("region", { name: "Workspace runtime" });
-async function capture(name: string, dialog = false) {
+async function capture(name: string, inDialog = false) {
   await page.screenshot({ path: `${shots}/${name}-full.png`, fullPage: false });
-  await (dialog ? page.getByRole("dialog") : runtime()).screenshot({
+  await (inDialog ? dialog() : runtime()).screenshot({
     path: `${shots}/${name}.png`,
   });
 }
@@ -108,7 +110,12 @@ async function post(path: string, body: unknown, subject = "timer-owner") {
   });
 }
 async function refresh() {
-  await page.reload();
+  // A fresh page rather than page.reload(): repeated reloads of the unbundled
+  // Vite app in one renderer can fail with net::ERR_INSUFFICIENT_RESOURCES.
+  const previous = page;
+  page = await previous.context().newPage();
+  await previous.close();
+  await page.goto(previous.url());
   await runtime().waitFor();
 }
 async function dueAndFire() {
@@ -119,8 +126,8 @@ async function dueAndFire() {
     ),
   );
   await refresh();
-  await page
-    .getByText(timer.action === "pause" ? "Pausing…" : "Resuming…", { exact: true })
+  await runtime()
+    .getByText(timer.action === "pause" ? /Pausing…\.$/ : /Resuming…\.$/)
     .waitFor();
   await capture(timer.action === "pause" ? "12-pausing" : "13-resuming");
   const service = {
@@ -132,13 +139,110 @@ async function dueAndFire() {
   await createWorkflowWakeActivities(async () => service).dispatchSessionWorkflowWakes();
 }
 
+async function setTimer(timer: { pauseInSeconds: number; pauseForSeconds?: number | null }) {
+  const control = (await getWorkspace(db.db, workspaceId))!.inferenceControl;
+  const response = await post("pause-timer", {
+    action: "set",
+    ...timer,
+    expectedRevision: control.revision,
+    clientEventId: crypto.randomUUID(),
+  });
+  expect(response.status).toBe(200);
+}
+async function inferenceControl() {
+  return (await getWorkspace(db.db, workspaceId))!.inferenceControl;
+}
+function localInput(at: number) {
+  const date = new Date(at);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+const choice = (name: string) => dialog().getByRole("radio", { name, exact: true });
+const submit = () => dialog().locator('button[type="submit"]');
+
 test("all timer states through the real settings UI and API", async () => {
+  await runtime().getByText("Running", { exact: true }).waitFor();
   await capture("01-active");
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
+  // A delayed pause with a resume (set through the API; the dialog only pauses
+  // now) shows in the row, then fires and resumes on its own timer.
+  await setTimer({ pauseInSeconds: 1800, pauseForSeconds: 7200 });
+  await refresh();
+  await runtime()
+    .getByText(/Pauses in 30 min · for 2 hr/)
+    .waitFor();
+  await capture("04-delayed-finite");
+  await dueAndFire();
+  await refresh();
+  await runtime().getByText("Paused", { exact: true }).waitFor();
+  await runtime()
+    .getByText(/Resumes in 2 hr/)
+    .waitFor();
+  await capture("05-paused-finite");
+  // Change while paused: the scheduled resume is preselected as a picked time.
+  await runtime().getByRole("button", { name: "Change", exact: true }).click();
+  await dialog().getByRole("heading", { name: "Change pause" }).waitFor();
+  expect(await choice("Pick a time").isChecked()).toBe(true);
+  await capture("06-resume-editor", true);
+  // "Until I resume" cancels the resume timer and keeps the workspace paused.
+  await choice("Until I resume").click();
+  await submit().click();
+  await dialog().waitFor({ state: "hidden" });
+  await runtime()
+    .getByText("New sessions and scheduled runs wait until someone resumes.", { exact: true })
+    .waitFor();
+  expect(await inferenceControl()).toMatchObject({ state: "paused", timer: null });
+  await capture("07-paused-indefinite");
+  await runtime().getByRole("button", { name: "Resume", exact: true }).click();
+  await runtime().getByRole("button", { name: "Pause", exact: true }).waitFor();
+  expect((await inferenceControl()).state).toBe("active");
+  // A delayed indefinite pause can be cancelled from the Pause dialog.
+  await setTimer({ pauseInSeconds: 3600 });
+  await refresh();
+  await runtime()
+    .getByText(/Pauses in 1 hr · until resumed/)
+    .waitFor();
+  await capture("08-delayed-indefinite");
+  await runtime().getByRole("button", { name: "Pause", exact: true }).click();
+  await dialog().getByRole("button", { name: "Cancel scheduled pause", exact: true }).click();
+  await dialog().waitFor({ state: "hidden" });
+  await runtime()
+    .getByText("Agents can start new sessions and scheduled runs.", { exact: true })
+    .waitFor();
+  expect(await inferenceControl()).toMatchObject({ state: "active", timer: null });
+  // The default editor, a picked time, and an invalid picked time.
+  await runtime().getByRole("button", { name: "Pause", exact: true }).click();
+  await dialog().getByRole("heading", { name: "Pause agent work" }).waitFor();
+  expect(await choice("For 30 minutes").isChecked()).toBe(true);
+  for (const name of ["For 1 hour", "Until I resume", "Pick a time"])
+    expect(await choice(name).count()).toBe(1);
+  expect(await choice("Until tomorrow morning").or(choice("Until this morning")).count()).toBe(1);
   await capture("02-default-editor", true);
-  await page.getByLabel("Pause in", { exact: true }).selectOption("1800");
-  await page.getByLabel("Pause for", { exact: true }).selectOption("7200");
-  await capture("03-combined-editor", true);
+  await choice("Pick a time").click();
+  const resumeAt = dialog().getByLabel("Resume at", { exact: true });
+  await resumeAt.fill(localInput(Date.now() + 90 * 60_000));
+  await capture("09-custom-duration", true);
+  await resumeAt.fill(localInput(Date.now() - 60 * 60_000));
+  await submit().click();
+  await dialog().getByText("Pick a time at least a minute from now.", { exact: true }).waitFor();
+  expect(await dialog().isVisible()).toBe(true);
+  expect((await inferenceControl()).state).toBe("active");
+  await capture("10-invalid-duration", true);
+  await resumeAt.fill(localInput(Date.now() + 90 * 60_000));
+  const accessibility = await new AxeBuilder({ page }).include('[role="dialog"]').analyze();
+  expect(accessibility.violations).toEqual([]);
+  await submit().click();
+  await dialog().waitFor({ state: "hidden" });
+  await runtime()
+    .getByText(/Resumes in 1 hr (29|30) min/)
+    .waitFor();
+  expect((await inferenceControl()).timer).toMatchObject({ action: "resume" });
+  await runtime().getByRole("button", { name: "Resume", exact: true }).click();
+  await runtime().getByRole("button", { name: "Pause", exact: true }).waitFor();
+  expect(await inferenceControl()).toMatchObject({ state: "active", timer: null });
+  // Pause for a preset while the save is held, then exercise the actual
+  // automatic resume transition.
+  await runtime().getByRole("button", { name: "Pause", exact: true }).click();
+  await choice("For 1 hour").click();
   let releaseSave!: () => void;
   const saveGate = new Promise<void>((resolve) => {
     releaseSave = resolve;
@@ -151,66 +255,38 @@ test("all timer states through the real settings UI and API", async () => {
     },
     { times: 1 },
   );
-  await page.getByRole("button", { name: "Set timer", exact: true }).click();
+  await submit().click();
+  await submit().filter({ hasText: "Pausing…" }).waitFor();
   await capture("14-saving", true);
-  expect(await page.getByRole("button", { name: "Set timer", exact: true }).isDisabled()).toBe(
-    true,
-  );
+  expect(await submit().getAttribute("aria-disabled")).toBe("true");
   releaseSave();
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
-  await page.getByText(/Pauses in 30 min · for 2 hr/).waitFor();
-  await capture("04-delayed-finite");
+  await dialog().waitFor({ state: "hidden" });
+  await runtime()
+    .getByText(/Resumes in 1 hr/)
+    .waitFor();
+  expect((await inferenceControl()).state).toBe("paused");
   await dueAndFire();
   await refresh();
-  await page.getByText(/Resumes in 2 hr/).waitFor();
-  await capture("05-paused-finite");
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
-  await capture("06-resume-editor", true);
-  await page.getByRole("button", { name: "Cancel timer", exact: true }).click();
-  await page.getByText("Paused until you resume", { exact: true }).waitFor();
-  await capture("07-paused-indefinite");
-  await page.getByRole("button", { name: "Resume workspace", exact: true }).click();
-  await page.getByRole("button", { name: "Pause workspace", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
-  await page.getByLabel("Pause in", { exact: true }).selectOption("3600");
-  await page.getByRole("button", { name: "Set timer", exact: true }).click();
-  await page.getByText(/Pauses in 1 hr · until resumed/).waitFor();
-  await capture("08-delayed-indefinite");
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
-  await page.getByLabel("Pause for", { exact: true }).selectOption("custom");
-  await page.getByLabel("Pause for amount", { exact: true }).fill("90");
-  await capture("09-custom-duration", true);
-  await page.getByLabel("Pause for amount", { exact: true }).fill("0");
-  expect(await page.getByRole("button", { name: "Set timer", exact: true }).isDisabled()).toBe(
-    true,
-  );
-  await capture("10-invalid-duration", true);
-  await page.getByLabel("Pause for amount", { exact: true }).fill("90");
-  const accessibility = await new AxeBuilder({ page }).include('[role="dialog"]').analyze();
-  expect(accessibility.violations).toEqual([]);
-  await page.keyboard.press("Escape");
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
-  await page.getByRole("button", { name: "Cancel timer", exact: true }).click();
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
-  // Pause now for 15 minutes, then exercise the actual automatic resume transition.
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
-  await page.getByLabel("Pause for", { exact: true }).selectOption("900");
-  await page.getByRole("button", { name: "Pause now", exact: true }).click();
-  await page.getByText(/Resumes in 15 min/).waitFor();
-  await dueAndFire();
-  await refresh();
-  expect((await getWorkspace(db.db, workspaceId))!.inferenceControl.state).toBe("active");
+  expect((await inferenceControl()).state).toBe("active");
+  await runtime().getByText("Running", { exact: true }).waitFor();
   await capture("11-resumed");
   // Another admin changes the workspace while the editor is open.
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
+  await runtime().getByRole("button", { name: "Pause", exact: true }).click();
+  await dialog().waitFor();
   await post("inference-control", { action: "pause", clientEventId: crypto.randomUUID() });
-  await page.getByRole("button", { name: "Pause now", exact: true }).click();
-  await page.getByRole("alert").filter({ hasText: "Workspace changed" }).waitFor();
+  await submit().click();
+  await dialog()
+    .getByRole("alert")
+    .filter({ hasText: "Someone changed agent activity just now" })
+    .waitFor();
   await capture("15-stale-edit", true);
   await page.keyboard.press("Escape");
+  await dialog().waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "Pause timer", exact: true }).click();
+  // Phones show the settings index first; General holds Agent activity.
+  await page.getByRole("link", { name: "General" }).click();
+  await runtime().getByRole("button", { name: "Change", exact: true }).click();
+  await dialog().waitFor();
   await capture("16-mobile-editor", true);
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 1440, height: 1000 });

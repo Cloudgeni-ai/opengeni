@@ -119,9 +119,32 @@ function appDatabaseUrl(fixture: OwnerMigratedTestDatabase): string {
   return value.toString();
 }
 
+function recoveryUrl(): string {
+  return `${publicOrigin}/workspaces/${workspaceId}/organization?section=security`;
+}
+
+// Security & data has no refresh control; a reload reads the recovery state again.
 async function refresh(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "Refresh" }).click();
-  await page.getByRole("heading", { name: "Recovery custody" }).waitFor();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForRecovery(page);
+}
+
+function recoveryHeading(page: Page): Locator {
+  return page.getByRole("heading", { name: /^Recovery(?: Owners only)?$/u });
+}
+
+/** The recovery rows have loaded (the contacts row is their first row). */
+async function waitForRecovery(page: Page): Promise<void> {
+  await recoveryHeading(page).waitFor();
+  await page.getByText("Recovery contacts", { exact: true }).first().waitFor();
+}
+
+const REAUTH_REQUIRED =
+  "Sign in again from your account menu before changing recovery. Changes are only accepted shortly after signing in.";
+
+async function chooseTarget(page: Page, name: string): Promise<void> {
+  await page.getByRole("combobox", { name: /^Member to make an owner/u }).click();
+  await page.getByRole("option", { name: new RegExp(`^${escapeRegExp(name)}`, "u") }).click();
 }
 
 function escapeRegExp(value: string): string {
@@ -389,12 +412,9 @@ function observeRecoveryPage(page: Page, actor: ActorKey): void {
 async function openRecovery(actor: ActorKey): Promise<Page> {
   const fixture = actorBrowsers.get(actor);
   if (!fixture) throw new Error(`${actor} browser unavailable`);
-  await fixture.page.goto(
-    `${publicOrigin}/workspaces/${workspaceId}/organization?section=recovery`,
-    { waitUntil: "domcontentloaded" },
-  );
+  await fixture.page.goto(recoveryUrl(), { waitUntil: "domcontentloaded" });
   try {
-    await fixture.page.getByRole("heading", { name: "Recovery custody" }).waitFor();
+    await waitForRecovery(fixture.page);
   } catch (error) {
     throw new Error(
       `${actor} did not reach recovery: url=${fixture.page.url()} body=${JSON.stringify((await fixture.page.locator("body").innerText()).slice(0, 4_000))} problems=${JSON.stringify(browserProblems.slice(-20))}`,
@@ -402,7 +422,8 @@ async function openRecovery(actor: ActorKey): Promise<Page> {
     );
   }
   try {
-    await fixture.page.getByText("Recent re-authentication verified").waitFor();
+    // The page asks for a fresh sign-in only when the recent proof is missing.
+    expect(await fixture.page.getByText(REAUTH_REQUIRED, { exact: true }).count()).toBe(0);
   } catch (error) {
     const authority = (await fixture.context.cookies(publicOrigin)).find(
       (cookie) => cookie.name === "opengeni.session_set",
@@ -497,6 +518,15 @@ async function elapseCooldown(operationId: string): Promise<void> {
       revision = revision + 1, updated_at = now()
       where id = ${operationId}::uuid`;
   });
+}
+
+/** Workspace Access: people come from the organization, which owns the workspace. */
+async function openWorkspaceAccess(page: Page): Promise<void> {
+  await page.goto(`${publicOrigin}/workspaces/${workspaceId}/settings?section=members`, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.getByText(/^People come from Recovery Acceptance Organization\./u).waitFor();
+  await page.getByRole("link", { name: "Organization > People" }).waitFor();
 }
 
 async function axe(page: Page): Promise<void> {
@@ -782,22 +812,29 @@ describe("organization recovery same-origin Chromium acceptance", () => {
     const memberPage = actorBrowsers.get("custodian-1")!.page;
     expectingUnavailableRecovery = true;
     try {
-      await memberPage.goto(
-        `${publicOrigin}/workspaces/${workspaceId}/organization?section=recovery`,
-        { waitUntil: "domcontentloaded" },
-      );
+      await memberPage.goto(recoveryUrl(), { waitUntil: "domcontentloaded" });
+      await recoveryHeading(memberPage).waitFor();
       await memberPage
-        .getByText("Recovery is unavailable for this account.", { exact: true })
+        .getByText("Recovery isn't available for this account. Only owners can set it up.", {
+          exact: true,
+        })
         .waitFor();
-      expect(await memberPage.getByText("Couldn't load organization recovery").count()).toBe(0);
-      expect(await memberPage.getByText("Policy: not configured").count()).toBe(0);
-      expect(await memberPage.getByRole("button", { name: "Save custody policy" }).count()).toBe(0);
+      expect(await memberPage.getByText(/Couldn't load organization recovery/u).count()).toBe(0);
+      expect(await memberPage.getByText(/^Not set up\./u).count()).toBe(0);
+      expect(await memberPage.getByRole("button", { name: "Save recovery contacts" }).count()).toBe(
+        0,
+      );
     } finally {
       expectingUnavailableRecovery = false;
     }
     const ownerPage = await openRecovery("owner");
-    await ownerPage.getByText("Policy: not configured").waitFor();
-    await ownerPage.getByText("Exact promotion consequence").waitFor();
+    await ownerPage
+      .getByText(
+        "Not set up. Three members who aren't owners can later approve making a member an owner.",
+        { exact: true },
+      )
+      .waitFor();
+    await ownerPage.getByRole("heading", { name: "Choose three recovery contacts" }).waitFor();
 
     expect(await ownerPage.getByRole("checkbox").count()).toBe(4);
     for (const member of members.slice(0, 3)) {
@@ -807,10 +844,11 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       await checkbox.focus();
       await ownerPage.keyboard.press("Space");
     }
-    const save = ownerPage.getByRole("button", { name: "Save custody policy" });
+    await ownerPage.getByText("3 of 3 chosen", { exact: true }).waitFor();
+    const save = ownerPage.getByRole("button", { name: "Save recovery contacts" });
     await save.focus();
     await ownerPage.keyboard.press("Enter");
-    await ownerPage.getByText("Custodians accepted: 0/3", { exact: true }).waitFor();
+    await ownerPage.getByText(/^Waiting for contacts to accept · 0 of 3 accepted\./u).waitFor();
 
     for (const [actor, acceptedCount] of [
       ["custodian-1", 1],
@@ -818,45 +856,58 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       ["custodian-3", 3],
     ] as const) {
       const actorPage = await openRecovery(actor);
-      const accept = actorPage.getByRole("button", { name: "Accept custody" });
+      await actorPage.getByText("You're asked to be a recovery contact", { exact: true }).waitFor();
+      const accept = actorPage.getByRole("button", { name: "Accept", exact: true });
       await accept.focus();
       await actorPage.keyboard.press("Enter");
-      await actorPage
-        .getByText(`Custodians accepted: ${acceptedCount}/3`, { exact: true })
-        .waitFor();
+      await actorPage.getByText(new RegExp(`· ${acceptedCount} of 3 accepted\\.`, "u")).waitFor();
     }
 
     const custodianOnePage = await openRecovery("custodian-1");
-    await custodianOnePage.getByText("Custodians accepted: 3/3", { exact: true }).waitFor();
-    await custodianOnePage.getByLabel("Target member").selectOption(members[3].membershipId);
+    await custodianOnePage.getByText(/^Ready · 3 of 3 accepted\./u).waitFor();
+    // The consequence is stated before anyone starts a recovery.
+    await custodianOnePage
+      .getByText(
+        "Makes this member an owner after two contacts approve and seven days pass. Nothing else changes.",
+        { exact: true },
+      )
+      .waitFor();
+    await chooseTarget(custodianOnePage, members[3].name);
     await custodianOnePage.getByRole("button", { name: "Start seven-day recovery" }).click();
-    await custodianOnePage.getByText(/collecting · revision/u).waitFor();
+    await custodianOnePage
+      .getByRole("heading", { name: `Making ${members[3].name} an owner` })
+      .waitFor();
+    await custodianOnePage.getByText(/^Waiting for approvals · 0 of 2 approvals/u).waitFor();
 
     await refresh(ownerPage);
     const cancel = ownerPage.getByRole("button", { name: "Cancel recovery" });
     await cancel.focus();
     await ownerPage.keyboard.press("Enter");
-    await ownerPage.getByRole("heading", { name: "Cancel this recovery operation?" }).waitFor();
+    const cancelDialog = ownerPage.getByRole("dialog", { name: "Cancel this recovery?" });
+    await cancelDialog.waitFor();
+    expect(await cancelDialog.textContent()).toContain("Nobody becomes an owner.");
     await ownerPage.keyboard.press("Escape");
+    await cancelDialog.waitFor({ state: "detached" });
     expect(await cancel.evaluate((element) => element === document.activeElement)).toBe(true);
     await ownerPage.keyboard.press("Enter");
-    const confirmCancel = ownerPage.getByRole("button", {
-      name: "Cancel recovery operation",
+    const confirmCancel = cancelDialog.getByRole("button", {
+      name: "Cancel recovery",
+      exact: true,
     });
     await confirmCancel.focus();
     await ownerPage.keyboard.press("Enter");
-    await ownerPage.getByText(/cancelled · revision/u).waitFor();
+    await ownerPage.getByText(/^Cancelled · 0 of 2 approvals/u).waitFor();
 
     await refresh(custodianOnePage);
-    await custodianOnePage.getByLabel("Target member").selectOption(members[3].membershipId);
+    await chooseTarget(custodianOnePage, members[3].name);
     await custodianOnePage.getByRole("button", { name: "Start seven-day recovery" }).click();
-    await custodianOnePage.getByRole("button", { name: "Approve recovery" }).click();
-    await custodianOnePage.getByText("1/2 approvals").waitFor();
+    await custodianOnePage.getByText(/^Waiting for approvals · 0 of 2 approvals/u).waitFor();
+    await custodianOnePage.getByRole("button", { name: "Approve", exact: true }).click();
+    await custodianOnePage.getByText(/^Waiting for approvals · 1 of 2 approvals/u).waitFor();
+    await custodianOnePage.getByText(`Approved by ${members[0].name},`, { exact: false }).waitFor();
     const custodianTwoPage = await openRecovery("custodian-2");
-    await custodianTwoPage.getByRole("button", { name: "Approve recovery" }).click();
-    await custodianTwoPage.getByText("cooling", { exact: false }).first().waitFor();
-    await custodianTwoPage.getByText("Journaled", { exact: true }).waitFor();
-    await custodianTwoPage.getByText("2/2 approvals").waitFor();
+    await custodianTwoPage.getByRole("button", { name: "Approve", exact: true }).click();
+    await custodianTwoPage.getByText(/^Waiting seven days · 2 of 2 approvals/u).waitFor();
 
     const [coolingOperation] = await owned.admin<
       Array<{ id: string; state: string; revision: number }>
@@ -894,18 +945,16 @@ describe("organization recovery same-origin Chromium acceptance", () => {
     await elapseCooldown(coolingOperation.id);
     await refresh(custodianOnePage);
     const execute = custodianOnePage.getByRole("button", {
-      name: "Execute promotion",
+      name: "Make owner",
+      exact: true,
     });
     const promotedToast = custodianOnePage
       .locator('[data-sonner-toast][data-type="success"]')
-      .filter({ hasText: "Target promoted to co-owner." });
+      .filter({ hasText: "They're an owner now." });
     await execute.focus();
     await custodianOnePage.keyboard.press("Enter");
     await promotedToast.waitFor();
-    await custodianOnePage.getByText(/executed · revision/u).waitFor();
-    await custodianOnePage.getByText("including organization administration and").waitFor();
-    await custodianOnePage.getByText("billing management").waitFor();
-    await custodianOnePage.getByText(/No Personal content, workspace ownership/u).waitFor();
+    await custodianOnePage.getByText(/^Done · 2 of 2 approvals/u).waitFor();
 
     const [targetAfter] = await owned.admin<
       Array<{
@@ -983,55 +1032,39 @@ describe("organization recovery same-origin Chromium acceptance", () => {
     const ownerPage = actorBrowsers.get("owner")?.page;
     if (!ownerPage) throw new Error("owner browser unavailable");
     await ownerPage.setViewportSize({ width: 390, height: 844 });
-    await ownerPage.goto(
-      `${publicOrigin}/workspaces/${workspaceId}/organization?section=recovery`,
-      {
-        waitUntil: "domcontentloaded",
-      },
-    );
-    await ownerPage.getByRole("heading", { name: "Recovery custody" }).waitFor();
-    await ownerPage.getByText("Policy: degraded").waitFor();
-    await ownerPage.getByText("Recovery unavailable", { exact: true }).waitFor();
+    await ownerPage.goto(recoveryUrl(), { waitUntil: "domcontentloaded" });
+    await waitForRecovery(ownerPage);
+    await ownerPage.getByText(/^Needs new contacts · /u).waitFor();
     await ownerPage
-      .getByText(
-        "A custodian or stamped identity is no longer eligible. A current owner must rotate the policy.",
-        { exact: true },
-      )
+      .getByText("A contact can no longer take part. An owner has to choose new contacts.", {
+        exact: true,
+      })
       .waitFor();
+    await ownerPage.getByText("Can't take part", { exact: true }).waitFor();
     await axe(ownerPage);
     await bounded(ownerPage, 390);
     await ownerPage.screenshot({
       path: `${EVIDENCE_DIR}/recovery-390-degraded.png`,
       fullPage: true,
     });
-    await ownerPage.goto(`${publicOrigin}/workspaces/${workspaceId}/settings?section=members`, {
-      waitUntil: "domcontentloaded",
-    });
-    await ownerPage.getByText("permanently owned by its organization").waitFor();
-    await ownerPage.getByText(/Cross-organization transfer/u).waitFor();
+    await openWorkspaceAccess(ownerPage);
     await bounded(ownerPage, 390);
 
     await ownerPage.setViewportSize({ width: 320, height: 844 });
-    await ownerPage.goto(
-      `${publicOrigin}/workspaces/${workspaceId}/organization?section=recovery`,
-      {
-        waitUntil: "domcontentloaded",
-      },
-    );
-    await ownerPage.getByText("Policy: degraded").waitFor();
-    await ownerPage.getByRole("button", { name: "Disable policy" }).click();
-    await ownerPage.getByRole("heading", { name: "Disable organization recovery?" }).waitFor();
-    await ownerPage.getByRole("button", { name: "Disable recovery policy" }).click();
+    await ownerPage.goto(recoveryUrl(), { waitUntil: "domcontentloaded" });
+    await waitForRecovery(ownerPage);
+    await ownerPage.getByText(/^Needs new contacts · /u).waitFor();
+    await ownerPage.getByRole("button", { name: /^Turn off recovery/u }).click();
+    const disableDialog = ownerPage.getByRole("dialog", { name: "Turn off recovery?" });
+    await disableDialog.waitFor();
+    expect(await disableDialog.textContent()).toContain("Owners and workspaces don't change.");
+    await disableDialog.getByRole("button", { name: "Turn off recovery", exact: true }).click();
     const disabledToast = ownerPage
       .locator('[data-sonner-toast][data-type="success"]')
-      .filter({ hasText: "Recovery policy disabled." });
+      .filter({ hasText: "Turned off recovery." });
     await disabledToast.waitFor();
-    await ownerPage.getByText("Policy: disabled").waitFor();
-    await ownerPage
-      .getByText("A current owner disabled the custody policy.", {
-        exact: true,
-      })
-      .waitFor();
+    await ownerPage.getByText(/^Turned off · /u).waitFor();
+    await ownerPage.getByText("An owner turned recovery off.", { exact: true }).waitFor();
     // Axe must inspect either the fully rendered toast or the stable page, not
     // colors blended mid-opacity during Sonner's removal transition.
     await disabledToast.waitFor({ state: "hidden", timeout: 10_000 });
@@ -1041,11 +1074,7 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       path: `${EVIDENCE_DIR}/recovery-320-disabled.png`,
       fullPage: true,
     });
-    await ownerPage.goto(`${publicOrigin}/workspaces/${workspaceId}/settings?section=members`, {
-      waitUntil: "domcontentloaded",
-    });
-    await ownerPage.getByText("permanently owned by its organization").waitFor();
-    await ownerPage.getByText(/Cross-organization transfer/u).waitFor();
+    await openWorkspaceAccess(ownerPage);
     await bounded(ownerPage, 320);
     expect(externalRequests).toEqual([]);
     expect(browserProblems).toEqual([]);
