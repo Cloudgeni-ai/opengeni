@@ -831,30 +831,17 @@ export async function freezeConnectionAccounts(
     }
     mcpAccountBindings = inherited.filter((binding) => serverIds.has(binding.canonicalServerId));
   } else {
-    const personal =
-      input.source.kind === "subject" &&
-      (await ownerStillBelongsToWorkspace(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.source.subjectId,
-      }))
-        ? await listOwnConnectionMetadata(input.db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.source.subjectId,
-          })
-        : [];
-    const workspace = await listConnectionsMetadata(input.db, input.workspaceId, null);
     mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
       servers,
       selectionsFrozen: input.authoritySelectionsFrozen === true,
-      connections: [
-        ...workspace.filter((connection) => connection.subjectId === null),
-        ...personal,
-      ],
+      connections: await visibleMcpAccountConnections(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        source: input.source,
+      }),
       ...(input.authoritySelections
         ? {
             selections: input.authoritySelections.filter((selection) =>
@@ -887,6 +874,66 @@ export async function freezeConnectionAccounts(
       ...special,
     ],
   };
+}
+
+/** Shared workspace accounts plus the entitled owner's own active accounts. */
+export async function visibleMcpAccountConnections(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
+  },
+): Promise<ConnectionMetadata[]> {
+  const personal =
+    input.source.kind === "subject" &&
+    (await ownerStillBelongsToWorkspace(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.source.subjectId,
+    }))
+      ? await listOwnConnectionMetadata(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.source.subjectId,
+        })
+      : [];
+  const workspace = await listConnectionsMetadata(db, input.workspaceId, null);
+  return [...workspace.filter((connection) => connection.subjectId === null), ...personal];
+}
+
+/**
+ * Every account a fresh, selection-free freeze would bind for the generic MCP
+ * routes among `tools`: exactly what `freezeConnectionAccounts` binds when no
+ * account is chosen. The same entitlement contract applies: `source` is a
+ * grant-derived or frozen-owner subject, never a looked-up one. Read-only; it
+ * never persists a delegation.
+ */
+export async function availableMcpAccountBindings(input: {
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  settings: Pick<Settings, "mcpServers">;
+  tools: ToolRef[];
+  source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
+  /** Result of `visibleMcpAccountConnections` for the same source, when already read. */
+  connections?: ConnectionMetadata[];
+}): Promise<McpConnectionAccountBinding[]> {
+  const selectedIds = new Set(input.tools.map((tool) => tool.id));
+  const servers = input.settings.mcpServers.filter(
+    (server) =>
+      selectedIds.has(server.id) &&
+      server.connectionRef &&
+      server.connectionRef.authoritySource !== "host",
+  );
+  if (servers.length === 0) return [];
+  return mcpAccountBindingsFromVisibleConnections({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
+    servers,
+    connections: input.connections ?? (await visibleMcpAccountConnections(input.db, input)),
+  });
 }
 
 export async function freezePersonalConnectionDelegations(input: {

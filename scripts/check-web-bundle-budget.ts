@@ -561,6 +561,14 @@ const effectiveBudgets = {
     // eager graph (lib/artifact-library-view). Measured 2,525,642 raw bytes on
     // Bun 1.4 Linux/x64; keep the established 1.5 KiB headroom.
     wholeKibEnvelope(2_525_642, 1.5 * kib),
+    // Scheduled-task attention: the Schedules rail item's dot polls the owner's
+    // failed-access list, so its hook and the attention/drift contracts join
+    // the always-loaded rail; the notices and refresh stay on the lazy
+    // Schedules pages. Main d1f472414 measures 2,526,574 raw / 705,254 gzip;
+    // merged, 2,527,533 / 705,435 across 36 files (Bun 1.3.14 macOS/arm64, which
+    // matched Linux/x64 CI to the byte for this graph today). Keep the
+    // established 1.5 KiB headroom; gzip and every other cap stay fixed.
+    wholeKibEnvelope(2_527_533, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

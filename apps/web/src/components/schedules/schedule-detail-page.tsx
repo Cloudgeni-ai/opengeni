@@ -3,7 +3,16 @@
  * then Overview (on/off, instructions, setup) and Runs. Never a side sheet.
  */
 import { Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   CalendarClockIcon,
   CopyIcon,
@@ -52,19 +61,35 @@ import { useAppContext } from "@/context";
 import { formatElapsedSeconds } from "@/lib/format";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
+  markScheduledTaskAttentionSeen,
+  notifyScheduledTaskAttentionUpdated,
+} from "@/components/rail/use-scheduled-task-attention";
+import {
+  carryScheduledTaskDriftDismissal,
+  dismissScheduledTaskDrift,
+  scheduledTaskDriftDismissal,
+} from "@/lib/scheduled-task-drift-dismissals";
+import {
   knowledgeSyncSourceLabel,
+  scheduledTaskAccessFailuresText,
   scheduledTaskDescription,
   scheduledTaskRunSessionAccess,
   scheduledTaskRunTriggerIsRedundant,
   scheduledTaskRunTriggerLabel,
   scheduledTaskStateLabel,
+  visibleScheduledTaskPolicyDrift,
 } from "@/lib/scheduled-tasks";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { cn } from "@/lib/utils";
-import type { ScheduledTask, ScheduledTaskRun, Session } from "@/types";
+import type {
+  ScheduledTask,
+  ScheduledTaskAccessAttention,
+  ScheduledTaskRun,
+  Session,
+} from "@/types";
 
 import {
   NAME_MAX_LENGTH,
@@ -86,6 +111,7 @@ import {
   useScheduleNavigation,
   type ScheduleAccess,
 } from "./schedule-parts";
+import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
 import { useScheduleActions } from "./use-schedule-actions";
 import { MoreMenu } from "@/components/ui/page-actions";
 
@@ -121,13 +147,28 @@ export function ScheduleDetailPage({
   const [clock, setClock] = useState(() => new Date());
   const [tab, setTab] = useState("overview");
   const [renaming, setRenaming] = useState(false);
+  // Owner-only: this schedule's latest run could not use a connector, or a
+  // chosen account is gone. Advisory; a failed read keeps the last answer.
+  const [attention, setAttention] = useState<ScheduledTaskAccessAttention | null>(null);
+  const [refreshingAccess, setRefreshingAccess] = useState(false);
+  // Bumped when the owner hides drift in this browser, so the page re-reads it.
+  const [, setDriftDismissals] = useState(0);
   const titleRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(
     async (background = false) => {
       try {
-        const task = await client.getScheduledTask(workspaceId, scheduleId);
+        const [task, attentionItems] = await Promise.all([
+          client.getScheduledTask(workspaceId, scheduleId),
+          client.listScheduledTaskAccessAttention(workspaceId).catch(() => null),
+        ]);
         setLoad({ status: "ready", task });
+        if (Array.isArray(attentionItems)) {
+          const mine = attentionItems.find((item) => item.taskId === task.id) ?? null;
+          setAttention(mine);
+          // Showing the notice here is the owner seeing it: clear the nav dot.
+          if (mine) markScheduledTaskAttentionSeen(workspaceId, [mine]);
+        }
       } catch (error) {
         if (!background) {
           setLoad({
@@ -244,7 +285,75 @@ export function ScheduleDetailPage({
 
   const task = load.task;
   const perms = schedulePermissions(task, access);
-  const busy = actions.busyTaskId === task.id;
+  const busy = actions.busyTaskId === task.id || refreshingAccess;
+
+  // One click re-freezes this schedule with the signed-in person's current
+  // access. The server recomputes the refresh and refuses a changed schedule.
+  // Defaults the owner hid stay off: the refresh leaves them out, and the
+  // choice moves to the refreshed task head.
+  const refreshAccess = async () => {
+    setRefreshingAccess(true);
+    try {
+      const dismissal = scheduledTaskDriftDismissal(workspaceId, task);
+      const drift = task.policyDrift;
+      const connectors = drift?.missingConnectors
+        .map((item) => item.id)
+        .filter((id) => dismissal?.connectors.includes(id));
+      const openGeniTools = drift?.missingOpenGeniTools.filter((tool) =>
+        dismissal?.openGeniTools.includes(tool),
+      );
+      const refreshed = await client.refreshScheduledTaskAccess(workspaceId, task.id, {
+        executionDigest: task.executionDigest,
+        ...(connectors?.length || openGeniTools?.length
+          ? {
+              leaveOut: {
+                ...(connectors?.length ? { connectors } : {}),
+                ...(openGeniTools?.length ? { openGeniTools } : {}),
+              },
+            }
+          : {}),
+      });
+      carryScheduledTaskDriftDismissal(workspaceId, task.id, dismissal, refreshed.executionDigest);
+      toast.success("Access refreshed", {
+        description: "New runs of this schedule use it. Run it now to check.",
+      });
+      await refresh(true);
+      notifyScheduledTaskAttentionUpdated();
+    } catch (error) {
+      toast.error("Couldn't refresh this schedule's access", {
+        description: scheduleErrorText(error),
+      });
+    } finally {
+      setRefreshingAccess(false);
+    }
+  };
+
+  // A display choice in this browser only: the defaults stay reported by the
+  // server and nothing about the schedule changes.
+  const dismissDrift = () => {
+    if (!task.policyDrift) return;
+    if (dismissScheduledTaskDrift(workspaceId, task, task.policyDrift)) {
+      setDriftDismissals((value) => value + 1);
+    } else {
+      toast.error("Couldn't hide this in this browser");
+    }
+  };
+
+  const accessNotices = (
+    <ScheduledTaskAccessNotices
+      className="mb-4"
+      policyDrift={visibleScheduledTaskPolicyDrift(
+        task.policyDrift,
+        scheduledTaskDriftDismissal(workspaceId, task),
+        task.executionDigest,
+      )}
+      attention={attention?.taskId === task.id ? attention : null}
+      ownsTask={perms.own}
+      busy={busy}
+      onRefreshAccess={() => void refreshAccess()}
+      onDismissDrift={dismissDrift}
+    />
+  );
   const runCount = runs.status === "ready" ? runs.runs.length : undefined;
   const latest = runs.status === "ready" ? runs.runs[0] : undefined;
 
@@ -373,6 +482,7 @@ export function ScheduleDetailPage({
               busy={busy}
               now={clock}
               workspaceId={workspaceId}
+              accessNotices={accessNotices}
               onActiveChange={(active) =>
                 void (active ? actions.resume(task) : actions.pause(task))
               }
@@ -437,6 +547,7 @@ function Overview({
   busy,
   now,
   workspaceId,
+  accessNotices,
   onActiveChange,
   onOpenSession,
 }: {
@@ -446,6 +557,8 @@ function Overview({
   busy: boolean;
   now: Date;
   workspaceId: string;
+  /** Frozen-access drift and connector failures, for the owner to act on. */
+  accessNotices: ReactNode;
   onActiveChange: (active: boolean) => void;
   onOpenSession: (sessionId: string) => void;
 }) {
@@ -470,6 +583,7 @@ function Overview({
   return (
     <>
       <DetailSection className="pt-6">
+        {accessNotices}
         {latest?.status === "failed" ? (
           <Notice tone="failed" title="The last run failed" className="mb-4">
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}
@@ -800,7 +914,11 @@ function durationLabel(run: ScheduledTaskRun): string | null {
 }
 
 function runOutcome(run: ScheduledTaskRun): string | undefined {
-  if (run.error?.trim()) return run.error.trim();
+  const accessFailures = scheduledTaskAccessFailuresText(run.accessFailures);
+  if (run.error?.trim()) {
+    return accessFailures ? `${run.error.trim()} ${accessFailures}` : run.error.trim();
+  }
+  if (accessFailures) return accessFailures;
   const summary = run.knowledgeSummary;
   if (summary) {
     return `${summary.imported} imported · ${summary.unchanged} unchanged · ${summary.failed} failed`;
