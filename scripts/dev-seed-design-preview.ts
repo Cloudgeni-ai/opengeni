@@ -1189,6 +1189,46 @@ const WORKSPACES: WorkspaceSeed[] = [
 // Seed
 // ---------------------------------------------------------------------------
 log(`Seeding ${API} (contract ${CONTRACT})`);
+function siteHtml(title: string, body: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:15px/1.5 system-ui,sans-serif;margin:32px;color:#1f2328}h1{font-size:22px}li{margin:4px 0}</style></head><body><h1>${title}</h1>${body}</body></html>`;
+}
+
+const SITE_SEEDS: {
+  title: string;
+  description: string;
+  versions: string[];
+  archived?: boolean;
+}[] = [
+  {
+    title: "Q3 cost review",
+    description: "Cloud spend by team with the three largest savings.",
+    versions: [
+      siteHtml("Q3 cost review", "<p>Draft.</p>"),
+      siteHtml(
+        "Q3 cost review",
+        "<ul><li>Compute: 41%</li><li>Storage: 23%</li><li>Network: 12%</li></ul>",
+      ),
+    ],
+  },
+  {
+    title: "On-call handbook",
+    description: "Escalation paths and runbooks for the platform rotation.",
+    versions: [siteHtml("On-call handbook", "<ol><li>Acknowledge</li><li>Triage</li></ol>")],
+  },
+  {
+    title: "Launch countdown",
+    description: "A countdown page for the spring release.",
+    versions: [siteHtml("Launch countdown", "<p>12 days to go.</p>")],
+    archived: true,
+  },
+];
+
+const EDITABLE_SEEDS: { title: string; modality: "document" | "spreadsheet" | "presentation" }[] = [
+  { title: "Incident review template", modality: "document" },
+  { title: "Headcount plan 2027", modality: "spreadsheet" },
+  { title: "Platform roadmap", modality: "presentation" },
+];
+
 const owner = await ownerClient();
 
 // Organization
@@ -1784,46 +1824,6 @@ async function seedConversations(
   });
   return count;
 }
-
-function siteHtml(title: string, body: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:15px/1.5 system-ui,sans-serif;margin:32px;color:#1f2328}h1{font-size:22px}li{margin:4px 0}</style></head><body><h1>${title}</h1>${body}</body></html>`;
-}
-
-const SITE_SEEDS: {
-  title: string;
-  description: string;
-  versions: string[];
-  archived?: boolean;
-}[] = [
-  {
-    title: "Q3 cost review",
-    description: "Cloud spend by team with the three largest savings.",
-    versions: [
-      siteHtml("Q3 cost review", "<p>Draft.</p>"),
-      siteHtml(
-        "Q3 cost review",
-        "<ul><li>Compute: 41%</li><li>Storage: 23%</li><li>Network: 12%</li></ul>",
-      ),
-    ],
-  },
-  {
-    title: "On-call handbook",
-    description: "Escalation paths and runbooks for the platform rotation.",
-    versions: [siteHtml("On-call handbook", "<ol><li>Acknowledge</li><li>Triage</li></ol>")],
-  },
-  {
-    title: "Launch countdown",
-    description: "A countdown page for the spring release.",
-    versions: [siteHtml("Launch countdown", "<p>12 days to go.</p>")],
-    archived: true,
-  },
-];
-
-const EDITABLE_SEEDS: { title: string; modality: "document" | "spreadsheet" | "presentation" }[] = [
-  { title: "Incident review template", modality: "document" },
-  { title: "Headcount plan 2027", modality: "spreadsheet" },
-  { title: "Platform roadmap", modality: "presentation" },
-];
 
 async function seedArtifacts(client: Client, ws: string) {
   const base = `/v1/workspaces/${ws}`;
