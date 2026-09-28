@@ -61,8 +61,8 @@ describe("route pending boundaries", () => {
       });
 
       expect(container.textContent).toContain("Persistent rail");
-      expect(container.textContent).toContain("Loading…");
-      expect(container.querySelector('[role="status"]')?.getAttribute("aria-label")).toBe(
+      expect(document.body.textContent).toContain("Loading…");
+      expect(document.body.querySelector('[role="status"]')?.getAttribute("aria-label")).toBe(
         "Loading",
       );
     } finally {

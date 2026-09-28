@@ -1,6 +1,7 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
@@ -31,17 +32,30 @@ export function LoadingPanel({ label }: { label?: string }) {
       </section>
     );
   }
-  return (
-    <section
+  const indicator = (
+    <span
       role="status"
       aria-label="Loading"
-      className="flex h-full min-h-0 w-full flex-1 items-center justify-center p-4 text-sm text-fg-muted"
+      className="pointer-events-none fixed left-1/2 top-1/2 inline-flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 text-sm text-fg-muted"
       data-page-loading=""
     >
-      <span className="inline-flex items-center gap-2">
-        <Loader2Icon aria-hidden className="size-4 animate-spin motion-reduce:animate-none" />
-        Loading…
-      </span>
+      <Loader2Icon
+        aria-hidden
+        ref={(node) =>
+          node?.getAnimations?.().forEach((animation) => {
+            // Bootstrap/route boundaries remount this indicator. Share the
+            // document timeline so its rotation does not restart at each one.
+            animation.startTime = 0;
+          })
+        }
+        className="size-4 animate-spin motion-reduce:animate-none"
+      />
+      Loading…
+    </span>
+  );
+  return (
+    <section aria-busy="true" className="min-h-0 flex-1">
+      {typeof document === "undefined" ? indicator : createPortal(indicator, document.body)}
     </section>
   );
 }

@@ -85,7 +85,8 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
-import { LoadingPanel } from "@/components/common";
+import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { useSessionOpening } from "@/lib/session-opening";
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
@@ -298,6 +299,7 @@ export function SessionRoute({
     sessionStatusSequence,
     connectionState,
     initialLoading,
+    initialHistoryReady,
     hasOlder,
     loadingOlder,
     loadOlder,
@@ -416,12 +418,10 @@ export function SessionRoute({
         : events,
     [events, viewClearedAfter],
   );
-  const [openedSessionId, setOpenedSessionId] = useState<string | null>(null);
-  useEffect(() => {
-    if (session && (!initialLoading || visibleEvents.length > 0 || creationHandoff)) {
-      setOpenedSessionId(session.id);
-    }
-  }, [session, initialLoading, visibleEvents.length, creationHandoff]);
+  const opened = useSessionOpening(
+    `${workspaceId}:${sessionId}`,
+    Boolean(session && (initialHistoryReady || creationHandoff)),
+  );
   const timeline = useMemo(() => {
     if (!session) {
       return [];
@@ -431,7 +431,7 @@ export function SessionRoute({
     // that fallback painted the GENESIS message at the top for the whole fetch
     // (user-reported). The fallback is only for genuinely-empty NEW sessions,
     // i.e. after the load settles with no events.
-    if (initialLoading && visibleEvents.length === 0 && !creationHandoff) {
+    if (!opened && visibleEvents.length === 0 && !creationHandoff) {
       return [];
     }
     const projected = projectSessionTimeline(
@@ -443,7 +443,7 @@ export function SessionRoute({
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
-  }, [creationHandoff, session, visibleEvents, viewClearedAfter, initialLoading]);
+  }, [creationHandoff, session, visibleEvents, viewClearedAfter, opened]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
@@ -1030,13 +1030,7 @@ export function SessionRoute({
   // Keep the same pending canvas through detail and the first history read.
   // A freshly sent creation handoff already has visible conversation truth.
   // Never paint the genesis message or mount a second loading treatment first.
-  if (
-    !session ||
-    (openedSessionId !== session.id &&
-      initialLoading &&
-      visibleEvents.length === 0 &&
-      !creationHandoff)
-  ) {
+  if (!session || !opened) {
     if (!session && loadError) {
       return (
         <Suspense fallback={<LoadingPanel />}>
@@ -1056,7 +1050,21 @@ export function SessionRoute({
           session={null}
           events={events}
           connectionState={connectionState}
-          primary={<LoadingPanel />}
+          primary={
+            session && streamError && !initialLoading ? (
+              <ProblemPanel
+                title="Conversation couldn't be loaded"
+                description="Your saved messages are unchanged. Try loading them again."
+                action={
+                  <Button variant="secondary" onClick={() => void jumpToLatest()}>
+                    Retry conversation
+                  </Button>
+                }
+              />
+            ) : (
+              <LoadingPanel />
+            )
+          }
           onReloadSession={refreshSession}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}

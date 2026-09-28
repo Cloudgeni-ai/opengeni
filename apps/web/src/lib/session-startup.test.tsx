@@ -10,6 +10,7 @@ import {
   SESSION_STARTUP_GRACE_MS,
   sessionStartupPhase,
   useSessionStartup,
+  SessionStartupProvider,
 } from "./session-startup";
 
 beforeAll(() => {
@@ -115,6 +116,37 @@ test("accepted idle Send remains in conversation before/after replay, independen
 function Probe({ value }: { value: Session }) {
   return <span>{useSessionStartup(value)}</span>;
 }
+
+test("a newly mounted wait surface shares the header's new episode after long idle and delayed detail", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const render = (value: Session) => (
+    <SessionStartupProvider session={value}>
+      <div data-header>
+        <Probe value={value} />
+      </div>
+      {value.status === "queued" ? <SessionWaitStatus session={value} /> : null}
+    </SessionStartupProvider>
+  );
+  const oldIdle = session({ status: "idle", updatedAt: "2000-01-01T00:00:00Z" });
+  try {
+    await act(async () => root.render(render(oldIdle)));
+    await act(async () => root.render(render({ ...oldIdle, status: "queued" })));
+    expect(container.querySelector("[data-header]")?.textContent).toBe("starting");
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Starting");
+    await act(async () => root.render(render(session())));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Starting");
+    await act(async () =>
+      root.render(render(session({ workspaceId: "other", updatedAt: "2000-01-01T00:00:00Z" }))),
+    );
+    expect(container.querySelector("[data-header]")?.textContent).toBe("delayed");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "Still waiting to start",
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
 
 test("polls cannot reset grace; account/session changes and new idle episodes reset local state", async () => {
   const container = document.createElement("div");
