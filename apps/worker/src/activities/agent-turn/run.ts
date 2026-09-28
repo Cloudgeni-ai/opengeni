@@ -1115,7 +1115,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // allowlist entry or its GitHub App access since the session started
           // sits this turn out with a warning, before the strict allowlist
           // recheck and token mint below would fail the whole turn for it.
-          const { turnResources, runtimeResources } = await waitForTurnOperation(
+          const {
+            turnResources,
+            runtimeResources,
+            retainsResource: retainsOptionalRepository,
+          } = await waitForTurnOperation(
             dropUnavailableOptionalRepositories({
               db,
               settings: runSettings,
@@ -1321,6 +1325,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             interactionInterventionResume,
             runWorkspaceMutationForSandbox,
             codeSearchEnabled,
+            retainsOptionalRepository,
             throwIfWorkerShuttingDown,
             throwIfTurnCancelled,
           });

@@ -68,7 +68,9 @@ describe("optional repository access lost after the session started", () => {
     scope: { accountId: string; workspaceId: string; subjectId: string },
     repositoryIds: number[],
   ) {
-    const checkedAt = new Date();
+    // Slightly in the past: the binding requires checkedAt <= the database
+    // clock, which may trail this process by a few milliseconds.
+    const checkedAt = new Date(Date.now() - 5_000);
     const bound = await bindAuthorizedGitHubInstallationRepositories(client.db, {
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,

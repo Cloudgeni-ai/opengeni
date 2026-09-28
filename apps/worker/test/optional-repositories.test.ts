@@ -132,6 +132,31 @@ describe("dropUnavailableOptionalRepositories", () => {
     expect(warnings[0]?.unverifiedCount).toBe("2");
   });
 
+  test("a failed allowlist lookup sits the optional repository out instead of failing the turn", async () => {
+    const { input, warnings } = harness({
+      isAllowlisted: async (_installationId, repositoryId) => {
+        if (repositoryId === 1) throw new Error("connection reset");
+        return true;
+      },
+    });
+    const result = await dropUnavailableOptionalRepositories(input);
+    expect(names(result.turnResources)).toEqual(["b.git", "explicit.git"]);
+    expect(warnings[0]?.unverifiedCount).toBe("1");
+  });
+
+  test("applies the same decision to another view of the turn's resources", async () => {
+    const { input } = harness({ findInaccessible: async () => [2] });
+    const result = await dropUnavailableOptionalRepositories(input);
+    // The GitHub REST tool surface reads the unbound session resources.
+    const unbound = { ...repository("b", 2) } as Record<string, unknown>;
+    delete unbound.githubInstallationId;
+    delete unbound.githubRepositoryId;
+    expect(result.retainsResource(unbound as ResourceRef)).toBe(false);
+    expect(result.retainsResource(repository("a", 1))).toBe(true);
+    expect(result.retainsResource(repository("b", 2, false))).toBe(true);
+    expect(result.retainsResource(file)).toBe(true);
+  });
+
   test("does not ask this deployment's App when a host mints the Git tokens", async () => {
     const { input } = harness({ hostMintsGitCredentials: true, findInaccessible: undefined });
     const result = await dropUnavailableOptionalRepositories(input);

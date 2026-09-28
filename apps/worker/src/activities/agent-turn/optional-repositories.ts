@@ -99,10 +99,19 @@ function repositoryIdentity(resource: ResourceRef): string | null {
 
 export async function dropUnavailableOptionalRepositories(
   input: DropUnavailableOptionalRepositoriesInput,
-): Promise<{ turnResources: ResourceRef[]; runtimeResources: ResourceRef[] }> {
+): Promise<{
+  turnResources: ResourceRef[];
+  runtimeResources: ResourceRef[];
+  /**
+   * The same decision for another view of this turn's resources (the GitHub
+   * REST tool surface is built from the unbound session resources).
+   */
+  retainsResource: (resource: ResourceRef) => boolean;
+}> {
   const passthrough = {
     turnResources: [...input.turnResources],
     runtimeResources: [...input.runtimeResources],
+    retainsResource: () => true,
   };
   // A Connected Machine receives no platform Git credential and runs neither
   // the allowlist recheck nor the mint, so nothing can fail there.
@@ -120,13 +129,24 @@ export async function dropUnavailableOptionalRepositories(
       ]));
   const dropped = new Map<OptionalRepositoryCandidate, OptionalRepositoryDropReason>();
   const allowlisted: OptionalRepositoryCandidate[] = [];
-  for (const candidate of candidates) {
-    if (await isAllowlisted(candidate.installationId, candidate.repositoryId)) {
-      allowlisted.push(candidate);
-    } else {
-      dropped.set(candidate, "not_allowlisted");
-    }
-  }
+  const admitted = await Promise.all(
+    candidates.map(async (candidate) => {
+      try {
+        return (await isAllowlisted(candidate.installationId, candidate.repositoryId))
+          ? ("allowlisted" as const)
+          : ("not_allowlisted" as const);
+      } catch {
+        // The check itself failed: an optional repository must not fail the
+        // turn, so it sits this turn out like an unverifiable GitHub answer.
+        return "unverified" as const;
+      }
+    }),
+  );
+  candidates.forEach((candidate, index) => {
+    const outcome = admitted[index]!;
+    if (outcome === "allowlisted") allowlisted.push(candidate);
+    else dropped.set(candidate, outcome);
+  });
 
   const findInaccessible =
     input.findInaccessible ??
@@ -199,5 +219,6 @@ export async function dropUnavailableOptionalRepositories(
   return {
     turnResources: input.turnResources.filter(keep),
     runtimeResources: input.runtimeResources.filter(keep),
+    retainsResource: keep,
   };
 }
