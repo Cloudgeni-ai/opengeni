@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, StrictMode, type ReactNode } from "react";
@@ -228,6 +228,8 @@ function makeClient(overrides: Record<string, unknown> = {}) {
 }
 
 type Client = ReturnType<typeof makeClient>;
+type InvitationRequest = Parameters<OpenGeniBrowserClient["createOrganizationInvitation"]>[1] &
+  Pick<OrganizationInvitation, "role" | "initialWorkspaceIds">;
 
 async function flush() {
   await act(async () => {
@@ -312,6 +314,156 @@ afterAll(() => {
 });
 
 describe("organization directory", () => {
+  test("replays the complete committed invitation after a lost response and clock advance", async () => {
+    let now = Date.parse("2026-09-28T12:00:00.000Z");
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const requests: InvitationRequest[] = [];
+    const receipts = new Map<
+      string,
+      { request: InvitationRequest; invitation: OrganizationInvitation }
+    >();
+    let deliveries = 0;
+    const create = mock(async (_org: string, request: InvitationRequest) => {
+      requests.push(structuredClone(request));
+      const receipt = receipts.get(request.operationId);
+      if (receipt) {
+        // The server hashes the whole command, not just the operation id.
+        if (JSON.stringify(receipt.request) !== JSON.stringify(request)) {
+          throw Object.assign(new Error("operation id reused with different input"), {
+            status: 409,
+          });
+        }
+        return receipt.invitation;
+      }
+      const committed = {
+        ...invitation(request.role),
+        id: `created-${request.email}`,
+        targetEmail: request.email,
+        initialWorkspaceIds: request.initialWorkspaceIds,
+        expiresAt: request.expiresAt,
+      };
+      receipts.set(request.operationId, {
+        request: structuredClone(request),
+        invitation: committed,
+      });
+      deliveries += 1;
+      throw Object.assign(new Error("response lost after commit"), { outcomeUnknown: true });
+    });
+    const client = makeClient({
+      createOrganizationInvitation: create,
+      listOrganizationInvitationsForOrganization: mock(async () => ({
+        invitations: [...receipts.values()].map((receipt) => receipt.invitation),
+        nextCursor: null,
+      })),
+    });
+    const view = mount(null);
+    try {
+      await view.render(
+        <Provider client={client}>
+          <Capture />
+        </Provider>,
+      );
+      await flush();
+      const input = {
+        emails: ["alex@example.test"],
+        role: "member" as const,
+        workspaceIds: ["ws-platform", "ws-design"],
+      };
+      let first!: Awaited<ReturnType<NonNullable<typeof captured>["invite"]>>;
+      await act(async () => {
+        first = await captured!.invite(input);
+      });
+      expect(first.sent).toHaveLength(0);
+      expect(first.failed).toEqual([
+        { email: "alex@example.test", message: expect.stringContaining("couldn't confirm") },
+      ]);
+      expect(receipts.size).toBe(1);
+      expect(deliveries).toBe(1);
+
+      now += 3 * 60 * 1000;
+      let replay!: Awaited<ReturnType<NonNullable<typeof captured>["invite"]>>;
+      await act(async () => {
+        replay = await captured!.invite({
+          ...input,
+          workspaceIds: [...input.workspaceIds].reverse(),
+        });
+      });
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(requests[1]!.operationId).toBe(requests[0]!.operationId);
+      expect(requests[1]!.expiresAt).toBe("2026-10-05T12:00:00.000Z");
+      expect(requests[1]!.initialWorkspaceIds).toEqual(["ws-design", "ws-platform"]);
+      expect(replay.failed).toEqual([]);
+      expect(replay.sent).toEqual([receipts.values().next().value!.invitation]);
+      expect(receipts.size).toBe(1);
+      expect(deliveries).toBe(1);
+      expect(captured!.invitations.value.invitations).toHaveLength(1);
+    } finally {
+      await view.unmount();
+      clock.mockRestore();
+    }
+  });
+
+  test.each([
+    { field: "email", change: { emails: ["blair@example.test"] } },
+    { field: "role", change: { role: "admin" as const } },
+    { field: "workspaces", change: { workspaceIds: ["ws-design"] } },
+  ])(
+    "a changed invitation $field starts a new request after an unknown outcome",
+    async ({ change }) => {
+      let now = Date.parse("2026-09-28T12:00:00.000Z");
+      const clock = spyOn(Date, "now").mockImplementation(() => now);
+      const requests: InvitationRequest[] = [];
+      const create = mock(async (_org: string, request: InvitationRequest) => {
+        requests.push(structuredClone(request));
+        if (requests.length === 1) {
+          throw Object.assign(new Error("response lost"), { outcomeUnknown: true });
+        }
+        return { ...invitation(request.role), targetEmail: request.email };
+      });
+      const client = makeClient({ createOrganizationInvitation: create });
+      const view = mount(null);
+      try {
+        await view.render(
+          <Provider client={client}>
+            <Capture />
+          </Provider>,
+        );
+        await flush();
+        const input = {
+          emails: ["alex@example.test"],
+          role: "member" as const,
+          workspaceIds: ["ws-platform"],
+        };
+        await act(async () => {
+          await captured!.invite(input);
+        });
+        now += 3 * 60 * 1000;
+        await act(async () => {
+          const result = await captured!.invite({
+            ...input,
+            ...change,
+            emails: [...(change.emails ?? input.emails)],
+            workspaceIds: [...(change.workspaceIds ?? input.workspaceIds)],
+          });
+          expect(result.failed).toEqual([]);
+          expect(result.sent).toHaveLength(1);
+        });
+        expect(requests).toHaveLength(2);
+        expect(requests[1]!.operationId).not.toBe(requests[0]!.operationId);
+        expect(requests[1]!.expiresAt).toBe("2026-10-05T12:03:00.000Z");
+        expect(requests[1]).toMatchObject({
+          email: (change.emails ?? input.emails)[0],
+          role: change.role ?? input.role,
+          initialWorkspaceIds: change.workspaceIds ?? input.workspaceIds,
+        });
+      } finally {
+        await view.unmount();
+        clock.mockRestore();
+      }
+    },
+  );
+
   test("retries an outcome-unknown workspace role change with the same operation id", async () => {
     const outcomeUnknown = Object.assign(new Error("network"), { outcomeUnknown: true });
     const put = mock(async () => {

@@ -254,17 +254,31 @@ export function OrganizationDirectoryProvider({
     };
   }, [identity]);
 
-  /** Reuses the pending attempt for `key` when its request is unchanged. */
+  /** Reuses unchanged input, retaining any generated fields with the complete request. */
   const attempt = useCallback(
-    <Request extends Record<string, unknown>>(key: string, request: Request): Pending<Request> => {
+    <
+      Request extends Record<string, unknown>,
+      Generated extends Record<string, unknown> = Record<never, never>,
+    >(
+      key: string,
+      request: Request,
+      generated?: () => Generated,
+    ): Pending<Request & Generated> => {
       const pending = pendingRef.current.get(key);
       if (pending) {
         const { operationId: _operationId, ...rest } = pending;
-        if (JSON.stringify(rest) === JSON.stringify(request)) return pending as Pending<Request>;
+        // Generated values (such as invitation expiry) are not editable intent.
+        // Keep their first values when retrying an outcome-unknown request.
+        const previousInput = generated
+          ? Object.fromEntries(Object.keys(request).map((field) => [field, rest[field]]))
+          : rest;
+        if (JSON.stringify(previousInput) === JSON.stringify(request)) {
+          return pending as Pending<Request & Generated>;
+        }
       }
-      const next = { ...request, operationId: crypto.randomUUID() };
+      const next = { ...request, ...generated?.(), operationId: crypto.randomUUID() };
       pendingRef.current.set(key, next);
-      return next;
+      return next as Pending<Request & Generated>;
     },
     [],
   );
@@ -633,16 +647,16 @@ export function OrganizationDirectoryProvider({
       const failed: InviteResult["failed"] = [];
       for (const email of emails) {
         const key = `invite:${email}`;
-        const request = attempt(key, {
-          email,
-          role,
-          initialWorkspaceIds: [...workspaceIds].sort(),
-        });
+        const request = attempt(
+          key,
+          { email, role, initialWorkspaceIds: [...workspaceIds].sort() },
+          () => ({ expiresAt }),
+        );
         try {
-          const invitation = await client.createOrganizationInvitation(identity.organizationId, {
-            ...request,
-            expiresAt,
-          });
+          const invitation = await client.createOrganizationInvitation(
+            identity.organizationId,
+            request,
+          );
           settle(key);
           sent.push(invitation);
         } catch (error) {
