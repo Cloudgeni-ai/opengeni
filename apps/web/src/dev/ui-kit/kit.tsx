@@ -15,6 +15,7 @@ import {
   alternativeMeta,
   getSection,
   type AlternativeId,
+  type ForkAlternativeId,
   type SectionKey,
 } from "./sections/registry";
 import type { ResolvedTheme } from "./theme";
@@ -65,7 +66,7 @@ export function useKitSectionKey(): SectionKey | null {
    Small shared pieces (kit chrome only, token classes only).
    -------------------------------------------------------------------------- */
 
-function LetterBadge({ id, picked }: { id: AlternativeId; picked?: boolean }) {
+function LetterBadge({ id, picked }: { id: ForkAlternativeId; picked?: boolean }) {
   return (
     <span
       aria-hidden="true"
@@ -81,7 +82,14 @@ function LetterBadge({ id, picked }: { id: AlternativeId; picked?: boolean }) {
   );
 }
 
-export function RecommendedTag({ className }: { className?: string }) {
+export function RecommendedTag({
+  className,
+  open = false,
+}: {
+  className?: string;
+  /** An open question: says "Recommended" instead of "Decided". */
+  open?: boolean;
+}) {
   return (
     <span
       className={cn(
@@ -89,7 +97,7 @@ export function RecommendedTag({ className }: { className?: string }) {
         className,
       )}
     >
-      Decided
+      {open ? "Recommended" : "Decided"}
     </span>
   );
 }
@@ -290,7 +298,8 @@ export function KitCanvas({
 interface ForkContextValue {
   sectionKey: SectionKey;
   recommended: AlternativeId | null;
-  pick: AlternativeId | null;
+  pick: ForkAlternativeId | null;
+  open: boolean;
 }
 
 const ForkContext = createContext<ForkContextValue | null>(null);
@@ -331,16 +340,18 @@ export function Fork({
   const pick = useExplicitPick(sectionKey);
   const pane = useKitPane();
   const recommended = section.recommended ?? null;
+  const open = section.open ?? false;
   const forkValue = useMemo(
-    () => ({ sectionKey, recommended, pick }),
-    [pick, recommended, sectionKey],
+    () => ({ sectionKey, recommended, pick, open }),
+    [open, pick, recommended, sectionKey],
   );
   const count = Children.count(children);
   const recommendedLine =
     description ??
     (recommended ? (
       <>
-        Decided: {alternativeLetter(recommended)}
+        {open ? "We recommend " : "Decided: "}
+        {alternativeLetter(recommended)}
         {section.whyRecommended ? `. ${section.whyRecommended}` : "."}
         {section.decision ? (
           <span className="mt-1.5 block text-fg-subtle">{section.decision}</span>
@@ -398,7 +409,7 @@ export function Alternative({
   className,
   children,
 }: {
-  id: AlternativeId;
+  id: ForkAlternativeId;
   /** Defaults to the registry name. */
   name?: string;
   /** Defaults to the registry rationale. */
@@ -438,7 +449,7 @@ export function Alternative({
             <span className="sr-only">Version {letter}: </span>
             {title}
           </h3>
-          {isRecommended ? <RecommendedTag className="ml-auto" /> : null}
+          {isRecommended ? <RecommendedTag className="ml-auto" open={fork.open} /> : null}
         </div>
         {line ? <p className="mt-1.5 text-xs leading-4.5 text-fg-muted">{line}</p> : null}
       </header>
@@ -691,7 +702,9 @@ export function ComingUp({ note }: { note?: ReactNode }) {
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <p className="text-sm font-medium text-fg">{alternative.name}</p>
-                  {section.recommended === alternative.id ? <RecommendedTag /> : null}
+                  {section.recommended === alternative.id ? (
+                    <RecommendedTag open={section.open} />
+                  ) : null}
                 </div>
                 <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">{alternative.rationale}</p>
               </div>

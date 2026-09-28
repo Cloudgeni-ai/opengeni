@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import {
-  ALTERNATIVE_IDS,
+  FORK_ALTERNATIVE_IDS,
   FORK_SECTIONS,
   alternativeLetter,
   alternativeMeta,
@@ -9,6 +9,7 @@ import {
   visibleGroups,
   sectionsInGroup,
   type AlternativeId,
+  type ForkAlternativeId,
   type SectionKey,
 } from "./sections/registry";
 
@@ -21,7 +22,7 @@ import {
 export const PICKS_STORAGE_KEY = "opengeni-ui-kit-picks-v1";
 
 export interface PickState {
-  picks: Partial<Record<SectionKey, AlternativeId>>;
+  picks: Partial<Record<SectionKey, ForkAlternativeId>>;
   notes: Partial<Record<SectionKey, string>>;
 }
 
@@ -41,8 +42,8 @@ function parseState(raw: string | null): PickState {
     const notes: PickState["notes"] = {};
     if (value.picks && typeof value.picks === "object") {
       for (const [key, id] of Object.entries(value.picks)) {
-        if (isSectionKey(key) && ALTERNATIVE_IDS.includes(id as AlternativeId)) {
-          picks[key] = id as AlternativeId;
+        if (isSectionKey(key) && FORK_ALTERNATIVE_IDS.includes(id as ForkAlternativeId)) {
+          picks[key] = id as ForkAlternativeId;
         }
       }
     }
@@ -119,9 +120,9 @@ export function usePick(key: SectionKey): AlternativeId {
   return storedPick(state, key) ?? getSection(key).recommended ?? "a";
 }
 
-/** Bendik's explicit pick for `key`, or null when he hasn't picked. */
-export function useExplicitPick(key: SectionKey): AlternativeId | null {
-  return storedPick(usePickState(), key);
+/** Bendik's explicit pick for `key` (any letter, D and E included), or null. */
+export function useExplicitPick(key: SectionKey): ForkAlternativeId | null {
+  return storedForkPick(usePickState(), key);
 }
 
 /**
@@ -130,15 +131,21 @@ export function useExplicitPick(key: SectionKey): AlternativeId | null {
  * so an older click on a retired version (for example the right sheet) no
  * longer steers the page previews.
  */
-export function storedPick(state: PickState, key: SectionKey): AlternativeId | null {
+export function storedForkPick(state: PickState, key: SectionKey): ForkAlternativeId | null {
   const pick = state.picks[key] ?? null;
   const section = getSection(key);
   if (pick && section.decision && section.recommended && pick !== section.recommended) return null;
   return pick;
 }
 
+/** `storedForkPick` narrowed to A/B/C, for page previews that map the three primitive variants. */
+export function storedPick(state: PickState, key: SectionKey): AlternativeId | null {
+  const pick = storedForkPick(state, key);
+  return pick === "a" || pick === "b" || pick === "c" ? pick : null;
+}
+
 /** Pick an alternative. Pass null to clear the pick. */
-export function setPick(key: SectionKey, id: AlternativeId | null) {
+export function setPick(key: SectionKey, id: ForkAlternativeId | null) {
   const current = getSnapshot();
   const picks = { ...current.picks };
   if (id) picks[key] = id;
@@ -165,7 +172,7 @@ export interface PickProgress {
 
 export function pickProgress(state: PickState): PickProgress {
   return {
-    picked: FORK_SECTIONS.filter((section) => storedPick(state, section.key)).length,
+    picked: FORK_SECTIONS.filter((section) => storedForkPick(state, section.key)).length,
     total: FORK_SECTIONS.length,
   };
 }
@@ -174,7 +181,7 @@ export function usePickProgress(): PickProgress {
   return pickProgress(usePickState());
 }
 
-function describeAlternative(key: SectionKey, id: AlternativeId): string {
+function describeAlternative(key: SectionKey, id: ForkAlternativeId): string {
   const name = alternativeMeta(key, id)?.name;
   return name ? `${alternativeLetter(id)} - ${name}` : alternativeLetter(id);
 }
@@ -189,18 +196,20 @@ export function formatPicksForExport(state: PickState): string {
     const groupLines: string[] = [];
     for (const section of sectionsInGroup(group)) {
       const note = state.notes[section.key]?.trim();
-      const pick = storedPick(state, section.key);
+      const pick = storedForkPick(state, section.key);
       if (section.recommended) {
         if (pick) {
-          const recommended = pick === section.recommended ? " (decided)" : "";
+          const recommended =
+            pick === section.recommended ? (section.open ? " (recommended)" : " (decided)") : "";
           groupLines.push(
             `- ${section.title}: ${describeAlternative(section.key, pick)}${recommended}`,
           );
         } else {
           unpicked.push(section.title);
           if (!note) continue;
+          const verb = section.open ? "recommended" : "decided";
           groupLines.push(
-            `- ${section.title}: decided ${describeAlternative(section.key, section.recommended)}`,
+            `- ${section.title}: ${verb} ${describeAlternative(section.key, section.recommended)}`,
           );
         }
       } else if (note) {

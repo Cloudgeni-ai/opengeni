@@ -109,7 +109,7 @@ shell doesn't (never in the normal kit).
 
 `Alternative` props:
 
-- `id: "a" | "b" | "c"` - required. The letter badge, name, rationale and "Recommended" tag come
+- `id: "a" | "b" | "c"` - required (`"d"` and `"e"` too, for style questions such as Button styles; a registry `open: true` shows "Recommended" instead of "Decided"). The letter badge, name, rationale and "Recommended" tag come
   from the registry.
 - `name?: string`, `rationale?: ReactNode` - override the registry text only if you must.
 - `canvas?: "bg" | "surface"` - `bg` (default) is the page canvas; `surface` is the inside of a

@@ -11,6 +11,15 @@ export type AlternativeId = "a" | "b" | "c";
 
 export const ALTERNATIVE_IDS: readonly AlternativeId[] = ["a", "b", "c"];
 
+/**
+ * A few open style questions (Button styles) compare more than three versions.
+ * Pages and primitives still map `AlternativeId`; only the fork chrome, the
+ * picks store and the export handle the extra letters.
+ */
+export type ForkAlternativeId = AlternativeId | "d" | "e";
+
+export const FORK_ALTERNATIVE_IDS: readonly ForkAlternativeId[] = ["a", "b", "c", "d", "e"];
+
 export type SectionGroup =
   | "Frame"
   | "Lists"
@@ -20,6 +29,7 @@ export type SectionGroup =
   | "Forms"
   | "People"
   | "Foundations"
+  | "Style"
   | "Pages";
 
 /** Navigation order. Groups without sections are hidden. */
@@ -32,11 +42,12 @@ export const SECTION_GROUPS: readonly SectionGroup[] = [
   "Forms",
   "People",
   "Foundations",
+  "Style",
   "Pages",
 ];
 
 export interface AlternativeMeta {
-  id: AlternativeId;
+  id: ForkAlternativeId;
   /** Short name, for example "Brand track". */
   name: string;
   /** One line on what it is and when it fits. */
@@ -58,6 +69,11 @@ export interface SectionMeta {
   whyRecommended?: string;
   /** Set when the pick changed after review: what was decided, when and why. */
   decision?: string;
+  /**
+   * Still an open question: the recommended version shows a "Recommended" tag
+   * instead of "Decided" and the fork says "We recommend".
+   */
+  open?: boolean;
   alternatives?: readonly AlternativeMeta[];
   load: () => Promise<{ default: ComponentType }>;
 }
@@ -95,6 +111,8 @@ export const SECTION_KEYS = [
   "relative-time",
   "copy-field",
   "diff-view",
+  // Style
+  "button-styles",
   // Pages
   "page-general",
   "page-access",
@@ -750,6 +768,53 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./diff-view"),
   },
 
+  // ---------------------------------------------------------------- Style
+  {
+    key: "button-styles",
+    group: "Style",
+    title: "Button styles",
+    purpose:
+      "How primary, secondary and destructive buttons look, compared on the same screens in dark and light.",
+    usedOn: "Every page header, detail page, form footer, empty state and confirm dialog",
+    recommended: "a",
+    open: true,
+    whyRecommended:
+      "One solid ink button per screen reads as confident and deliberate in both themes, and frees blue for focus, selection and links, where it carries meaning.",
+    alternatives: [
+      {
+        id: "a",
+        name: "Inverted ink",
+        rationale:
+          "Primary is a solid foreground-colored button (near-white on dark, near-black on light), like Claude, Vercel and Linear. Blue only marks focus, selection and links.",
+      },
+      {
+        id: "b",
+        name: "Quiet surface",
+        rationale:
+          "Primary is a raised neutral surface with a firm border and stronger text. No solid fills except the destructive confirm.",
+      },
+      {
+        id: "c",
+        name: "Deep indigo",
+        rationale:
+          "Keeps a brand-colored primary, but darker and much less saturated, with a hairline inner edge and taller 36px controls.",
+      },
+      {
+        id: "d",
+        name: "Outline accent",
+        rationale:
+          "Every button is outlined. The primary alone gets a thin brand ring, brand text and a faint tint; nothing is solid.",
+      },
+      {
+        id: "e",
+        name: "Ink pills",
+        rationale:
+          "Inverted ink primary on a fully rounded shape, with filled neutral secondaries and no outlines, like ChatGPT settings.",
+      },
+    ],
+    load: () => import("./button-styles"),
+  },
+
   // ---------------------------------------------------------------- Pages
   {
     key: "page-general",
@@ -861,10 +926,13 @@ export function visibleGroups(): readonly SectionGroup[] {
   return SECTION_GROUPS.filter((group) => sectionsInGroup(group).length > 0);
 }
 
-export function alternativeMeta(key: SectionKey, id: AlternativeId): AlternativeMeta | undefined {
+export function alternativeMeta(
+  key: SectionKey,
+  id: ForkAlternativeId,
+): AlternativeMeta | undefined {
   return getSection(key).alternatives?.find((alternative) => alternative.id === id);
 }
 
-export function alternativeLetter(id: AlternativeId): string {
+export function alternativeLetter(id: ForkAlternativeId): string {
   return id.toUpperCase();
 }
