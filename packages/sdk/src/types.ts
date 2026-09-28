@@ -5484,7 +5484,12 @@ export type CreateAgentScheduledTaskRequest = {
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
-  // The rig each run binds to (M3); active version resolved per fire.
+  /**
+   * Sandbox Environment each run binds to; its active version is resolved per
+   * fire. Omit to resolve it once at create: the workspace default (none for a
+   * Connected Machine task), or the target session's own environment for an
+   * existing-session task. `null` means none.
+   */
   rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };

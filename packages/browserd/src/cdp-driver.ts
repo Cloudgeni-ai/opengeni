@@ -1538,16 +1538,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
     if (typeof attached.sessionId !== "string") throw new Error("CDP did not attach the target");
     const sessionId = attached.sessionId;
-    await Promise.all([
-      connection.send("Page.enable", {}, { sessionId }),
-      connection.send("Runtime.enable", {}, { sessionId }),
-      connection.send("DOM.enable", {}, { sessionId }),
-      connection.send("Accessibility.enable", {}, { sessionId }),
-      connection.send("Network.enable", {}, { sessionId }),
-      connection.send("Log.enable", {}, { sessionId }),
-    ]);
-    await this.applyEmulation(connection, sessionId);
-    const frame = await this.mainFrame(sessionId);
+    let frame: MainFrame;
+    try {
+      await Promise.all([
+        connection.send("Page.enable", {}, { sessionId }),
+        connection.send("Runtime.enable", {}, { sessionId }),
+        connection.send("DOM.enable", {}, { sessionId }),
+        connection.send("Accessibility.enable", {}, { sessionId }),
+        connection.send("Network.enable", {}, { sessionId }),
+        connection.send("Log.enable", {}, { sessionId }),
+      ]);
+      await this.applyEmulation(connection, sessionId);
+      frame = await this.mainFrame(sessionId);
+    } catch (error) {
+      // Failed initialization never enters states, so normal target cleanup cannot
+      // find it. Release only this CDP attachment; preserve the page and profile.
+      await connection
+        .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 500 })
+        .catch(() => undefined);
+      throw error;
+    }
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
@@ -2128,11 +2138,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async frameTree(sessionId: string, timeoutMs?: number): Promise<PageFrameTree> {
     const connection = await this.ensureConnection();
-    const response = await connection.send<{ frameTree?: unknown }>(
-      "Page.getFrameTree",
-      {},
-      { sessionId, ...(timeoutMs ? { timeoutMs } : {}) },
-    );
+    let response: { frameTree?: unknown };
+    try {
+      response = await connection.send<{ frameTree?: unknown }>(
+        "Page.getFrameTree",
+        {},
+        { sessionId, ...(timeoutMs ? { timeoutMs } : {}) },
+      );
+    } catch (error) {
+      // Target validation runs before dispatch. Preserve its bounded diagnosis
+      // in the receipt without exposing arbitrary provider error text or
+      // weakening document/frame fences on an unresponsive renderer.
+      if (!(error instanceof CdpTransportError)) throw error;
+      const timeout = error instanceof CdpCommandTimeoutError;
+      const failure = new InteractionControllerError(
+        timeout ? "timeout" : "resource_unavailable",
+        `browser frame inspection ${timeout ? "timed out" : "unavailable"} during Page.getFrameTree`,
+        true,
+      );
+      failure.cause = error;
+      throw failure;
+    }
     if (!isRecord(response.frameTree) || !isRecord(response.frameTree.frame)) {
       throw new Error("CDP returned an invalid frame tree");
     }
@@ -2155,8 +2181,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     try {
       return await read(remaining);
     } catch (error) {
-      if (!(error instanceof CdpTransportError)) throw error;
-      const timeout = error instanceof CdpCommandTimeoutError;
+      const transport = error instanceof InteractionControllerError ? error.cause : error;
+      if (!(transport instanceof CdpTransportError)) throw error;
+      const timeout = transport instanceof CdpCommandTimeoutError;
       const failure = new InteractionControllerError(
         timeout ? "timeout" : "resource_unavailable",
         `browser screenshot ${timeout ? "timed out" : "unavailable"} during ${stage}`,

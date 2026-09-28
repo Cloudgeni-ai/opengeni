@@ -60,6 +60,7 @@ import {
   type AttemptToolScope,
 } from "@opengeni/codemode";
 import {
+  ToolGatewayInputValidationError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -2555,21 +2556,32 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * `isError`, cross the SDK through `callToolResult` plus
  * `McpResultCustomDataBridge`; their complete exact result is retained
  * separately from this compatibility fallback.
+ *
+ * A gateway argument-validation rejection is not a transient failure: the
+ * identical call would be rejected again. It names the missing or mistyped
+ * properties and asks the model to correct them instead of "Please try again".
  */
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = exactErrorMessage(error);
-  return {
-    isError: true,
-    content: [
-      {
-        type: "text",
-        text: `An error occurred while running the tool. Please try again. Error: ${details}`,
-      },
-    ],
-  };
+  const text =
+    invalidToolArgumentsText(error) ??
+    `An error occurred while running the tool. Please try again. Error: ${exactErrorMessage(error)}`;
+  return { isError: true, content: [{ type: "text", text }] };
+}
+
+function invalidToolArgumentsText(error: unknown): string | null {
+  try {
+    if (!(error instanceof ToolGatewayInputValidationError)) return null;
+    // The gateway rejects before authorization or execution, so nothing ran.
+    const summary = error.summary;
+    return summary
+      ? `The tool was not called because its arguments do not match the tool's input schema: ${summary}. Correct the named properties and call the tool again.`
+      : "The tool was not called because its arguments do not match the tool's input schema. Correct the arguments to match the schema and call the tool again.";
+  } catch {
+    return null;
+  }
 }
 
 // Applied to EVERY MCP server via the agent's `mcpConfig.errorFunction`

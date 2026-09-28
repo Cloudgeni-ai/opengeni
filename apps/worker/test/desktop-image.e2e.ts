@@ -152,6 +152,8 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
       // uv install (no venv, no override flag) must still reach the system
       // interpreter, and the common data/test packages must be preinstalled.
       // With HOME=/workspace, the caches must still stay out of the snapshot.
+      // psycopg must load its bundled-libpq binary wheel, and psql must be on
+      // PATH, so a Postgres question needs no install first.
       const python = await sh(
         [
           "cd /workspace",
@@ -160,7 +162,9 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
           'test "$(pip cache dir)" = /var/cache/pip',
           "pip install --dry-run --no-index pytest >/dev/null",
           "uv pip install --system --dry-run --offline pytest >/dev/null",
-          `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'`,
+          `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'`,
+          `python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary"'`,
+          "psql --version >/dev/null",
           "uvx --version >/dev/null",
           "echo PYTHON_OK",
         ].join(" && "),
