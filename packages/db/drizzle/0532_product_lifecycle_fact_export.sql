@@ -80,7 +80,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM "host_export_cursor_state" WHERE "export_kind" = 'lifecycle_fact'
   ) THEN
-    RAISE EXCEPTION '0531 could not seed the lifecycle_fact cursor state'
+    RAISE EXCEPTION '0532 could not seed the lifecycle_fact cursor state'
       USING ERRCODE = '55000';
   END IF;
 END $seed$;

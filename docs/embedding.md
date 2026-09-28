@@ -1101,7 +1101,7 @@ events in that interval are deliberately not recoverable. Normal deploys must us
 
 Canonical sources: `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES` in
 `packages/contracts/src/product-lifecycle-facts.ts`, the `HostLifecycleFactExport` contract in
-`packages/contracts/src/index.ts`, and migration `0531_product_lifecycle_fact_export.sql`.
+`packages/contracts/src/index.ts`, and migration `0532_product_lifecycle_fact_export.sql`.
 
 A third export kind, `lifecycle_fact`, carries one content-free fact per person-level product
 milestone, so a host can answer who signed up, verified, signed in, set up an organization, and

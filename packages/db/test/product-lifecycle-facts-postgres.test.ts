@@ -48,7 +48,7 @@ setDefaultTimeout(180_000);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const CONSUMER = "lifecycle-facts-test";
 const migrationText = readFileSync(
-  new URL("../drizzle/0531_product_lifecycle_fact_export.sql", import.meta.url),
+  new URL("../drizzle/0532_product_lifecycle_fact_export.sql", import.meta.url),
   "utf8",
 );
 
