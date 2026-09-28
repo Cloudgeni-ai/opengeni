@@ -15,6 +15,7 @@ const output =
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
+const otherSessionId = "33333333-3333-4333-8333-444444444444";
 const turnId = "44444444-4444-4444-8444-444444444444";
 let base: string;
 let web: StartedProcess | undefined;
@@ -108,7 +109,7 @@ const control = {
   settlement: null,
 };
 function fixtures() {
-  const now = new Date().toISOString();
+  const now = new Date(Date.now() - 60_000).toISOString();
   const session = {
     id: sessionId,
     workspaceId,
@@ -207,7 +208,21 @@ function fixtures() {
     events,
     turns: [] as Record<string, unknown>[],
     denyAccess: false,
-    gates: { config: gate(), access: gate(), detail: gate(), history: gate(), send: gate() },
+    failHistory: false,
+    emptyHistory: false,
+    failStream: false,
+    deferDetail: false,
+    gates: {
+      config: gate(),
+      access: gate(),
+      detail: gate(),
+      history: gate(),
+      send: gate(),
+      other: gate(),
+      stream: gate(),
+      streamError: gate(),
+      dispatchDetail: gate(),
+    },
     draft: {
       revision: 0,
       text: "",
@@ -289,7 +304,10 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
     if (path === `/v1/workspaces/${workspaceId}`) return json(state.workspace);
     if (path === `/v1/workspaces/${workspaceId}/sessions`)
       return json({
-        sessions: [state.session],
+        sessions: [
+          state.session,
+          { ...state.session, id: otherSessionId, title: "Unloaded other session" },
+        ],
         pinned: [],
         pinnedTruncated: false,
         nextCursor: null,
@@ -297,15 +315,41 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
         sortBy: new URL(request.url()).searchParams.get("sortBy") ?? "updated",
         archiveStatus: new URL(request.url()).searchParams.get("archiveStatus") ?? "active",
       });
+    if (
+      path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}` ||
+      path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}/events`
+    ) {
+      await state.gates.other.wait();
+      return json(
+        path.endsWith("/events")
+          ? []
+          : { ...state.session, id: otherSessionId, title: "Unloaded other session" },
+      );
+    }
     if (path === `/v1/workspaces/${workspaceId}/sessions/${sessionId}`) {
       await state.gates.detail.wait();
+      if (state.deferDetail) await state.gates.dispatchDetail.wait();
       return json(state.session);
     }
-    if (path.endsWith("/events/stream"))
-      return route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" });
+    if (path.endsWith("/events/stream")) {
+      if (state.failStream) {
+        await state.gates.streamError.wait();
+        return json({ message: "Live event stream unavailable" }, 400);
+      }
+      await state.gates.stream.wait();
+      const after = Number(new URL(request.url()).searchParams.get("after") ?? 0);
+      return route.fulfill({
+        contentType: "text/event-stream",
+        body: state.events
+          .filter((event) => Number(event.sequence) > after)
+          .map((event) => `id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)
+          .join(""),
+      });
+    }
     if (path.endsWith("/events")) {
       await state.gates.history.wait();
-      return json(state.events);
+      if (state.failHistory) return json({ message: "Initial history unavailable" }, 503);
+      return json(state.emptyHistory ? [] : state.events);
     }
     if (path.endsWith("/composer-draft/submit")) {
       const input = request.postDataJSON();
@@ -341,16 +385,28 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
         updatedAt: accepted.occurredAt,
       };
       state.events.push(accepted);
+      state.events.push({
+        id: crypto.randomUUID(),
+        workspaceId,
+        sessionId,
+        turnId,
+        sequence: 3,
+        type: "session.status.changed",
+        payload: { status: "queued" },
+        occurredAt: accepted.occurredAt,
+      });
       // Match getSessionQueueSnapshot: direct admission is a physical queued
       // turn, but is intentionally absent from the operator-visible queue.
       state.turns = [];
       Object.assign(state.session, {
         status: "queued",
-        lastSequence: 2,
+        lastSequence: 3,
         queueVersion: 1,
         updatedAt: accepted.occurredAt,
       });
       state.draft = { ...state.draft, text: "", revision: state.draft.revision + 1 };
+      state.deferDetail = true;
+      state.gates.stream.release();
       return json({
         accepted,
         turn,
@@ -431,14 +487,46 @@ for (const width of [1280, 390]) {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const state = fixtures();
+    state.failHistory = true;
     await installApi(page, state);
     const capture = async (name: string) =>
       page.screenshot({ path: `${output}/${width}-${name}.png` });
     try {
+      await page.emulateMedia({ reducedMotion: "no-preference" });
       await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      let anchor: { x: number; y: number; width: number; height: number } | null = null;
+      let animationOrigin: number | null = null;
       for (const phase of ["config", "access", "detail", "history"] as const) {
         await state.gates[phase].entered;
         await page.locator("[data-page-loading]").waitFor();
+        const loading = page.locator("[data-page-loading]");
+        const box = await loading.boundingBox();
+        assert(box);
+        if (anchor) {
+          for (const axis of ["x", "y", "width", "height"] as const)
+            assert(
+              Math.abs(box[axis] - anchor[axis]) <= 1,
+              `Loading anchor changed during ${phase}: ${JSON.stringify({ box, anchor })}`,
+            );
+        } else anchor = box;
+        assert.equal(
+          await loading.evaluate((element) => getComputedStyle(element).pointerEvents),
+          "none",
+        );
+        const origin = await loading.locator("svg").evaluate((element) => {
+          const animation = element.getAnimations()[0];
+          return animation
+            ? Number(animation.startTime) + Number(animation.effect!.getTiming().delay)
+            : null;
+        });
+        assert(origin !== null, "loading animation is active");
+        if (animationOrigin !== null) {
+          const delta = (((origin - animationOrigin) % 1000) + 1000) % 1000;
+          assert(
+            Math.min(delta, 1000 - delta) < 120,
+            `Loading animation restarted during ${phase}: ${delta}`,
+          );
+        } else animationOrigin = origin;
         assert.equal(
           await page.getByText(state.session.initialMessage, { exact: true }).count(),
           0,
@@ -458,8 +546,75 @@ for (const width of [1280, 390]) {
         await capture(phase);
         state.gates[phase].release();
       }
+      await page.emulateMedia({ reducedMotion: "reduce" });
       const transcript = page.locator('[data-testid="timeline-user"]');
+      await page.getByRole("button", { name: "Retry conversation", exact: true }).waitFor();
+      assert.equal(
+        await transcript.count(),
+        0,
+        "failed first history read must not show genesis fallback",
+      );
+      await capture("history-error");
+      state.failHistory = false;
+      state.emptyHistory = true;
+      state.failStream = true;
+      state.gates.history = gate();
+      await page.getByRole("button", { name: "Retry conversation", exact: true }).click();
+      await state.gates.history.entered;
+      await page.locator("[data-page-loading]").waitFor();
+      assert.equal(await transcript.count(), 0, "retry must remain pending until history succeeds");
+      await capture("history-retry");
+      state.gates.history.release();
       await transcript.getByText(state.session.initialMessage, { exact: true }).waitFor();
+      // Let the real transient error notification settle before capturing the
+      // recovered conversation and exercising the unrelated startup sequence.
+      await page.locator("[data-sonner-toast]").waitFor({ state: "hidden" });
+      await capture("empty-history-ready");
+      assert.equal(await page.getByRole("button", { name: "Retry conversation" }).count(), 0);
+      await page
+        .getByRole("textbox", { name: /Message|Prompt/i })
+        .first()
+        .waitFor();
+      await state.gates.streamError.entered;
+      state.gates.streamError.release();
+      await page.getByText(/Live event stream unavailable/).waitFor();
+      assert.equal(await page.locator("[data-page-loading]").count(), 0);
+      assert.equal(
+        await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
+        1,
+      );
+      await page
+        .getByRole("textbox", { name: /Message|Prompt/i })
+        .first()
+        .waitFor();
+      await capture("post-open-stream-error");
+      state.failStream = false;
+      state.emptyHistory = false;
+      if (width < 1024)
+        await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+      await page.locator(`a[data-session-row="${otherSessionId}"]:visible`).click();
+      await state.gates.other.entered;
+      await page.locator("[data-page-loading]").waitFor();
+      await capture("other-pending");
+      state.gates.history = gate();
+      await page.goBack();
+      await state.gates.history.entered;
+      await page.locator("[data-page-loading]").waitFor();
+      assert.equal(
+        await transcript.count(),
+        0,
+        "returning A through unloaded B must not reuse A's opening lifetime",
+      );
+      const returnedAnchor = await page.locator("[data-page-loading]").boundingBox();
+      assert(returnedAnchor && anchor);
+      assert(
+        Math.abs(returnedAnchor.x - anchor.x) <= 1 && Math.abs(returnedAnchor.y - anchor.y) <= 1,
+      );
+      await capture("return-pending");
+      state.gates.history.release();
+      state.gates.other.release();
+      await transcript.getByText(state.session.initialMessage, { exact: true }).waitFor();
+      await page.locator("[data-sonner-toast]").waitFor({ state: "hidden" });
       await capture("ready");
       const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
       await input.fill("Start this next step.");
@@ -479,6 +634,11 @@ for (const width of [1280, 390]) {
         await page.locator("header [data-status=queued]").first().textContent(),
         "Starting",
       );
+      await state.gates.dispatchDetail.entered;
+      assert.equal(await page.getByText("Still waiting to start", { exact: true }).count(), 0);
+      await capture("delayed-detail");
+      state.deferDetail = false;
+      state.gates.dispatchDetail.release();
       await capture("starting");
       // A hard reconnect must recover durable admission without moving the bubble.
       await page.reload();
