@@ -326,7 +326,6 @@ export function SessionRoute({
   );
   const {
     session: fetchedSession,
-    loading,
     error: loadError,
     readRevision: sessionReadRevision,
     readGeneration: sessionReadGeneration,
@@ -417,6 +416,12 @@ export function SessionRoute({
         : events,
     [events, viewClearedAfter],
   );
+  const [openedSessionId, setOpenedSessionId] = useState<string | null>(null);
+  useEffect(() => {
+    if (session && (!initialLoading || visibleEvents.length > 0 || creationHandoff)) {
+      setOpenedSessionId(session.id);
+    }
+  }, [session, initialLoading, visibleEvents.length, creationHandoff]);
   const timeline = useMemo(() => {
     if (!session) {
       return [];
@@ -1022,10 +1027,19 @@ export function SessionRoute({
     [setInspectorOpen],
   );
 
-  if (!session) {
-    if (loadError) {
+  // Keep the same pending canvas through detail and the first history read.
+  // A freshly sent creation handoff already has visible conversation truth.
+  // Never paint the genesis message or mount a second loading treatment first.
+  if (
+    !session ||
+    (openedSessionId !== session.id &&
+      initialLoading &&
+      visibleEvents.length === 0 &&
+      !creationHandoff)
+  ) {
+    if (!session && loadError) {
       return (
-        <Suspense fallback={<LoadingPanel label="Looking for this session" />}>
+        <Suspense fallback={<LoadingPanel />}>
           <LazySessionRouteAuxiliary
             workspaceId={workspaceId}
             sessionId={sessionId}
@@ -1042,7 +1056,7 @@ export function SessionRoute({
           session={null}
           events={events}
           connectionState={connectionState}
-          primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
+          primary={<LoadingPanel />}
           onReloadSession={refreshSession}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
@@ -2667,10 +2681,8 @@ function SessionChatPane(props: {
                       }
                     />
                   ) : props.initialLoading ? (
-                    // History is still fetching — a quiet shimmer, not the
-                    // "waiting for the first step" copy (that's for NEW sessions).
-                    <div className="grid min-h-[24rem] place-items-center text-sm">
-                      <span className="og-shimmer-text font-medium">Loading conversation…</span>
+                    <div className="flex min-h-[24rem]">
+                      <LoadingPanel />
                     </div>
                   ) : (
                     <EmptyState
