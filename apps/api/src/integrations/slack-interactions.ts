@@ -4792,7 +4792,7 @@ async function postDelivery(
  * bytes (a claimed-but-unposted row, a response-loss retry, or a page replayed
  * across the deploy) must keep them, or every retry would conflict and wedge
  * the interaction. The ledger reports that conflict from its durable claim,
- * before any provider call, so one retry with the unformatted bytes under the
+ * before any Slack write, so one retry with the unformatted bytes under the
  * same operation id is safe. The id itself never changes: action handles and
  * the post lookups keyed on it stay exact, and a new operation always carries
  * the formatted bytes.

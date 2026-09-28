@@ -328,7 +328,7 @@ export class SlackBotProviderError extends Error {
 
 /**
  * The post or update ledger already binds this operation id to different
- * request bytes. Raised from the durable claim, before any provider call, so a
+ * request bytes. Raised from the durable claim, before any Slack write, so a
  * caller that knows an earlier release wrote other bytes for the same operation
  * may retry once with those bytes.
  */

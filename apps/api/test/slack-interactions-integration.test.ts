@@ -8192,6 +8192,50 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
   });
 
+  test("coalesces a Markdown progress post into the result without a second post", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_MRKDWN_COALESCE_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_MRKDWN_COALESCE",
+        ts: "1761500000.000001",
+        text: "Is the deploy healthy?",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const updatesBefore = value.slack.calls.filter((call) => call.method === "chat.update").length;
+    const answer = "## Deploy\n**Healthy.** See [the dashboard](https://example.com/deploys).";
+    const formatted = "*Deploy*\n*Healthy.* See <https://example.com/deploys|the dashboard>.";
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: answer } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([formatted]);
+
+    // The progress reconciliation renders the same formatted bytes under the
+    // progress operation, so the ledger finds the completed post instead of
+    // conflicting, and the terminal update rewrites that one message.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: answer } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([formatted]);
+    expect(value.slack.calls.filter((call) => call.method === "chat.update").length).toBe(
+      updatesBefore + 1,
+    );
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "completed",
+    });
+  });
+
   test("keeps the unformatted bytes an earlier release bound to a Slack post operation", async () => {
     if (!available) return;
     const value = await fixture();

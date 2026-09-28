@@ -11,6 +11,13 @@
  *
  * Code is never rewritten: fenced code blocks keep every line between their
  * fences, and inline code spans are copied as they are.
+ *
+ * The output is part of the Slack post and update ledgers' request digest, so a
+ * change to it changes the bytes an in-flight operation is bound to. Delivery
+ * (`deliverSlackModelText` in `slack-interactions.ts`) falls back only to the
+ * unformatted text; a later output change must keep the previous rendering
+ * reachable the same way, or operations started before the deploy conflict on
+ * every retry.
  */
 
 /**
@@ -25,7 +32,12 @@ const PROVIDER_CITATION_TOKEN =
 /** Stray citation delimiters, for example from a token cut short upstream. */
 const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
 
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/u;
+/**
+ * A fence at any indentation. Agents nest code under list items (a `10.` item
+ * or a nested bullet puts the fence four or more spaces in), and Slack has no
+ * indented code block, so a fence line is a fence wherever it starts.
+ */
+const FENCE_OPEN = /^[ \t]*(`{3,}|~{3,})(.*)$/u;
 const ATX_HEADING = /^ {0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/u;
 const BULLET = /^([ \t]*)[-*+][ \t]+(?=\S)/u;
 const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u;
@@ -51,6 +63,7 @@ const MARKDOWN_LINK =
 /** Bare URLs are set aside after links: they may legitimately contain `__` or `**`. */
 const BARE_URL = /\bhttps?:\/\/[^\s<>]+/gu;
 
+const BOLD_ITALIC_ASTERISK = /\*\*\*(?=[^\s*])((?:[^*\n]|\*(?!\*))+?)(?<=[^\s*])\*\*\*/gu;
 const BOLD_ASTERISK = /\*\*(?=[^\s*])((?:[^*\n]|\*(?!\*))+?)(?<=[^\s*])\*\*/gu;
 const BOLD_UNDERSCORE =
   /(?<![\p{L}\p{N}_])__(?=[^\s_])((?:[^_\n]|_(?!_))+?)(?<=[^\s_])__(?![\p{L}\p{N}_])/gu;
@@ -66,13 +79,15 @@ export function stripProviderCitationMarkers(text: string): string {
  * Rewrite common Markdown as Slack mrkdwn.
  *
  * - `# Heading` (any level) becomes a bold line.
- * - `**bold**` and `__bold__` become `*bold*`; `~~struck~~` becomes `~struck~`.
+ * - `**bold**` and `__bold__` become `*bold*`, `***both***` becomes `*_both_*`,
+ *   and `~~struck~~` becomes `~struck~`.
  * - `[label](https://...)` becomes `<https://...|label>`.
  * - `-`, `*`, and `+` bullets become Slack's `•` bullet, keeping indentation;
  *   numbered lists and block quotes are already Slack syntax and stay as they are.
- * - Fenced code blocks keep their contents byte for byte. The opening fence
- *   loses its language tag, which Slack would otherwise print as the first
- *   code line, and an unclosed block is closed so Slack still renders it as code.
+ * - Fenced code blocks, at any indentation, keep their contents byte for byte.
+ *   The opening fence loses its language tag, which Slack would otherwise print
+ *   as the first code line, and an unclosed block is closed so Slack still
+ *   renders it as code.
  * - Provider citation handles are removed.
  *
  * Text that uses none of this syntax comes back unchanged.
@@ -106,7 +121,7 @@ export function slackMrkdwnFromMarkdown(markdown: string): string {
 }
 
 function closesFence(line: string, fence: { character: string; length: number }): boolean {
-  const trimmed = line.replace(/^ {0,3}/u, "").replace(/[ \t]+$/u, "");
+  const trimmed = line.trim();
   return (
     trimmed.length >= fence.length &&
     [...trimmed].every((character) => character === fence.character)
@@ -149,7 +164,10 @@ function slackInline(text: string, options: { heading: boolean }): string {
       .replace(BOLD_UNDERSCORE, "$1")
       .replace(/\*/gu, "");
   } else {
-    working = working.replace(BOLD_ASTERISK, "*$1*").replace(BOLD_UNDERSCORE, "*$1*");
+    working = working
+      .replace(BOLD_ITALIC_ASTERISK, "*_$1_*")
+      .replace(BOLD_ASTERISK, "*$1*")
+      .replace(BOLD_UNDERSCORE, "*$1*");
   }
   working = working.replace(STRIKETHROUGH, "~$1~");
   return restore(working, kept);

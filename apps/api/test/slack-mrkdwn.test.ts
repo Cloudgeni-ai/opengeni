@@ -49,6 +49,26 @@ describe("slackMrkdwnFromMarkdown", () => {
     );
   });
 
+  test("keeps a code fence nested under a list item exactly as written", () => {
+    // A nested bullet or a `10.` item puts the fence four or more spaces in.
+    const body = [
+      "    kubectl apply -f deploy.yaml  # **careful** with [prod](https://example.com)",
+      "    - not a bullet",
+      "    # not a heading",
+    ];
+    const reply = [
+      "- Roll out the fix:",
+      "    ```bash",
+      ...body,
+      "    ```",
+      "- Then **verify**.",
+    ].join("\n");
+
+    expect(slackMrkdwnFromMarkdown(reply)).toBe(
+      ["• Roll out the fix:", "```", ...body, "```", "• Then *verify*."].join("\n"),
+    );
+  });
+
   test("normalises fences Slack does not understand and closes an unclosed one", () => {
     expect(slackMrkdwnFromMarkdown("~~~python\nprint('**x**')\n~~~")).toBe(
       "```\nprint('**x**')\n```",
@@ -141,6 +161,12 @@ describe("slackMrkdwnFromMarkdown", () => {
       "Plain sentence with 3 * 4 = 12.",
     ].join("\n");
     expect(slackMrkdwnFromMarkdown(slack)).toBe(slack);
+  });
+
+  test("turns bold italic into Slack's nested bold and italic", () => {
+    expect(slackMrkdwnFromMarkdown("This is ***not optional*** before **release**.")).toBe(
+      "This is *_not optional_* before *release*.",
+    );
   });
 
   test("converts bold inside a block quote", () => {
