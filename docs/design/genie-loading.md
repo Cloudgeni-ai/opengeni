@@ -112,7 +112,8 @@ There is no forced answer stop and no automatic repin on subsequent work.
 One **Latest question** button targets the newest actual user message, never the
 question nearest the viewport. Hosts with bounded history wire
 `onJumpToLatestQuestion={events.jumpToLatestQuestion}` from `useSessionEvents`.
-It resolves the newest durable `user.message` with one filtered read, then uses
+It resolves the newest durable user message with a filtered forensic read (paging
+past legacy worker-completion records using the canonical timeline projection), then uses
 the existing bounded `jumpToSequence` path only when needed. Target placement
 wins over prepend correction without enabling tip-follow. Lookup failures are
 retryable; stale history/identity requests cannot replace the current window.

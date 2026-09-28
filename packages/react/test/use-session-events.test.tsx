@@ -57,6 +57,7 @@ type ListOptions = {
   compact?: boolean;
   direction?: "after" | "before";
   payloadMode?: SessionEventPayloadMode;
+  mode?: "forensic" | "monitoring";
 };
 
 function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEvent[] {
@@ -128,7 +129,13 @@ describe("useSessionEvents", () => {
       await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(9000));
       await flush(20);
       expect(listCalls.slice(reads)).toEqual([
-        { direction: "before", includeTypes: ["user.message"], limit: 1, payloadMode: "full" },
+        {
+          direction: "before",
+          includeTypes: ["user.message"],
+          limit: 1,
+          payloadMode: "full",
+          mode: "forensic",
+        },
         { before: 9001, limit: 128, compact: true, payloadMode: "full" },
         { after: 9000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
       ]);
@@ -165,6 +172,82 @@ describe("useSessionEvents", () => {
       );
     } finally {
       await emptyHook.unmount();
+    }
+  });
+
+  test("Latest question pages past legacy worker completions without scanning activity", async () => {
+    const worker = (sequence: number) =>
+      event(sequence, "user.message", {
+        text: "Worker finished",
+        childCompletion: { childSessionId: SECOND_SESSION_ID, status: "idle" },
+      });
+    const store = [event(1), event(2), ...Array.from({ length: 130 }, (_, i) => worker(i + 3))];
+    const { client, listCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      const reads = listCalls.length;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+      expect(listCalls.slice(reads).map(({ before, limit }) => ({ before, limit }))).toEqual([
+        { before: undefined, limit: 1 },
+        { before: 132, limit: 64 },
+        { before: 68, limit: 64 },
+        { before: 4, limit: 64 },
+      ]);
+      expect(
+        listCalls
+          .slice(reads)
+          .every((call) => call.mode === "forensic" && call.includeTypes?.[0] === "user.message"),
+      ).toBe(true);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question retains malformed legacy payloads as ordinary visible messages", async () => {
+    const { client } = scriptedClient({
+      store: [
+        event(1),
+        event(2, "user.message", {
+          text: "Still readable",
+          childCompletion: { childSessionId: SECOND_SESSION_ID },
+        }),
+      ],
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question does not confuse queued admission routing with machine provenance", async () => {
+    const { client } = scriptedClient({
+      store: [
+        event(1),
+        event(2, "user.message", {
+          text: "Newest human request",
+          routing: "queued_for_execution",
+        }),
+      ],
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+    } finally {
+      await hook.unmount();
     }
   });
 
