@@ -5,7 +5,7 @@ import { Link } from "@tanstack/react-router";
  * cadence sentence and its next runs) -> an optional Name -> one closed
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
-import { useEffect, useId, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useId, useMemo, useState } from "react";
 import { LaptopIcon, ServerIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
@@ -14,7 +14,6 @@ import { ConnectionAccountPicker } from "@/components/capabilities/connection-ac
 import { connectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
-import { ScheduleSlackPosting } from "@/components/schedule-slack-posting";
 import { Button } from "@/components/ui/button";
 import { CadencePicker } from "@/components/ui/cadence-picker";
 import { Disclosure } from "@/components/ui/disclosure";
@@ -41,6 +40,12 @@ import { cn } from "@/lib/utils";
 import type { ScheduledTask, Session } from "@/types";
 
 import { useCanCreateScheduleWithAgent, useCreateWithOpenGeni } from "./create-with-opengeni";
+
+// Slack posting pulls in the Slack bot helpers shared with Capabilities; load
+// it on demand so it does not reshape the chunks every session page shares.
+const ScheduleSlackPosting = lazy(async () => ({
+  default: (await import("@/components/schedule-slack-posting")).ScheduleSlackPosting,
+}));
 import { ComposerField } from "./schedule-composer";
 import {
   NAME_MAX_LENGTH,
@@ -939,16 +944,18 @@ function AgentScheduleForm({
                 </p>
               ) : null}
               {eachRun !== "existing_session" ? (
-                <ScheduleSlackPosting
-                  workspaceId={workspaceId}
-                  connectionId={draft.slackBotConnectionId}
-                  channelId={draft.slackBotChannelId}
-                  disabled={false}
-                  active={advancedOpen}
-                  onChange={({ connectionId, channelId }) =>
-                    update({ slackBotConnectionId: connectionId, slackBotChannelId: channelId })
-                  }
-                />
+                <Suspense fallback={null}>
+                  <ScheduleSlackPosting
+                    workspaceId={workspaceId}
+                    connectionId={draft.slackBotConnectionId}
+                    channelId={draft.slackBotChannelId}
+                    disabled={false}
+                    active={advancedOpen}
+                    onChange={({ connectionId, channelId }) =>
+                      update({ slackBotConnectionId: connectionId, slackBotChannelId: channelId })
+                    }
+                  />
+                </Suspense>
               ) : null}
               {learningLoading ? (
                 <p role="status" className="m-0 text-sm text-fg-muted">
