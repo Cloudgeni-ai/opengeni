@@ -8125,6 +8125,147 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
   });
 
+  test("posts Markdown results in Slack formatting and keeps the stored events exact", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_MRKDWN_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_MRKDWN",
+        ts: "1761000000.000001",
+        text: "Check the deploy and summarize it",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const progress = "**Checking** the [deploy dashboard](https://example.com/deploys).";
+    const output = [
+      "## Deploy check",
+      "**Healthy** in every region. \ue200cite\ue202turn1search0\ue201",
+      "- Error rate is flat",
+      "",
+      "```bash",
+      "echo **kept** [as](https://written.example)",
+      "```",
+    ].join("\n");
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: progress } },
+    ]);
+    await drainAll(value.deps);
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output } },
+    ]);
+    await drainAll(value.deps);
+
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      "*Checking* the <https://example.com/deploys|deploy dashboard>.",
+      [
+        "*Deploy check*",
+        "*Healthy* in every region.",
+        "• Error rate is flat",
+        "",
+        "```",
+        "echo **kept** [as](https://written.example)",
+        "```",
+      ].join("\n"),
+    ]);
+    // Formatting happens at the Slack sink only: the session keeps the exact
+    // Markdown the model wrote, which is what the console renders.
+    const stored = await shared!.admin<{ type: string; text: string }[]>`
+      select type, coalesce(payload ->> 'text', payload ->> 'output') as text
+      from session_events
+      where session_id = ${route!.session_id}
+        and type in ('agent.message.completed', 'turn.completed')
+      order by sequence`;
+    expect(stored).toEqual([
+      { type: "agent.message.completed", text: progress },
+      { type: "turn.completed", text: output },
+    ]);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "completed",
+    });
+  });
+
+  test("keeps the unformatted bytes an earlier release bound to a Slack post operation", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_MRKDWN_LEGACY_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_MRKDWN_LEGACY",
+        ts: "1762000000.000001",
+        text: "Do we need a rollback?",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const output =
+      "**Rollback** is not needed. See [the incident](https://example.com/incidents/7).";
+    const formatted =
+      "*Rollback* is not needed. See <https://example.com/incidents/7|the incident>.";
+    value.slack.failuresByText.set("is not needed", { status: 429, retryAfterSeconds: 30 });
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output } },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const attempted = value.slack.postAttempts.at(-1)!;
+    expect(attempted.text).toBe(formatted);
+    const operationId = attempted.clientMessageId!;
+    const digestOf = (text: string) =>
+      createHmac("sha256", environmentsEncryptionKeyBytes(value.deps.settings)!)
+        .update(
+          JSON.stringify({
+            operationId,
+            connectionId: value.connectionId,
+            targetKind: "channel",
+            targetId: attempted.channel,
+            threadTimestamp: attempted.threadTimestamp || null,
+            text,
+            blocks: null,
+          }),
+        )
+        .digest("hex");
+    const [claimed] = await shared!.admin<{ request_digest: string; status: string }[]>`
+      select request_digest, status from slack_bot_post_operations
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    expect(claimed).toEqual({ request_digest: digestOf(formatted), status: "pending" });
+
+    // Seed the claim an older release would have left for this same operation:
+    // bound to the unformatted bytes, with its provider call rejected.
+    await shared!.admin`
+      update slack_bot_post_operations set request_digest = ${digestOf(output)}
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    value.slack.failuresByText.clear();
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    const postsBefore = value.slack.posts.length;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+
+    // The retry keeps the bound bytes under the same operation instead of
+    // conflicting on every attempt, and no second message is posted.
+    expect(value.slack.posts.slice(postsBefore)).toEqual([
+      expect.objectContaining({ text: output, clientMessageId: operationId }),
+    ]);
+    const [completed] = await shared!.admin<{ request_digest: string; status: string }[]>`
+      select request_digest, status from slack_bot_post_operations
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    expect(completed).toEqual({ request_digest: digestOf(output), status: "completed" });
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "completed",
+    });
+  });
+
   test("posts one bounded pointer card when a worker the human started needs input", async () => {
     if (!available) return;
     const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
