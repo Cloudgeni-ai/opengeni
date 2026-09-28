@@ -43,33 +43,38 @@ afterAll(() => {
 
 function shell(currentPage = "General", page: { title: string } | null = { title: currentPage }) {
   return (
-    <SettingsShell
-      label="Workspace settings"
-      back={{
-        label: "Back to sessions",
-        link: <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId: "workspace" }} />,
-      }}
-      home={settingsHomeLink("workspace")}
-      scope={<button type="button">Switch workspace</button>}
-      groups={[
-        {
-          items: [
-            {
-              id: "general",
-              label: "General",
-              icon: SlidersHorizontalIcon,
-              link: <a href="#general" />,
-            },
-            { id: "models", label: "Models", icon: SparklesIcon, link: <a href="#models" /> },
-          ],
-        },
-      ]}
-      activeId={currentPage === "Models" ? "models" : "general"}
-      currentPage={currentPage}
-      page={page}
-    >
-      <p>Page body</p>
-    </SettingsShell>
+    // The application owns the main landmark; settings supplies a named region.
+    <main>
+      <SettingsShell
+        label="Workspace settings"
+        back={{
+          label: "Back to sessions",
+          link: (
+            <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId: "workspace" }} />
+          ),
+        }}
+        home={settingsHomeLink("workspace")}
+        scope={<button type="button">Switch workspace</button>}
+        groups={[
+          {
+            items: [
+              {
+                id: "general",
+                label: "General",
+                icon: SlidersHorizontalIcon,
+                link: <a href="#general" />,
+              },
+              { id: "models", label: "Models", icon: SparklesIcon, link: <a href="#models" /> },
+            ],
+          },
+        ]}
+        activeId={currentPage === "Models" ? "models" : "general"}
+        currentPage={currentPage}
+        page={page}
+      >
+        <p>Page body</p>
+      </SettingsShell>
+    </main>
   );
 }
 
@@ -93,8 +98,13 @@ test("desktop settings draw the settings rail in place of the main rail, with a 
     expect(rail?.textContent).toContain("Switch workspace");
     expect(rail?.querySelector('a[href="#general"]')?.getAttribute("aria-current")).toBe("page");
     // The page renders full width beside the rail with its own header.
-    expect(container.querySelector("main h1")?.textContent).toBe("General");
-    expect(container.querySelector("main")?.textContent).toContain("Page body");
+    const content = container.querySelector('section[aria-label="General"]');
+    expect(content).not.toBeNull();
+    expect(content?.querySelector("h1")?.textContent).toBe("General");
+    expect(content?.textContent).toContain("Page body");
+    expect(content?.contains(rail)).toBe(false);
+    expect(content?.closest("main")).not.toBeNull();
+    expect(container.querySelectorAll('main, [role="main"]').length).toBe(1);
     expect(container.querySelector('button[aria-label="Open workspace settings menu"]')).toBeNull();
   } finally {
     await act(async () => root.unmount());
@@ -117,6 +127,10 @@ test("narrow settings keep navigation in a dismissible drawer and restore the de
   };
   try {
     await act(async () => root.render(shell()));
+    const content = container.querySelector('section[aria-label="General"]');
+    expect(content?.querySelector("h1")?.textContent).toBe("General");
+    expect(content?.textContent).toContain("Page body");
+    expect(container.querySelectorAll('main, [role="main"]').length).toBe(1);
     expect(container.querySelector('nav[aria-label="Workspace settings"]')).toBeNull();
     expect(container.querySelector('a[aria-label="Back to sessions"]')?.getAttribute("href")).toBe(
       "/workspaces/workspace/sessions",
@@ -130,6 +144,8 @@ test("narrow settings keep navigation in a dismissible drawer and restore the de
     await open();
     await act(async () => root.render(shell("Models")));
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('section[aria-label="General"]')).toBeNull();
+    expect(container.querySelector('section[aria-label="Models"] h1')?.textContent).toBe("Models");
     await open();
     await act(async () =>
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
@@ -155,8 +171,12 @@ test("a sub-page brings its own header", async () => {
   const root = createRoot(container);
   try {
     await act(async () => root.render(shell("Models", null)));
-    expect(container.querySelector("main h1")).toBeNull();
-    expect(container.querySelector("main")?.getAttribute("aria-label")).toBe("Models");
+    const content = container.querySelector('section[aria-label="Models"]');
+    expect(content).not.toBeNull();
+    expect(content?.querySelector("h1")).toBeNull();
+    expect(content?.textContent).toContain("Page body");
+    expect(content?.closest("main")).not.toBeNull();
+    expect(container.querySelectorAll('main, [role="main"]').length).toBe(1);
   } finally {
     await act(async () => root.unmount());
   }

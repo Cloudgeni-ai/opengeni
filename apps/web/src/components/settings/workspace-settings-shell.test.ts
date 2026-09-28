@@ -87,14 +87,19 @@ async function renderShell(
   await act(async () => {
     root.render(
       createElement(
-        WorkspaceManagementShell,
-        {
-          workspaceId,
-          organizationName: "CloudGeni",
-          location,
-          ...overrides,
-        } as ComponentProps<typeof WorkspaceManagementShell>,
-        createElement("p", null, "Settings content"),
+        // Match the application-owned main landmark around the settings shell.
+        "main",
+        null,
+        createElement(
+          WorkspaceManagementShell,
+          {
+            workspaceId,
+            organizationName: "CloudGeni",
+            location,
+            ...overrides,
+          } as ComponentProps<typeof WorkspaceManagementShell>,
+          createElement("p", null, "Settings content"),
+        ),
       ),
     );
   });
@@ -226,8 +231,13 @@ describe("workspace settings rail", () => {
       );
       expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
       // The dashboard brings its own page; the shell adds no settings header.
-      expect(view.container.querySelector("main h1")).toBeNull();
-      expect(view.container.querySelector("main")?.textContent).toContain("Settings content");
+      const content = view.container.querySelector('section[aria-label="Agents"]');
+      expect(content).not.toBeNull();
+      expect(content?.querySelector("h1")).toBeNull();
+      expect(content?.textContent).toContain("Settings content");
+      expect(content?.contains(rail)).toBe(false);
+      expect(content?.closest("main")).not.toBeNull();
+      expect(view.container.querySelectorAll('main, [role="main"]').length).toBe(1);
     } finally {
       await view.unmount();
     }
