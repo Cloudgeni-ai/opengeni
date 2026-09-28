@@ -313,6 +313,52 @@ test.each(["Page.getFrameTree", "Page.getLayoutMetrics"])(
   },
 );
 
+test("a fully fenced action preserves a frame timeout before dispatch", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: randomUUID() };
+  const fixture = await captureFixture(reference);
+  const directory = await mkdtemp("/tmp/ogb-frame-timeout-");
+  const supervisor = await BrowserSupervisor.open({
+    rootDirectory: join(directory, "state"),
+    socketRootDirectory: join(directory, "s"),
+    createDriver: async () => fixture.driver,
+  });
+  try {
+    const { observation } = await supervisor.createSession({ ...reference, headed: false });
+    fixture.calls.length = 0;
+    fixture.stallNext("Page.getFrameTree");
+    jest.useFakeTimers();
+    const receipt = supervisor.action({
+      protocolVersion: 1,
+      ...reference,
+      operationId: randomUUID(),
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId!,
+      actor: { kind: "human", subjectId: "fixture" },
+      action: { type: "click", locator: { kind: "ref", ref: "e1" } },
+    });
+    await fixture.waitUntilStalled();
+    jest.advanceTimersByTime(30_000);
+    await settle();
+    expect(await receipt).toMatchObject({
+      state: "failed",
+      dispatchedAt: null,
+      error: {
+        code: "timeout",
+        retryable: true,
+        message: "browser frame inspection timed out during Page.getFrameTree",
+      },
+    });
+    expect(fixture.calls.some((call) => call.method.startsWith("Input."))).toBe(false);
+    expect(await fixture.driver.isAvailable()).toBe(true);
+  } finally {
+    jest.useRealTimers();
+    await supervisor.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("screenshot frame, layout, and pixel reads share one deadline", async () => {
   const fixture = await captureFixture();
   try {
