@@ -46,6 +46,10 @@ export type UseSessionEventsResult = {
   windowTruncated: boolean;
   /** True until the initial tail window has been applied (windowed mode). */
   initialLoading: boolean;
+  /** A history window (including an empty tail) succeeded for this session/replay
+   * identity. Stays true through later stream errors and navigation/reloads.
+   * Full replay has no snapshot-completion watermark and does not set this by itself. */
+  initialHistoryReady: boolean;
   /** Whether older durable events are available before the current window. */
   hasOlder: boolean;
   /** True while an older window is being fetched. */
@@ -160,6 +164,7 @@ export function useSessionEvents(
     null,
   );
   const [initialLoading, setInitialLoading] = useState(true);
+  const [initialHistoryReady, setInitialHistoryReady] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [loadingOldest, setLoadingOldest] = useState(false);
@@ -234,6 +239,7 @@ export function useSessionEvents(
       setLoadingOldest(false);
       setLoadingLatest(false);
       setInitialLoading(true);
+      setInitialHistoryReady(false);
       lastSequenceRef.current = after;
       streamResumeSequenceRef.current = after;
       oldestSequenceRef.current = null;
@@ -285,7 +291,12 @@ export function useSessionEvents(
     const reconcileForegroundResume = reconcileAfterPageResumeRef.current && !fullReplay;
     reconcileAfterPageResumeRef.current = false;
     const controller = new AbortController();
-    const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
+    const isCurrent = () =>
+      generationRef.current === generation &&
+      !controller.signal.aborted &&
+      navigationIdentityRef.current.client === client &&
+      navigationIdentityRef.current.streamKey === streamKey &&
+      navigationIdentityRef.current.enabled === enabled;
     streamAbortRef.current = controller;
     // Batch yielded events into one React update per flush window so a long
     // replay (thousands of events) does not render per event. Project every
@@ -441,6 +452,8 @@ export function useSessionEvents(
           lastSequenceRef.current = window.newestSequence;
           streamResumeSequenceRef.current = window.newestSequence;
           initialWindowLoadedRef.current = true;
+          setInitialHistoryReady(true);
+          setError(null);
           if (status !== undefined) {
             setSessionStatusProjection(status);
           }
@@ -709,6 +722,8 @@ export function useSessionEvents(
         (retainedNewest !== null && retainedNewest < highWater);
       hasNewerRef.current = newer;
       initialWindowLoadedRef.current = true;
+      setInitialHistoryReady(true);
+      setError(null);
       viewModeRef.current = "history";
       loadingOldestRef.current = false;
       setNewerError(null);
@@ -904,6 +919,8 @@ export function useSessionEvents(
           retained.truncated ||
           (newestSequenceRef.current ?? 0) < lastSequenceRef.current;
         initialWindowLoadedRef.current = true;
+        setInitialHistoryReady(true);
+        setError(null);
         viewModeRef.current = "history";
         setEventWindow(retained);
         setHasOlder(hasOlderRef.current);
@@ -982,6 +999,14 @@ export function useSessionEvents(
   }, [client, workspaceId, sessionId, jumpToSequence]);
 
   const jumpToLatest = useCallback(async (): Promise<void> => {
+    // An old host retry closure must not clear a replacement session's error
+    // or abort its live feed before the passive effect cleanup has run.
+    if (
+      navigationIdentityRef.current.client !== client ||
+      navigationIdentityRef.current.streamKey !== streamKey ||
+      navigationIdentityRef.current.enabled !== enabled
+    )
+      return;
     if (loadingTargetRef.current) {
       navigationGenerationRef.current += 1;
       loadingTargetRef.current = false;
@@ -993,6 +1018,7 @@ export function useSessionEvents(
     loadingLatestRef.current = true;
     setLoadingLatest(true);
     setNewerError(null);
+    setError(null);
     let published = false;
     try {
       streamAbortRef.current?.abort();
@@ -1023,7 +1049,7 @@ export function useSessionEvents(
         setLoadingLatest(false);
       }
     }
-  }, [after, sessionId]);
+  }, [after, sessionId, client, streamKey, enabled]);
 
   const identityMatches = stateStreamKey === streamKey;
   const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
@@ -1045,6 +1071,7 @@ export function useSessionEvents(
     windowBytes: identityMatches ? eventWindow.bytes : 2,
     windowTruncated: identityMatches ? eventWindow.truncated : false,
     initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
+    initialHistoryReady: identityMatches && initialHistoryReady,
     hasOlder: !identityMatches ? false : hasOlder,
     loadingOlder: !identityMatches ? false : loadingOlder,
     loadOlder,

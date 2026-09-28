@@ -90,6 +90,14 @@ your authenticated host routes. For custom or compatible frontends, the backend
 
 ### Exact conversation search navigation
 
+`useSessionEvents().initialHistoryReady` becomes true when a history window has
+loaded successfully, including an empty tail. It stays true through later stream
+errors, history navigation, and tip reloads, and resets for a new session/replay
+identity. Use it rather than inferring initial success from `initialLoading` or
+the combined `error`. A failed first load stays unready until recovery;
+`jumpToLatest()` clears its stale error and retries. Full replay has no history
+snapshot-completion watermark, so SSE alone does not set this flag.
+
 `useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
 window with at most two bounded cursor reads around an exact durable event.
 It resolves `true` only when that event is retained, `false` for a missing or
