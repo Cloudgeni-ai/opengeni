@@ -19,12 +19,10 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is a self-hostable session agent runtime. Postgres owns durable truth;
-Temporal coordinates execution; NATS transports reconstructible events. The
-control plane owns identity, tenancy, sessions, intervention, goals, recovery,
-compute, files, artifacts, usage, and observability. The API authorizes clients
-and bounded browser access to storage, sandboxes, relays, Codex WebRTC, and
-Gateway realtime WebSockets. Workers run in sandboxes or Connected Machines.
+OpenGeni is a self-hostable agent runtime: Postgres persists state, Temporal
+coordinates execution, and NATS transports reconstructible events. The API
+authorizes clients and browser access; workers use sandboxes or Connected Machines.
+Subsystem ownership and access boundaries follow below.
 
 External users require live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
