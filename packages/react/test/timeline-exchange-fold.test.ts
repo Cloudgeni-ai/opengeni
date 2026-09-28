@@ -397,6 +397,136 @@ describe("readable per-turn grouping", () => {
     expect(visibleProse(groups)).toEqual(["Done"]);
   });
 
+  test("settled standalone maintenance compaction never manufactures live work", () => {
+    sequence = 0;
+    const groups = fold([
+      event("turn.started", {}, { turnId: "maintenance" }),
+      event(
+        "session.context.compaction.started",
+        { trigger: "operator" },
+        { turnId: "maintenance" },
+      ),
+      event("session.context.compacted", { trigger: "operator" }, { turnId: "maintenance" }),
+      event("turn.completed", { maintenance: "context_compaction" }, { turnId: "maintenance" }),
+      event("session.status.changed", { status: "idle" }, { turnId: "maintenance" }),
+    ]);
+    expect(workRows(groups)).toHaveLength(0);
+    expect(kinds(groups)).toEqual(["context-compaction"]);
+    expect(groups[0]).toMatchObject({ kind: "item", item: { phase: "compacted" } });
+  });
+
+  test("compaction before real work attaches only to its own conversational turn", () => {
+    sequence = 0;
+    const groups = fold([
+      event("session.context.compacted", { trigger: "auto" }),
+      ...tool("read", "exec_command", "turn-1"),
+      event("turn.completed", {}),
+      event("session.context.compacted", { trigger: "operator" }, { turnId: "maintenance" }),
+      event("turn.completed", { maintenance: "context_compaction" }, { turnId: "maintenance" }),
+    ]);
+    expect(workRows(groups)).toHaveLength(1);
+    const row = workRows(groups)[0]!;
+    expect(row.kind === "activity" ? kinds(row.work!.details) : []).toEqual(["context-compaction"]);
+    expect(
+      groups.filter((group) => group.kind === "item" && group.item.kind === "context-compaction"),
+    ).toHaveLength(1);
+  });
+
+  test.each(["running", "output"])(
+    "resolved approval clears waiting from %s without creating a new tool",
+    (resume) => {
+      sequence = 0;
+      const waiting = [
+        event("turn.started", {}),
+        event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+        event("session.requiresAction", {}),
+        event("session.status.changed", { status: "requires_action" }),
+      ];
+      expect(workRows(fold(waiting))[0]).toMatchObject({
+        work: { waiting: { label: "Waiting for you" } },
+      });
+      const groups = fold([
+        ...waiting,
+        resume === "running"
+          ? event("session.status.changed", { status: "running" })
+          : event("agent.toolCall.output", { id: "same", output: "approved result" }),
+        event("agent.message.delta", {
+          text: "Continuing the approved work.",
+          phase: "commentary",
+        }),
+      ]);
+      const row = workRows(groups)[0]!;
+      expect(row.kind === "activity" ? row.work!.waiting : null).toBeUndefined();
+      expect(
+        groups.some(
+          (group) =>
+            group.kind === "item" &&
+            group.item.kind === "notice" &&
+            group.item.text.startsWith("Approval needed"),
+        ),
+      ).toBe(true);
+      expect(visibleProse(groups)).toEqual(["Continuing the approved work."]);
+    },
+  );
+
+  test.each(["other-turn", "unmatched", "late", "duplicate"])(
+    "%s tool output cannot resolve this turn's approval wait",
+    (variant) => {
+      sequence = 0;
+      const waiting = [
+        event("turn.started", {}),
+        event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+        event("session.requiresAction", {}),
+      ];
+      const receipt = event(
+        "agent.toolCall.output",
+        { id: variant === "unmatched" ? "unknown" : "same", output: "ok" },
+        { turnId: variant === "other-turn" ? "other" : "turn-1" },
+      );
+      if (variant === "late") receipt.turnAssociation = "late_rejected";
+      if (variant === "duplicate") receipt.duplicateOfEventId = "original";
+      const groups = fold([...waiting, receipt]);
+      expect(workRows(groups)[0]).toMatchObject({
+        work: { waiting: { label: "Waiting for you" } },
+      });
+    },
+  );
+
+  test("unscoped lifecycle receipts resolve only the active turn's historical approval", () => {
+    sequence = 0;
+    const groups = fold([
+      event("turn.started", {}),
+      event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+      event("session.requiresAction", {}),
+      event("session.status.changed", { status: "requires_action" }, { turnId: null }),
+      event("session.status.changed", { status: "running" }, { turnId: null }),
+    ]);
+    const row = workRows(groups)[0]!;
+    expect(row.kind === "activity" ? row.work!.waiting : null).toBeUndefined();
+    expect(
+      groups.filter(
+        (group) =>
+          group.kind === "item" &&
+          (group.item.kind === "notice" || group.item.kind === "session-status"),
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("a new approval after resumed work remains waiting and retains both status landmarks", () => {
+    sequence = 0;
+    const groups = fold([
+      event("turn.started", {}),
+      ...tool("same", "exec_command", "turn-1"),
+      event("session.status.changed", { status: "requires_action" }),
+      event("session.status.changed", { status: "running" }),
+      event("session.status.changed", { status: "requires_action" }),
+    ]);
+    expect(workRows(groups)[0]).toMatchObject({ work: { waiting: { label: "Waiting for you" } } });
+    expect(
+      groups.filter((group) => group.kind === "item" && group.item.kind === "session-status"),
+    ).toHaveLength(2);
+  });
+
   test("failure stays on its own work row and scheduled input stays visible", () => {
     sequence = 0;
     const groups = fold([

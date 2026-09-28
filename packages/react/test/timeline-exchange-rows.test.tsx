@@ -209,6 +209,72 @@ describe("readable per-turn rows", () => {
     }
   });
 
+  test("same-tool approval resumption clears live waiting without hiding historical approval", async () => {
+    sequence = 0;
+    const waiting = [
+      event("turn.started", {}),
+      event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+      event("session.requiresAction", {}),
+      event("session.status.changed", { status: "requires_action" }, null),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={waiting} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      const trigger = statusTrigger(r.container);
+      expect(trigger.textContent).toMatch(/^Waiting for you/);
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...waiting,
+            event("session.status.changed", { status: "running" }, null),
+            event("agent.toolCall.output", { id: "same", output: "approved result" }),
+            event("agent.message.delta", {
+              text: "Continuing the approved work.",
+              phase: "commentary",
+            }),
+          ]}
+          turnSummary={{ rolling: true }}
+        />,
+      );
+      await flush();
+      expect(statusTrigger(r.container)).toBe(trigger);
+      expect(trigger.textContent).toMatch(/^Working/);
+      expect(r.container.textContent).toContain("Approval was needed.");
+      expect(r.container.textContent).not.toContain("waiting on you");
+      expect(r.container.textContent).not.toContain("the turn is paused");
+      expect(topLevelMessages(r.container)).toEqual(["Continuing the approved work."]);
+      expect(r.container.querySelectorAll("[data-og-exchange-status]")).toHaveLength(1);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("completed standalone compaction remains visible without an eternal Working header", async () => {
+    sequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          event("turn.started", {}, "maintenance"),
+          event("session.context.compaction.started", { trigger: "operator" }, "maintenance"),
+          event("session.context.compacted", { trigger: "operator" }, "maintenance"),
+          event("turn.completed", { maintenance: "context_compaction" }, "maintenance"),
+          event("session.status.changed", { status: "idle" }, "maintenance"),
+        ]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.querySelector("[data-og-exchange-status]")).toBeNull();
+      expect(r.container.textContent).toContain("Conversation history compacted");
+      expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("declared answer duration remains fixed at its first delta after completion", async () => {
     sequence = 0;
     const working = [

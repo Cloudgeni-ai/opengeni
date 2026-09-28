@@ -4067,7 +4067,11 @@ function WorkerCompletionRow({
   );
 }
 
-function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt: string } }) {
+function SessionStatusRow({
+  item,
+}: {
+  item: { status: SessionStatus; occurredAt: string; resolvedAt?: string };
+}) {
   const enter = useEntranceAnimation();
   const meta = SESSION_STATUS_META[item.status];
   return (
@@ -4080,8 +4084,9 @@ function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt:
     >
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
-        <StatusDot status={item.status} className="size-1" />
-        {meta.label.toLowerCase()} · {formatRelativeTime(item.occurredAt)}
+        {item.resolvedAt ? null : <StatusDot status={item.status} className="size-1" />}
+        {item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} ·{" "}
+        {formatRelativeTime(item.resolvedAt ?? item.occurredAt)}
       </span>
       <span className="h-px flex-1 bg-og-border" />
     </div>
@@ -4369,7 +4374,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   const tone =
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
-      : item.tone === "waiting"
+      : item.tone === "waiting" && !item.resolvedAt
         ? WAITING_PILL_CLASS
         : NEUTRAL_PILL;
   return (
@@ -4385,7 +4390,11 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
       />
       <div className="min-w-0 flex-1">
-        <span className="whitespace-pre-wrap break-words">{item.text}</span>
+        <span className="whitespace-pre-wrap break-words">
+          {item.resolvedAt && item.text.startsWith("Approval needed")
+            ? "Approval was needed."
+            : item.text}
+        </span>
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>

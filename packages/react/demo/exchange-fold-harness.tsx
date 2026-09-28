@@ -332,6 +332,48 @@ const SCENARIOS: Record<string, () => Draft[]> = {
   notes: notesScenario,
   history: historyScenario,
   sticky: stickyScenario,
+  "review-maintenance": () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Check the signup totals." }, null);
+    add(
+      "agent.message.completed",
+      { text: "The signup totals reconcile.", phase: "final_answer" },
+      "turn-1",
+    );
+    add("turn.started", {}, "maintenance");
+    add("session.context.compaction.started", { trigger: "operator" }, "maintenance");
+    add(
+      "session.context.compacted",
+      { trigger: "operator", estimatedTokensBefore: 240000, estimatedTokensAfter: 40000 },
+      "maintenance",
+    );
+    add("turn.completed", { maintenance: "context_compaction" }, "maintenance");
+    add("session.status.changed", { status: "idle" }, "maintenance");
+    return drafts;
+  },
+  "review-approval": () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Verify the signup totals with the approved query." }, null);
+    add("turn.started", {}, "turn-1");
+    add(
+      "agent.toolCall.created",
+      { id: "same", name: "exec_command", arguments: { cmd: "psql -f signup-totals.sql" } },
+      "turn-1",
+    );
+    add("session.requiresAction", {}, "turn-1");
+    add("session.status.changed", { status: "requires_action" }, null);
+    add("session.status.changed", { status: "running" }, null);
+    add("agent.toolCall.output", { id: "same", output: "Approved query: 312 signups." }, "turn-1");
+    add(
+      "agent.message.delta",
+      {
+        text: "The approved query completed. I’m **reconciling the source breakdown** now.",
+        phase: "commentary",
+      },
+      "turn-1",
+    );
+    return drafts;
+  },
   "machine-follow-up": machineFollowUpScenario,
 };
 
