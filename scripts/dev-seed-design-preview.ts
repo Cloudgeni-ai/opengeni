@@ -26,13 +26,7 @@
  * password (generated) stored in the same file.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,15 +61,11 @@ const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 // Safety gate
 // ---------------------------------------------------------------------------
 if (!flag("--yes")) {
-  fail(
-    "refusing to run without --yes (this writes fake data into the local dev stack).",
-  );
+  fail("refusing to run without --yes (this writes fake data into the local dev stack).");
 }
 const runtime = readEnvFile(resolve(repositoryRoot, ".env.runtime"));
 if (!runtime.OPENGENI_API_PORT) {
-  fail(
-    "no .env.runtime with OPENGENI_API_PORT; start this worktree's stack with `bun run dev`.",
-  );
+  fail("no .env.runtime with OPENGENI_API_PORT; start this worktree's stack with `bun run dev`.");
 }
 const stackApi = `http://127.0.0.1:${runtime.OPENGENI_API_PORT}`;
 const API = (option("--api") ?? stackApi).replace(/\/$/, "");
@@ -83,9 +73,7 @@ const API = (option("--api") ?? stackApi).replace(/\/$/, "");
   const url = new URL(API);
   if (!LOOPBACK.has(url.hostname)) fail(`API ${API} is not loopback.`);
   if (url.port !== runtime.OPENGENI_API_PORT) {
-    fail(
-      `API ${API} is not this worktree's dev stack (port ${runtime.OPENGENI_API_PORT}).`,
-    );
+    fail(`API ${API} is not this worktree's dev stack (port ${runtime.OPENGENI_API_PORT}).`);
   }
 }
 const migrationsUrl = runtime.OPENGENI_MIGRATIONS_DATABASE_URL;
@@ -93,29 +81,23 @@ if (migrationsUrl && !LOOPBACK.has(new URL(migrationsUrl).hostname)) {
   fail("the worktree database URL is not loopback.");
 }
 
-const clientConfig = (await (
-  await fetch(`${API}/v1/config/client`)
-).json()) as {
+const clientConfig = (await (await fetch(`${API}/v1/config/client`)).json()) as {
   apiContractRevision: string;
   productAccessMode: string;
 };
 if (clientConfig.productAccessMode !== "managed") {
-  fail(
-    `API product access mode is ${clientConfig.productAccessMode}; expected managed.`,
-  );
+  fail(`API product access mode is ${clientConfig.productAccessMode}; expected managed.`);
 }
 const CONTRACT = clientConfig.apiContractRevision;
 // Browser origin the web dev server serves; Better Auth checks it on cookie requests.
 const ORIGIN =
-  readEnvFile(resolve(repositoryRoot, ".env")).OPENGENI_PUBLIC_BASE_URL ??
-  "http://127.0.0.1:3000";
+  readEnvFile(resolve(repositoryRoot, ".env")).OPENGENI_PUBLIC_BASE_URL ?? "http://127.0.0.1:3000";
 
 // ---------------------------------------------------------------------------
 // Credentials
 // ---------------------------------------------------------------------------
 const credentialsPath =
-  option("--credentials") ??
-  resolve(homedir(), ".config/opengeni-design-preview/credentials");
+  option("--credentials") ?? resolve(homedir(), ".config/opengeni-design-preview/credentials");
 const credentials = readEnvFile(credentialsPath);
 if (!credentials.OWNER_PASSWORD || !credentials.PEOPLE_PASSWORD) {
   credentials.OWNER_EMAIL = "bendik@acme.dev";
@@ -202,11 +184,7 @@ class Client {
   }
 }
 
-async function signIn(
-  name: string,
-  email: string,
-  password: string,
-): Promise<Client> {
+async function signIn(name: string, email: string, password: string): Promise<Client> {
   const client = new Client(name);
   const signInResult = await client.request(
     "POST",
@@ -236,22 +214,12 @@ async function ownerClient(): Promise<Client> {
   if (existsSync(sessionCachePath)) {
     const cached = new Client(OWNER.name);
     cached.cookie = readFileSync(sessionCachePath, "utf8").trim();
-    const session = await cached.request(
-      "GET",
-      "/v1/auth/get-session",
-      undefined,
-      {
-        allow: [401, 403],
-      },
-    );
-    if (session.status === 200 && session.body?.user?.email === OWNER.email)
-      return cached;
+    const session = await cached.request("GET", "/v1/auth/get-session", undefined, {
+      allow: [401, 403],
+    });
+    if (session.status === 200 && session.body?.user?.email === OWNER.email) return cached;
   }
-  const client = await signIn(
-    OWNER.name,
-    OWNER.email,
-    credentials.OWNER_PASSWORD!,
-  );
+  const client = await signIn(OWNER.name, OWNER.email, credentials.OWNER_PASSWORD!);
   writeFileSync(sessionCachePath, `${client.cookie}\n`, { mode: 0o600 });
   return client;
 }
@@ -340,8 +308,7 @@ type WorkspaceSeed = {
   sessions: SessionSeed[];
 };
 
-const inDays = (days: number) =>
-  new Date(Date.now() + days * 86_400_000).toISOString();
+const inDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
 
 // Finished conversations. `hoursAgo` is the last activity; `unread` leaves the
 // owner's read marker behind the final answer. Children render nested under
@@ -682,8 +649,7 @@ const WORKSPACES: WorkspaceSeed[] = [
     schedules: [
       {
         name: "Summarize new Sentry errors",
-        prompt:
-          "Summarize new Sentry errors since the last run and group them by service.",
+        prompt: "Summarize new Sentry errors since the last run and group them by service.",
         schedule: { type: "interval", everySeconds: 3600 },
         overlapPolicy: "skip",
       },
@@ -701,8 +667,7 @@ const WORKSPACES: WorkspaceSeed[] = [
       },
       {
         name: "Weekly dependency update PR",
-        prompt:
-          "Open one pull request that bumps patch-level dependencies in the main services.",
+        prompt: "Open one pull request that bumps patch-level dependencies in the main services.",
         schedule: {
           type: "calendar",
           timeZone: "Europe/Oslo",
@@ -715,8 +680,7 @@ const WORKSPACES: WorkspaceSeed[] = [
       },
       {
         name: "Monthly access review",
-        prompt:
-          "List users and API keys with production access and highlight inactive ones.",
+        prompt: "List users and API keys with production access and highlight inactive ones.",
         schedule: { type: "interval", everySeconds: 2_592_000 },
         variableSet: "Datadog",
       },
@@ -730,11 +694,7 @@ const WORKSPACES: WorkspaceSeed[] = [
       {
         name: "Terraform runner",
         description: "Reads variable sets during plan.",
-        permissions: [
-          "workspace:read",
-          "variable-sets:list",
-          "variable-sets:read",
-        ],
+        permissions: ["workspace:read", "variable-sets:list", "variable-sets:read"],
         expires: "future",
       },
       {
@@ -833,8 +793,7 @@ const WORKSPACES: WorkspaceSeed[] = [
     schedules: [
       {
         name: "Daily ticket digest",
-        prompt:
-          "Summarize yesterday's new tickets by theme and flag anything urgent.",
+        prompt: "Summarize yesterday's new tickets by theme and flag anything urgent.",
         schedule: {
           type: "calendar",
           timeZone: "Europe/Oslo",
@@ -858,8 +817,7 @@ const WORKSPACES: WorkspaceSeed[] = [
       },
       {
         name: "Hourly SLA watch",
-        prompt:
-          "Check for tickets close to breaching their first-response SLA.",
+        prompt: "Check for tickets close to breaching their first-response SLA.",
         schedule: { type: "interval", everySeconds: 3600 },
         overlapPolicy: "skip",
       },
@@ -946,8 +904,7 @@ const WORKSPACES: WorkspaceSeed[] = [
     schedules: [
       {
         name: "Month-end close checklist",
-        prompt:
-          "Prepare the month-end close checklist and list missing receipts.",
+        prompt: "Prepare the month-end close checklist and list missing receipts.",
         schedule: { type: "interval", everySeconds: 2_592_000 },
         variableSet: "Accounting system",
       },
@@ -1049,8 +1006,7 @@ const WORKSPACES: WorkspaceSeed[] = [
     schedules: [
       {
         name: "Screenshot regression sweep",
-        prompt:
-          "Capture screenshots of the main pages and compare with last week's baseline.",
+        prompt: "Capture screenshots of the main pages and compare with last week's baseline.",
         schedule: {
           type: "calendar",
           timeZone: "Europe/Oslo",
@@ -1060,8 +1016,7 @@ const WORKSPACES: WorkspaceSeed[] = [
       },
       {
         name: "Accessibility audit",
-        prompt:
-          "Run an accessibility audit of the marketing site and list new issues.",
+        prompt: "Run an accessibility audit of the marketing site and list new issues.",
         schedule: {
           type: "calendar",
           timeZone: "Europe/Oslo",
@@ -1120,8 +1075,7 @@ const WORKSPACES: WorkspaceSeed[] = [
           {
             title: "Buttons use sentence case",
             kind: "decision",
-            content:
-              "All button labels use sentence case, never title case or all caps.",
+            content: "All button labels use sentence case, never title case or all caps.",
           },
           {
             title: "Contrast requirement",
@@ -1153,9 +1107,7 @@ log(`Seeding ${API} (contract ${CONTRACT})`);
 const owner = await ownerClient();
 
 // Organization
-const onboarding = await owner.get<{ state: string }>(
-  "/v1/auth/organization-onboarding",
-);
+const onboarding = await owner.get<{ state: string }>("/v1/auth/organization-onboarding");
 if (onboarding.state === "required") {
   await owner.post("/v1/auth/organization-onboarding", {
     organizationName: ORG_NAME,
@@ -1170,8 +1122,7 @@ const memberships = await owner.get<{
     personalWorkspaceId: string;
   }[];
 }>("/v1/organization-memberships");
-const ownerMembership =
-  memberships.memberships[0] ?? fail("owner has no organization membership");
+const ownerMembership = memberships.memberships[0] ?? fail("owner has no organization membership");
 const orgId = ownerMembership.organizationId;
 
 // Invitations + people
@@ -1183,14 +1134,10 @@ type Member = {
   authorizationRevision: number;
 };
 const listMembers = async () =>
-  (await owner.get<{ members: Member[] }>(`/v1/organizations/${orgId}/members`))
-    .members;
+  (await owner.get<{ members: Member[] }>(`/v1/organizations/${orgId}/members`)).members;
 const listInvitations = async () =>
-  (
-    await owner.get<{ invitations: any[] }>(
-      `/v1/organizations/${orgId}/invitations?limit=100`,
-    )
-  ).invitations;
+  (await owner.get<{ invitations: any[] }>(`/v1/organizations/${orgId}/invitations?limit=100`))
+    .invitations;
 
 for (const person of PEOPLE) {
   let members = await listMembers();
@@ -1198,8 +1145,7 @@ for (const person of PEOPLE) {
   if (!member) {
     const invitations = await listInvitations();
     let invitation = invitations.find(
-      (i) =>
-        i.targetEmail?.toLowerCase() === person.email && i.status === "pending",
+      (i) => i.targetEmail?.toLowerCase() === person.email && i.status === "pending",
     );
     if (!invitation) {
       invitation = await owner.post(`/v1/organizations/${orgId}/invitations`, {
@@ -1213,16 +1159,9 @@ for (const person of PEOPLE) {
       log(`Invited ${person.email} as ${person.role}`);
     }
     if (person.state === "pending") continue;
-    const client = await signIn(
-      person.name,
-      person.email,
-      credentials.PEOPLE_PASSWORD!,
-    );
-    const own = await client.get<{ invitations: any[] }>(
-      "/v1/organization-invitations",
-    );
-    const mine =
-      own.invitations.find((i) => i.id === invitation.id) ?? invitation;
+    const client = await signIn(person.name, person.email, credentials.PEOPLE_PASSWORD!);
+    const own = await client.get<{ invitations: any[] }>("/v1/organization-invitations");
+    const mine = own.invitations.find((i) => i.id === invitation.id) ?? invitation;
     await client.post(`/v1/organization-invitations/${mine.id}/accept`, {
       expectedRevision: mine.revision,
       operationId: randomUUID(),
@@ -1234,15 +1173,12 @@ for (const person of PEOPLE) {
   if (person.state === "pending") continue;
   if (!member) fail(`member ${person.email} missing after acceptance`);
   if (member.role !== person.role && member.status === "active") {
-    member = await owner.patch<Member>(
-      `/v1/organizations/${orgId}/members/${member.id}`,
-      {
-        kind: "change_role",
-        role: person.role,
-        expectedAuthorizationRevision: member.authorizationRevision,
-        operationId: randomUUID(),
-      },
-    );
+    member = await owner.patch<Member>(`/v1/organizations/${orgId}/members/${member.id}`, {
+      kind: "change_role",
+      role: person.role,
+      expectedAuthorizationRevision: member.authorizationRevision,
+      operationId: randomUUID(),
+    });
   }
 }
 
@@ -1314,14 +1250,11 @@ for (const seed of WORKSPACES) {
       (m: any) => m.organizationMembershipId === member.id,
     );
     if (current?.role === role) continue;
-    await owner.put(
-      `/v1/organizations/${orgId}/workspaces/${ws}/members/${member.id}`,
-      {
-        role,
-        expectedUpdatedAt: current?.updatedAt ?? null,
-        operationId: randomUUID(),
-      },
-    );
+    await owner.put(`/v1/organizations/${orgId}/workspaces/${ws}/members/${member.id}`, {
+      role,
+      expectedUpdatedAt: current?.updatedAt ?? null,
+      operationId: randomUUID(),
+    });
   }
 
   // Variable sets
@@ -1331,9 +1264,7 @@ for (const seed of WORKSPACES) {
     : (existingSets.variableSets ?? []);
   const setIds: Record<string, string> = {};
   for (const set of seed.variableSets) {
-    let found = setList.find(
-      (s) => s.name === set.name && s.scope === "workspace",
-    );
+    let found = setList.find((s) => s.name === set.name && s.scope === "workspace");
     if (!found) {
       found = await owner.post(`${base}/variable-sets`, {
         scope: "workspace",
@@ -1346,10 +1277,7 @@ for (const seed of WORKSPACES) {
       });
       for (const [name, values] of Object.entries(set.updates ?? {})) {
         for (const value of values) {
-          await owner.put(
-            `${base}/variable-sets/${found.id}/variables/${name}`,
-            { value },
-          );
+          await owner.put(`${base}/variable-sets/${found.id}/variables/${name}`, { value });
         }
       }
     }
@@ -1361,8 +1289,7 @@ for (const seed of WORKSPACES) {
   for (const task of seed.schedules) {
     const found = tasks.find((t) => t.name === task.name);
     if (found) {
-      if (found.status !== "paused")
-        await owner.post(`${base}/scheduled-tasks/${found.id}/pause`);
+      if (found.status !== "paused") await owner.post(`${base}/scheduled-tasks/${found.id}/pause`);
       continue;
     }
     await owner.post(`${base}/scheduled-tasks`, {
@@ -1377,8 +1304,7 @@ for (const seed of WORKSPACES) {
   }
 
   // Workspace API keys
-  const keys = (await owner.get<{ apiKeys: any[] }>(`${base}/api-keys`))
-    .apiKeys;
+  const keys = (await owner.get<{ apiKeys: any[] }>(`${base}/api-keys`)).apiKeys;
   for (const key of seed.apiKeys) {
     let found = keys.find((k) => k.name === key.name);
     if (!found) {
@@ -1386,9 +1312,7 @@ for (const seed of WORKSPACES) {
         name: key.name,
         description: key.description,
         permissions: key.permissions,
-        ...(key.expires
-          ? { expiresAt: inDays(key.expires === "future" ? 120 : 1) }
-          : {}),
+        ...(key.expires ? { expiresAt: inDays(key.expires === "future" ? 120 : 1) } : {}),
       });
       found = created.apiKey;
       if (key.revoked) await owner.del(`${base}/api-keys/${found.id}`);
@@ -1405,31 +1329,23 @@ for (const seed of WORKSPACES) {
     };
     let previous: string | null = null;
     for (const [index, content] of seed.instructions.entries()) {
-      const draft = await owner.post<any>(
-        `${base}/instruction-policies/drafts`,
-        {
-          operationId: randomUUID(),
-          kind: "policy",
-          scope: "global",
-          roleKey: null,
-          content,
-          supersedesRevisionId: previous,
-        },
-      );
-      const activated = await owner.post<any>(
-        `${base}/instruction-policies/${draft.id}/activate`,
-        {
-          operationId: randomUUID(),
-          expectedCurrentRevisionId: head.revisionId,
-          ...(head.activationVersion !== undefined
-            ? { expectedActivationVersion: head.activationVersion }
-            : {}),
-          reason:
-            index === 0
-              ? "Initial workspace instructions"
-              : `Revision ${index + 1}: clarified rules`,
-        },
-      );
+      const draft = await owner.post<any>(`${base}/instruction-policies/drafts`, {
+        operationId: randomUUID(),
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+        content,
+        supersedesRevisionId: previous,
+      });
+      const activated = await owner.post<any>(`${base}/instruction-policies/${draft.id}/activate`, {
+        operationId: randomUUID(),
+        expectedCurrentRevisionId: head.revisionId,
+        ...(head.activationVersion !== undefined
+          ? { expectedActivationVersion: head.activationVersion }
+          : {}),
+        reason:
+          index === 0 ? "Initial workspace instructions" : `Revision ${index + 1}: clarified rules`,
+      });
       head = {
         revisionId: activated.head.revisionId,
         activationVersion: activated.head.activationVersion,
@@ -1442,9 +1358,7 @@ for (const seed of WORKSPACES) {
   const knowledge = await owner.get<any>(`${base}/knowledge/entries?limit=50`);
   const entries: any[] = knowledge.entries ?? knowledge.items ?? [];
   for (const group of seed.knowledge) {
-    let groupEntry = entries.find(
-      (e) => (e.revision?.title ?? e.title) === group.group,
-    );
+    let groupEntry = entries.find((e) => (e.revision?.title ?? e.title) === group.group);
     let groupId: string = groupEntry?.id ?? groupEntry?.entryId;
     if (!groupEntry) {
       groupId = randomUUID();
@@ -1461,8 +1375,7 @@ for (const seed of WORKSPACES) {
       });
     }
     for (const entry of group.entries) {
-      if (entries.some((e) => (e.revision?.title ?? e.title) === entry.title))
-        continue;
+      if (entries.some((e) => (e.revision?.title ?? e.title) === entry.title)) continue;
       await owner.post(`${base}/knowledge/entries`, {
         operationId: randomUUID(),
         entryId: randomUUID(),
@@ -1481,9 +1394,9 @@ for (const seed of WORKSPACES) {
     : (sessionsPage.sessions ?? sessionsPage.items ?? []);
   const shells: { id: string; seed: SessionSeed }[] = [];
   for (const session of seed.sessions) {
-    let id = sessions.find(
-      (s) => s.title === session.title && !s.parentSessionId,
-    )?.id as string | undefined;
+    let id = sessions.find((s) => s.title === session.title && !s.parentSessionId)?.id as
+      | string
+      | undefined;
     if (!id) {
       const created = await owner.post<any>(`${base}/sessions`, {
         startMode: "realtime",
@@ -1531,18 +1444,14 @@ if (expiredKeyIds.length && migrationsUrl) {
 if (migrationsUrl) {
   sql = new SQL(migrationsUrl);
   let seededCount = 0;
-  for (const plan of conversationPlan)
-    seededCount += await seedConversations(sql, plan);
+  for (const plan of conversationPlan) seededCount += await seedConversations(sql, plan);
   await sql.close();
-  if (seededCount)
-    log(`Wrote conversation history for ${seededCount} sessions`);
+  if (seededCount) log(`Wrote conversation history for ${seededCount} sessions`);
 }
 
 log("\nDone. Workspaces:");
 for (const line of workspaceUrls) log(`  ${line}`);
-log(
-  `Owner Personal workspace: ${ORIGIN}/workspaces/${ownerMembership.personalWorkspaceId}`,
-);
+log(`Owner Personal workspace: ${ORIGIN}/workspaces/${ownerMembership.personalWorkspaceId}`);
 log(`Credentials: ${credentialsPath}`);
 
 async function seedConversations(
@@ -1577,9 +1486,7 @@ async function seedConversations(
       unread: boolean,
     ) => {
       const minutesPerExchange = 7;
-      let at = new Date(
-        endAt.getTime() - exchanges.length * minutesPerExchange * 60_000,
-      );
+      let at = new Date(endAt.getTime() - exchanges.length * minutesPerExchange * 60_000);
       const startAt = at;
       let sequence = await cursor(sessionId);
       const rows: [
@@ -1595,8 +1502,7 @@ async function seedConversations(
       for (const [index, [userText, answer]] of exchanges.entries()) {
         const userEventId = randomUUID();
         const turnId = randomUUID();
-        const t = (offsetSeconds: number) =>
-          new Date(at.getTime() + offsetSeconds * 1000);
+        const t = (offsetSeconds: number) => new Date(at.getTime() + offsetSeconds * 1000);
         rows.push([
           userEventId,
           null,
@@ -1672,16 +1578,7 @@ async function seedConversations(
       }
       const params: unknown[] = [];
       const values = rows.map((row) => {
-        const [
-          id,
-          turnId,
-          generation,
-          association,
-          seq,
-          type,
-          payload,
-          occurredAt,
-        ] = row;
+        const [id, turnId, generation, association, seq, type, payload, occurredAt] = row;
         // Bun serializes objects bound to a jsonb parameter; do not stringify twice.
         params.push(
           id,
