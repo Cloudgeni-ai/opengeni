@@ -285,6 +285,25 @@ describe("fsWriteFiles", () => {
     expect(readFileSync(join(root, "wide", files[229]!.path), "utf8")).toBe("x");
   });
 
+  test("a path too deep to verify in one command is refused, never silently skipped", async () => {
+    const { root } = workspace();
+    const { session, commands } = shellSession(root);
+    // 400 one-letter directories: short as text, but each directory needs its
+    // own check fragment, so the chain alone overflows one command.
+    const deep = Array.from({ length: 400 }, () => "a").join("/");
+    await expect(
+      service(session).fsWriteFiles({
+        directory: "tree",
+        files: [
+          { path: "SKILL.md", content: "top" },
+          { path: `${deep}/leaf.txt`, content: "leaf" },
+        ],
+      }),
+    ).rejects.toThrow(ChannelAValidationError);
+    expect(commands).toEqual([]);
+    expect(existsSync(join(root, "tree"))).toBe(false);
+  });
+
   test("a new directory holding only large files still counts as created", async () => {
     const { root } = workspace();
     const { session } = shellSession(root);

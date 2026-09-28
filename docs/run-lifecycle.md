@@ -1056,7 +1056,8 @@ it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
 stored event and drops fields a newer worker added instead of the whole fact.
 The default `skill_read` (no `paths`) also returns a bounded `scripts` index:
 each runnable file's path and first usage line (a shebang or script extension, or
-any non-document file under `scripts/` or `bin/`; at most 32 entries and 4 KiB,
+any file under `scripts/` or `bin/` that is not a document or data file such as
+JSON or YAML; at most 32 entries and 4 KiB,
 with `scriptsOmitted` for the rest), so the agent sees the commands without a
 checkout. Explicit `paths`, `listFiles`, and the tool schema are unchanged.
 `skill_checkout` writes the selected files through one Channel-A
@@ -1068,7 +1069,8 @@ a path resolving outside the workspace fails before anything is written. A
 request too large for one command (about 88 KiB of encoded content) runs
 read-only checks first, then writes only missing files in batches, and reports a
 later-batch failure as a partial mutation; repeating the same checkout finishes
-it. Optional `paths` copies exactly those files, for example one script to run.
+it. A path whose directory chain alone cannot fit one check command is refused
+as invalid rather than skipped. Optional `paths` copies exactly those files, for example one script to run.
 Only a complete checkout that created its directory returns `revisionId` and
 `scopeVersion` as a `skill_publish` base; any other result says
 `publishable: false`, because a reused directory may hold files outside the

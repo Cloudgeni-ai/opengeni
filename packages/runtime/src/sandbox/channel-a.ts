@@ -1153,9 +1153,10 @@ export class SandboxChannelAService {
    * existing regular file with the same bytes is reported unchanged, while any
    * other entry at a file path, a symbolic link on the directory path, or a
    * path resolving outside the workspace fails before anything is written.
-   * Only a request too large for one command can partially apply; it then
-   * fails with ChannelAPartialMutationError. Repeating a request after any
-   * failure is safe because files it already wrote are reported unchanged.
+   * A failed write can leave earlier files of the request in place (a later
+   * batch of a large request, or a later file of one batch); it then fails
+   * with ChannelAPartialMutationError. Repeating a request after any failure
+   * is safe because files it already wrote are reported unchanged.
    */
   async fsWriteFiles(req: FsWriteFilesRequest): Promise<FsWriteFilesResponse> {
     this.assertFileSystemRoute(req.route);
@@ -1281,8 +1282,17 @@ export class SandboxChannelAService {
       } else {
         // Too large for one command: prove every path first with read-only
         // checks, then create only the missing files.
+        const checks = pack(plan.files, "check");
+        // A path whose directory chain alone overflows a command could never
+        // be proven or written; refuse the request instead of skipping it.
+        const unverifiable = checks.oversize[0];
+        if (unverifiable) {
+          throw new ChannelAValidationError(
+            `path is too deep to verify in one command: ${unverifiable.workspacePath}`,
+          );
+        }
         const missing = new Set<number>();
-        for (const batch of pack(plan.files, "check").batches) {
+        for (const batch of checks.batches) {
           for (const index of (await execute("check", batch)).missing) missing.add(index);
         }
         const remaining = pack(

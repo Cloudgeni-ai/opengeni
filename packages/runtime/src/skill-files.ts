@@ -112,7 +112,24 @@ const SCRIPT_EXTENSIONS = new Set([
   "zsh",
 ]);
 const SCRIPT_DIRECTORIES = new Set(["bin", "scripts"]);
-const DOCUMENT_EXTENSIONS = new Set(["md", "markdown", "rst", "txt"]);
+// Documents and data next to scripts are read, not run.
+const NON_RUNNABLE_EXTENSIONS = new Set([
+  "cfg",
+  "conf",
+  "csv",
+  "ini",
+  "json",
+  "lock",
+  "markdown",
+  "md",
+  "rst",
+  "toml",
+  "tsv",
+  "txt",
+  "xml",
+  "yaml",
+  "yml",
+]);
 // Tool pragmas and encoding lines describe the file, not how to run it.
 const PRAGMA =
   /^(-\*-|vim?:|eslint|prettier|@ts-|pylint|noqa|type:|shellcheck|mypy|flake8|fmt:|isort)/i;
@@ -158,7 +175,9 @@ function isSkillScript(file: SkillTextFile): boolean {
   if (SCRIPT_EXTENSIONS.has(extension)) return true;
   const top = file.path.split("/")[0] ?? "";
   return (
-    file.path.includes("/") && SCRIPT_DIRECTORIES.has(top) && !DOCUMENT_EXTENSIONS.has(extension)
+    file.path.includes("/") &&
+    SCRIPT_DIRECTORIES.has(top) &&
+    !NON_RUNNABLE_EXTENSIONS.has(extension)
   );
 }
 

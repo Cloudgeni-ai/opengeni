@@ -121,6 +121,8 @@ describe("Skill script index", () => {
       { path: "tools/format.ts", content: "// Normalize a CSV export into JSON.\nexport {};\n" },
       { path: "bin/run", content: "exec python3 main.py\n" },
       { path: "scripts/README.md", content: "# Scripts\nUsage: read me\n" },
+      { path: "scripts/config.json", content: '{ "usage": "not a script" }\n' },
+      { path: "bin/defaults.yaml", content: "# Usage: not a script\n" },
       { path: "references/api.md", content: "Usage: not a script\n" },
     ]);
     expect(index).toEqual({
