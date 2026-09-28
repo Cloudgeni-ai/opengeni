@@ -53,6 +53,7 @@ import { ListRow, ListRowSkeleton } from "@/components/ui/list-row";
 import { SecretInput } from "@/components/ui/secret-field";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
+import type { AnalyticsAction } from "@/lib/analytics-actions";
 
 // Workspace API-key providers (Vercel AI Gateway, OpenRouter) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list
@@ -79,7 +80,7 @@ type ProviderConnectionConfig = {
   title: string;
   provider: "vercel" | "openrouter";
   billedTo: string;
-  analyticsAction: string;
+  analyticsAction: AnalyticsAction;
   /** One sentence under the name, for the not-connected row and the Connect page. */
   summary: string;
   /** Where to get a key. */
@@ -248,7 +249,7 @@ export type ProviderPresentation = Pick<
 > & {
   /** Where the key is billed, for the page's aside. */
   billedTo: string;
-  analyticsAction?: string | undefined;
+  analyticsAction?: AnalyticsAction | undefined;
 };
 
 export interface CustomModelLike {
@@ -1268,6 +1269,7 @@ export function ProviderConnectPage({
       onClose={onClose}
       submitLabel={`Connect ${config.title}`}
       pendingLabel="Connecting…"
+      submitAnalyticsAction={config.analyticsAction}
       submitDisabled={!key.trim() || !state.canManageConnection}
       disabledReason={
         state.canManageConnection
@@ -1286,7 +1288,6 @@ export function ProviderConnectPage({
           <SecretInput
             value={key}
             autoComplete="off"
-            data-analytics-action={config.analyticsAction}
             aria-label={config.keyAriaLabel}
             onChange={(event) => setKey(event.target.value)}
           />

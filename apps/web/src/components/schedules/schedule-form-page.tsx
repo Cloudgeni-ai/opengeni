@@ -728,6 +728,7 @@ function AgentScheduleForm({
         }
         submitLabel={editing ? "Save changes" : "Create schedule"}
         pendingLabel={editing ? "Saving…" : "Creating…"}
+        submitAnalyticsAction={editing ? null : "create_schedule"}
         onSubmit={onSubmit}
         onCancel={back.onClick}
         back={back}
