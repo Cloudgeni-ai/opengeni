@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { SECTION_TITLE_CLASS } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import {
@@ -182,7 +183,7 @@ function ConnectedAppsRow({ variant, error }: { variant: SettingRowVariant; erro
 function SessionDefaults({ variant }: { variant: SettingRowVariant }) {
   return (
     <section aria-label="New session defaults" className="min-w-0">
-      <h3 className="text-sm font-semibold text-fg">New session defaults</h3>
+      <h3 className={SECTION_TITLE_CLASS}>New session defaults</h3>
       <p className="mt-1 text-xs leading-4.5 text-fg-muted">
         Applied when someone starts a new session in {currentWorkspace.name}.
       </p>

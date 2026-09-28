@@ -57,7 +57,7 @@ const QUESTIONS: Record<
     tag: "Q7",
     label: "Agent activity row",
     question:
-      "Replace the Pause split button with an Agent activity row (status plus a Pause… menu), and show a banner across the workspace while paused? Recommended: Yes.",
+      "Replace the Pause split button with an Agent activity row (status plus a Pause button that opens a small dialog), and show a banner across the workspace while paused? Recommended: Yes.",
     pages: ["general"],
   },
   q8: {

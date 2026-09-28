@@ -11,6 +11,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
 import { LogoTileSizeProvider } from "@/components/ui/logo-tile";
+import { SECTION_TITLE_CLASS } from "@/components/ui/section";
 import {
   Sheet,
   SheetClose,
@@ -415,7 +416,10 @@ export interface DetailSectionProps {
   className?: string;
 }
 
-/** A borderless section: 14/600 title, 12px description, content 12px below. */
+/**
+ * A borderless section: the 16/600 section title (14/600 inline), 12px
+ * description, content 12px below.
+ */
 export function DetailSection({
   title,
   description,
@@ -437,7 +441,14 @@ export function DetailSection({
         <div className="flex min-w-0 items-center justify-between gap-4">
           <div className="min-w-0">
             {title ? (
-              <Heading id={headingId} className="text-sm leading-5 font-semibold text-fg">
+              <Heading
+                id={headingId}
+                className={
+                  presentation === "inline"
+                    ? "text-sm leading-5 font-semibold text-fg"
+                    : SECTION_TITLE_CLASS
+                }
+              >
                 {title}
               </Heading>
             ) : null}

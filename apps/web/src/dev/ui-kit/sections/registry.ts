@@ -185,7 +185,7 @@ export const SECTIONS: readonly SectionMeta[] = [
         id: "a",
         name: "Open section",
         rationale:
-          "A 14px title and 12px description, rows below, one hairline between sections, no box.",
+          "A 16px title a step above the 14px rows, a 12px description, rows below, one hairline between sections, no box.",
       },
       {
         id: "b",

@@ -1,15 +1,9 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDownIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
+import { PauseIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
 import { DisabledReason } from "@/components/ui/disabled-reason";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack, type SectionVariant } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -41,23 +35,12 @@ const FAST_SEARCH_OPTIONS = [
 
 type FastSearch = (typeof FAST_SEARCH_OPTIONS)[number]["value"];
 
-function PauseMenu() {
+function PauseButton() {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm">
-          Pause…
-          <ChevronDownIcon aria-hidden="true" className="-mr-0.5 size-3.5 text-fg-subtle" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-44">
-        {agentActivity.pauseOptions.map((option) => (
-          <DropdownMenuItem key={option}>
-            {option === "Now" ? "Pause now" : option}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Button variant="outline" size="sm">
+      <PauseIcon aria-hidden="true" />
+      Pause
+    </Button>
   );
 }
 
@@ -112,7 +95,7 @@ function AgentActivitySection() {
           </span>
         }
         description="Chats and schedules can start new work."
-        control={<PauseMenu />}
+        control={<PauseButton />}
       />
     </Section>
   );

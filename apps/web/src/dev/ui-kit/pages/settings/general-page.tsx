@@ -1,27 +1,11 @@
 import { useState, type ReactNode } from "react";
-import {
-  CalendarClockIcon,
-  ChevronDownIcon,
-  Clock3Icon,
-  InfinityIcon,
-  PauseIcon,
-  PencilIcon,
-  PlayIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { ChevronDownIcon, PauseIcon, PencilIcon, PlayIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { CopyField } from "@/components/ui/copy-field";
 import { DestructiveConfirm, type ConfirmDependency } from "@/components/ui/destructive-confirm";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Field, FieldStack, TextInput, useField } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
@@ -302,28 +286,39 @@ function osloToIso(dayOffset: number, time: string): string {
   return date.toISOString();
 }
 
-function CustomPauseDialog({
+type PauseChoice = "30" | "60" | "morning" | "manual" | "custom";
+
+/**
+ * "Pause agent work": a short list of until-when choices, then Cancel and
+ * Pause. "Pick a time" reveals the day and time. No menu button.
+ */
+function PauseDialog({
   open,
   onOpenChange,
-  title,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  title: string;
 }) {
-  const { workspaceName } = useSettingsPreview();
   const { pauseFor } = usePauseActions();
+  const [choice, setChoice] = useState<PauseChoice>("30");
   const [day, setDay] = useState("1");
   const [time, setTime] = useState("08:00");
   const [error, setError] = useState<string>();
   const offset = RESUME_DAYS.find((each) => each.value === day)?.offset ?? 0;
-  const until = osloToIso(offset, time);
-  const valid = new Date(until).getTime() > KIT_NOW.getTime() + 60_000;
+  const picked = osloToIso(offset, time);
+  const morning = osloToIso(1, "08:00");
+  const until: Record<Exclude<PauseChoice, "manual">, string> = {
+    "30": addMinutes(30),
+    "60": addMinutes(60),
+    morning,
+    custom: picked,
+  };
   return (
     <FormDialog
       open={open}
       onOpenChange={(next) => {
         if (next) {
+          setChoice("30");
           setDay("1");
           setTime("08:00");
           setError(undefined);
@@ -331,48 +326,68 @@ function CustomPauseDialog({
         onOpenChange(next);
       }}
       size="sm"
-      title={title}
-      description={`New agent work in ${workspaceName} waits until the time you pick. Work already running finishes its current step.`}
+      title="Pause agent work"
+      description="New sessions and scheduled runs wait until agent work resumes, and running work stops after its current step."
       submitLabel="Pause"
       pendingLabel="Pausing…"
       onSubmit={async () => {
-        if (!valid) {
+        if (choice === "custom" && new Date(picked).getTime() <= KIT_NOW.getTime() + 60_000) {
           setError("Pick a time after 13:48 today.");
           return false;
         }
         await wait(500);
-        pauseFor(until, `Resumes ${timeInSentence(until)}`);
+        if (choice === "manual") pauseFor(null, "Until someone resumes it");
+        else pauseFor(until[choice], `Resumes ${timeInSentence(until[choice])}`);
         return true;
       }}
     >
-      <div className="min-w-0">
-        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-          <Field label="Resume on">
-            <DaySelect
-              value={day}
-              onChange={(next) => {
-                setDay(next);
-                setError(undefined);
-              }}
-            />
-          </Field>
-          <Field label="At">
-            <TimeControl
-              value={time}
-              invalid={Boolean(error)}
-              onChange={(next) => {
-                setTime(next);
-                setError(undefined);
-              }}
-            />
-          </Field>
-        </div>
-        <p
-          role={error ? "alert" : undefined}
-          className={cn("mt-1.5 text-xs leading-4.5", error ? "text-danger" : "text-fg-muted")}
+      <div className="grid min-w-0 gap-3">
+        <ChoiceCards
+          variant="list"
+          aria-label="Pause until"
+          value={choice}
+          onValueChange={(next) => {
+            setChoice(next as PauseChoice);
+            setError(undefined);
+          }}
         >
-          {error ?? `Agent work resumes ${timeInSentence(until)}, Oslo time.`}
-        </p>
+          <ChoiceCard value="30" title="For 30 minutes" meta="until 14:18" />
+          <ChoiceCard value="60" title="For 1 hour" meta="until 14:48" />
+          <ChoiceCard value="morning" title="Until tomorrow morning" meta="Sun 27 Sep, 08:00" />
+          <ChoiceCard value="manual" title="Until I resume" />
+          <ChoiceCard value="custom" title="Pick a time" />
+        </ChoiceCards>
+        {choice === "custom" ? (
+          <div className="min-w-0 pl-6">
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+              <Field label="Resume on">
+                <DaySelect
+                  value={day}
+                  onChange={(next) => {
+                    setDay(next);
+                    setError(undefined);
+                  }}
+                />
+              </Field>
+              <Field label="At">
+                <TimeControl
+                  value={time}
+                  invalid={Boolean(error)}
+                  onChange={(next) => {
+                    setTime(next);
+                    setError(undefined);
+                  }}
+                />
+              </Field>
+            </div>
+            <p
+              role={error ? "alert" : undefined}
+              className={cn("mt-1.5 text-xs leading-4.5", error ? "text-danger" : "text-fg-muted")}
+            >
+              {error ?? `Agent work resumes ${timeInSentence(picked)}, Oslo time.`}
+            </p>
+          </div>
+        ) : null}
       </div>
     </FormDialog>
   );
@@ -412,47 +427,15 @@ function DaySelect({ value, onChange }: { value: string; onChange: (value: strin
   );
 }
 
-function PauseMenu({ onCustom }: { onCustom: () => void }) {
-  const { pauseFor } = usePauseActions();
-  const { canManage } = useSettingsPreview();
-  const trigger = (
-    <Button type="button" variant="outline" size="sm">
-      <PauseIcon aria-hidden="true" />
-      Pause…
-      <ChevronDownIcon aria-hidden="true" className="-mr-0.5 text-fg-subtle" />
-    </Button>
-  );
-  if (!canManage) return <AdminOnly>{trigger}</AdminOnly>;
+/** A plain secondary Pause button; the dialog asks until when. */
+function PauseButton({ onClick }: { onClick: () => void }) {
   return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-52">
-        <DropdownMenuLabel className="text-xs font-medium text-fg-subtle">
-          Pause new agent work
-        </DropdownMenuLabel>
-        <DropdownMenuItem
-          onSelect={() => pauseFor(addMinutes(30), `Resumes ${timeInSentence(addMinutes(30))}`)}
-        >
-          <Clock3Icon />
-          For 30 minutes
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onSelect={() => pauseFor(addMinutes(60), `Resumes ${timeInSentence(addMinutes(60))}`)}
-        >
-          <Clock3Icon />
-          For 1 hour
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => pauseFor(null, "Until someone resumes it")}>
-          <InfinityIcon />
-          Until I resume
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onCustom}>
-          <CalendarClockIcon />
-          Custom…
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <AdminOnly>
+      <Button type="button" variant="outline" size="sm" onClick={onClick}>
+        <PauseIcon aria-hidden="true" />
+        Pause
+      </Button>
+    </AdminOnly>
   );
 }
 
@@ -466,7 +449,7 @@ function StatusLabel({ paused }: { paused: boolean }) {
 }
 
 function AgentActivitySection() {
-  const { pause, setPause, questions } = useSettingsPreview();
+  const { pause, setPause, questions, canManage } = useSettingsPreview();
   const picks = useSettingsPicks();
   const buttonWidth = useButtonWidth();
   const { resume } = usePauseActions();
@@ -528,7 +511,7 @@ function AgentActivitySection() {
             )
           }
         />
-        <CustomPauseDialog open={customOpen} onOpenChange={setCustomOpen} title="Pause timer" />
+        <PauseDialog open={customOpen} onOpenChange={setCustomOpen} />
       </Section>
     );
   }
@@ -546,18 +529,25 @@ function AgentActivitySection() {
         controlWidth={buttonWidth}
         control={
           pause.paused ? (
-            <AdminOnly>
-              <Button type="button" variant="outline" size="sm" onClick={resume}>
-                <PlayIcon aria-hidden="true" />
-                Resume
-              </Button>
-            </AdminOnly>
+            <div className="flex items-center justify-end gap-2">
+              {canManage ? (
+                <Button type="button" variant="ghost" size="sm" onClick={() => setCustomOpen(true)}>
+                  Change
+                </Button>
+              ) : null}
+              <AdminOnly>
+                <Button type="button" variant="outline" size="sm" onClick={resume}>
+                  <PlayIcon aria-hidden="true" />
+                  Resume
+                </Button>
+              </AdminOnly>
+            </div>
           ) : (
-            <PauseMenu onCustom={() => setCustomOpen(true)} />
+            <PauseButton onClick={() => setCustomOpen(true)} />
           )
         }
       />
-      <CustomPauseDialog open={customOpen} onOpenChange={setCustomOpen} title="Pause agent work" />
+      <PauseDialog open={customOpen} onOpenChange={setCustomOpen} />
     </Section>
   );
 }
@@ -936,7 +926,7 @@ function DeleteWorkspaceSection() {
           className="text-danger hover:text-danger"
         >
           <Trash2Icon aria-hidden="true" />
-          Delete…
+          Delete
         </Button>
       }
     >

@@ -353,7 +353,6 @@ export const agentActivity = {
   state: "running" as "running" | "paused",
   runningLabel: "Running",
   pausedLabel: "Paused · resumes in 52 min",
-  pauseOptions: ["Now", "30 min", "1 hour", "Until I resume", "Custom"],
 };
 
 export const sessionDefaults = {

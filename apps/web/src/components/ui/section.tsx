@@ -3,9 +3,10 @@ import { createContext, useContext, useId, type ComponentProps, type ReactNode }
 import { cn } from "@/lib/utils";
 
 /**
- * Groups related rows on a page, a sheet or a dialog. Title 14/20 semibold,
- * optional 12/18 description 4px below, content 12px below that, and an
- * optional action vertically centred on the title line.
+ * Groups related rows on a page, a sheet or a dialog. Title 16/24 semibold,
+ * one step above the 14/20 row labels so a section never reads as a setting
+ * without a control; optional 12/18 description 4px below, content 12px below
+ * that, and an optional action vertically centred on the title line.
  *
  * Variants (how the rows are held):
  * - `open` (default): rows sit on the page, no box. Sections are separated by
@@ -17,6 +18,9 @@ import { cn } from "@/lib/utils";
  * `group` and `tiles` add the horizontal padding their boxes need, so the same
  * rows work in every variant.
  */
+
+/** The section title type. Shared by every heading that sits above setting rows. */
+export const SECTION_TITLE_CLASS = "text-base leading-6 font-semibold tracking-[-0.2px] text-fg";
 
 export type SectionVariant = "open" | "group" | "tiles";
 
@@ -122,14 +126,14 @@ export function Section({
       >
         <Heading
           id={headingId}
-          className="col-start-1 row-start-1 text-sm leading-5 font-semibold break-words text-fg"
+          className={cn("col-start-1 row-start-1 break-words", SECTION_TITLE_CLASS)}
         >
           {title}
         </Heading>
         {action ? (
           <div
             data-slot="section-action"
-            className="col-start-2 row-start-1 flex h-5 shrink-0 items-center gap-2"
+            className="col-start-2 row-start-1 flex h-6 shrink-0 items-center gap-2"
           >
             {action}
           </div>
@@ -140,8 +144,8 @@ export function Section({
             className={cn(
               "row-start-2 mt-1 text-xs leading-4.5 text-fg-muted",
               // Under the action on narrow widths: clear the 32px button, which
-              // overhangs the 20px title line by 6px.
-              action && "col-span-2 mt-2.5 @md/section-header:col-span-1 @md/section-header:mt-1",
+              // overhangs the 24px title line by 4px.
+              action && "col-span-2 mt-2 @md/section-header:col-span-1 @md/section-header:mt-1",
             )}
           >
             {description}

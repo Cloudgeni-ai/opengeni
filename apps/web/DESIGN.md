@@ -79,14 +79,15 @@ Inter Variable with `cv11 ss01 ss03`; JetBrains Mono for IDs, code and key prefi
 | --- | --- | --- | --- |
 | Page title, detail page title | 20 / 28 | 600 | -0.5px tracking |
 | Dialog title | 18 / 26 | 600 | -0.25px |
-| Section heading | 14 / 20 | 600 | |
+| Section heading | 16 / 24 | 600 | -0.2px; one step above row titles so a section never reads as a setting |
 | Row title, tab, nav, button, label | 14 / 20 | 500 | |
 | Body, page subtitle, meta line under a detail title | 14 / 20 | 400 | `fg-muted` |
 | Description, help | 12 / 18 | 400 | `fg-muted`, 2-line clamp in rows |
 | Meta, chip, count | 11 / 16 | 500 | `fg-subtle` or a tone |
 | Mono | 12 / 18 | 400 | IDs, code, key prefixes only |
 
-Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted text.
+Retired: 13 and 10px text, 16px anywhere but section headings, uppercase tracked group labels,
+opacity-muted text.
 
 ## 4. Spacing, radius, elevation, frame
 
@@ -133,7 +134,12 @@ Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted tex
 | Navigational row | A setting that lives on its own page (Allowed models, Models it can serve): the whole row opens it, the current value sits muted by a chevron (`SettingNavRow`) | An Edit, Change or View button whose only job is to open a page |
 | Detail page | Anything you open: see section 8 | A side sheet |
 | Form page | Every create and edit flow | A side sheet, or an inline form that pushes the list down |
-| Centered dialog | A short confirmation or a one-field prompt | Anything with two or more fields, a list, or tabs |
+| Centered dialog | A short confirmation, a one-field prompt, or a short choice right before one action ("Pause agent work": a few options, Cancel and the action) | Anything with two or more fields, a long list, or tabs |
+
+**No menu buttons for a choice before an action.** A button with a chevron that opens options
+("Pause" > 30 min, 1 hour, Custom) hides the choice and mixes a menu with an action. Use a plain
+button that opens a small centered dialog: a short choice list, one sentence on what happens, then
+Cancel and the action as the primary.
 
 ## 6. Copy rules
 
@@ -152,6 +158,8 @@ Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted tex
   some people need go in a tooltip.
 - Sentence case everywhere. Plain dashes (-), never em-dashes. Dates as "Mon 28 Sep, 08:00" or
   "3 days ago" with the exact time on hover; never seconds, never ISO.
+- No ellipsis in button labels: "Delete", "Pause", "Rename", not "Delete...". A button that opens
+  a dialog is still named for what it does. Progress labels ("Saving…") and loading text keep it.
 - Back links name the list they return to: "Variable sets", "Models", "Your skills". The arrow is
   the icon, not a character in the label.
 
@@ -288,7 +296,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | --- | --- |
 | Page header | Icon on main-rail pages only; settings sub-pages drop the icon because the sub-nav gives context. |
 | Navigation | The rail never swaps. Settings opens a sub-nav column inside the content. |
-| Section | Open section: 14px title, 12px description, rows below, one hairline between sections, no box. |
+| Section | Open section: 16px title (one step above the 14px row titles), 12px description, rows below, one hairline between sections, no box. |
 | Tabs and toolbar | Underline tabs; search, filter and the primary action in a toolbar that keeps its shape. Status filters are not a second tab row. |
 | List row | Divided resource row (56-64px, 32px tile, one meta line) for things you own; the catalog row (76px, 40px tile, 2 columns) for discovery. Same tile, type and hover. |
 | Detail | **Detail page** (section 8). No side sheets. Expand in place only for one level of secondary options. |

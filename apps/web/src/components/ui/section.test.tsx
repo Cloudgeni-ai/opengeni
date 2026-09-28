@@ -57,11 +57,20 @@ describe("Section", () => {
     expect(html).toMatch(/data-slot="section-content"[^>]*\[&amp;&gt;\*\]:rounded-\[14px\]/);
   });
 
+  test("the title sits one type step above the row labels", () => {
+    const html = renderToStaticMarkup(
+      <Section title="New session defaults">
+        <div />
+      </Section>,
+    );
+    expect(html).toMatch(/<h2[^>]*class="[^"]*text-base leading-6 font-semibold/);
+  });
+
   test("puts the action next to the title, centred on the title line", () => {
     const html = renderToStaticMarkup(
       <Section title="Used by" action={<button type="button">Add to a schedule</button>} />,
     );
-    expect(html).toMatch(/data-slot="section-action" class="[^"]*h-5[^"]*items-center/);
+    expect(html).toMatch(/data-slot="section-action" class="[^"]*h-6[^"]*items-center/);
   });
 
   test("on narrow widths the description clears an action that overhangs the title line", () => {
@@ -73,12 +82,12 @@ describe("Section", () => {
       />,
     );
     expect(withAction).toMatch(
-      /data-slot="section-description" class="[^"]*col-span-2 mt-2\.5 @md\/section-header:col-span-1 @md\/section-header:mt-1/,
+      /data-slot="section-description" class="[^"]*col-span-2 mt-2 @md\/section-header:col-span-1 @md\/section-header:mt-1/,
     );
     const plain = renderToStaticMarkup(
       <Section title="Workspace" description="The name people see." />,
     );
     expect(plain).toMatch(/data-slot="section-description" class="[^"]*mt-1/);
-    expect(plain).not.toContain("mt-2.5");
+    expect(plain).not.toContain("col-span-2");
   });
 });

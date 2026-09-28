@@ -1,32 +1,17 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type { Workspace, WorkspacePauseTimerRequest } from "@opengeni/contracts";
-import {
-  CalendarClockIcon,
-  ChevronDownIcon,
-  Clock3Icon,
-  InfinityIcon,
-  Loader2Icon,
-  PauseIcon,
-  PlayIcon,
-} from "lucide-react";
-import { useEffect, useState } from "react";
+import { Loader2Icon, PauseIcon, PlayIcon } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { durationLabel, workspaceTimerLabel } from "@/components/workspace-runtime-control";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
+import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
+import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { DisabledReasonTooltip, SettingRow, SettingRowLink } from "@/components/ui/setting-row";
+import { DisabledReasonTooltip, SettingRow } from "@/components/ui/setting-row";
 import { StatusDot } from "@/components/ui/status-dot";
+import { cn } from "@/lib/utils";
 
 type Control = Workspace["inferenceControl"];
 type TimerRequest = Omit<WorkspacePauseTimerRequest, "clientEventId" | "expectedRevision">;
@@ -71,9 +56,60 @@ function failureMessage(failure: unknown): string {
     : "Couldn't update agent activity. Try again.";
 }
 
+/* ----------------------------------------------------------------------------
+   When agent work resumes. Every timed choice becomes a pause timer that
+   starts now; "Until I resume" is a plain pause (or, while paused, cancels the
+   timer). Timers run one minute to 30 days.
+   -------------------------------------------------------------------------- */
+
+type PauseChoice = "1800" | "3600" | "morning" | "manual" | "custom";
+
+const MORNING_HOUR = 8;
+
+/** The next 08:00 local time after `from`. */
+function nextMorning(from: number): number {
+  const date = new Date(from);
+  date.setHours(MORNING_HOUR, 0, 0, 0);
+  if (date.getTime() <= from) date.setDate(date.getDate() + 1);
+  return date.getTime();
+}
+
+function isTomorrow(at: number, from: number): boolean {
+  const tomorrow = new Date(from);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return new Date(at).toDateString() === tomorrow.toDateString();
+}
+
+/** "14:30" today, "Tue 29 Sep, 08:00" on another day. */
+function clockLabel(at: number, from: number): string {
+  const date = new Date(at);
+  const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  if (date.toDateString() === new Date(from).toDateString()) return time;
+  const day = date.toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+  return `${day.replace(",", "")}, ${time}`;
+}
+
+/** `YYYY-MM-DDTHH:mm` in local time, for a datetime-local input. */
+function localInputValue(at: number): string {
+  const date = new Date(at);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** Two hours from now, on the next quarter hour. */
+function defaultPickedTime(from: number): number {
+  const quarter = 15 * 60_000;
+  return Math.ceil((from + 2 * 3_600_000) / quarter) * quarter;
+}
+
 /**
- * Settings > General > Agent activity: "● Running" with a Pause… menu, or
- * "● Paused" with Resume. Pausing stops new agent work in the workspace; work
+ * Settings > General > Agent activity: "● Running" with a Pause button, or
+ * "● Paused" with Change and Resume. Pause and Change open one small dialog
+ * that asks until when. Pausing stops new agent work in the workspace; work
  * already running finishes its current step.
  */
 export function AgentActivityRow(props: AgentActivityProps) {
@@ -81,31 +117,21 @@ export function AgentActivityRow(props: AgentActivityProps) {
   const paused = control.state === "paused";
   const now = useWorkspaceTimerClock(control, props.onRefresh);
   const timerLabel = control.timer ? workspaceTimerLabel(control, now) : null;
-  const [busy, setBusy] = useState(false);
-  const [timerOpen, setTimerOpen] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
-  async function run(action: () => Promise<void>, success: string) {
-    setBusy(true);
+  async function resume() {
+    setResuming(true);
     try {
-      await action();
-      toast.success(success);
+      await props.onControl("resume");
+      toast.success("Agent work resumed");
     } catch (failure) {
       toast.error(failureMessage(failure));
       void props.onRefresh().catch(() => undefined);
     } finally {
-      setBusy(false);
+      setResuming(false);
     }
   }
-
-  const pauseFor = (seconds: number) =>
-    void run(
-      () =>
-        props.onTimer(
-          { action: "set", pauseInSeconds: 0, pauseForSeconds: seconds },
-          control.revision,
-        ),
-      `Agent work paused for ${durationLabel(seconds)}`,
-    );
 
   const description = paused
     ? timerLabel && control.timer?.action === "resume"
@@ -115,60 +141,67 @@ export function AgentActivityRow(props: AgentActivityProps) {
       ? `Agents can start new sessions and scheduled runs. ${timerLabel}.`
       : "Agents can start new sessions and scheduled runs.";
 
-  const spinner = busy ? <Loader2Icon aria-hidden="true" className="animate-spin" /> : null;
-  const control_ = paused ? (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      disabled={busy}
-      onClick={() => void run(() => props.onControl("resume"), "Agent work resumed")}
-      className="pointer-coarse:h-11"
-    >
-      {spinner ?? <PlayIcon aria-hidden="true" />}
-      Resume
-    </Button>
-  ) : (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
+  const coarse = "pointer-coarse:h-11";
+  let controls: ReactNode;
+  if (!canManage) {
+    controls = (
+      <DisabledReasonTooltip reason={ADMIN_ONLY}>
         <Button
           type="button"
           variant="outline"
           size="sm"
-          disabled={busy}
-          className="pointer-coarse:h-11"
+          aria-disabled="true"
+          className={cn("cursor-not-allowed opacity-50", coarse)}
         >
-          {spinner ?? <PauseIcon aria-hidden="true" />}
-          Pause…
-          <ChevronDownIcon aria-hidden="true" className="-mr-0.5 text-fg-subtle" />
+          {paused ? <PlayIcon aria-hidden="true" /> : <PauseIcon aria-hidden="true" />}
+          {paused ? "Resume" : "Pause"}
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-52">
-        <DropdownMenuLabel className="text-xs font-medium text-fg-subtle">
-          Pause new agent work
-        </DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => pauseFor(1800)}>
-          <Clock3Icon />
-          For 30 minutes
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => pauseFor(3600)}>
-          <Clock3Icon />
-          For 1 hour
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onSelect={() => void run(() => props.onControl("pause"), "Agent work paused")}
+      </DisabledReasonTooltip>
+    );
+  } else if (paused) {
+    controls = (
+      <div className="flex items-center justify-end gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={resuming}
+          onClick={() => setDialogOpen(true)}
+          className={coarse}
         >
-          <InfinityIcon />
-          Until I resume
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => setTimerOpen(true)}>
-          <CalendarClockIcon />
-          Custom…
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
+          Change
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={resuming}
+          onClick={() => void resume()}
+          className={coarse}
+        >
+          {resuming ? (
+            <Loader2Icon aria-hidden="true" className="animate-spin" />
+          ) : (
+            <PlayIcon aria-hidden="true" />
+          )}
+          Resume
+        </Button>
+      </div>
+    );
+  } else {
+    controls = (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => setDialogOpen(true)}
+        className={coarse}
+      >
+        <PauseIcon aria-hidden="true" />
+        Pause
+      </Button>
+    );
+  }
 
   return (
     <>
@@ -180,38 +213,14 @@ export function AgentActivityRow(props: AgentActivityProps) {
           </span>
         }
         description={description}
-        hint={
-          canManage && (paused || control.timer) ? (
-            <SettingRowLink onClick={() => setTimerOpen(true)}>
-              {control.timer ? "Change timer" : "Resume automatically"}
-            </SettingRowLink>
-          ) : undefined
-        }
-        control={
-          canManage ? (
-            control_
-          ) : (
-            <DisabledReasonTooltip reason={ADMIN_ONLY}>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                aria-disabled="true"
-                className="cursor-not-allowed opacity-50 pointer-coarse:h-11"
-              >
-                {paused ? <PlayIcon aria-hidden="true" /> : <PauseIcon aria-hidden="true" />}
-                {paused ? "Resume" : "Pause…"}
-              </Button>
-            </DisabledReasonTooltip>
-          )
-        }
+        control={controls}
       />
       {canManage ? (
-        <PauseTimerDialog
-          open={timerOpen}
-          onOpenChange={setTimerOpen}
+        <PauseDialog
+          open={dialogOpen}
+          onOpenChange={setDialogOpen}
           control={control}
-          now={now}
+          onControl={props.onControl}
           onTimer={props.onTimer}
           onRefresh={props.onRefresh}
         />
@@ -220,168 +229,122 @@ export function AgentActivityRow(props: AgentActivityProps) {
   );
 }
 
-/* ----------------------------------------------------------------------------
-   The timer: pause later and/or for a while, or resume a paused workspace
-   after a while. One minute to 30 days.
-   -------------------------------------------------------------------------- */
-
-const PRESETS = [
-  { value: "900", label: "15 minutes" },
-  { value: "1800", label: "30 minutes" },
-  { value: "3600", label: "1 hour" },
-  { value: "7200", label: "2 hours" },
-  { value: "28800", label: "8 hours" },
-  { value: "86400", label: "1 day" },
-];
-const UNITS = [
-  { value: "60", label: "Minutes" },
-  { value: "3600", label: "Hours" },
-  { value: "86400", label: "Days" },
-];
-
-function DurationField({
-  label,
-  special,
-  value,
-  onChange,
-  disabled,
-}: {
-  label: string;
-  special?: string;
-  value: number | null;
-  onChange: (value: number | null) => void;
-  disabled: boolean;
-}) {
-  const presetValues = PRESETS.map((preset) => Number(preset.value));
-  const [custom, setCustom] = useState(value !== null && !presetValues.includes(value));
-  const [unit, setUnit] = useState(value !== null && value % 3600 === 0 ? 3600 : 60);
-  const options = [
-    ...(special ? [{ value: "special", label: special }] : []),
-    ...PRESETS,
-    { value: "custom", label: "Custom" },
-  ];
-  const selected = custom ? "custom" : value === null ? "special" : String(value);
-  return (
-    <Field label={label}>
-      <div className="grid min-w-0 gap-2">
-        <SelectMenu
-          options={options}
-          value={selected}
-          disabled={disabled}
-          onValueChange={(next) => {
-            setCustom(next === "custom");
-            onChange(
-              next === "special" ? null : next === "custom" ? (value ?? 1800) : Number(next),
-            );
-          }}
-          className="w-full"
-        />
-        {custom ? (
-          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] gap-2">
-            <TextInput
-              type="number"
-              aria-label={`${label}, amount`}
-              min={1}
-              max={MAX_SECONDS / unit}
-              step={1}
-              disabled={disabled}
-              value={value === null || !Number.isFinite(value) ? "" : value / unit}
-              onChange={(event) =>
-                onChange(event.target.value === "" ? Number.NaN : Number(event.target.value) * unit)
-              }
-            />
-            <SelectMenu
-              aria-label={`${label}, unit`}
-              options={UNITS}
-              value={String(unit)}
-              disabled={disabled}
-              onValueChange={(next) => {
-                const nextUnit = Number(next);
-                onChange(((value ?? 1800) / unit) * nextUnit);
-                setUnit(nextUnit);
-              }}
-              className="w-full"
-            />
-          </div>
-        ) : null}
-      </div>
-    </Field>
-  );
-}
-
-function PauseTimerDialog({
+/**
+ * "Pause agent work": a short list of until-when choices, Cancel and Pause.
+ * Opened from Change while paused, the same choices move the resume time.
+ */
+function PauseDialog({
   open,
   onOpenChange,
   control,
-  now,
+  onControl,
   onTimer,
   onRefresh,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   control: Control;
-  now: number;
+  onControl: AgentActivityProps["onControl"];
   onTimer: AgentActivityProps["onTimer"];
   onRefresh: AgentActivityProps["onRefresh"];
 }) {
   const paused = control.state === "paused";
   const [revision, setRevision] = useState(control.revision);
-  const [pauseIn, setPauseIn] = useState<number | null>(null);
-  const [pauseFor, setPauseFor] = useState<number | null>(null);
+  const [openedAt, setOpenedAt] = useState(() => Date.now());
+  const [choice, setChoice] = useState<PauseChoice>("1800");
+  const [picked, setPicked] = useState("");
+  const [pickedError, setPickedError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  const [draftKey, setDraftKey] = useState(0);
 
-  function reset() {
-    const remaining = (dueAt: string) =>
-      Math.max(60, Math.ceil((Date.parse(dueAt) - now) / 60000) * 60);
-    setRevision(control.revision);
-    setPauseIn(control.timer?.action === "pause" ? remaining(control.timer.dueAt) : null);
-    setPauseFor(
-      control.timer?.action === "resume"
-        ? remaining(control.timer.dueAt)
-        : (control.timer?.pauseForSeconds ?? (paused ? 1800 : null)),
-    );
-    setError(null);
-    setDraftKey((key) => key + 1);
-  }
-
-  // Start from the current timer each time the dialog opens (it opens from a menu or a link).
+  // Start from the current state each time the dialog opens.
   useEffect(() => {
-    if (open) reset();
+    if (!open) return;
+    const at = Date.now();
+    const resumeAt =
+      paused && control.timer?.action === "resume" ? Date.parse(control.timer.dueAt) : null;
+    setRevision(control.revision);
+    setOpenedAt(at);
+    setChoice(paused ? (resumeAt ? "custom" : "manual") : "1800");
+    setPicked(localInputValue(resumeAt ?? defaultPickedTime(at)));
+    setPickedError(null);
+    setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const validDuration = (value: number | null) =>
-    value === null || (Number.isInteger(value) && value >= 60 && value <= MAX_SECONDS);
-  const valid = validDuration(pauseIn) && validDuration(pauseFor) && (!paused || pauseFor !== null);
-  const preview = !valid
-    ? "Pick a whole number of minutes between 1 minute and 30 days."
-    : paused
-      ? `Agent work resumes in ${durationLabel(pauseFor!)}.`
-      : `${pauseIn ? `Agent work pauses in ${durationLabel(pauseIn)}` : "Agent work pauses now"}${
-          pauseFor
-            ? ` and resumes after ${durationLabel(pauseFor)}.`
-            : ", until someone resumes it."
-        }`;
+  const morning = nextMorning(openedAt);
+  const until = (seconds: number) => `until ${clockLabel(openedAt + seconds * 1000, openedAt)}`;
+
+  /** Seconds until the picked time, or what to fix. */
+  function pickedSeconds(): number | string {
+    const at = new Date(picked).getTime();
+    if (!picked || Number.isNaN(at)) return "Pick a date and time.";
+    const seconds = Math.ceil((at - Date.now()) / 1000);
+    if (seconds < 60) return "Pick a time at least a minute from now.";
+    if (seconds > MAX_SECONDS) return "Pick a time within the next 30 days.";
+    return seconds;
+  }
+
+  async function submit(): Promise<boolean> {
+    setError(null);
+    let seconds: number | null = null;
+    if (choice === "1800" || choice === "3600") seconds = Number(choice);
+    if (choice === "morning")
+      seconds = Math.min(MAX_SECONDS, Math.ceil((nextMorning(Date.now()) - Date.now()) / 1000));
+    if (choice === "custom") {
+      const result = pickedSeconds();
+      if (typeof result === "string") {
+        setPickedError(result);
+        return false;
+      }
+      seconds = result;
+    }
+    try {
+      if (seconds !== null) {
+        await onTimer({ action: "set", pauseInSeconds: 0, pauseForSeconds: seconds }, revision);
+        const at = clockLabel(Date.now() + seconds * 1000, Date.now());
+        toast.success(
+          paused
+            ? `Agent work resumes at ${at}`
+            : choice === "1800" || choice === "3600"
+              ? `Agent work paused for ${durationLabel(seconds)}`
+              : `Agent work paused until ${at}`,
+        );
+      } else if (!paused) {
+        await onControl("pause");
+        toast.success("Agent work paused");
+      } else if (control.timer) {
+        await onTimer({ action: "cancel" }, revision);
+        toast.success("Agent work stays paused until someone resumes it");
+      }
+      return true;
+    } catch (failure) {
+      setError(failureMessage(failure));
+      void onRefresh().catch(() => undefined);
+      return false;
+    }
+  }
+
+  // A pause scheduled for later (running, with a pause timer) can be cancelled here.
+  const scheduledPause = !paused && control.timer?.action === "pause";
 
   return (
     <FormDialog
       open={open}
       onOpenChange={onOpenChange}
       size="sm"
-      title={paused ? "Resume automatically" : "Pause agent work"}
+      title={paused ? "Change pause" : "Pause agent work"}
       description={
         paused
-          ? "Agent work stays paused until the time you pick."
-          : "New sessions and scheduled runs wait while agent work is paused. Work already running finishes its current step."
+          ? "Pick when agent work resumes."
+          : "New sessions and scheduled runs wait until agent work resumes, and running work stops after its current step."
       }
-      submitLabel={paused ? "Set timer" : pauseIn === null ? "Pause" : "Set timer"}
-      pendingLabel="Saving…"
-      submitDisabled={!valid || cancelling}
+      submitLabel={paused ? "Save" : "Pause"}
+      pendingLabel={paused ? "Saving…" : "Pausing…"}
+      submitDisabled={cancelling}
       error={error}
       footerStart={
-        control.timer ? (
+        scheduledPause ? (
           <Button
             type="button"
             variant="ghost"
@@ -392,9 +355,7 @@ function PauseTimerDialog({
               setError(null);
               try {
                 await onTimer({ action: "cancel" }, revision);
-                toast.success(
-                  paused ? "Timer cancelled. Agent work stays paused" : "Timer cancelled",
-                );
+                toast.success("Scheduled pause cancelled");
                 onOpenChange(false);
               } catch (failure) {
                 setError(failureMessage(failure));
@@ -404,52 +365,47 @@ function PauseTimerDialog({
               }
             }}
           >
-            Cancel timer
+            Cancel scheduled pause
           </Button>
         ) : undefined
       }
-      onSubmit={async () => {
-        if (!valid) return false;
-        setError(null);
-        try {
-          await onTimer(
-            {
-              action: "set",
-              pauseInSeconds: paused ? 0 : (pauseIn ?? 0),
-              pauseForSeconds: pauseFor,
-            },
-            revision,
-          );
-          toast.success(paused || pauseIn ? "Timer set" : "Agent work paused");
-          return true;
-        } catch (failure) {
-          setError(failureMessage(failure));
-          void onRefresh().catch(() => undefined);
-          return false;
-        }
-      }}
+      onSubmit={submit}
     >
-      <FieldStack key={draftKey}>
-        {paused ? null : (
-          <DurationField
-            label="Start"
-            special="Now"
-            value={pauseIn}
-            onChange={setPauseIn}
-            disabled={cancelling}
+      <div className="grid min-w-0 gap-3">
+        <ChoiceCards
+          variant="list"
+          aria-label={paused ? "Resume" : "Pause until"}
+          value={choice}
+          onValueChange={(next) => {
+            setChoice(next as PauseChoice);
+            setPickedError(null);
+          }}
+        >
+          <ChoiceCard value="1800" title="For 30 minutes" meta={until(1800)} />
+          <ChoiceCard value="3600" title="For 1 hour" meta={until(3600)} />
+          <ChoiceCard
+            value="morning"
+            title={isTomorrow(morning, openedAt) ? "Until tomorrow morning" : "Until this morning"}
+            meta={clockLabel(morning, openedAt)}
           />
-        )}
-        <DurationField
-          label={paused ? "Resume after" : "Pause for"}
-          special={paused ? undefined : "Until someone resumes it"}
-          value={pauseFor}
-          onChange={setPauseFor}
-          disabled={cancelling}
-        />
-        <p className="-mt-3 text-xs leading-4.5 text-fg-muted" aria-live="polite">
-          {preview}
-        </p>
-      </FieldStack>
+          <ChoiceCard value="manual" title="Until I resume" />
+          <ChoiceCard value="custom" title="Pick a time" />
+        </ChoiceCards>
+        {choice === "custom" ? (
+          <Field label="Resume at" error={pickedError} className="pl-6">
+            <TextInput
+              type="datetime-local"
+              value={picked}
+              min={localInputValue(Date.now() + 60_000)}
+              max={localInputValue(Date.now() + MAX_SECONDS * 1000)}
+              onChange={(event) => {
+                setPicked(event.target.value);
+                setPickedError(null);
+              }}
+            />
+          </Field>
+        ) : null}
+      </div>
     </FormDialog>
   );
 }
