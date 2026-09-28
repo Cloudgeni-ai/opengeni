@@ -297,12 +297,14 @@ describe("useSessionEvents", () => {
       undefined,
     );
     expect(hook.result.current.initialLoading).toBe(true);
+    expect(hook.result.current.initialHistoryReady).toBe(false);
     await actRun(async () => expect(await hook.result.current.jumpToSequence(50)).toBe(true));
     release();
     await flush(30);
     expect(hook.result.current.events.some((item) => item.sequence === 50)).toBe(true);
     expect(hook.result.current.events.at(-1)?.sequence).toBeLessThan(3000);
     expect(hook.result.current.initialLoading).toBe(false);
+    expect(hook.result.current.initialHistoryReady).toBe(true);
     expect(hook.result.current.loadingTarget).toBe(false);
     await hook.unmount();
   });
@@ -715,8 +717,173 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.initialLoading).toBe(false);
     expect(hook.result.current.connectionState).toBe("error");
     expect(hook.result.current.error?.message).toBe("tail unavailable");
+    expect(hook.result.current.initialHistoryReady).toBe(false);
 
     await hook.unmount();
+  });
+
+  test("an empty successful initial retry clears its stale error and publishes readiness", async () => {
+    let release!: (events: SessionEvent[]) => void;
+    const retry = new Promise<SessionEvent[]>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const client = fakeClient({
+      listEvents: async () => {
+        if (++calls === 1) throw new Error("tail unavailable");
+        return retry;
+      },
+      streamEvents: async function* () {},
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.error?.message).toBe("tail unavailable");
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+      await actRun(() => hook.result.current.jumpToLatest());
+      expect(hook.result.current.initialLoading).toBe(true);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+      release([]);
+      await flush(20);
+      expect(hook.result.current.events).toEqual([]);
+      expect(hook.result.current.initialLoading).toBe(false);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      expect(hook.result.current.error).toBeNull();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("history readiness stays true through an SSE error and a pending later reload", async () => {
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    let releaseReload!: (events: SessionEvent[]) => void;
+    const reload = new Promise<SessionEvent[]>((resolve) => {
+      releaseReload = resolve;
+    });
+    let calls = 0;
+    const client = fakeClient({
+      listEvents: async () => (++calls === 1 ? [] : reload),
+      streamEvents: async function* () {
+        yield* [];
+        await streamGate;
+        throw new Error("stream unavailable");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      releaseStream();
+      await flush(20);
+      expect(hook.result.current.error?.message).toBe("stream unavailable");
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      await actRun(() => hook.result.current.jumpToLatest());
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      expect(hook.result.current.initialLoading).toBe(true);
+      releaseReload([]);
+      await flush(20);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test.each(["resolve", "reject"] as const)(
+    "a superseded initial tail cannot %s into a successful retry",
+    async (outcome) => {
+      let resolve!: (events: SessionEvent[]) => void;
+      let reject!: (reason: Error) => void;
+      const oldTail = new Promise<SessionEvent[]>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      let calls = 0;
+      const client = fakeClient({
+        listEvents: async () => (++calls === 1 ? oldTail : []),
+        streamEvents: async function* () {},
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        expect(hook.result.current.initialHistoryReady).toBe(false);
+        await actRun(() => hook.result.current.jumpToLatest());
+        await flush(20);
+        expect(hook.result.current.initialHistoryReady).toBe(true);
+        if (outcome === "resolve") resolve([event(99)]);
+        else reject(new Error("old tail failed"));
+        await flush(20);
+        expect(hook.result.current.initialHistoryReady).toBe(true);
+        expect(hook.result.current.error).toBeNull();
+        expect(hook.result.current.events).toEqual([]);
+      } finally {
+        await hook.unmount();
+      }
+    },
+  );
+
+  test("new-session renders hide prior readiness and stale retry closures cannot clear its error", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      listEvents: async (_workspace, sessionId) => {
+        calls.push(sessionId);
+        if (sessionId === SECOND_SESSION_ID) throw new Error("new tail failed");
+        return [];
+      },
+      streamEvents: async function* () {},
+    });
+    const seen: Array<{ sessionId: string; ready: boolean }> = [];
+    const hook = await renderHook(
+      ({ sessionId }) => {
+        const result = useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID });
+        seen.push({ sessionId, ready: result.initialHistoryReady });
+        return result;
+      },
+      { sessionId: SESSION_ID },
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      const staleRetry = hook.result.current.jumpToLatest;
+      await hook.rerender({ sessionId: SECOND_SESSION_ID });
+      await flush(20);
+      expect(
+        seen.filter((row) => row.sessionId === SECOND_SESSION_ID).every((row) => !row.ready),
+      ).toBe(true);
+      const readCount = calls.length;
+      await actRun(() => staleRetry());
+      expect(calls).toHaveLength(readCount);
+      expect(hook.result.current.error?.message).toBe("new tail failed");
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("full replay does not claim a history snapshot completed merely because SSE yielded", async () => {
+    const { client } = scriptedClient({ store: [], streamEvents: [event(1)] });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID, replay: "full" }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.events).toEqual([event(1)]);
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
   });
 
   test("initial windowed load uses compact tail pages and opens the stream after the newest event", async () => {
