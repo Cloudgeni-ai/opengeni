@@ -91,7 +91,7 @@ function claim(
   options?: { limit?: number; leaseToken?: string },
 ): Promise<HostUsageExportBatch | null>;
 async function claim(
-  kind: HostExportKind,
+  kind: Exclude<HostExportKind, "lifecycle_fact">,
   consumerId: string,
   options: { limit?: number; leaseToken?: string } = {},
 ): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
