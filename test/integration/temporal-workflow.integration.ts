@@ -136,9 +136,11 @@ describe("Temporal workflow integration", () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const calls: unknown[] = [];
+      const claimedEvents: string[] = [];
       const queuedTurns = [queuedTurn("event-1")];
-      const admission = createTurnAdmission(queuedTurns, async (input) => {
+      const admission = createTurnAdmission(queuedTurns, async (input, turn) => {
         calls.push(input);
+        claimedEvents.push(turn.triggerEventId);
         return { status: "idle" };
       });
       const worker = await testWorker(nativeConnection, taskQueue, {
@@ -152,21 +154,26 @@ describe("Temporal workflow integration", () => {
       const run = worker.run();
       try {
         const client = new Client({ connection });
-        const handle = await client.workflow.start("sessionWorkflow", {
+        const options = {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
-          args: [
-            {
-              ...scope,
-              sessionId: crypto.randomUUID(),
-              initialEventId: "event-1",
-            },
-          ],
-        });
+          args: [{ ...scope, sessionId: crypto.randomUUID() }],
+        };
+        await client.workflow.start("sessionWorkflow", options);
         await waitFor(() => calls.length === 1);
         queuedTurns.push(queuedTurn("event-2"));
-        await handle.signal("userMessage", "event-2");
-        await waitFor(() => calls.length === 2);
+        // Normal idle may already have closed. Production wakes the same
+        // durable session with signalWithStart, not a grace-window-only signal.
+        const followUp = await client.workflow.signalWithStart("sessionWorkflow", {
+          ...options,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          signal: "userMessage",
+          signalArgs: ["event-2"],
+        });
+        await followUp.result();
+        expect(calls).toHaveLength(2);
+        expect(claimedEvents).toEqual(["event-1", "event-2"]);
+        expect(queuedTurns).toEqual([]);
       } finally {
         worker.shutdown();
         await run;
