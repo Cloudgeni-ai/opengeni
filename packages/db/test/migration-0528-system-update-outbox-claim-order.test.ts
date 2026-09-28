@@ -97,9 +97,10 @@ test("the migration is rolling", async () => {
   expect(migration.split("\n")[0]).toBe("-- deployment-mode: rolling");
 });
 
-test("the claim keeps its private definer posture and pinned search_path", async () => {
+test("the claim keeps its row type, private definer posture, and pinned search_path", async () => {
   const [claim] = await shared.admin<
     {
+      result: string;
       securityDefiner: boolean;
       config: string[] | null;
       appExecute: boolean;
@@ -107,6 +108,7 @@ test("the claim keeps its private definer posture and pinned search_path", async
     }[]
   >`
     select
+      pg_get_function_result(procedure.oid) as "result",
       procedure.prosecdef as "securityDefiner",
       procedure.proconfig as "config",
       has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
@@ -121,7 +123,16 @@ test("the claim keeps its private definer posture and pinned search_path", async
     where namespace.nspname = 'opengeni_private'
       and procedure.proname = 'claim_session_system_update_outbox'
   `;
+  // 0528 reads the row type from the installed function; after the full
+  // ledger that is exactly the 0494 shape current callers read.
   expect(claim).toEqual({
+    result:
+      "TABLE(id uuid, account_id uuid, workspace_id uuid, source_session_id uuid, " +
+      "target_session_id uuid, dedupe_key text, kind text, classification text, " +
+      "source_id text, summary text, summary_codec_version integer, payload jsonb, " +
+      "payload_codec_version integer, lineage jsonb, mcp_account_bindings jsonb, " +
+      "personal_connection_delegations jsonb, codex_provider_account_authority_snapshot jsonb, " +
+      "xai_provider_account_authority_snapshot jsonb)",
     securityDefiner: true,
     config: ["search_path=pg_catalog, public"],
     appExecute: true,

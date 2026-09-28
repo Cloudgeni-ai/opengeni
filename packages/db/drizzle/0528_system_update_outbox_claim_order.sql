@@ -13,26 +13,84 @@
 -- results claimed out of completion order, or an older progress notice
 -- superseding a newer one.
 --
--- Only the row order changes. The signature, SECURITY DEFINER posture, and
--- existing grants are preserved (CREATE OR REPLACE keeps the ACL), so old and
--- new binaries can run against either definition.
+-- Only the row order changes. The returned columns are read from the installed
+-- function instead of restated, so the replacement keeps exactly the row type
+-- the database already has (CREATE OR REPLACE may not change it). In ledger
+-- order that is the 0494 shape every current caller reads. Migration fixtures
+-- that withhold 0494 run this file against the older 0234 shape and replay
+-- 0494 afterwards; 0494 textually adds its column to the RETURNING list, and
+-- the final `SELECT b.*` follows it. CREATE OR REPLACE keeps the owner and
+-- grants; SECURITY DEFINER and the pinned search_path are restated and checked
+-- below, so old and new binaries can run against either definition.
+DO $outbox_claim_order$
+DECLARE
+  claim constant regprocedure :=
+    'opengeni_private.claim_session_system_update_outbox(integer)'::regprocedure;
+  outbox constant regclass :=
+    format('%I.session_system_update_outbox', current_schema())::regclass;
+  prior_config text[];
+  prior_definer boolean;
+  result_before text;
+  result_after text;
+  config_after text[];
+  definer_after boolean;
+  result_columns text;
+  returning_columns text;
+  column_count bigint;
+  id_columns bigint;
+  foreign_columns bigint;
+BEGIN
+  SELECT p.proconfig, p.prosecdef, pg_get_function_result(p.oid)
+  INTO prior_config, prior_definer, result_before
+  FROM pg_proc p
+  WHERE p.oid = claim;
+
+  -- Every returned column must be the outbox column of the same name and type,
+  -- because the body returns them straight from the claimed rows.
+  SELECT
+    string_agg(
+      format('%I %s', arg.arg_name, format_type(arg.arg_type, NULL)), ', '
+      ORDER BY arg.arg_position
+    ),
+    string_agg(format('o.%I', arg.arg_name), ', ' ORDER BY arg.arg_position),
+    count(*),
+    count(*) FILTER (WHERE arg.arg_name = 'id'),
+    count(*) FILTER (
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute attribute
+        WHERE attribute.attrelid = outbox
+          AND attribute.attname = arg.arg_name
+          AND attribute.atttypid = arg.arg_type
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+      )
+    )
+  INTO result_columns, returning_columns, column_count, id_columns, foreign_columns
+  FROM pg_proc p
+  CROSS JOIN LATERAL unnest(p.proargnames, p.proargmodes, p.proallargtypes)
+    WITH ORDINALITY AS arg(arg_name, arg_mode, arg_type, arg_position)
+  WHERE p.oid = claim AND arg.arg_mode = 't';
+
+  IF NOT coalesce(prior_definer, false)
+    OR column_count = 0
+    OR id_columns <> 1
+    OR foreign_columns <> 0 THEN
+    RAISE EXCEPTION '0528 outbox claim prerequisite drift' USING ERRCODE = '55000';
+  END IF;
+
+  EXECUTE format(
+    $ddl$
 CREATE OR REPLACE FUNCTION opengeni_private.claim_session_system_update_outbox(p_limit integer)
-RETURNS TABLE (
-  id uuid, account_id uuid, workspace_id uuid, source_session_id uuid,
-  target_session_id uuid, dedupe_key text, kind text, classification text,
-  source_id text, summary text, summary_codec_version integer,
-  payload jsonb, payload_codec_version integer, lineage jsonb,
-  mcp_account_bindings jsonb, personal_connection_delegations jsonb,
-  codex_provider_account_authority_snapshot jsonb,
-  xai_provider_account_authority_snapshot jsonb
-)
+RETURNS TABLE (%s)
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = pg_catalog, %I
 AS $function$
 BEGIN
   RETURN QUERY
     WITH claimed AS (
-      SELECT o.id FROM session_system_update_outbox o
+      SELECT o.id, o.created_at FROM session_system_update_outbox o
       WHERE o.status = 'pending'
       ORDER BY o.created_at, o.id
       FOR UPDATE SKIP LOCKED
@@ -41,34 +99,30 @@ BEGIN
       UPDATE session_system_update_outbox o
       SET attempts = o.attempts + 1, updated_at = now()
       FROM claimed c WHERE o.id = c.id
-      RETURNING o.created_at, o.id, o.account_id, o.workspace_id, o.source_session_id,
-        o.target_session_id, o.dedupe_key, o.kind, o.classification,
-        o.source_id, o.summary, o.summary_codec_version,
-        o.payload, o.payload_codec_version, o.lineage,
-        o.mcp_account_bindings, o.personal_connection_delegations,
-        o.codex_provider_account_authority_snapshot,
-        o.xai_provider_account_authority_snapshot
+      RETURNING %s
     )
-    SELECT b.id, b.account_id, b.workspace_id, b.source_session_id,
-      b.target_session_id, b.dedupe_key, b.kind, b.classification,
-      b.source_id, b.summary, b.summary_codec_version,
-      b.payload, b.payload_codec_version, b.lineage,
-      b.mcp_account_bindings, b.personal_connection_delegations,
-      b.codex_provider_account_authority_snapshot,
-      b.xai_provider_account_authority_snapshot
-    FROM bumped b
-    ORDER BY b.created_at, b.id;
+    SELECT b.* FROM bumped b
+    JOIN claimed c ON c.id = b.id
+    ORDER BY c.created_at, c.id;
 END
-$function$;
-
--- CREATE OR REPLACE drops the pinned search_path; restore it for this schema.
-DO $outbox_claim_search_path$
-BEGIN
-  EXECUTE format(
-    'ALTER FUNCTION opengeni_private.claim_session_system_update_outbox(integer) SET search_path = pg_catalog, %I',
-    current_schema()
+$function$
+$ddl$,
+    result_columns,
+    current_schema(),
+    returning_columns
   );
+
+  SELECT p.proconfig, p.prosecdef, pg_get_function_result(p.oid)
+  INTO config_after, definer_after, result_after
+  FROM pg_proc p
+  WHERE p.oid = claim;
+
+  IF result_after IS DISTINCT FROM result_before
+    OR config_after IS DISTINCT FROM prior_config
+    OR NOT definer_after THEN
+    RAISE EXCEPTION '0528 outbox claim posture drift' USING ERRCODE = '55000';
+  END IF;
 END
-$outbox_claim_search_path$;
+$outbox_claim_order$;
 
 REVOKE ALL ON FUNCTION opengeni_private.claim_session_system_update_outbox(integer) FROM PUBLIC;
