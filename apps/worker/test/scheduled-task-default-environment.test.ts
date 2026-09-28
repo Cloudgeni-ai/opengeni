@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { CreateScheduledTaskRequest, type AccessGrant, type Permission } from "@opengeni/contracts";
-import { createValidatedScheduledTask } from "@opengeni/core";
+import {
+  CreateScheduledTaskRequest,
+  UpdateScheduledTaskRequest,
+  type AccessGrant,
+  type Permission,
+} from "@opengeni/contracts";
+import { createValidatedScheduledTask, validatedScheduledTaskUpdate } from "@opengeni/core";
 import {
   createDb,
   createRig,
@@ -198,6 +203,68 @@ describe("scheduled task default Sandbox Environment", () => {
     await expect(createTask(workspace, {}, manageOnly)).rejects.toMatchObject({ status: 403 });
     // The same creator may still opt out explicitly.
     expect((await createTask(workspace, { rigId: null }, manageOnly)).rigId).toBeNull();
+  }, 60_000);
+
+  test("an explicit environment needs the same Variable Set authority as the default", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const credentials = await createVariableSet(client.db, {
+      ...workspace,
+      scope: "workspace",
+      name: "restricted credentials",
+    });
+    const withSecrets = await seedRig(workspace, "with secrets", [credentials.id]);
+    const manageOnly = grantFor(workspace, ["scheduled_tasks:manage"]);
+    const update = (
+      existing: Awaited<ReturnType<typeof createTask>>,
+      payload: Record<string, unknown>,
+      grant: AccessGrant,
+    ) =>
+      validatedScheduledTaskUpdate({
+        settings,
+        db: client.db,
+        objectStorage: null,
+        grant,
+        existing,
+        payload: UpdateScheduledTaskRequest.parse(payload),
+      });
+
+    // Naming the environment on create or edit binds its Variable Sets to
+    // every generated session, so it is refused like the omitted default.
+    await expect(
+      createTask(workspace, { rigId: withSecrets.id }, manageOnly),
+    ).rejects.toMatchObject({ status: 403 });
+    const plain = await createTask(workspace, { rigId: null }, manageOnly);
+    await expect(update(plain, { rigId: withSecrets.id }, manageOnly)).rejects.toMatchObject({
+      status: 403,
+    });
+    expect((await update(plain, { rigId: withSecrets.id }, grantFor(workspace))).rigId).toBe(
+      withSecrets.id,
+    );
+
+    // An existing-session task adopts its target's environment without a
+    // new binding. Turning it into a generated-session task binds that
+    // environment to fresh sessions, so the same check applies.
+    const target = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "target with secrets",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      rigId: withSecrets.id,
+      rigVersionId: withSecrets.activeVersion!.id,
+    });
+    const adopted = await createTask(workspace, {
+      runMode: "existing_session",
+      targetSessionId: target.id,
+    });
+    expect(adopted.rigId).toBe(withSecrets.id);
+    await expect(
+      update(adopted, { runMode: "new_session_per_run", targetSessionId: null }, manageOnly),
+    ).rejects.toMatchObject({ status: 403 });
   }, 60_000);
 
   test("an existing-session task adopts its target session's own environment", async () => {

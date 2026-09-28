@@ -313,8 +313,11 @@ export async function createValidatedScheduledTask(input: {
   // (at dispatch), so validate only that the id names a rig in the workspace —
   // NOT that it has an active version now (that is a fire-time concern). RLS
   // makes a cross-workspace id indistinguishable from missing → both 422.
+  // A generated session binds the environment and its default Variable Sets,
+  // so an explicit choice needs the same attachment authority as session
+  // create; an existing-session task only matches its target's environment.
   if (!knowledgeAction && input.payload.rigId) {
-    await requireScheduledTaskRig(
+    const rig = await requireScheduledTaskRig(
       input.db,
       {
         accountId: input.grant.accountId,
@@ -323,6 +326,15 @@ export async function createValidatedScheduledTask(input: {
       },
       input.payload.rigId,
     );
+    if (input.payload.runMode !== "existing_session") {
+      await requireScheduledTaskRigVariableSetAttachments({
+        settings: input.settings,
+        db: input.db,
+        grant: input.grant,
+        workspaceId: input.grant.workspaceId,
+        rig,
+      });
+    }
   }
   const rigId = knowledgeAction
     ? (input.payload.rigId ?? null)
@@ -938,15 +950,39 @@ async function resolveScheduledTaskCreateRigId(input: {
     defaultRigId,
   );
   if (!rig?.activeVersion) return null;
-  for (const variableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
+  await requireScheduledTaskRigVariableSetAttachments({
+    settings: input.settings,
+    db: input.db,
+    grant: input.grant,
+    workspaceId: input.grant.workspaceId,
+    rig,
+  });
+  return rig.id;
+}
+
+type ScheduledTaskRig = NonNullable<Awaited<ReturnType<typeof getRig>>>;
+
+/**
+ * Binding a Sandbox Environment to generated sessions layers its active
+ * version's default Variable Sets into every turn, so the task writer must be
+ * allowed to attach each of them, exactly as session create requires. An
+ * environment without an active version has nothing to check yet.
+ */
+async function requireScheduledTaskRigVariableSetAttachments(input: {
+  settings: Settings;
+  db: Database;
+  grant: AccessGrant;
+  workspaceId: string;
+  rig: ScheduledTaskRig;
+}): Promise<void> {
+  for (const variableSetId of new Set(input.rig.activeVersion?.defaultVariableSetIds ?? [])) {
     await validateVariableSetAttachment(
       { settings: input.settings, db: input.db },
       input.grant,
-      input.grant.workspaceId,
+      input.workspaceId,
       variableSetId,
     );
   }
-  return rig.id;
 }
 
 // Validate a scheduled task's rig reference: it must name a rig in the
@@ -955,11 +991,12 @@ async function requireScheduledTaskRig(
   db: Database,
   access: { accountId: string; workspaceId: string; subjectId: string },
   rigId: string,
-): Promise<void> {
+): Promise<ScheduledTaskRig> {
   const rig = await getRig(db, access, rigId);
   if (!rig) {
     throw new HTTPException(422, { message: `unknown rigId: ${rigId}` });
   }
+  return rig;
 }
 
 export async function validatedScheduledTaskUpdate(input: {
@@ -1125,6 +1162,33 @@ export async function validatedScheduledTaskUpdate(input: {
       );
     }
     update.rigId = input.payload.rigId;
+  }
+  // An edit that newly binds an environment to generated sessions needs the
+  // same Variable Set attachment authority as create: a changed rigId, or a
+  // switch away from an existing-session target that keeps the environment
+  // the task adopted from that session.
+  const nextRigId = input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId;
+  if (
+    nextRigId !== null &&
+    !knowledgeSource &&
+    nextRunMode !== "existing_session" &&
+    (nextRigId !== input.existing.rigId || input.existing.runMode === "existing_session")
+  ) {
+    await requireScheduledTaskRigVariableSetAttachments({
+      settings: input.settings,
+      db: input.db,
+      grant: input.grant,
+      workspaceId: input.existing.workspaceId,
+      rig: await requireScheduledTaskRig(
+        input.db,
+        {
+          accountId: input.existing.accountId,
+          workspaceId: input.existing.workspaceId,
+          subjectId: input.grant.subjectId,
+        },
+        nextRigId,
+      ),
+    });
   }
   if (input.payload.agentConfig !== undefined) {
     // Editing the instructions of a task that injects workspace secrets is
