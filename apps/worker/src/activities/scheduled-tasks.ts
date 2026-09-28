@@ -19,6 +19,7 @@ import {
 import {
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
+  withScheduledSlackBotPostingTools,
   resolveWorkspaceCatalogSettings,
   resolveScheduledTaskDefaultModel,
   resolveSessionToolPolicy,
@@ -474,9 +475,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // deployment ceiling. A human/API-created task (null policy) keeps the
       // deployment default exactly as before.
       const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
-      const firstPartyMcpTools = creatorPolicy?.firstPartyMcpTools
-        ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
-        : resolveFirstPartyMcpToolPolicy(settings).default;
+      // A person-chosen Slack channel adds only the two bot posting tools;
+      // they post nowhere else, whatever the creator's own selection was.
+      const firstPartyMcpTools = withScheduledSlackBotPostingTools(
+        creatorPolicy?.firstPartyMcpTools
+          ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
+          : resolveFirstPartyMcpToolPolicy(settings).default,
+        task.agentConfig,
+        resolveFirstPartyMcpToolPolicy(settings).allowed,
+      );
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
         ? [...creatorPolicy.firstPartyMcpPermissions]
         : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];

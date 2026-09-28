@@ -33,6 +33,7 @@ import {
   createRig,
   createScheduledTask,
   createScheduledTaskRun,
+  recordScheduledTaskAdmissionFailure,
   createSession,
   createVariableSet,
   createXaiSubscriptionCredential,
@@ -419,7 +420,8 @@ describe("scheduled task personal MCP authority", () => {
     expect(selectedUpdate.agentConfig?.connectionAccounts).toHaveLength(2);
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, selectedUpdate);
     await commonConnectionDelegationFixture(workspace);
-    const selectedRun = await dispatch();
+    const acceptedProducer = crypto.randomUUID();
+    const selectedRun = await dispatch(acceptedProducer);
     expect(selectedRun.action).toBe("start");
     const selectedRuns = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
     const selectedAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
@@ -429,6 +431,20 @@ describe("scheduled task personal MCP authority", () => {
     expect(
       selectedAccepted?.mcpAccountBindings?.map((binding) => binding.connectionId).sort(),
     ).toEqual(selections.map((selection) => selection.connectionId).sort());
+    const acceptedTask = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
+    const acceptedWinner = await recordScheduledTaskAdmissionFailure(client.db, {
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: acceptedTask.authorityRevision,
+      taskExecutionDigest: acceptedTask.executionDigest,
+      producerKey: acceptedProducer,
+      triggerType: "scheduled",
+      diagnostic: { version: 1, reason: "selection_unavailable", accounts: [] },
+    });
+    expect(acceptedWinner.admissionDiagnostic).toBeNull();
+    expect(acceptedWinner.sessionId).toBe(
+      selectedRun.action === "start" ? selectedRun.sessionId : null,
+    );
     await admin`update connections set status = 'revoked' where id = ${first.connection.id}`;
     const refusedProducer = crypto.randomUUID();
     const refusal = await dispatch(refusedProducer);

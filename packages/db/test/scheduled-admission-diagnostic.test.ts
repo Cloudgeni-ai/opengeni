@@ -76,7 +76,10 @@ test("blocked admission is a durable terminal occurrence, not accepted execution
       runId: first.id,
     }),
   ).toBeNull();
-  const replay = await db.recordScheduledTaskAdmissionFailure(client.db, input);
+  const replay = await db.recordScheduledTaskAdmissionFailure(client.db, {
+    ...input,
+    diagnostic: { version: 1, reason: "selection_unavailable", accounts: [] },
+  });
   expect(replay).toEqual(first);
   const history = await db.listScheduledTaskRuns(client.db, task.workspaceId, task.id, 10);
   expect(history).toHaveLength(1);
@@ -119,4 +122,12 @@ test("blocked admission is a durable terminal occurrence, not accepted execution
     }),
   ).rejects.toThrow();
   expect(await db.listScheduledTaskRuns(client.db, task.workspaceId, task.id, 10)).toHaveLength(1);
+  await db.updateScheduledTask(client.db, task.workspaceId, task.id, { status: "paused" });
+  expect(await db.recordScheduledTaskAdmissionFailure(client.db, input)).toEqual(first);
+  await expect(
+    db.recordScheduledTaskAdmissionFailure(client.db, {
+      ...input,
+      producerKey: `${input.producerKey}:paused`,
+    }),
+  ).rejects.toThrow();
 });

@@ -53,6 +53,11 @@ export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
+export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
+  "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
+  "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
+] as const;
+const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
@@ -2007,6 +2012,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
               'organization_usage_read_capabilities',
               'session_file_attachments',
               'session_file_read_capabilities',
@@ -3657,6 +3663,49 @@ export function evaluateRuntimeDatabasePosture(
         !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       ) {
         violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
+      }
+    }
+  }
+
+  const scheduledSlackMessageTables = posture.privateTables.filter(
+    (table) => table.name === SCHEDULED_SLACK_BOT_MESSAGES_TABLE,
+  );
+  if (scheduledSlackMessageTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("scheduled Slack bot message private relation is missing or ambiguous");
+  } else {
+    const table = scheduledSlackMessageTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("scheduled Slack bot message relation lacks active FORCE-RLS isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct scheduled Slack bot message authority");
+    }
+    const postLedgerOwner = tableByName.get("slack_bot_post_operations")?.owner;
+    if (postLedgerOwner && table.owner !== postLedgerOwner)
+      violations.push("scheduled Slack bot message owner does not match Slack post authority");
+    for (const name of SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+      ]);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
       }
     }
   }
