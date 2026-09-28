@@ -10,6 +10,7 @@ import { TextInput } from "@/components/ui/field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
+import { analyticsAction } from "@/lib/analytics-actions";
 import { entitlementEntries, validTopupAmount } from "@/lib/format";
 import {
   beginOrganizationAdminOperation,
@@ -252,6 +253,7 @@ export function OrganizationBillingPage({
                         />
                       </div>
                       <RowButton
+                        {...analyticsAction("buy_credits")}
                         disabled={visibleBusy || !validTopupAmount(topupAmount)}
                         onClick={() => void startCheckout(Number(topupAmount))}
                       >

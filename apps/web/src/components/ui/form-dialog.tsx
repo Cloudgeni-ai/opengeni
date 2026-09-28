@@ -17,6 +17,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
+import { analyticsAction, type AnalyticsAction } from "@/lib/analytics-actions";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -82,6 +83,8 @@ export interface FormFrameProps {
   submitLabel: ReactNode;
   /** Shown with a spinner while submitting: "Creating…". */
   pendingLabel?: ReactNode;
+  /** Closed product-analytics label for the primary button (never derived from text). */
+  submitAnalyticsAction?: AnalyticsAction | null;
   /** Pass null to hide Cancel (for example on a one-time secret step). */
   cancelLabel?: ReactNode | null;
   /** "destructive" fills the primary in danger, for confirmations. */
@@ -144,6 +147,7 @@ export function FormFrame({
   children,
   submitLabel,
   pendingLabel,
+  submitAnalyticsAction,
   cancelLabel = "Cancel",
   tone = "default",
   onSubmit,
@@ -276,6 +280,7 @@ export function FormFrame({
       ) : null}
       <Button
         type="submit"
+        {...analyticsAction(submitAnalyticsAction)}
         variant={tone === "destructive" ? "destructive" : "default"}
         // Busy is not disabled: the primary keeps its colour and its focus while
         // the spinner runs (a disabled button drops focus to the page), and a

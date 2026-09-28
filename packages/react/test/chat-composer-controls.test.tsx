@@ -161,6 +161,8 @@ describe("ChatComposer delivery and lifecycle controls", () => {
       'button[aria-label="Pause this workstream"]',
     );
     expect(pause).not.toBeNull();
+    // A stable, content-free label hosts may read for product analytics.
+    expect(pause?.getAttribute("data-analytics-action")).toBe("pause");
     expect(
       mounted.container.querySelectorAll('button[aria-label="Pause this workstream"]'),
     ).toHaveLength(1);
@@ -258,6 +260,7 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     // Tips are Radix tooltips (not native `title`); tip copy is on data-og-tip.
     expect(send?.getAttribute("data-og-tip")).toContain("Queue message");
     expect(send?.getAttribute("data-og-tip")).toContain("Cmd/Ctrl+Enter");
+    expect(send?.getAttribute("data-analytics-action")).toBe("send");
     await act(async () => send?.click());
     expect(spy.sends).toEqual(["send"]);
   });

@@ -9,15 +9,19 @@ PostHog uses the authenticated internal user ID as `distinct_id`, and the
 current routed workspace's account ID as the `account` group. Managed operators
 can resolve these IDs using their private identity directory. The browser never
 sends email or names. Do not put that directory in PostHog person properties.
+`app_opened` and `login_completed` wait until the signed-in user's account has
+loaded, so the group is set first and both events carry it. A user with no
+account yet (before organization setup) still reports them, without a group,
+once that lookup has finished.
 
 | Event | Meaning |
 | --- | --- |
-| `login_completed` | Consented legacy email sign-in with a confirmed cookie session, or an initiated Google/GitHub sign-in followed by a freshly created cookie session. |
-| `app_opened` | An identified browser page initialized. This includes returning with an existing cookie; it is not a new login. |
+| `login_completed` | Consented legacy email sign-in with a confirmed cookie session, or an initiated Google/GitHub sign-in followed by a freshly created cookie session. Carries the `account` group when the user has an account. |
+| `app_opened` | An identified browser page initialized. This includes returning with an existing cookie; it is not a new login. Carries the `account` group when the user has an account. |
 | `app_active` | Trusted click/key input in a visible document, at most once per minute per mounted app. Recent interaction, not proof the user remains online. |
-| `$pageview` | Page/section/workspace/session navigation, including allowlisted settings query sections. |
-| `navigation_clicked` | Same-origin link clicked, with destination page/section. |
-| `product_clicked` | Button/menu/tab clicked; a closed action label is attached for model connection controls. No visible text or input values. |
+| `$pageview` | Page/section/workspace/session navigation, including allowlisted settings query sections. `page` is one of the closed values below. |
+| `navigation_clicked` | Same-origin link clicked, with destination page/section, plus `action` when the link carries a control label. |
+| `product_clicked` | Button/menu/tab clicked, with `control_kind`, plus `action` when the control carries a control label. No visible text or input values. |
 | `credits_required_viewed` | The composer displays an empty-credit notice; an external connection may still provide a usable alternative. |
 | `session_start_blocker_viewed` | The new-session composer currently has a known blocker, including no connected model. This is exposure, not a submitted attempt. Re-emitted after consent is granted. |
 | `session_start_blocked` | A submit handler was invoked while a known blocker remained. A disabled Send button cannot produce this event. |
@@ -32,6 +36,47 @@ sends email or names. Do not put that directory in PostHog person properties.
 | `checkout_started` | A credit checkout session was created; the browser is about to leave for Stripe. |
 | `checkout_completed` | The organization page confirmed a Stripe success return. The outcome is one-shot: the page drops `checkout` from the URL immediately, so a reload, back navigation, or bookmark does not repeat it. Credits post asynchronously by webhook; returns to other pages are not observed. |
 | `first_turn_completed` | The first agent turn of a session this page created completed while its view was open. Carries the session, workspace, and account IDs only. |
+
+## Pages and control labels
+
+`analytics-journey.ts` reports `page` from a closed list, and anything else as
+`other`. Workspace pages are the first path segment after
+`/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
+`rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
+`schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
+`organization`, and `files`; a session page also carries `session_id`.
+`environments` and `capabilities` are legacy redirects, so they appear only
+when an old link or bookmark opens them. Pages outside a workspace are matched by
+exact path and never carry an id: `home` (`/`, including the sign-in panel),
+`session-link`, `identity-link`, `checkout-return` (`/billing`),
+`integration-return` (`/integrations`), `device`, `personal-security`, and the
+sign-in and setup pages `setup-account`, `account-auth` and `reset-password`.
+The last three are public authentication routes where providers stay suspended,
+so they appear only as a `navigation_clicked` destination, never as a
+`$pageview`. A drift test fails when an app route has no page label.
+
+`section` comes from the `section` or `view` query value when it is on the
+closed list (settings, organization, plugins and workspace-state sections).
+
+Key controls carry `data-analytics-action`, and the click observer attaches it
+as `action` only when it is one of the closed values in `analytics-actions.ts`:
+
+| `action` | Control |
+| --- | --- |
+| `new_session` | New session links in the rail and folder rows |
+| `send` | Composer send button (`@opengeni/react`) |
+| `steer` | Steer buttons on queued prompts (`@opengeni/react`) |
+| `pause` | Composer pause button (`@opengeni/react`) |
+| `connect_integration` | First connect of an integration: OAuth, API key, or adding an MCP server |
+| `create_schedule` | Create scheduled task (not Save changes) |
+| `install_skill` | Install Skill (not Update Skill) |
+| `invite_member` | Send invitation in organization People |
+| `buy_credits` | Buy or add credits buttons and links |
+| `connect_model` | Connect a model links |
+| `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter` | Provider connect controls in settings and onboarding |
+
+Clicks are the only signal: pressing Enter to send or Cmd/Ctrl+Enter to steer
+is not a click. Use `session_command_attempted` for message volume.
 
 Finished requests distinguish accepted, unauthenticated, credits required,
 forbidden, conflict, invalid request, rate limit, server error and unknown
@@ -113,9 +158,27 @@ and event definition used.
 For a manual browser check, run an isolated full dev stack with an empty-credit
 workspace, then run `OPENGENI_ANALYTICS_E2E_URL=http://127.0.0.1:3000 bun
 apps/web/test/validate-analytics-browser.ts`. The script intercepts telemetry
-locally and verifies consent, navigation, foreground activity and the visible
-credit notice against the real app. It requires the Vite development server and
-is separate from the default CI browser fixtures.
+locally and verifies consent (including the consent count request), page labels
+for the pages above, the `new_session` and `connect_model` action labels, the
+labelled composer send button, foreground activity, the visible credit notice,
+and that the public sign-in and setup pages send nothing, against the real app.
+It requires the Vite development server and is separate from the default CI
+browser fixtures. On a stack without billing, where the credit notice cannot
+appear, set `OPENGENI_ANALYTICS_E2E_SKIP_CREDITS=1` to skip only the credit
+notice and `connect_model` checks.
+
+## Consent count
+
+PostHog sees only people who allow analytics. To state how much it misses, the
+banner reports each changed answer to `POST /v1/analytics-consent`
+(`src/lib/analytics-consent.ts`), which increments
+`opengeni_analytics_consent_total{decision="granted|denied"}`. This is
+first-party operational telemetry like the error beacon below, not a provider:
+the body is only the decision, the request uses `credentials: "omit"`, and it
+is sent for `denied` too. Re-confirming the same answer from Account
+preferences is not counted again. People who never answer the banner are not
+counted, so compare PostHog's consented numbers with the server counters as
+well. See `docs/application-observability.md`.
 
 ## Client error beacon
 

@@ -97,6 +97,7 @@ import {
   type SessionPaginationGroup,
 } from "@/lib/session-group-pagination";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
+import { analyticsAction } from "@/lib/analytics-actions";
 import {
   SESSION_TITLE_MAX_LENGTH,
   sessionDisplayTitle,
@@ -225,6 +226,7 @@ export function NewSessionLink(props: {
       aria-label={props["aria-label"]}
       aria-keyshortcuts="Meta+Shift+O Control+Shift+O"
       className={props.className}
+      {...analyticsAction("new_session")}
       onClick={(event) => {
         if (isModifiedNavigationClick(event)) return;
         context.resetSessionView();

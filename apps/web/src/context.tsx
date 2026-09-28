@@ -2968,6 +2968,7 @@ export function RootRouteComponent() {
             analyticsAccountId={
               routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
             }
+            analyticsAccountResolved={accessContext !== null || accessError !== null}
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
