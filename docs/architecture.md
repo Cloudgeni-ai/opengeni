@@ -1499,7 +1499,10 @@ deadline batch selects interaction-held leases, including already-draining ones;
 unrelated overdue leases cannot starve it. Lease-free Connected Machine/device
 transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
 fences before mutation visibility. Healthy interactions have no independent age
-limit. See `docs/run-lifecycle.md` for rotation and capture ordering.
+limit. Existing browser/computer control, including suspension, retains its provider across
+image updates. Admission locks and checks provider identity; replacements and
+capture/rotation bypasses are forbidden. New work enforces the deployment image.
+See `docs/run-lifecycle.md` for rotation and capture ordering.
 
 Modal commands use authenticated task-router byte offsets owned by the retained
 process. Output and cursor commit atomically under an expected-cursor fence;
