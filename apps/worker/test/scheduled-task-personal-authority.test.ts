@@ -374,12 +374,12 @@ describe("scheduled task personal MCP authority", () => {
     });
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, update);
     const scheduler = activities({ mcpServers });
-    const dispatch = () =>
+    const dispatch = (producerKey = crypto.randomUUID()) =>
       scheduler.dispatchScheduledTaskRun({
         workspaceId: workspace.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
-        producerKey: crypto.randomUUID(),
+        producerKey,
       });
     const emptyRun = await dispatch();
     expect(emptyRun.action).toBe("start");
@@ -430,10 +430,21 @@ describe("scheduled task personal MCP authority", () => {
       selectedAccepted?.mcpAccountBindings?.map((binding) => binding.connectionId).sort(),
     ).toEqual(selections.map((selection) => selection.connectionId).sort());
     await admin`update connections set status = 'revoked' where id = ${first.connection.id}`;
-    expect(await dispatch()).toMatchObject({
+    const refusedProducer = crypto.randomUUID();
+    const refusal = await dispatch(refusedProducer);
+    expect(refusal).toMatchObject({
       action: "blocked",
       reason: "connection_account_unavailable",
+      diagnostic: {
+        reason: "selected_account_unavailable",
+        accounts: [{ serverId: "scheduled-common", connectionId: first.connection.id }],
+      },
     });
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
+      3,
+    );
+    await admin`update connections set status = 'active' where id = ${first.connection.id}`;
+    expect(await dispatch(refusedProducer)).toEqual(refusal);
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
       3,
     );
