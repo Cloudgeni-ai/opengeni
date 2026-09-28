@@ -127,6 +127,18 @@ if (previewParameters.get("scenario") === "sparse-active") {
   );
 }
 
+if (previewParameters.get("scenario") === "keyboard-focus") {
+  // Match the real Today retry boundary: 100 disclosed roots, then a final
+  // six-row page whose successful retry must not enlarge the visible window.
+  rows.splice(
+    0,
+    rows.length,
+    ...Array.from({ length: 106 }, (_, index) =>
+      session(2000 + index, `Focus conversation ${index + 1}`, null, index / 100),
+    ),
+  );
+}
+
 type RecordedOptions = Omit<SessionListPageOptions, "signal">;
 export type SessionSidebarEvidence = {
   listCalls: {
@@ -146,6 +158,10 @@ export type SessionSidebarEvidence = {
   }[];
   failChannelId: string | null;
   failCursor: string | null;
+  failTodayCursor: string | null;
+  holdTodayCursor: string | null;
+  heldPageStarted: boolean;
+  releaseHeldPage: () => void;
   snapshot: () => Session[];
 };
 
@@ -154,6 +170,10 @@ export const evidence: SessionSidebarEvidence = {
   archiveCalls: [],
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
+  failTodayCursor: null,
+  holdTodayCursor: null,
+  heldPageStarted: false,
+  releaseHeldPage: () => {},
   snapshot: () => structuredClone(rows),
 };
 
@@ -221,12 +241,23 @@ export const client = {
       outcome: "success",
     };
     evidence.listCalls.push(call);
+    const todayPage = options.updatedFrom !== undefined && options.updatedBefore === undefined;
+    if (todayPage && evidence.holdTodayCursor && options.cursor === evidence.holdTodayCursor) {
+      evidence.holdTodayCursor = null;
+      evidence.heldPageStarted = true;
+      await new Promise<void>((resolve) => {
+        evidence.releaseHeldPage = resolve;
+      });
+      evidence.releaseHeldPage = () => {};
+    }
     if (
-      evidence.failChannelId &&
-      options.channelId === evidence.failChannelId &&
-      (options.cursor ?? null) === evidence.failCursor
+      (evidence.failChannelId &&
+        options.channelId === evidence.failChannelId &&
+        (options.cursor ?? null) === evidence.failCursor) ||
+      (todayPage && evidence.failTodayCursor && options.cursor === evidence.failTodayCursor)
     ) {
       evidence.failChannelId = null;
+      evidence.failTodayCursor = null;
       call.outcome = "error";
       throw new Error("Preview project page failed once");
     }

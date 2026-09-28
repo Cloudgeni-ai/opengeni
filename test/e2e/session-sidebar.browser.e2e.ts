@@ -481,3 +481,161 @@ test("one Active disclosure traverses overlapping and sparse fifty-row pages to 
   ).toBe(true);
   expect(calls.map((call) => call.returnedIds.length)).toEqual([50, 50, 50, 50, 10]);
 }, 30_000);
+
+async function openKeyboardFocus(visibleCount: number) {
+  await page.goto(`${url}?scenario=keyboard-focus`);
+  await waitForRows("Today", 4);
+  for (let count = 8; count <= visibleCount; count += 4) {
+    await showMore("Today").click();
+    await waitForRows("Today", count);
+  }
+}
+
+async function holdTodayPage(cursor: string, fail = false) {
+  await page.evaluate(
+    ({ cursor: nextCursor, fail: shouldFail }) => {
+      window.sessionSidebarQa.holdTodayCursor = nextCursor;
+      window.sessionSidebarQa.heldPageStarted = false;
+      window.sessionSidebarQa.failTodayCursor = shouldFail ? nextCursor : null;
+    },
+    { cursor, fail },
+  );
+}
+
+async function waitForHeldTodayPage() {
+  await page.waitForFunction(() => window.sessionSidebarQa.heldPageStarted);
+  expect(
+    await group("Today")
+      .getByRole("button", { name: "Loading sessions in Today", exact: true })
+      .isDisabled(),
+  ).toBe(true);
+}
+
+async function releaseTodayPage() {
+  await page.evaluate(() => window.sessionSidebarQa.releaseHeldPage());
+}
+
+test("keyboard retry keeps its visible window and recovers disclosure focus before final four-plus-two exhaustion", async () => {
+  await openKeyboardFocus(100);
+  const todayCalls = (await listCalls()).filter((call) => call.options.updatedFrom);
+  expect(todayCalls.map((call) => call.options.cursor ?? null)).toEqual([null, "50"]);
+  expect(todayCalls.map((call) => call.returnedIds.length)).toEqual([50, 50]);
+  expect(todayCalls.every((call) => call.options.limit === 50)).toBe(true);
+
+  await holdTodayPage("100", true);
+  await showMore("Today").focus();
+  await page.keyboard.press("Enter");
+  await waitForHeldTodayPage();
+  await releaseTodayPage();
+  const retry = group("Today").getByRole("button", {
+    name: "Retry sessions in Today",
+    exact: true,
+  });
+  await retry.waitFor();
+  expect(await rows(group("Today")).count()).toBe(100);
+  const retryElement = await retry.elementHandle();
+
+  await holdTodayPage("100");
+  await retry.focus();
+  await page.keyboard.press("Enter");
+  await waitForHeldTodayPage();
+  await releaseTodayPage();
+  const reveal = showMore("Today");
+  await reveal.waitFor();
+  expect(await rows(group("Today")).count()).toBe(100);
+  const finalPageCalls = (await listCalls()).filter(
+    (call) => call.options.updatedFrom && call.options.cursor === "100",
+  );
+  expect(finalPageCalls.map((call) => call.outcome)).toEqual(["error", "success"]);
+  expect(finalPageCalls[1]).toMatchObject({
+    options: { limit: 50 },
+    nextCursor: null,
+  });
+  expect(finalPageCalls[1]!.returnedIds).toHaveLength(6);
+  await reveal.and(page.locator(":focus")).waitFor();
+  expect(await retryElement!.evaluate((element) => element === document.activeElement)).toBe(true);
+  if (screenshots) {
+    await reveal.scrollIntoViewIfNeeded();
+    await page.mouse.move((page.viewportSize()?.width ?? 1160) - 10, 10);
+    await page.getByText("Created by Alex Morgan", { exact: true }).waitFor({ state: "hidden" });
+  }
+  await capture("retry-focus");
+
+  await page.keyboard.press("Enter");
+  await waitForRows("Today", 104);
+  const lastTwo = showMore("Today", 2);
+  await lastTwo.and(page.locator(":focus")).waitFor();
+  await page.keyboard.press("Enter");
+  await waitForRows("Today", 106);
+  expect(await lastTwo.count()).toBe(0);
+  await page.waitForFunction(() => document.activeElement?.id === "session-group-today");
+  expect((await listCalls()).filter((call) => call.options.updatedFrom).length).toBe(
+    todayCalls.length + 2,
+  );
+}, 30_000);
+
+test("keyboard page failure recovers the surviving Retry control without disclosing rows", async () => {
+  await openKeyboardFocus(48);
+  await holdTodayPage("50", true);
+  await showMore("Today").focus();
+  await page.keyboard.press("Enter");
+  await waitForHeldTodayPage();
+  await releaseTodayPage();
+  await group("Today")
+    .getByRole("button", { name: "Retry sessions in Today", exact: true })
+    .and(page.locator(":focus"))
+    .waitFor();
+  expect(await rows(group("Today")).count()).toBe(48);
+}, 30_000);
+
+for (const blurMovedFocus of [false, true]) {
+  test(`pending continuation does not steal moved focus${blurMovedFocus ? " even after it returns to BODY" : ""}`, async () => {
+    await openKeyboardFocus(48);
+    await holdTodayPage("50");
+    await showMore("Today").focus();
+    await page.keyboard.press("Enter");
+    await waitForHeldTodayPage();
+    const view = page.getByRole("button", { name: /^Session view/ });
+    await view.focus();
+    if (blurMovedFocus) await view.evaluate((element) => element.blur());
+    await releaseTodayPage();
+    await waitForRows("Today", 52);
+    // Observe the focus-restoration frame, not only the row commit before it.
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    if (blurMovedFocus)
+      expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+    else expect(await view.evaluate((element) => element === document.activeElement)).toBe(true);
+    expect(await showMore("Today").count()).toBe(1);
+  }, 30_000);
+}
+
+test("stale pagination completion does not restore focus or grow a new browse generation", async () => {
+  await openKeyboardFocus(48);
+  await holdTodayPage("50");
+  await showMore("Today").focus();
+  await page.keyboard.press("Enter");
+  await waitForHeldTodayPage();
+  await selectView("Status", "All");
+  await waitForRows("Today", 4);
+  await page.getByRole("button", { name: /^Session view/ }).evaluate((element) => element.blur());
+  await releaseTodayPage();
+  await page.waitForFunction(() =>
+    window.sessionSidebarQa.listCalls.some(
+      (call) =>
+        call.options.updatedFrom && call.options.cursor === "50" && call.returnedIds.length === 50,
+    ),
+  );
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  expect(await rows(group("Today")).count()).toBe(4);
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+}, 30_000);

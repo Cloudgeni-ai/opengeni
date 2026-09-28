@@ -2396,7 +2396,7 @@ export function SessionList() {
               ? `No additional older sessions in ${group.label} yet.`
               : `No more older sessions in ${group.label}.`,
         );
-        return { exhausted: page.nextCursor === null, added: newlyLoaded };
+        return { exhausted: page.nextCursor === null, added: newlyLoaded, failed: false };
       } catch {
         if (!requestIsCurrent()) return;
         if (refreshWindow) return;
@@ -2409,6 +2409,7 @@ export function SessionList() {
           return new Map(states).set(group.key, { ...latest, failed: true });
         });
         setAnnouncement(`Older sessions in ${group.label} did not load. Retry is available.`);
+        return { exhausted: false, added: 0, failed: true };
       } finally {
         if (requestIsCurrent()) {
           const nextLoading = new Map(groupLoadingRef.current);
@@ -2517,6 +2518,7 @@ export function SessionList() {
       hasMore: hasMore || hiddenLocally || continuation.failed,
       loading: groupLoading,
       failed: continuation.failed,
+      isCurrent: () => paginationIdentity.current.generation === pageGeneration,
       ...(nodes && !search
         ? {
             revealCount:
@@ -2537,9 +2539,12 @@ export function SessionList() {
         );
         const result = needsPage
           ? await loadMoreInGroup(requestedGroup, false, Math.max(0, nextCount - nodes.length))
-          : { exhausted: !hasMore, added: 0 };
+          : { exhausted: !hasMore, added: 0, failed: false };
         if (result === undefined || paginationIdentity.current.generation !== pageGeneration)
           return;
+        // A current failure keeps its Retry control, but never advances the
+        // disclosure window. Stale/no-op loads still return no focus outcome.
+        if (result.failed) return false;
         setGroupWindows((current) => ({
           generation: pageGeneration,
           counts: new Map(current.generation === pageGeneration ? current.counts : []).set(
@@ -3225,6 +3230,7 @@ type SessionGroupPaginationProps = {
   hasMore: boolean;
   loading: boolean;
   failed: boolean;
+  isCurrent: () => boolean;
   revealCount?: number;
   onLoadMore: (group: SessionPaginationGroup) => Promise<boolean | void>;
 };
@@ -3232,34 +3238,106 @@ type SessionGroupPaginationProps = {
 function SessionGroupPaginationControl(
   props: SessionGroupPaginationProps & { className?: string; fallbackFocusId?: string },
 ) {
-  const { failed, group, hasMore, loading, onLoadMore, revealCount } = props;
+  const { failed, fallbackFocusId, group, hasMore, isCurrent, loading, onLoadMore, revealCount } =
+    props;
   const buttonRef = useRef<HTMLButtonElement>(null);
   const groupRef = useRef(group);
   groupRef.current = group;
+  const focusAttempt = useRef(0);
+  const pendingFocus = useRef<{
+    attempt: number;
+    exhausted?: boolean;
+    restore?: () => void;
+    cancel: () => void;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (!loading && hasMore) pendingFocus.current?.restore?.();
+  }, [loading, hasMore]);
+  useEffect(
+    () => () => {
+      // Removal can precede the promise's exhaustion result. Let that result
+      // decide fallback; a settled surviving-control intent is abandoned here.
+      if (pendingFocus.current?.exhausted === false) pendingFocus.current?.cancel();
+    },
+    [],
+  );
   const loadWithFocus = useCallback(async () => {
+    pendingFocus.current?.cancel();
     const button = buttonRef.current;
     const root = button?.closest<HTMLElement>("[data-sessionpin-session-list]") ?? null;
     const shouldRestoreFocus = document.activeElement === button;
-    const exhausted = await onLoadMore(groupRef.current);
-    if (!shouldRestoreFocus || !root || !exhausted) return;
-    requestAnimationFrame(() => {
-      if (!root.isConnected) return;
-      if (
-        document.activeElement &&
-        document.activeElement !== document.body &&
-        document.activeElement !== button
-      )
-        return;
-      const labelledFallback = props.fallbackFocusId
-        ? document.getElementById(props.fallbackFocusId)
-        : null;
-      const fallback =
-        labelledFallback && root.contains(labelledFallback)
-          ? labelledFallback
-          : (root.querySelector<HTMLElement>("a[data-session-row]") ?? root);
-      fallback.focus();
-    });
-  }, [onLoadMore, props.fallbackFocusId]);
+    const requestedGroup = groupRef.current;
+    const attempt = ++focusAttempt.current;
+    let focusMoved = false;
+    let cancelled = false;
+    const observeFocus = (event: FocusEvent) => {
+      if (event.target !== button && event.target !== document.body) focusMoved = true;
+    };
+    const cancel = () => {
+      cancelled = true;
+      document.removeEventListener("focusin", observeFocus, true);
+      if (pendingFocus.current?.attempt === attempt) pendingFocus.current = null;
+    };
+    if (shouldRestoreFocus) {
+      pendingFocus.current = { attempt, cancel };
+      document.addEventListener("focusin", observeFocus, true);
+    }
+    let restoreScheduled = false;
+    try {
+      const exhausted = await onLoadMore(requestedGroup);
+      if (!shouldRestoreFocus || !root || cancelled || exhausted === undefined) return;
+      const restore = () => {
+        if (cancelled) return;
+        if (
+          focusMoved ||
+          focusAttempt.current !== attempt ||
+          !isCurrent() ||
+          groupRef.current.key !== requestedGroup.key ||
+          !root.isConnected
+        ) {
+          cancel();
+          return;
+        }
+        if (
+          document.activeElement &&
+          document.activeElement !== document.body &&
+          document.activeElement !== button
+        ) {
+          cancel();
+          return;
+        }
+        if (!exhausted) {
+          if (
+            !button ||
+            buttonRef.current !== button ||
+            !button.isConnected ||
+            !root.contains(button)
+          ) {
+            cancel();
+            return;
+          }
+          // The promise can settle before React commits disabled={false}.
+          // Keep this intent for that commit instead of dropping focus to BODY.
+          if (button.disabled) return;
+          cancel();
+          button.focus({ preventScroll: true });
+          return;
+        }
+        cancel();
+        const labelledFallback = fallbackFocusId ? document.getElementById(fallbackFocusId) : null;
+        const fallback =
+          labelledFallback && root.contains(labelledFallback)
+            ? labelledFallback
+            : (root.querySelector<HTMLElement>("a[data-session-row]") ?? root);
+        fallback.focus();
+      };
+      pendingFocus.current = { attempt, exhausted, restore, cancel };
+      restoreScheduled = true;
+      requestAnimationFrame(restore);
+    } finally {
+      if (!restoreScheduled) cancel();
+    }
+  }, [onLoadMore, fallbackFocusId, isCurrent]);
   const isActiveGroup = group.kind === "activity" && group.group === "active";
 
   const action = loading ? "Loading" : failed ? "Retry" : "Load";

@@ -17,7 +17,9 @@ writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId(subjectId, worksp
   groupBy:
     new URLSearchParams(window.location.search).get("scenario") === "sparse-active"
       ? "none"
-      : "project",
+      : new URLSearchParams(window.location.search).get("scenario") === "keyboard-focus"
+        ? "activity"
+        : "project",
   sortBy: "updatedAt",
   status: "active",
   showEmptyGroups: false,
