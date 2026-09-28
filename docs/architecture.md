@@ -812,17 +812,10 @@ These producers all converge on the ordinary session/turn runtime:
   session rather than copying the parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
-Schedule indicators derive from authorized, non-deleted reusable-session targets,
-including paused schedules, through existing lineage refreshes. Creation metadata
-is historical provenance; the schedules API filters by `sessionId`.
+Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
+Schedules API filtering uses `sessionId`.
 
-Connection-account selection refusals are terminal failed scheduled-run receipts
-under the same producer identity. `admissionDiagnostic` contains typed reasons
-and selected account identifiers, not credentials or accepted execution. These
-rows cannot acquire a session or execution snapshot or become runnable.
-Reconnection affects a new occurrence, not an already-refused occurrence.
-Migration 0531 adds this diagnostic-only path; ordinary accepted-run checks stay
-unchanged.
+Connection-account refusals retain immutable [diagnostic-only run receipts](scheduled-admission-diagnostics.md), never execution authority.
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;
 `tools: []` remains an empty override. Standalone scheduler-owned turns use a
