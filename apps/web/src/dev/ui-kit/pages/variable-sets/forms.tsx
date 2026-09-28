@@ -1,16 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Disclosure } from "@/components/ui/disclosure";
-import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
+import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import { FormDialog, FormFrame, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
 import { InlineHelp } from "@/components/ui/inline-help";
 import {
   EnvPastePreview,
   SecretInput,
   importableEnvRows,
-  normalizeVariableName,
   parseEnvText,
-  variableNameIssue,
   type EnvRow,
 } from "@/components/ui/secret-field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -29,8 +27,8 @@ import {
 } from "./model";
 
 /* ----------------------------------------------------------------------------
-   Create and edit forms for the Variable sets pages. New variable set, Add
-   variables and Edit details are their own pages with a back link and a
+   Create and edit forms for the Variable sets pages. New variable set, Paste
+   .env and Edit details are their own pages with a back link and a
    sticky footer (the decided form pick). Only the one-field Replace value
    stays a small centered dialog.
    -------------------------------------------------------------------------- */
@@ -305,25 +303,15 @@ export function NewSetForm({
 }
 
 /* ----------------------------------------------------------------------------
-   Add variable (one, or a pasted .env).
+   Paste .env: several variables at once, on their own page. One variable is
+   added inline at the bottom of the set's list (the real AddVariableRow).
    -------------------------------------------------------------------------- */
 
-export type AddMode = "one" | "paste";
-
-interface AddValues {
-  mode: AddMode;
-  name: string;
-  value: string;
-  env: string;
-  secret: boolean;
-}
-
-export function AddVariableForm({
+export function PasteEnvForm({
   presentation,
   open,
   set,
-  initialMode = "one",
-  initialValues,
+  initialEnv = "",
   onClose,
   onAdd,
   back,
@@ -331,49 +319,29 @@ export function AddVariableForm({
   presentation: FormPresentation;
   open: boolean;
   set: PreviewSet | undefined;
-  initialMode?: AddMode;
-  /** Prefilled fields, for the kit's dialog previews. */
-  initialValues?: { name?: string; env?: string };
+  /** Prefilled text, for the kit's framed preview. */
+  initialEnv?: string;
   onClose: () => void;
   onAdd: (variables: NewVariable[], replaced: string[]) => void;
   back?: { label: ReactNode; onClick: () => void };
 }) {
-  const picks = usePagePicks();
   const answers = useAnswers();
   const plainOn = answers.plain === "shown";
-  const initialName = initialValues?.name ?? "";
-  const initialEnv = initialValues?.env ?? "";
-  const [values, setValues] = useState<AddValues>({
-    mode: initialMode,
-    name: initialName,
-    value: "",
-    env: initialEnv,
-    secret: true,
-  });
+  const [env, setEnv] = useState(initialEnv);
   const [tried, setTried] = useState(false);
 
   useEffect(() => {
     if (open) {
-      setValues({ mode: initialMode, name: initialName, value: "", env: initialEnv, secret: true });
+      setEnv(initialEnv);
       setTried(false);
     }
-  }, [open, initialMode, initialName, initialEnv]);
+  }, [open, initialEnv]);
 
   if (!set) return null;
   const existing = set.variables.map((variable) => variable.name);
-  const update = <Key extends keyof AddValues>(key: Key, value: AddValues[Key]) =>
-    setValues((current) => ({ ...current, [key]: value }));
-
-  const normalized = normalizeVariableName(values.name);
-  const issue = normalized ? variableNameIssue(normalized, existing) : null;
-  const nameError = issue?.message ?? (tried && !normalized ? "Name the variable." : undefined);
-  const valueError = tried && !values.value ? "Enter a value." : undefined;
-  const rows = values.env.trim() ? parseEnvText(values.env, existing) : [];
+  const rows = env.trim() ? parseEnvText(env, existing) : [];
   const importable = importableEnvRows(rows);
   const envError = tried ? envProblems(rows) : undefined;
-  const plainValue = plainOn && !values.secret;
-
-  const paste = values.mode === "paste";
   const count = importable.length;
 
   return (
@@ -384,144 +352,45 @@ export function AddVariableForm({
       onSubmitted={onClose}
       back={back}
       frame={{
-        title: paste ? "Add variables" : "Add variable",
-        description: `In ${set.name}. Agents get ${paste ? "them" : "it"} from the next turn.`,
-        submitLabel: paste
-          ? count > 0
-            ? `Add ${count} ${count === 1 ? "variable" : "variables"}`
-            : "Add variables"
-          : "Add variable",
+        title: "Paste .env",
+        description: `Add several variables to ${set.name}. Agents get them from the next turn.`,
+        submitLabel:
+          count > 0 ? `Add ${count} ${count === 1 ? "variable" : "variables"}` : "Add variables",
         pendingLabel: "Adding…",
-        submitDisabled: paste && count === 0,
+        submitDisabled: count === 0,
         onSubmit: async () => {
           setTried(true);
-          if (paste) {
-            if (count === 0 || envProblems(rows)) return false;
-            await wait(650);
-            onAdd(
-              importable.map((row) => ({ name: row.name, kind: "secret", value: row.value })),
-              importable.filter((row) => row.status === "replace").map((row) => row.name),
-            );
-            return true;
-          }
-          if (issue || !normalized || !values.value) return false;
+          if (count === 0 || envProblems(rows)) return false;
           await wait(650);
           onAdd(
-            [
-              {
-                name: normalized,
-                kind: plainValue ? "plain" : "secret",
-                value: plainValue ? values.value : undefined,
-              },
-            ],
-            [],
+            importable.map((row) => ({ name: row.name, kind: "secret", value: row.value })),
+            importable.filter((row) => row.status === "replace").map((row) => row.name),
           );
           return true;
         },
       }}
     >
       <FieldStack>
-        <SegmentedControl
-          aria-label="How to add"
-          variant={picks.segmented}
-          size="sm"
-          className="self-start"
-          value={values.mode}
-          onValueChange={(mode) => update("mode", mode)}
-          options={[
-            { value: "one", label: "One variable" },
-            { value: "paste", label: "Paste .env" },
-          ]}
-        />
-        {paste ? (
-          <>
-            <Field
-              label="Variables"
-              error={envError}
-              hint={
-                rows.length
-                  ? undefined
-                  : "One NAME=value per line. Comments and export are ignored."
-              }
-            >
-              <TextArea
-                mono
-                rows={5}
-                value={values.env}
-                onChange={(event) => update("env", event.target.value)}
-                placeholder={"DATABASE_URL=postgres://…\nPGSSLMODE=require"}
-                spellCheck={false}
-              />
-            </Field>
-            {rows.length ? <EnvPastePreview rows={rows} /> : null}
-            {plainOn && rows.length ? (
-              <InlineHelp icon>Pasted values are saved as secrets. Edit one to show it.</InlineHelp>
-            ) : null}
-          </>
-        ) : (
-          <>
-            <Field
-              label="Name"
-              error={nameError}
-              hint={
-                normalized && normalized !== values.name ? (
-                  <>
-                    Saved as <span className="font-mono text-fg">{normalized}</span>
-                  </>
-                ) : (
-                  variableNameRules.hint
-                )
-              }
-            >
-              <TextInput
-                mono
-                value={values.name}
-                onChange={(event) => update("name", event.target.value)}
-                placeholder="e.g. DATABASE_URL"
-                autoComplete="off"
-                autoCapitalize="characters"
-                spellCheck={false}
-                data-1p-ignore
-                data-lpignore="true"
-              />
-            </Field>
-            <Field
-              label="Value"
-              error={valueError}
-              hint={
-                plainValue
-                  ? "Shown on this page. Anyone who can see this set can read it."
-                  : "Hidden after you save it. Agents still get it in their sandbox."
-              }
-            >
-              {plainValue ? (
-                <TextArea
-                  mono
-                  rows={2}
-                  value={values.value}
-                  onChange={(event) => update("value", event.target.value)}
-                  spellCheck={false}
-                />
-              ) : (
-                <SecretInput
-                  multiline
-                  rows={2}
-                  value={values.value}
-                  onChange={(event) => update("value", event.target.value)}
-                  placeholder="Paste the value"
-                />
-              )}
-            </Field>
-            {plainOn ? (
-              <CheckboxField
-                label="Secret"
-                description="Hide the value after saving. Turn it off for config like a region or an account ID."
-                checked={values.secret}
-                onCheckedChange={(secret) => update("secret", secret)}
-              />
-            ) : null}
-          </>
-        )}
+        <Field
+          label="Variables"
+          error={envError}
+          hint={
+            rows.length ? undefined : "One NAME=value per line. Comments and export are ignored."
+          }
+        >
+          <TextArea
+            mono
+            rows={5}
+            value={env}
+            onChange={(event) => setEnv(event.target.value)}
+            placeholder={"DATABASE_URL=postgres://…\nPGSSLMODE=require"}
+            spellCheck={false}
+          />
+        </Field>
+        {rows.length ? <EnvPastePreview rows={rows} /> : null}
+        {plainOn && rows.length ? (
+          <InlineHelp icon>Pasted values are saved as secrets. Edit one to show it.</InlineHelp>
+        ) : null}
       </FieldStack>
     </FormHost>
   );

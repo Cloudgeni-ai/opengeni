@@ -12,24 +12,16 @@ import {
 } from "react";
 import {
   ArrowRightIcon,
-  BotIcon,
-  BrainCircuitIcon,
   Building2Icon,
-  CalendarClockIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ContainerIcon,
-  GaugeIcon,
-  InboxIcon,
   KeyRoundIcon,
   LaptopIcon,
   MenuIcon,
-  PanelsTopLeftIcon,
-  PlugIcon,
   SettingsIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
-  SquarePenIcon,
   UsersIcon,
   VariableIcon,
   type LucideIcon,
@@ -44,6 +36,7 @@ import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
 import { cn } from "@/lib/utils";
 
 import { chats, currentWorkspace, organization, you } from "../../fixtures";
+import { KitRailItems } from "../kit-rail";
 import { usePagePicks, type NavLayout } from "./answers";
 
 /* ----------------------------------------------------------------------------
@@ -67,18 +60,6 @@ interface Destination {
   badge?: string;
   attention?: boolean;
 }
-
-const RAIL: Destination[] = [
-  { id: "new-session", label: "New session", icon: SquarePenIcon },
-  { id: "for-you", label: "For you", icon: InboxIcon, badge: "2" },
-  { id: "agents", label: "Agents", icon: BotIcon },
-  { id: "schedules", label: "Schedules", icon: CalendarClockIcon },
-  { id: "artifacts", label: "Artifacts", icon: PanelsTopLeftIcon },
-  { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon, attention: true },
-  { id: "capabilities", label: "Capabilities", icon: PlugIcon },
-  { id: "insights", label: "Insights", icon: GaugeIcon },
-  { id: "settings", label: "Settings", icon: SettingsIcon },
-];
 
 const SETTINGS: Destination[] = [
   { id: "general", label: "General", icon: SlidersHorizontalIcon },
@@ -203,23 +184,12 @@ function MainRail({
       </div>
       <nav aria-label="Main" className="mt-3 w-full">
         <NavGroup collapsed={collapsed}>
-          {RAIL.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavItem
-                key={item.id}
-                href={`#${item.id}`}
-                onClick={linkHandler(item.id, onNavigate)}
-                icon={<Icon />}
-                label={item.label}
-                badge={item.badge}
-                attention={item.attention}
-                attentionLabel="3 waiting for review"
-                active={item.id === "settings"}
-                collapsed={collapsed}
-              />
-            );
-          })}
+          <KitRailItems
+            active="settings"
+            collapsed={collapsed}
+            knowledgeAttention={3}
+            onNavigate={onNavigate}
+          />
         </NavGroup>
       </nav>
       {collapsed ? null : (

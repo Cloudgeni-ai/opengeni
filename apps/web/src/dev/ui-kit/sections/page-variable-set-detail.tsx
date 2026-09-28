@@ -1,6 +1,8 @@
 import { useMemo, useState, type ReactNode } from "react";
 
 import { DestructiveConfirmPanel } from "@/components/ui/destructive-confirm";
+import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
+import type { WorkspaceVariableSet } from "@/types";
 
 import { envPastePreview } from "../fixtures";
 import {
@@ -15,7 +17,7 @@ import {
 import { useVerbs } from "../pages/variable-sets/answers";
 import { VariableSetsApp } from "../pages/variable-sets/app";
 import { announceUsage } from "../pages/variable-sets/detail";
-import { AddVariableForm, ReplaceValueDialog } from "../pages/variable-sets/forms";
+import { PasteEnvForm, ReplaceValueDialog, wait } from "../pages/variable-sets/forms";
 import { ChipGroup, PicksUsed, QuestionToggles } from "../pages/variable-sets/kit-controls";
 import {
   blockedDeleteHint,
@@ -95,21 +97,18 @@ function DialogStates() {
     <StatesGrid
       title="Forms and dialogs on this page"
       columns={2}
-      description="Framed here so you can compare them. Add variable and Paste .env are pages with a back link to the set; Replace value is the one small centered dialog, and deletes are centered confirms."
+      description="Framed here so you can compare them. One variable is added inline under the list; Paste .env is a page with a back link to the set; Replace value is the one small centered dialog, and deletes are centered confirms."
     >
       <StateCell
-        label="Add variable (a page)"
+        label="Add a variable (inline, under the list)"
         align="stretch"
-        note='Typed "aws session token"; the name is saved in uppercase with underscores.'
+        note="The product's row. Name is uppercased as you type; errors show inline; after Add it clears and Name takes focus again."
       >
-        <div className="flex min-w-0 flex-1 items-start justify-center">
-          <AddVariableForm
-            presentation="panel"
-            open
-            set={aws}
-            initialValues={{ name: "aws session token" }}
-            onClose={noop}
-            onAdd={noop}
+        <div className="min-w-0 flex-1">
+          <AddVariableRow
+            set={{ name: aws.name, variables: aws.variables } as unknown as WorkspaceVariableSet}
+            onAdd={() => wait(500)}
+            onPaste={noop}
           />
         </div>
       </StateCell>
@@ -119,12 +118,11 @@ function DialogStates() {
         note="One name is reserved and one is already in the set; both are explained before anything is saved."
       >
         <div className="flex min-w-0 flex-1 items-start justify-center">
-          <AddVariableForm
+          <PasteEnvForm
             presentation="panel"
             open
             set={github}
-            initialMode="paste"
-            initialValues={{ env: PASTED_ENV }}
+            initialEnv={PASTED_ENV}
             onClose={noop}
             onAdd={noop}
           />
@@ -197,7 +195,7 @@ export default function PageVariableSetDetailSection() {
     <KitSection sectionKey="page-variable-set-detail">
       <KitBlock
         title="The page"
-        description="What opens when you click a variable set: its own page with a back link, Variables and Used by tabs, and a quiet card with its facts. Add variable and Edit details open as pages; every menu, dialog and form works on the fixtures."
+        description="What opens when you click a variable set: its own page with a back link, Variables and Used by tabs, and a quiet card with its facts. Variables are added inline at the bottom of the list, with a quiet Paste .env link; Paste .env and Edit details open as pages. Every menu, dialog and form works on the fixtures."
       >
         <div className="flex min-w-0 flex-col gap-4">
           {pane.mobileFrame ? null : <QuestionToggles collapsible={pane.count > 1} />}
@@ -245,13 +243,14 @@ export default function PageVariableSetDetailSection() {
         title="What this page does"
         use={[
           "Variables as one table: Name, Value and Updated, with Replace value and Delete in the row's ⋯ menu.",
+          "Add a variable inline at the bottom of the list: Name, Value, Add. Paste .env is a quiet link to its own page.",
           'Secrets read "Secret" and are never shown. Plain config shows inline once variables have a Secret flag.',
           "Used by lists every schedule, chat and environment default, each linked.",
           "Delete explains what uses the set instead of failing after the click.",
         ]}
         avoid={[
           "Reveal, Copy, version numbers or a •••••• pill on every row.",
-          "An add form that is always open under the table, or a right-side sheet.",
+          "An Add variable button in the header, a one-variable page, or a right-side sheet.",
           "Rotate and Revoke for values OpenGeni only stores.",
         ]}
       />

@@ -68,6 +68,8 @@ import {
   type KitViewChange,
   type KitWidth,
 } from "./view";
+// The kit's own utilities; the production stylesheet does not scan src/dev/ui-kit.
+import "./kit.css";
 
 /**
  * DEV-only component studio at /dev/ui-kit. Every component shown here is the

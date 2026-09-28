@@ -1,21 +1,21 @@
 import { useState, type ReactNode } from "react";
 import {
   ArrowRightIcon,
-  BotIcon,
+  BarChart3Icon,
   BrainCircuitIcon,
   Building2Icon,
   CalendarClockIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ContainerIcon,
-  GaugeIcon,
-  InboxIcon,
   KeyRoundIcon,
   LaptopIcon,
+  NetworkIcon,
   PanelsTopLeftIcon,
   PencilIcon,
   PlugIcon,
   PlusIcon,
+  SendIcon,
   SettingsIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -44,6 +44,7 @@ import {
   type NavItemSize,
 } from "@/components/ui/settings-nav";
 import { Switch } from "@/components/ui/switch";
+import { DEFAULT_RAIL_DESTINATIONS } from "@/lib/rail-destinations";
 import { cn } from "@/lib/utils";
 
 import {
@@ -58,6 +59,7 @@ import {
 } from "../fixtures";
 import { usePick } from "../picks";
 import { Alternative, Fork, KitBlock, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
+import { KitRailItems, type KitRailId } from "../pages/kit-rail";
 
 /* ----------------------------------------------------------------------------
    Destinations: every one once, with one name and one icon.
@@ -72,24 +74,30 @@ interface Destination {
   attention?: boolean;
 }
 
+/** Every main-rail destination with the real icon; the rail itself is `KitRailItems`. */
 const RAIL: Destination[] = [
   { id: "new-session", label: "New session", icon: SquarePenIcon },
-  { id: "for-you", label: "For you", icon: InboxIcon, badge: "2" },
-  { id: "agents", label: "Agents", icon: BotIcon },
+  { id: "for-you", label: "For you", icon: SendIcon, badge: "2" },
+  { id: "agents", label: "Agents", icon: NetworkIcon },
   { id: "schedules", label: "Schedules", icon: CalendarClockIcon },
   { id: "artifacts", label: "Artifacts", icon: PanelsTopLeftIcon },
   { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon, attention: true },
   { id: "capabilities", label: "Capabilities", icon: PlugIcon },
-  { id: "insights", label: "Insights", icon: GaugeIcon },
+  { id: "insights", label: "Insights", icon: BarChart3Icon },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
+
+/** Where a rail destination sits by default: in the rail, or under More. */
+function railPlace(id: string): string {
+  if (id === "new-session" || id === "settings") return "Main rail";
+  return (DEFAULT_RAIL_DESTINATIONS as readonly string[]).includes(id) ? "Main rail" : "More";
+}
 
 const SETTINGS: Destination[] = [
   {
     id: "general",
     label: "General",
     icon: SlidersHorizontalIcon,
-    description: "Name, agent activity and defaults for new sessions.",
   },
   {
     id: "access",
@@ -163,10 +171,14 @@ function usePagePicks(): {
 function GeneralBody({ variant }: { variant: SectionVariant }) {
   return (
     <SectionStack variant={variant}>
-      <Section title="Workspace">
+      <Section aria-label="Workspace">
         <SettingRow
           label="Name"
-          description={currentWorkspace.name}
+          description={
+            <span className="mt-0.5 block text-sm leading-5 break-words text-fg">
+              {currentWorkspace.name}
+            </span>
+          }
           control={
             <Button variant="outline" size="sm">
               <PencilIcon aria-hidden="true" />
@@ -176,16 +188,10 @@ function GeneralBody({ variant }: { variant: SectionVariant }) {
         />
         <SettingRow
           label="Workspace ID"
-          description={currentWorkspace.typeLabel}
-          controlWidth="auto"
-          control={
-            <CopyField
-              value={currentWorkspace.id}
-              label="workspace ID"
-              size="md"
-              truncate="middle"
-              maxLength={18}
-            />
+          description={
+            <span className="mt-0.5 flex min-w-0">
+              <CopyField value={currentWorkspace.id} label="workspace ID" truncate="middle" />
+            </span>
           }
         />
       </Section>
@@ -362,26 +368,12 @@ function MainRail({
       </div>
       <nav aria-label="Main" className="mt-3 w-full">
         <NavGroup collapsed={collapsed}>
-          {RAIL.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavItem
-                key={item.id}
-                href={`#${item.id}`}
-                onClick={(event) => {
-                  prevent(event);
-                  onSelect?.(item.id);
-                }}
-                icon={<Icon />}
-                label={item.label}
-                badge={item.badge}
-                attention={item.attention}
-                attentionLabel="3 waiting for review"
-                active={active === item.id}
-                collapsed={collapsed}
-              />
-            );
-          })}
+          <KitRailItems
+            active={active as KitRailId}
+            collapsed={collapsed}
+            knowledgeAttention={3}
+            onNavigate={onSelect}
+          />
         </NavGroup>
       </nav>
       {collapsed ? null : (
@@ -661,7 +653,7 @@ function NavItemStates() {
         />
       </ItemState>
       <ItemState label="With count">
-        <NavItem href="#for-you" onClick={prevent} icon={<InboxIcon />} label="For you" badge="2" />
+        <NavItem href="#for-you" onClick={prevent} icon={<SendIcon />} label="For you" badge="2" />
       </ItemState>
       <ItemState label="Needs you">
         <NavItem
@@ -684,7 +676,7 @@ function NavItemStates() {
       </ItemState>
       <ItemState label="Disabled with reason">
         <NavItem
-          icon={<GaugeIcon />}
+          icon={<BarChart3Icon />}
           label="Insights"
           disabledReason="Only workspace admins can see Insights. Ask Maria Chen for access."
         />
@@ -775,7 +767,6 @@ function MobileSettingsPage() {
             }
             icon={<SlidersHorizontalIcon />}
             title="General"
-            description="Name, agent activity and defaults for new sessions."
           />
         </PageHeaderStyleProvider>
         <div className="mt-6">
@@ -929,7 +920,7 @@ export default function NavigationSection() {
                 <Icon aria-hidden="true" className="size-4 shrink-0 text-fg-muted" />
                 <span className="min-w-0 truncate">{item.label}</span>
                 <span className="ml-auto shrink-0 text-xs text-fg-subtle">
-                  {RAIL.includes(item) ? "Main rail" : "Settings"}
+                  {RAIL.includes(item) ? railPlace(item.id) : "Settings"}
                 </span>
               </li>
             );
@@ -940,6 +931,7 @@ export default function NavigationSection() {
       <UsageNotes
         use={[
           "Every destination once, with one name and one icon. Rail label = page title = route noun.",
+          "The main rail stays brief: New session, Schedules, Artifacts, Knowledge, Capabilities, More, then Settings. More holds the rest and Customize rail.",
           "Group labels in 12px sentence case, only when a group needs a name (Runtime, Chats).",
           "Hide destinations the viewer can't use. Disable only when access is on its way.",
           "A trailing arrow when the item leaves this area (Organization settings).",

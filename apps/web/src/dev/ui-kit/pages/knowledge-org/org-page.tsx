@@ -94,7 +94,8 @@ interface NavEntry {
   id: OrgPageId;
   label: string;
   icon: LucideIcon;
-  description: string;
+  /** Omitted when it would only restate the page's rows (General). */
+  description?: string;
 }
 
 const ORG_PICKS: readonly PickedKey[] = [
@@ -125,7 +126,6 @@ function navEntries(questions: OrgQuestions, peopleTitle: string, local: boolean
       id: "general",
       label: "General",
       icon: SlidersHorizontalIcon,
-      description: "The organization's name and ID.",
     },
     !local && {
       id: "people",
@@ -857,15 +857,20 @@ export function OrgPagePreview() {
    The smaller pages.
    -------------------------------------------------------------------------- */
 
+/** Name (value + Rename) and Organization ID (value + copy); the page title names them. */
 function GeneralBody({ onRename }: { onRename: () => void }) {
   const { picks, local } = useOrg();
   return (
     <SectionStack variant={picks.section}>
-      <Section title="Organization">
+      <Section aria-label="Organization">
         <SettingRow
           variant={picks.settingRow}
           label="Name"
-          description={local ? "Local" : organization.name}
+          description={
+            <span className="mt-0.5 block text-sm leading-5 break-words text-fg">
+              {local ? "Local" : organization.name}
+            </span>
+          }
           control={
             <Button
               type="button"
@@ -882,16 +887,10 @@ function GeneralBody({ onRename }: { onRename: () => void }) {
         <SettingRow
           variant={picks.settingRow}
           label="Organization ID"
-          description="For the API and support requests."
-          controlWidth="auto"
-          control={
-            <CopyField
-              value={organization.id}
-              label="organization ID"
-              size="md"
-              truncate="middle"
-              maxLength={20}
-            />
+          description={
+            <span className="mt-0.5 flex min-w-0">
+              <CopyField value={organization.id} label="organization ID" truncate="middle" />
+            </span>
           }
         />
       </Section>

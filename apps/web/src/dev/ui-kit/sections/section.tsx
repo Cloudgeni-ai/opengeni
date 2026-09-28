@@ -8,11 +8,10 @@ import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack, type SectionVariant } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingRow, SettingRowLink, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { StatusDot } from "@/components/ui/status-dot";
 import { Switch } from "@/components/ui/switch";
 
 import {
-  agentActivity,
   currentWorkspace,
   learningModes,
   learningSettings,
@@ -44,15 +43,13 @@ function PauseButton() {
   );
 }
 
+/** Settings > General starts with its rows: no header, no descriptions that restate the labels. */
 function WorkspaceSection() {
   return (
-    <Section
-      title="Workspace"
-      description="The name people see, and what this workspace belongs to."
-    >
+    <Section aria-label="Workspace">
       <SettingRow
         label="Name"
-        description={currentWorkspace.name}
+        description={<RowValue>{currentWorkspace.name}</RowValue>}
         control={
           <Button variant="outline" size="sm">
             <PencilIcon aria-hidden="true" />
@@ -60,41 +57,36 @@ function WorkspaceSection() {
           </Button>
         }
       />
-      <SettingRow label="Type" description={currentWorkspace.typeLabel} />
+      <SettingRow label="Type" description={<RowValue>{currentWorkspace.typeLabel}</RowValue>} />
       <SettingRow
         label="Workspace ID"
-        description="Use it with the API and the CLI."
-        controlWidth="auto"
-        control={
-          <CopyField
-            value={currentWorkspace.id}
-            label="workspace ID"
-            size="md"
-            truncate="middle"
-            maxLength={18}
-          />
+        description={
+          <span className="mt-0.5 flex min-w-0">
+            <CopyField value={currentWorkspace.id} label="workspace ID" truncate="middle" />
+          </span>
         }
       />
     </Section>
   );
 }
 
+/** A row's current value: 14px in the title color, under the label. */
+function RowValue({ children }: { children: ReactNode }) {
+  return <span className="mt-0.5 block text-sm leading-5 break-words text-fg">{children}</span>;
+}
+
+/** As in the product: "Running" with a plain Pause button that opens "Pause agent work". */
 function AgentActivitySection() {
   return (
-    <Section
-      title="Agent activity"
-      description="Pausing stops new agent work in this workspace. Work in progress finishes first."
-    >
+    <Section title="Agent activity">
       <SettingRow
         label={
           <span className="inline-flex items-center gap-2">
-            Agents
-            <StatusBadge status="running" variant="dot">
-              {agentActivity.runningLabel}
-            </StatusBadge>
+            <StatusDot tone="success" size="sm" />
+            Running
           </span>
         }
-        description="Chats and schedules can start new work."
+        description="Agents can start new sessions and scheduled runs."
         control={<PauseButton />}
       />
     </Section>
@@ -154,7 +146,7 @@ function SessionDefaultsSection({ action }: { action?: ReactNode }) {
 function DeleteWorkspaceButton() {
   return (
     <Button variant="outline" size="sm" className="text-danger hover:text-danger">
-      Delete workspace…
+      Delete workspace
     </Button>
   );
 }
@@ -224,6 +216,14 @@ export default function SectionSection() {
       </Fork>
 
       <StatesGrid columns={2} description="Version A, the open section.">
+        <StateCell
+          label="No header"
+          note="Only for a page's first rows when the page title already names them (Settings > General)."
+          align="stretch"
+        >
+          <WorkspaceSection />
+        </StateCell>
+
         <StateCell label="Title only" align="stretch">
           <Section title="Schedules you own">
             <ScheduleRows />
@@ -320,10 +320,7 @@ export default function SectionSection() {
           note="What happened, what to do, inside the section."
           align="stretch"
         >
-          <Section
-            title="Agent activity"
-            description="Pausing stops new agent work in this workspace. Work in progress finishes first."
-          >
+          <Section title="Agent activity">
             <Notice
               tone="failed"
               action={
@@ -383,6 +380,7 @@ export default function SectionSection() {
         ]}
         avoid={[
           "Around a single control. Use one SettingRow.",
+          "A header or description that only restates the page title or the row labels.",
           "Inside another boxed surface. Never a card in a card.",
           "As a page title. Use the page header.",
           "For hiding options. Use a Disclosure for secondary options of the same object.",

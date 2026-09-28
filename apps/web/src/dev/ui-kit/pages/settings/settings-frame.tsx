@@ -3,27 +3,22 @@ import {
   ArrowRightIcon,
   ArrowUpRightIcon,
   BotIcon,
-  BrainCircuitIcon,
   Building2Icon,
-  CalendarClockIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ContainerIcon,
   GaugeIcon,
   GraduationCapIcon,
-  InboxIcon,
   KeyRoundIcon,
   LaptopIcon,
   LibraryIcon,
   MenuIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
-  PanelsTopLeftIcon,
   PlugIcon,
   SettingsIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
-  SquarePenIcon,
   TriangleAlertIcon,
   UsersIcon,
   VariableIcon,
@@ -43,6 +38,7 @@ import { cn } from "@/lib/utils";
 import { chats, organization, organizationRoles, type Person } from "../../fixtures";
 import type { SectionKey } from "../../sections/registry";
 import { useKitNavigate, useKitView } from "../../view";
+import { KitRailItems } from "../kit-rail";
 import { useElementWidth } from "./controls";
 import { useSettingsPicks, type SettingsNavLayout } from "./picks";
 
@@ -73,7 +69,8 @@ interface Destination {
   id: SettingsPageId;
   label: string;
   icon: LucideIcon;
-  description: string;
+  /** Omitted when it would only list what the page shows (General). */
+  description?: string;
   /** Another kit page preview that shows this destination. */
   preview?: { section: SectionKey; label: string };
   /** Why this destination isn't in this preview (placeholder copy). */
@@ -86,7 +83,6 @@ function destinations(workspaceName: string): Record<SettingsPageId, Destination
       id: "general",
       label: "General",
       icon: SlidersHorizontalIcon,
-      description: "Name, agent activity and defaults for new sessions.",
     },
     access: {
       id: "access",
@@ -155,14 +151,14 @@ function destinations(workspaceName: string): Record<SettingsPageId, Destination
       label: "Agents",
       icon: BotIcon,
       description: "Every workstream in this workspace, live.",
-      note: "Agents is a live view of work, not a setting. Question 5 moves it to the main rail.",
+      note: "Agents is a live view of work, not a setting. Question 5 moves it to the main rail, under More.",
     },
     insights: {
       id: "insights",
       label: "Insights",
       icon: GaugeIcon,
       description: "Usage and spend for this workspace.",
-      note: "Insights is a dashboard, not a setting. Question 5 moves it to the main rail for admins.",
+      note: "Insights is a dashboard, not a setting. Question 5 moves it to the main rail, under More, for admins.",
     },
     memory: {
       id: "memory",
@@ -209,29 +205,6 @@ function settingsGroups({
     { label: "Workspace activity", items: ["agents", "insights", "memory"] },
     runtime,
   ];
-}
-
-interface RailDestination {
-  id: string;
-  label: string;
-  icon: LucideIcon;
-  badge?: string;
-  attention?: boolean;
-}
-
-function railDestinations(settingsOnly: boolean): RailDestination[] {
-  const all: Array<RailDestination & { movedIn?: boolean }> = [
-    { id: "new-session", label: "New session", icon: SquarePenIcon },
-    { id: "for-you", label: "For you", icon: InboxIcon, badge: "2" },
-    { id: "agents", label: "Agents", icon: BotIcon, movedIn: true },
-    { id: "schedules", label: "Schedules", icon: CalendarClockIcon },
-    { id: "artifacts", label: "Artifacts", icon: PanelsTopLeftIcon },
-    { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon, attention: true },
-    { id: "capabilities", label: "Capabilities", icon: PlugIcon },
-    { id: "insights", label: "Insights", icon: GaugeIcon, movedIn: true },
-    { id: "settings", label: "Settings", icon: SettingsIcon },
-  ];
-  return all.filter((item) => settingsOnly || !item.movedIn);
 }
 
 function prevent(event: MouseEvent) {
@@ -304,7 +277,6 @@ function AccountRow({
 
 function MainRail({
   collapsed,
-  settingsOnly,
   workspaceName,
   viewer,
   onOpenSettings,
@@ -312,7 +284,6 @@ function MainRail({
   className,
 }: {
   collapsed: boolean;
-  settingsOnly: boolean;
   workspaceName: string;
   viewer: Person;
   onOpenSettings: () => void;
@@ -342,27 +313,14 @@ function MainRail({
       </div>
       <nav aria-label="Main" className="mt-3 w-full">
         <NavGroup collapsed={collapsed}>
-          {railDestinations(settingsOnly).map((item) => {
-            const Icon = item.icon;
-            const settings = item.id === "settings";
-            return (
-              <NavItem
-                key={item.id}
-                href={`#${item.id}`}
-                onClick={(event) => {
-                  prevent(event);
-                  if (settings) onOpenSettings();
-                }}
-                icon={<Icon />}
-                label={item.label}
-                badge={item.badge}
-                attention={item.attention}
-                attentionLabel="3 waiting for review"
-                active={settings}
-                collapsed={collapsed}
-              />
-            );
-          })}
+          <KitRailItems
+            active="settings"
+            collapsed={collapsed}
+            knowledgeAttention={3}
+            onNavigate={(id) => {
+              if (id === "settings") onOpenSettings();
+            }}
+          />
         </NavGroup>
       </nav>
       {collapsed ? null : (
@@ -709,7 +667,6 @@ export function SettingsFrame({
   const mainRail = (collapsed: boolean, inDrawer = false) => (
     <MainRail
       collapsed={collapsed}
-      settingsOnly={settingsOnly}
       workspaceName={workspaceName}
       viewer={viewer}
       onOpenSettings={() => navigate(backLinks ? "index" : "general")}

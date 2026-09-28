@@ -44,7 +44,7 @@ const QUESTIONS: Record<
     tag: "Q5",
     label: "Settings is configuration only",
     question:
-      "Remove Memory and the Settings > Capabilities stub, and move Agents and Insights to the main rail? Recommended: Yes.",
+      "Remove Memory and the Settings > Capabilities stub, and move Agents and Insights to the main rail, under More? Recommended: Yes.",
   },
   q6: {
     tag: "Q6",

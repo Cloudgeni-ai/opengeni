@@ -1,8 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { EyeIcon, PlusIcon } from "lucide-react";
+import { EyeIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
@@ -19,7 +18,9 @@ import {
   variableNameIssue,
 } from "@/components/ui/secret-field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { Alternative, Fork, KitBlock, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
+import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
+import type { WorkspaceVariableSet } from "@/types";
+import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import {
   newApiKeySecret,
   scheduleById,
@@ -308,62 +309,6 @@ function AddVariablePanel({
   );
 }
 
-function AddVariableDialog({
-  open,
-  onOpenChange,
-  set,
-  policy,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  set: VariableSet;
-  policy: SecretPolicy;
-}) {
-  const [values, setValues] = useState(EMPTY_ADD);
-  const [tried, setTried] = useState(false);
-  const change = (next: boolean) => {
-    if (!next) {
-      setValues(EMPTY_ADD);
-      setTried(false);
-    }
-    onOpenChange(next);
-  };
-  const existing = set.variables.map((variable) => variable.name);
-  return (
-    <FormDialog
-      open={open}
-      onOpenChange={change}
-      {...addFrameProps(values, set)}
-      submitDisabled={
-        values.mode === "paste" && !importableEnvRows(parseEnvText(values.env, existing)).length
-      }
-      onSubmit={async () => {
-        setTried(true);
-        const errors = addErrors(values, existing, true);
-        if (values.mode === "one" && (errors.name || errors.value)) return false;
-        await wait(700);
-        return true;
-      }}
-      onSubmitted={() => {
-        toast.success(
-          values.mode === "one"
-            ? `Added ${normalizeVariableName(values.name)} to ${set.name}`
-            : `Added variables to ${set.name}`,
-        );
-        change(false);
-      }}
-    >
-      <AddVariableFields
-        values={values}
-        onChange={setValues}
-        set={set}
-        policy={policy}
-        submitted={tried}
-      />
-    </FormDialog>
-  );
-}
-
 function ReplaceValueFields({
   variable,
   defaultValue,
@@ -505,7 +450,6 @@ function VariablesTable({
   readOnlyReason?: string;
 }) {
   const [revealed, setRevealed] = useState<string | null>(initiallyRevealed ?? null);
-  const [adding, setAdding] = useState(false);
   const [replacing, setReplacing] = useState<Variable | null>(null);
   const [deleting, setDeleting] = useState<Variable | null>(null);
 
@@ -516,17 +460,6 @@ function VariablesTable({
           <h3 className="text-sm font-semibold text-fg">Variables</h3>
           <p className="mt-0.5 truncate text-xs leading-4.5 text-fg-muted">{set.name}</p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={Boolean(readOnlyReason)}
-          onClick={() => setAdding(true)}
-          className="shrink-0 pointer-coarse:h-11"
-        >
-          <PlusIcon aria-hidden="true" />
-          Add variable
-        </Button>
       </div>
       <RowList variant="table" label={`Variables in ${set.name}`} columns={COLUMNS}>
         {set.variables.map((variable) => {
@@ -577,9 +510,17 @@ function VariablesTable({
       </RowList>
       {readOnlyReason ? (
         <p className="mt-3 text-xs leading-4.5 text-fg-muted">{readOnlyReason}</p>
-      ) : null}
-
-      <AddVariableDialog open={adding} onOpenChange={setAdding} set={set} policy={policy} />
+      ) : (
+        // As in the product: one variable is added inline under the list.
+        <AddVariableRow
+          set={set as unknown as WorkspaceVariableSet}
+          onAdd={async ({ name }) => {
+            await wait(600);
+            toast.success(`Added ${name} to ${set.name}`);
+          }}
+          onPaste={() => toast("Paste .env opens its own page")}
+        />
+      )}
       {replacing ? (
         <ReplaceValueDialog variable={replacing} set={set} onClose={() => setReplacing(null)} />
       ) : null}
@@ -754,13 +695,6 @@ export default function SecretValuesSection() {
         </StateCell>
       </StatesGrid>
 
-      <KitBlock
-        title="Open the real thing"
-        description="Use the ⋯ menu on any row above for Replace value and Delete, or add a variable here."
-      >
-        <LiveAdd />
-      </KitBlock>
-
       <UsageNotes
         use={[
           "Any credential people give OpenGeni: variables, provider keys, API key creation",
@@ -774,18 +708,5 @@ export default function SecretValuesSection() {
         ]}
       />
     </KitSection>
-  );
-}
-
-function LiveAdd() {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <Button type="button" onClick={() => setOpen(true)} className="pointer-coarse:h-11">
-        <PlusIcon aria-hidden="true" />
-        Add variable to {aws.name}
-      </Button>
-      <AddVariableDialog open={open} onOpenChange={setOpen} set={aws} policy="write-only" />
-    </>
   );
 }

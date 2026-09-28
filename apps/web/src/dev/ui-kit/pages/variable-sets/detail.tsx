@@ -5,11 +5,9 @@ import {
   CalendarClockIcon,
   ContainerIcon,
   EyeIcon,
-  FileTextIcon,
   MessageSquareIcon,
   MoreHorizontalIcon,
   PencilIcon,
-  PlusIcon,
   Trash2Icon,
   UserIcon,
   VariableIcon,
@@ -32,7 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { DisabledReason } from "@/components/ui/disabled-reason";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
+import { EmptyState } from "@/components/ui/empty-state";
 import { InlineHelp } from "@/components/ui/inline-help";
 import {
   LineTabs,
@@ -46,6 +44,11 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SecretValue } from "@/components/ui/secret-field";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  AddVariableRow,
+  type NewVariableInput,
+} from "@/components/variable-sets/variable-set-forms";
+import type { WorkspaceVariableSet } from "@/types";
 
 import { KIT_NOW, KIT_TIME_ZONE, organization } from "../../fixtures";
 import { useAnswers, usePagePicks, useVerbs } from "./answers";
@@ -70,7 +73,10 @@ import {
 const TIME = { now: KIT_NOW, timeZone: KIT_TIME_ZONE } as const;
 
 export interface SetActions {
-  addVariable: (mode: "one" | "paste") => void;
+  /** Saves one variable from the inline row. Throws a user-facing error. */
+  addVariable: (variable: NewVariableInput) => Promise<void>;
+  /** Opens the Paste .env page. */
+  pasteEnv: () => void;
   replaceValue: (variable: PreviewVariable) => void;
   deleteVariable: (variable: PreviewVariable) => void;
   editSet: () => void;
@@ -263,45 +269,22 @@ export function VariablesTable({ set, actions }: { set: PreviewSet; actions: Set
 }
 
 /* ----------------------------------------------------------------------------
-   Empty variables, following the Empty state pick.
+   Adding variables: the product's inline row at the bottom of the list (Name
+   uppercased live, inline errors, clears and refocuses after Add) with a quiet
+   Paste .env link. No header button and no one-variable page.
    -------------------------------------------------------------------------- */
 
-function NoVariables({ actions }: { actions: SetActions }) {
-  const picks = usePagePicks();
-  if (picks.empty === "inline") {
-    return (
-      <EmptyState
-        variant="inline"
-        title="No variables yet."
-        action={
-          <span className="flex items-center gap-4">
-            <EmptyStateLink onClick={() => actions.addVariable("one")}>Add variable</EmptyStateLink>
-            <EmptyStateLink onClick={() => actions.addVariable("paste")}>Paste .env</EmptyStateLink>
-          </span>
-        }
-      />
-    );
-  }
+/** The real row reads only the set's name and its variable names. */
+function rowSet(set: PreviewSet): WorkspaceVariableSet {
+  return {
+    name: set.name,
+    variables: set.variables.map((variable) => ({ name: variable.name })),
+  } as unknown as WorkspaceVariableSet;
+}
+
+function AddVariables({ set, actions }: { set: PreviewSet; actions: SetActions }) {
   return (
-    <EmptyState
-      variant="page"
-      icon={<VariableIcon />}
-      title="No variables yet"
-      description="Add the keys and config agents need, one at a time or from a .env file."
-      className="pt-8 pb-6"
-      action={
-        <>
-          <Button type="button" onClick={() => actions.addVariable("one")}>
-            <PlusIcon aria-hidden="true" />
-            Add variable
-          </Button>
-          <Button type="button" variant="outline" onClick={() => actions.addVariable("paste")}>
-            <FileTextIcon aria-hidden="true" />
-            Paste .env
-          </Button>
-        </>
-      }
-    />
+    <AddVariableRow set={rowSet(set)} onAdd={actions.addVariable} onPaste={actions.pasteEnv} />
   );
 }
 
@@ -431,21 +414,7 @@ export function SetDetail({ set, actions }: { set: PreviewSet; actions: SetActio
             updated <RelativeTime date={set.updatedAt} {...TIME} />
           </span>,
         ]}
-        actions={
-          <>
-            {empty ? null : (
-              <Button
-                type="button"
-                onClick={() => actions.addVariable("one")}
-                className="pointer-coarse:h-11"
-              >
-                <PlusIcon aria-hidden="true" />
-                Add variable
-              </Button>
-            )}
-            <SetMenu set={set} actions={actions} />
-          </>
-        }
+        actions={<SetMenu set={set} actions={actions} />}
         tabs={
           <LineTabsList aria-label={`${set.name} sections`}>
             <LineTabsTrigger value="variables" count={set.variables.length}>
@@ -466,10 +435,17 @@ export function SetDetail({ set, actions }: { set: PreviewSet; actions: SetActio
                 Agents get these as environment variables. Changes apply from the next turn.
               </p>
               {scopeNote}
-              {empty ? (
-                <NoVariables actions={actions} />
-              ) : (
-                box(<VariablesTable set={set} actions={actions} />)
+              {box(
+                <>
+                  {empty ? (
+                    <p className="px-3 pb-3 text-sm leading-5 text-fg-muted">
+                      No variables yet. Add the keys and config agents need.
+                    </p>
+                  ) : (
+                    <VariablesTable set={set} actions={actions} />
+                  )}
+                  <AddVariables set={set} actions={actions} />
+                </>,
               )}
             </DetailSection>
           </LineTabsContent>

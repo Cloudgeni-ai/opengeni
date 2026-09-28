@@ -7,21 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import {
-  BotIcon,
-  BrainCircuitIcon,
-  CalendarClockIcon,
-  GaugeIcon,
-  InboxIcon,
-  MenuIcon,
-  PanelLeftCloseIcon,
-  PanelLeftOpenIcon,
-  PanelsTopLeftIcon,
-  PlugIcon,
-  SettingsIcon,
-  SquarePenIcon,
-  type LucideIcon,
-} from "lucide-react";
+import { MenuIcon, PanelLeftCloseIcon, PanelLeftOpenIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -32,6 +18,7 @@ import { cn } from "@/lib/utils";
 
 import { chats, organization, you } from "../../fixtures";
 import { PagePreview, useKitPane } from "../../kit";
+import { KitRailItems, type KitRailId } from "../kit-rail";
 
 /* ----------------------------------------------------------------------------
    The app window the page previews sit in: the proposed main rail (every
@@ -45,40 +32,7 @@ import { PagePreview, useKitPane } from "../../kit";
    - Under 640px: a top bar whose menu opens the rail from the left.
    -------------------------------------------------------------------------- */
 
-export type RailId =
-  | "new-session"
-  | "for-you"
-  | "agents"
-  | "schedules"
-  | "artifacts"
-  | "knowledge"
-  | "capabilities"
-  | "insights"
-  | "settings";
-
-interface RailDestination {
-  id: RailId;
-  label: string;
-  icon: LucideIcon;
-  badge?: string;
-}
-
-const RAIL: RailDestination[] = [
-  { id: "new-session", label: "New session", icon: SquarePenIcon },
-  { id: "for-you", label: "For you", icon: InboxIcon, badge: "2" },
-  { id: "agents", label: "Agents", icon: BotIcon },
-  { id: "schedules", label: "Schedules", icon: CalendarClockIcon },
-  { id: "artifacts", label: "Artifacts", icon: PanelsTopLeftIcon },
-  { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon },
-  { id: "capabilities", label: "Capabilities", icon: PlugIcon },
-  { id: "insights", label: "Insights", icon: GaugeIcon },
-  { id: "settings", label: "Settings", icon: SettingsIcon },
-];
-
-/** The icon a rail destination uses, so page headers match their rail entry. */
-export function railIcon(id: RailId): LucideIcon {
-  return RAIL.find((item) => item.id === id)?.icon ?? SettingsIcon;
-}
+export type RailId = KitRailId;
 
 /** Width of an element, measured before paint and kept in sync. */
 export function useElementWidth<T extends HTMLElement>(): [RefObject<T | null>, number] {
@@ -155,27 +109,12 @@ export function MainRail({
       </div>
       <nav aria-label="Main" className="mt-3 w-full">
         <NavGroup collapsed={collapsed}>
-          {RAIL.map((item) => {
-            const Icon = item.icon;
-            const attention = item.id === "knowledge" && knowledgeAttention > 0;
-            return (
-              <NavItem
-                key={item.id}
-                href={`#${item.id}`}
-                onClick={(event) => {
-                  prevent(event);
-                  onNavigate?.(item.id);
-                }}
-                icon={<Icon />}
-                label={item.label}
-                badge={item.badge}
-                attention={attention}
-                attentionLabel={`${knowledgeAttention} waiting for review`}
-                active={active === item.id}
-                collapsed={collapsed}
-              />
-            );
-          })}
+          <KitRailItems
+            active={active}
+            collapsed={collapsed}
+            knowledgeAttention={knowledgeAttention}
+            onNavigate={onNavigate}
+          />
         </NavGroup>
       </nav>
       {collapsed ? null : (

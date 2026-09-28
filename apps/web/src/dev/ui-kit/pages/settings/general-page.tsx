@@ -228,8 +228,9 @@ function WorkspaceSection() {
   const kitNavigate = useKitNavigate(view);
   const buttonWidth = useButtonWidth();
   const [renaming, setRenaming] = useState(false);
+  // No header: the page title names these rows (Name, Type, Workspace ID).
   return (
-    <Section title="Workspace">
+    <Section aria-label="Workspace">
       <SettingRow
         variant={picks.settingRow}
         label="Name"
@@ -300,6 +301,7 @@ function PauseDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { pauseFor } = usePauseActions();
+  const { pause } = useSettingsPreview();
   const [choice, setChoice] = useState<PauseChoice>("30");
   const [day, setDay] = useState("1");
   const [time, setTime] = useState("08:00");
@@ -326,10 +328,14 @@ function PauseDialog({
         onOpenChange(next);
       }}
       size="sm"
-      title="Pause agent work"
-      description="New sessions and scheduled runs wait until agent work resumes, and running work stops after its current step."
-      submitLabel="Pause"
-      pendingLabel="Pausing…"
+      title={pause.paused ? "Change pause" : "Pause agent work"}
+      description={
+        pause.paused
+          ? "Pick when agent work resumes."
+          : "New sessions and scheduled runs wait until agent work resumes, and running work stops after its current step."
+      }
+      submitLabel={pause.paused ? "Save" : "Pause"}
+      pendingLabel={pause.paused ? "Saving…" : "Pausing…"}
       onSubmit={async () => {
         if (choice === "custom" && new Date(picked).getTime() <= KIT_NOW.getTime() + 60_000) {
           setError("Pick a time after 13:48 today.");
@@ -344,7 +350,7 @@ function PauseDialog({
       <div className="grid min-w-0 gap-3">
         <ChoiceCards
           variant="list"
-          aria-label="Pause until"
+          aria-label={pause.paused ? "Resume" : "Pause until"}
           value={choice}
           onValueChange={(next) => {
             setChoice(next as PauseChoice);
@@ -456,7 +462,7 @@ function AgentActivitySection() {
   const [customOpen, setCustomOpen] = useState(false);
 
   if (questions.q7 === "no") {
-    // Today's control: a one-click pause with a timer behind the chevron, only visible here.
+    // Question 7 answered No: the retired split button, kept as history. The product ships the row below.
     return (
       <Section title="Agent activity">
         <SettingRow
@@ -946,7 +952,7 @@ function GeneralSkeleton() {
       <SectionStack variant={picks.section}>
         {/* Same rows as the loaded page: name, type and ID; the activity row;
             voice, video, code search and connected apps. */}
-        <Section title="Workspace">
+        <Section aria-label="Workspace">
           <SettingRowSkeleton variant={picks.settingRow} />
           <SettingRowSkeleton variant={picks.settingRow} />
           <SettingRowSkeleton variant={picks.settingRow} />

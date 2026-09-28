@@ -9,12 +9,11 @@ import { DetailPage } from "@/components/ui/detail-page";
 import { useAnswers, usePagePicks, useVerbs } from "./answers";
 import { SetDetail, SetDetailLoading, announceUsage, type SetActions } from "./detail";
 import {
-  AddVariableForm,
   EditSetForm,
   NewSetForm,
+  PasteEnvForm,
   ReplaceValueDialog,
   wait,
-  type AddMode,
   type NewSetValues,
   type SetTemplate,
 } from "./forms";
@@ -39,7 +38,9 @@ import {
 /* ----------------------------------------------------------------------------
    The Variable sets area as one small app on fixtures: the list, each set's
    own page, and every create and edit flow as its own page with a back link.
-   Only confirmations and the one-field Replace value stay centered dialogs.
+   One variable is added inline at the bottom of the set's list; Paste .env is
+   a page. Only confirmations and the one-field Replace value stay centered
+   dialogs.
    -------------------------------------------------------------------------- */
 
 type Route =
@@ -47,7 +48,7 @@ type Route =
   | { name: "detail"; setId: string }
   | { name: "settings" }
   | { name: "new-set"; template?: SetTemplate }
-  | { name: "add-variable"; setId: string; mode: AddMode }
+  | { name: "paste-env"; setId: string }
   | { name: "edit-set"; setId: string };
 
 function initialSets(dataState: DataState, withEmptySet: boolean): PreviewSet[] {
@@ -206,7 +207,12 @@ export function VariableSetsApp({
   };
 
   const actionsFor = (set: PreviewSet): SetActions => ({
-    addVariable: (mode) => setRoute({ name: "add-variable", setId: set.id, mode }),
+    addVariable: async ({ name }) => {
+      await wait(500);
+      dispatch({ type: "upsert-variables", id: set.id, variables: [{ name, kind: "secret" }] });
+      toast.success(`Added ${name} to ${set.name}`);
+    },
+    pasteEnv: () => setRoute({ name: "paste-env", setId: set.id }),
     replaceValue: (variable) => setReplacing({ setId: set.id, name: variable.name }),
     deleteVariable: (variable) => {
       if (picks.destructive === "undo") removeVariable(set, variable);
@@ -266,15 +272,14 @@ export function VariableSetsApp({
         />
       </AppFrame>
     );
-  } else if (route.name === "add-variable") {
+  } else if (route.name === "paste-env") {
     page = (
       <AppFrame header={null} onNavigate={onNavigate}>
         <RouteFocus routeKey={routeKey} />
-        <AddVariableForm
+        <PasteEnvForm
           presentation="page"
           open
           set={routeSet}
-          initialMode={route.mode}
           onClose={backToSet}
           onAdd={(variables, replaced) => routeSet && addVariables(routeSet, variables, replaced)}
           back={routeSet ? { label: routeSet.name, onClick: backToSet } : undefined}

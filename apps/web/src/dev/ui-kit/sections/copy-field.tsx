@@ -10,14 +10,15 @@ import { apiKeys, currentWorkspace, newApiKeySecret, organization } from "../fix
 
 const failedCopy = async () => false;
 
+/** As in Settings > General: the ID is the row's value, with its copy button. */
 function WorkspaceIdRow() {
   return (
     <SettingRow
       label="Workspace ID"
-      description="Use it with the API and the CLI."
-      controlWidth="auto"
-      control={
-        <CopyField size="md" value={currentWorkspace.id} truncate="middle" label="workspace ID" />
+      description={
+        <span className="mt-0.5 flex min-w-0">
+          <CopyField value={currentWorkspace.id} truncate="middle" label="workspace ID" />
+        </span>
       }
     />
   );
@@ -55,7 +56,9 @@ export default function CopyFieldSection() {
             </RowList>
           </KitCanvas>
           <KitCanvas canvas="surface">
-            <p className="mb-2 text-xs font-medium text-fg-muted">Inline · md, in a setting row</p>
+            <p className="mb-2 text-xs font-medium text-fg-muted">
+              Inline, as the value of a setting row
+            </p>
             <WorkspaceIdRow />
           </KitCanvas>
           <KitCanvas canvas="surface" className="@2xl/kit-section:col-span-2">
