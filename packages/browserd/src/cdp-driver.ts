@@ -2128,11 +2128,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async frameTree(sessionId: string, timeoutMs?: number): Promise<PageFrameTree> {
     const connection = await this.ensureConnection();
-    const response = await connection.send<{ frameTree?: unknown }>(
-      "Page.getFrameTree",
-      {},
-      { sessionId, ...(timeoutMs ? { timeoutMs } : {}) },
-    );
+    let response: { frameTree?: unknown };
+    try {
+      response = await connection.send<{ frameTree?: unknown }>(
+        "Page.getFrameTree",
+        {},
+        { sessionId, ...(timeoutMs ? { timeoutMs } : {}) },
+      );
+    } catch (error) {
+      // Target validation runs before dispatch. Preserve its bounded diagnosis
+      // in the receipt without exposing arbitrary provider error text or
+      // weakening document/frame fences on an unresponsive renderer.
+      if (!(error instanceof CdpTransportError)) throw error;
+      const timeout = error instanceof CdpCommandTimeoutError;
+      const failure = new InteractionControllerError(
+        timeout ? "timeout" : "resource_unavailable",
+        `browser frame inspection ${timeout ? "timed out" : "unavailable"} during Page.getFrameTree`,
+        true,
+      );
+      failure.cause = error;
+      throw failure;
+    }
     if (!isRecord(response.frameTree) || !isRecord(response.frameTree.frame)) {
       throw new Error("CDP returned an invalid frame tree");
     }
@@ -2155,8 +2171,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     try {
       return await read(remaining);
     } catch (error) {
-      if (!(error instanceof CdpTransportError)) throw error;
-      const timeout = error instanceof CdpCommandTimeoutError;
+      const transport = error instanceof InteractionControllerError ? error.cause : error;
+      if (!(transport instanceof CdpTransportError)) throw error;
+      const timeout = transport instanceof CdpCommandTimeoutError;
       const failure = new InteractionControllerError(
         timeout ? "timeout" : "resource_unavailable",
         `browser screenshot ${timeout ? "timed out" : "unavailable"} during ${stage}`,
