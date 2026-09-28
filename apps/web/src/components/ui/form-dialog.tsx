@@ -17,7 +17,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
-import { analyticsAction, type AnalyticsAction } from "@/lib/analytics-actions";
+import type { AnalyticsAction } from "@/lib/analytics-actions";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -280,7 +280,7 @@ export function FormFrame({
       ) : null}
       <Button
         type="submit"
-        {...analyticsAction(submitAnalyticsAction)}
+        data-analytics-action={submitAnalyticsAction ?? undefined}
         variant={tone === "destructive" ? "destructive" : "default"}
         // Busy is not disabled: the primary keeps its colour and its focus while
         // the spinner runs (a disabled button drops focus to the page), and a

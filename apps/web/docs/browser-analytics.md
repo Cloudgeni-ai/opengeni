@@ -56,7 +56,9 @@ so they appear only as a `navigation_clicked` destination, never as a
 `$pageview`. A drift test fails when an app route has no page label.
 
 `section` comes from the `section` or `view` query value when it is on the
-closed list (settings, organization, plugins and workspace-state sections).
+closed list (settings, organization, plugins and workspace-state sections). A
+second drift test fails when a workspace settings or organization section,
+current or legacy, has no label.
 
 Key controls carry `data-analytics-action`, and the click observer attaches it
 as `action` only when it is one of the closed values in `analytics-actions.ts`:
@@ -68,7 +70,7 @@ as `action` only when it is one of the closed values in `analytics-actions.ts`:
 | `steer` | Steer buttons on queued prompts (`@opengeni/react`) |
 | `pause` | Composer pause button (`@opengeni/react`) |
 | `connect_integration` | First connect of an integration: OAuth, API key, or adding an MCP server |
-| `create_schedule` | Create scheduled task (not Save changes) |
+| `create_schedule` | Create schedule (not Save changes) |
 | `install_skill` | Install Skill (not Update Skill) |
 | `invite_member` | Send invitation in organization People |
 | `buy_credits` | Buy or add credits buttons and links |

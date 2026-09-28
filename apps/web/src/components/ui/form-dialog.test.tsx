@@ -242,3 +242,29 @@ test("Cancel can be hidden for a one-time step", async () => {
     "I've saved it",
   ]);
 });
+
+test("the primary carries only a closed analytics label when one is given", async () => {
+  await act(async () =>
+    root.render(
+      <FormFrame
+        variant="page"
+        title="New schedule"
+        submitLabel="Create schedule"
+        submitAnalyticsAction="create_schedule"
+      />,
+    ),
+  );
+  expect(submitButton().getAttribute("data-analytics-action")).toBe("create_schedule");
+
+  await act(async () =>
+    root.render(
+      <FormFrame
+        variant="page"
+        title="Edit schedule"
+        submitLabel="Save changes"
+        submitAnalyticsAction={null}
+      />,
+    ),
+  );
+  expect(submitButton().hasAttribute("data-analytics-action")).toBe(false);
+});

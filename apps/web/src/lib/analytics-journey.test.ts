@@ -7,6 +7,8 @@ import {
   journeyOutcome,
   journeyPage,
 } from "./analytics-journey";
+import { LEGACY_ORGANIZATION_SECTIONS, ORGANIZATION_ADMIN_SECTIONS } from "./organization-admin";
+import { WORKSPACE_SETTINGS_SECTIONS } from "./workspace-management-location";
 
 const workspace = "11111111-1111-4111-8111-111111111111";
 const session = "22222222-2222-4222-8222-222222222222";
@@ -90,6 +92,27 @@ describe("content-free customer journey", () => {
       workspace_id: workspace,
       section: "files",
     });
+  });
+
+  test("every settings and organization section the app links to has a label", () => {
+    const pages = [
+      ...[
+        ...WORKSPACE_SETTINGS_SECTIONS,
+        // Older workspace `?section=` values that still resolve.
+        "members",
+        "danger",
+        "plugins",
+        "capabilities",
+      ].map((section) => ["settings", section] as const),
+      ...[...ORGANIZATION_ADMIN_SECTIONS, ...Object.keys(LEGACY_ORGANIZATION_SECTIONS)].map(
+        (section) => ["organization", section] as const,
+      ),
+    ];
+    for (const [path, section] of pages) {
+      expect(journeyPage(`/workspaces/${workspace}/${path}`, `?section=${section}`).section).toBe(
+        section,
+      );
+    }
   });
 
   test("accepts only the closed control action labels", () => {

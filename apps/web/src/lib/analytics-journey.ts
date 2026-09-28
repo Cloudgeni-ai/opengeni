@@ -68,6 +68,9 @@ const SECTIONS = new Set([
   "recovery",
   "developer",
   "files",
+  "access",
+  "identity",
+  "capabilities",
 ]);
 
 export function journeyPage(pathname: string, search = ""): JourneyProperties {
