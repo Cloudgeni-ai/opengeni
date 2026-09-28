@@ -161,6 +161,15 @@ export const ToolGatewayCaller = z
   .strict();
 export type ToolGatewayCaller = z.infer<typeof ToolGatewayCaller>;
 
+/**
+ * MCP request `_meta` key naming the attempt surface that issued a call to the
+ * first-party server: `model` for a direct model tool call, `codemode` for a
+ * Codemode script. Only the worker's own tool gateway sets it, and only for the
+ * first-party server. A read reached the model's context only when it says
+ * `model`; a Codemode script may keep the output to itself.
+ */
+export const FIRST_PARTY_MCP_CALLER_META_KEY = "opengeniCaller";
+
 export const AttemptToolCatalog = z
   .object({
     version: z.literal(ATTEMPT_TOOL_CATALOG_VERSION),

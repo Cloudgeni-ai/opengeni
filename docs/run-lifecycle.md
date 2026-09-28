@@ -1030,6 +1030,24 @@ Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`
 and Codemode callers always receive content. The check reads only the acting
 session's active history and leaves the tool schema, instructions, and Skill index
 unchanged, so it does not move the cached prompt prefix.
+Every `skill_read` increments `opengeni_skill_reads_total{source, skill, kind, caller}`.
+`source` is `builtin`, `session`, `workspace`, `organization`, `personal`, or
+`unknown` for a read refused before a Skill resolved; `skill` is the built-in id,
+or `custom` for every other Skill, so tenant ids, names, and requested identifiers
+never become labels; `kind` is `full` (default SKILL.md read), `already_in_context`,
+`files` (explicit paths), `list`, or `refused` (the read returned an error instead
+of Skill text); `caller` is `model` or `codemode`. A successful model read also
+carries a content-free `SkillUse` fact under MCP `_meta["opengeni/skillUse"]`:
+the resolved id and source, a ledger `revisionId` or, for a built-in or session
+artifact, the whole-artifact `contentSha256`, the kind, the UTF-8 `bytes` of the
+text returned, `inIndex` (listed in this turn's frozen, model-visible Skill
+index), and `searchedThisTurn` (returned by `skill_search` earlier in the same
+attempt). The model output is the text part alone, so `_meta` never reaches the
+model or model history; only the `agent.toolCall.output` event projection keeps
+it. It holds no Skill text, user text, or Skill title, and it is dropped rather
+than let a result cross the 1 MiB model-visible cap. Codemode results never carry
+it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
+stored event and drops fields a newer worker added instead of the whole fact.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
@@ -1329,9 +1347,16 @@ by itself. A result arriving while the parent turn is live remains available to
 that turn's ordinary loop.
 The provider-neutral coordination contract creates a child only for concrete,
 bounded, independently useful work with a defined integration point. Parent
-work must stay disjoint from the delegated scope. A parent joining a child uses
-`session_wait` with `waitFor: "completion"` before committing or publishing
-dependent work. `goal.completed` is a durable goal fact, not proof that the
+work must stay disjoint from the delegated scope. A child costs minutes and its
+own large context, so the contract prefers a direct answer for small work and a
+`session_send_message` follow-up to an existing child over another spawn. For
+multi-minute work with nothing else to advance, the parent calls `wait_for_input`
+right after spawning; the child's terminal result wakes it and carries the
+bounded final answer (`payload.finalAnswer`), which the parent uses directly,
+reading the child's results only when that copy is absent or truncated. A
+`session_get` snapshot between waits is not new evidence. A parent joining a
+short child inside its turn uses `session_wait` with `waitFor: "completion"`
+before committing or publishing dependent work. `goal.completed` is a durable goal fact, not proof that the
 child has emitted its final result. Completed commentary messages, maintenance
 turns, and continuation segment settlements are also ignored until an ordinary
 result-bearing turn settles. The ordinary `waitFor: "change"` mode remains
@@ -1669,6 +1694,16 @@ success must not be treated as proof those files still exist. Consent alone does
 not claim restore success. Failed/stale public restores and a later loss after
 verified recovery remain explicit blockers requiring operator review; this slice
 does not introduce an abandon/reset or automatic re-consent operation.
+
+A fresh exact operator historical-checkpoint authorization may supersede a
+`verified` public recovery after a later loss. Under the existing quiescence,
+epoch, generation and revision fences, its audit receipt retains the complete
+superseded public projection before atomically clearing that projection and
+installing the new authorization marker. Permanent public consent receipts and
+their warnings remain unchanged; accepted and failed public recoveries are not
+superseded. Automatic selection still rejects every non-null public recovery.
+Operators must accept the new checkpoint gap explicitly; a previous completed
+consent is not authority for a later loss.
 
 Migration `0495_consented_sandbox_recovery.sql` is additive with DB-default-off
 consent. Activation is owner-only and follows verified immutable API/control/turn
@@ -2263,6 +2298,16 @@ completed model/tool truth, closes only the unresolved tool suffix, records
 from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
+
+A sandboxless attempt uses a plain Agent whose native capabilities cannot be
+added in place. If an authorized attachment commits an active machine pointer,
+the next provider-dispatch barrier first persists the complete preceding tool
+batch, then emits `native_capabilities_changed_this_attempt`. The same route
+recovery boundary rebuilds the agent from the committed route in a fresh attempt
+of the existing logical turn. Completed attachment and peer-tool receipts are
+not replayed; normal attempt authority and machine establishment checks still
+apply. Native-capable attempts and deployments with routing disabled do not
+perform this additional pointer check.
 
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with

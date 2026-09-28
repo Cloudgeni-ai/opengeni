@@ -266,97 +266,111 @@ describe("Connected Machine to managed-home turn transition", () => {
     ).toBe(false);
   });
 
-  test("checkpoints completed truth and recovers the same logical turn", async () => {
-    const transition = new ActiveBackendUnresolvableError(
-      "home_unavailable_this_turn",
-      "home is available to the next attempt",
-    );
-    const error = new AggregateError([transition], "Failed to run function tools");
-    const requestRecovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
-      action: "recovering",
-      events: [],
-    });
-    const flushRuntimeBatcher = mock(async () => undefined);
-    const reconcileConversationTruth = mock(async () => undefined);
-    const acknowledgeRecoveryQuiescence = mock(() => undefined);
-    const acknowledgeLostAttemptOwnership = mock(() => undefined);
-    const control = {
-      cancellationRequestedAt: null,
-      activityStatus: "unknown",
-      turnMetricOutcome: null,
-      activityError: null,
-      acknowledgeQuiescence: false,
-    };
+  test.each([
+    ["home_unavailable_this_turn", "recovering"],
+    ["native_capabilities_changed_this_attempt", "recovering"],
+    ["native_capabilities_changed_this_attempt", "stale"],
+  ] as const)(
+    "checkpoints completed truth and respects exact attempt ownership: %s / %s",
+    async (code, action) => {
+      const transition = new ActiveBackendUnresolvableError(
+        "home_unavailable_this_turn",
+        "home is available to the next attempt",
+      );
+      const signal =
+        code === "home_unavailable_this_turn"
+          ? transition
+          : Object.assign(new Error("native capabilities changed"), {
+              name: "SandboxCapabilitiesChangedError",
+              code,
+            });
+      const error = new AggregateError([signal], "Failed to run function tools");
+      const requestRecovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+        action,
+        events: [],
+      });
+      const flushRuntimeBatcher = mock(async () => undefined);
+      const reconcileConversationTruth = mock(async () => undefined);
+      const acknowledgeRecoveryQuiescence = mock(() => undefined);
+      const acknowledgeLostAttemptOwnership = mock(() => undefined);
+      const control = {
+        cancellationRequestedAt: null,
+        activityStatus: "unknown",
+        turnMetricOutcome: null,
+        activityError: null,
+        acknowledgeQuiescence: false,
+      };
 
-    try {
-      const result = await settleTurnFailure({
-        error,
-        input: {
-          accountId: "account-1",
-          workspaceId: "workspace-1",
-          sessionId: "session-1",
+      try {
+        const result = await settleTurnFailure({
+          error,
+          input: {
+            accountId: "account-1",
+            workspaceId: "workspace-1",
+            sessionId: "session-1",
+            attemptId: "attempt-1",
+          },
+          settings: {},
+          db: {},
+          bus: {},
+          observability: {},
+          wakeSessionWorkflow: async () => undefined,
+          signalCodexCapacityWorkflow: async () => undefined,
+          cancellationSignal: undefined,
+          sandboxRotationController: new AbortController(),
+          noteCancellationRequested: () => undefined,
+          codexWorkspaceKey: "workspace-key",
+          control,
+          attempt: {
+            turnId: "turn-1",
+            triggerEventId: "trigger-1",
+            executionGeneration: 1,
+            providerRecoveryCount: 0,
+            modelRequestStarted: true,
+            redispatchesAtDispatch: 0,
+            triggerType: "user",
+          },
+          billingState: {},
+          eventing: { publish: async () => [], turnStartedPublished: true },
+          providerTurn: {},
+          leases: {},
+          historySink: { reconcileConversationTruth },
+          claimedResult: (value: Record<string, unknown>) => ({
+            ...value,
+            turnId: "turn-1",
+            attemptId: "attempt-1",
+          }),
+          flushRuntimeBatcher,
+          acknowledgeLostAttemptOwnership,
+          acknowledgeRecoveryQuiescence,
+        } as never);
+
+        expect(result).toEqual({
+          status: action === "stale" ? "cancelled" : "recovering",
+          turnId: "turn-1",
           attemptId: "attempt-1",
-        },
-        settings: {},
-        db: {},
-        bus: {},
-        observability: {},
-        wakeSessionWorkflow: async () => undefined,
-        signalCodexCapacityWorkflow: async () => undefined,
-        cancellationSignal: undefined,
-        sandboxRotationController: new AbortController(),
-        noteCancellationRequested: () => undefined,
-        codexWorkspaceKey: "workspace-key",
-        control,
-        attempt: {
+        });
+        expect(flushRuntimeBatcher).toHaveBeenCalledTimes(1);
+        expect(reconcileConversationTruth).toHaveBeenCalledWith({ requireDurable: true });
+        expect(requestRecovery).toHaveBeenCalledWith({}, "workspace-1", {
+          sessionId: "session-1",
           turnId: "turn-1",
           triggerEventId: "trigger-1",
-          executionGeneration: 1,
-          providerRecoveryCount: 0,
-          modelRequestStarted: true,
-          redispatchesAtDispatch: 0,
-          triggerType: "user",
-        },
-        billingState: {},
-        eventing: { publish: async () => [], turnStartedPublished: true },
-        providerTurn: {},
-        leases: {},
-        historySink: { reconcileConversationTruth },
-        claimedResult: (value: Record<string, unknown>) => ({
-          ...value,
-          turnId: "turn-1",
           attemptId: "attempt-1",
-        }),
-        flushRuntimeBatcher,
-        acknowledgeLostAttemptOwnership,
-        acknowledgeRecoveryQuiescence,
-      } as never);
-
-      expect(result).toEqual({
-        status: "recovering",
-        turnId: "turn-1",
-        attemptId: "attempt-1",
-      });
-      expect(flushRuntimeBatcher).toHaveBeenCalledTimes(1);
-      expect(reconcileConversationTruth).toHaveBeenCalledWith({ requireDurable: true });
-      expect(requestRecovery).toHaveBeenCalledWith({}, "workspace-1", {
-        sessionId: "session-1",
-        turnId: "turn-1",
-        triggerEventId: "trigger-1",
-        attemptId: "attempt-1",
-        reason: "sandbox_route_transition",
-        detail: {
-          code: "home_unavailable_this_turn",
-          effectiveBoundary: "next_attempt",
-        },
-      });
-      expect(acknowledgeRecoveryQuiescence).toHaveBeenCalledTimes(1);
-      expect(acknowledgeLostAttemptOwnership).not.toHaveBeenCalled();
-      expect(control.activityStatus).toBe("recovering");
-      expect(control.turnMetricOutcome).toBe("recovering");
-      expect(control.activityError).toBe(error);
-    } finally {
-      requestRecovery.mockRestore();
-    }
-  });
+          reason: "sandbox_route_transition",
+          detail: {
+            code,
+            effectiveBoundary: "next_attempt",
+          },
+        });
+        expect(acknowledgeRecoveryQuiescence).toHaveBeenCalledTimes(action === "stale" ? 0 : 1);
+        expect(acknowledgeLostAttemptOwnership).toHaveBeenCalledTimes(action === "stale" ? 1 : 0);
+        expect(control.activityStatus).toBe(action === "stale" ? "cancelled" : "recovering");
+        expect(control.turnMetricOutcome).toBe(action === "stale" ? "cancelled" : "recovering");
+        if (action === "recovering") expect(control.activityError).toBe(error);
+      } finally {
+        requestRecovery.mockRestore();
+      }
+    },
+  );
 });

@@ -13,7 +13,10 @@ describe("goalContinuationPrompt", () => {
       1,
       null,
     );
-    expect(prompt).toContain("including reports produced during another task");
+    expect(prompt).not.toContain("including reports produced during another task");
+    expect(prompt).toContain(
+      "a document the user asked for, or a large report meant to be kept or shared",
+    );
     expect(prompt).toContain("create the durable native document first");
     expect(prompt).toContain("inspect its relevant final head after the last edit");
     expect(prompt).toContain("satisfy every persisted report requirement");

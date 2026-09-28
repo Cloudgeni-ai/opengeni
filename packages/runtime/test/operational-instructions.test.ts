@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { buildOpenGeniAgent, CODEMODE_PROGRAMMATIC_DIRECTIVE } from "../src/index";
+import {
+  buildOpenGeniAgent,
+  CODEMODE_PROGRAMMATIC_DIRECTIVE,
+  composeRuntimeSkills,
+  coreInstructions,
+} from "../src/index";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 
 describe("provider-neutral operational instructions", () => {
@@ -12,6 +17,9 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance).toContain("`capability_catalog_search`");
     expect(guidance).toContain("`capability_authorization_request`");
     expect(guidance).toContain("Use available integration tools directly");
+    expect(guidance).toContain(
+      "If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.",
+    );
     expect(guidance).toContain("`setup.nextAction`");
     expect(guidance).toContain("does not need integration-management permission");
     expect(guidance).toContain("authenticated human must authorize");
@@ -127,23 +135,32 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
   });
 
-  test("routes direct and secondary reports before local-file formatting guidance", () => {
+  test("answers in chat by default and routes document deliverables before local-file guidance", () => {
     const reportRouting = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
-      "User-facing reports are durable document Artifacts by default",
+      "Answer in chat by default, including summaries and reports",
     );
     const localLinks = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "When referencing a real local source file",
     );
     expect(reportRouting).toBeGreaterThan(-1);
     expect(localLinks).toBeGreaterThan(reportRouting);
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "User-facing reports are durable document Artifacts by default",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
       "including audit or summary reports produced while doing another task",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "only when the user asks for a document or file, or when the deliverable is large (multi-page) or clearly meant to be kept or shared",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "give a short summary and the artifact link in chat, not a full restatement",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Read the opengeni-documents Skill and create the native document artifact before authoring",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "including reports discovered after a goal was created",
+      "including ones discovered after the goal was created",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Inspect the relevant final artifact head after the last edit",
@@ -195,6 +212,12 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Do not delegate a scope that you will also perform yourself.",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "A session cannot gain a Variable Set while it works",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "run that step in a child created with those `variableSetIds` instead of asking the user to attach it.",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain('waitFor: "completion"');
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A `goal.completed` event records goal state but is not a terminal child result",
@@ -211,9 +234,92 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
-  test("holds an unchanged external wait during the status turn without stalling useful work", () => {
+  test("prices delegation and uses the result-bearing wake instead of a poll ritual", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Do not end with only a status reply and leave an immediate continuation",
+      "A child costs minutes of wall time and a large context of its own",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "send a related follow-up to a child you already spawned with `session_send_message`",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "call `wait_for_input` right after spawning instead of alternating `session_wait` and `session_get`",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "carries its final answer in `payload.finalAnswer`. Use that answer directly",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "only when `finalAnswer` is absent or truncated",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "a `session_get` snapshot between waits is not new evidence",
+    );
+    // Guidance only: the join tool stays available and uncapped.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      'To join a short child inside this turn, use `session_wait` with `waitFor: "completion"`',
+    );
+  });
+
+  test("answers a question asked mid-run with a final response instead of resuming work", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "The user may send a new message while you are still working.",
+    );
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "When earlier context is compacted",
+      start,
+    );
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(guidance).not.toContain("provide the update and then progress with the task");
+    expect(guidance).toContain(
+      "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
+    );
+    expect(guidance).toContain(
+      "If nothing is in flight, the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains.",
+    );
+    expect(guidance).toContain("acknowledgement, not approval");
+  });
+
+  test("keeps a status answer short and in the user's terms", () => {
+    // Benchmark status replies led with plumbing such as "this session didn't
+    // inherit its credentials" instead of progress.
+    // A blocker only the user can clear (a missing credential, a tool approval
+    // a worker is waiting on) must still reach them.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Keep a status answer to one or two sentences about progress in the user's terms, without session, credential, or tool mechanics; name a blocker only when the user must act on it, and say what they need to do.",
+    );
+  });
+
+  test("a question asked during a wait keeps the wait so in-flight results still resume the agent", () => {
+    // A newer finished turn supersedes a registered wait, and child or command
+    // results wake a goal-less session only while a wait is held. A question
+    // turn that answered and ended would silently drop the watch; with an
+    // active goal it instead starts a continuation that rediscovers the same
+    // wait. The re-wait rule must not be conditional on having no goal.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "If work you already started is still in flight (a child, a command, or a timed recheck), give the answer, then call `wait_for_input` when available so its result resumes you, even when a goal is active.",
+    );
+    // Each turn's wait sets a fresh absolute deadline from its timeout, so a
+    // re-wait with the full timeout would push a timed recheck back on every
+    // status question.
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("again with the same reason");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "Otherwise the answer is your final response: an active goal continues on its own",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "do not post a status right before `wait_for_input` unless it answers the user",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "For ordinary background commands, register that session-level wait before ending your turn.",
+    );
+  });
+
+  test("holds an unchanged external wait outside question turns without stalling useful work", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Outside a question or status turn, do not end with only a status reply and leave an immediate continuation",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "only when further progress genuinely depends on unchanged work already in flight",
@@ -222,10 +328,141 @@ describe("provider-neutral operational instructions", () => {
       "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "after calling `wait_for_input`, end without another final or status restatement unless you found material new information",
+      "A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information.",
     );
+    // Any turn may end with a wait instead of a final response, so a turn that
+    // starts long work and waits still has a compliant ending.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "except for the unchanged-wait `wait_for_input` continuation described above",
+      "a turn that ends with `wait_for_input` has none, and its reason is the user-visible status.",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain(
+      "unchanged-wait `wait_for_input` continuation",
+    );
+  });
+});
+
+describe("proportional effort", () => {
+  const section = (heading: string) => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(heading);
+    expect(start).toBeGreaterThan(-1);
+    const next = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start + heading.length).search(/\n#+ /);
+    return next === -1
+      ? OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start)
+      : OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, start + heading.length + next);
+  };
+
+  test("scales work to the request and reuses the earlier approach on repeat asks", () => {
+    const guidance = section("## Match effort to the request");
+    expect(guidance).toContain("A simple question or lookup gets a direct answer");
+    expect(guidance).toContain("do not verify beyond what the question needs");
+    expect(guidance).toContain("Waiting is the user's main cost");
+    expect(guidance).toContain(
+      "research or comparison questions, still get the full effort they need.",
+    );
+    // What a sourced answer contains is decided in the final answer, not here.
+    expect(guidance).not.toContain("link the sources you rely on");
+    expect(guidance).toContain('"check again"');
+    expect(guidance).toContain("reuse the approach");
+    expect(guidance).toContain("instead of rediscovering");
+  });
+
+  test("keeps progress updates short and skips the opening update for quick answers", () => {
+    const guidance = section("## Progress updates");
+    expect(guidance).not.toContain("If the request requires tools, start with a progress update");
+    expect(guidance).not.toContain("more than 60 seconds");
+    expect(guidance).toContain("one short, plain sentence");
+    expect(guidance).toContain(
+      "Skip the opening update when you expect to answer within about 20 seconds",
+    );
+    expect(guidance).toContain("at least every two minutes");
+    expect(guidance).toContain("Do not narrate Skill reads or waits");
+    expect(guidance).toContain("do not post a status right before `wait_for_input`");
+  });
+
+  test("puts a blank line before every heading so the contract renders as Markdown", () => {
+    const lines = OPENGENI_OPERATIONAL_INSTRUCTIONS.split("\n");
+    const crowded = lines.filter(
+      (line, index) => /^#+ /.test(line) && index > 0 && lines[index - 1] !== "",
+    );
+    expect(crowded).toEqual([]);
+  });
+
+  test("leads final answers with the answer and keeps simple answers short", () => {
+    const guidance = section("## Final answer");
+    expect(guidance).toContain("Put the answer or outcome in the first sentence");
+    expect(guidance).toContain("a few sentences or one table");
+    expect(guidance).toContain("to the minute");
+  });
+
+  test("keeps source-backed answers short but not partial", () => {
+    const guidance = section("## Final answer");
+    expect(guidance).toContain(
+      "An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.",
+    );
+  });
+
+  test("reads a Skill once, without announcing it or triggering on keywords", () => {
+    const guidance = section("# Using skills");
+    expect(guidance).not.toContain("Briefly tell the user which skills you are using");
+    expect(guidance).not.toContain("Do not carry skills across turns");
+    expect(guidance).toContain("not because of keyword matches");
+    expect(guidance).toContain("do not read it again");
+    expect(guidance).toContain("Do not announce Skill reads");
+  });
+
+  test("drops directives that pushed simple asks toward audits", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("evidence-backed response");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("exhaust safe in-scope checks");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("point out likely pitfalls");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("in proportion to the question");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not introduce unsolicited warnings");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("stop optional verification");
+  });
+
+  test("the default persona is a general assistant with repository-conditional code guidance", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const instructions = agent.instructions as string;
+    expect(instructions).toContain("general assistant");
+    expect(instructions).not.toMatch(/Checkov|Terraform|GitOps/);
+    // Branches, commits, and pull requests are conditional on a remote plus
+    // credentials, or on the user asking. An unconditional branch clause made
+    // every benchmark coding run create a branch in a repository without a
+    // remote, and a blocker clause ended every answer with pull-request talk.
+    expect(instructions).toContain(
+      "When the Git repository you change has a remote and git provider credentials are available, work on a focused branch and open a pull request.",
+    );
+    // A repository with a remote but no credentials still says the changes
+    // are not pushed, so the user does not assume they were.
+    expect(instructions).toContain(
+      "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if the repository has a remote, say the changes are not pushed, and if the user asks for something you cannot make, say what blocks it.",
+    );
+    expect(instructions).not.toContain("make code changes on a focused branch with a pull request");
+    expect(instructions).not.toContain("report the exact commands and blockers");
+    expect(instructions).toContain("Attached files are mounted read-only");
+    expect(instructions).toContain("pre-authenticated");
+  });
+
+  test("a question does not resume a paused goal", () => {
+    const goalLine = coreInstructions()[0]!;
+    expect(goalLine).toContain("opengeni__goal_complete");
+    expect(goalLine).not.toContain("regardless of who paused it or why;");
+    expect(goalLine).toContain("when the user asks you to continue");
+    expect(goalLine).toContain("A question alone is not such a request");
+  });
+
+  test("bundled Skill descriptors apply when asked or clearly useful, never proactively", () => {
+    const { index } = composeRuntimeSkills([], {
+      editableArtifacts: true,
+      sites: true,
+      videoGeneration: true,
+    });
+    const descriptions = new Map(index.map((entry) => [entry.name, entry.description]));
+    expect(descriptions.get("opengeni-sites")).toBeDefined();
+    expect(descriptions.get("opengeni-visualize")).toBeDefined();
+    for (const [name, description] of descriptions) {
+      expect(description, name).not.toMatch(/proactively|even when the user doesn't name/i);
+    }
+    expect(descriptions.get("opengeni-sites")).toContain("Use when the user asks");
+    expect(descriptions.get("opengeni-visualize")).toContain("Use when the user asks");
   });
 });

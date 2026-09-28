@@ -15,6 +15,8 @@ export function createSkillSearchAttemptToolDefinition(input: {
   authorize: () => Promise<void>;
   listWorkspace: () => Promise<readonly WorkspaceSkillSearchEntry[]>;
   publicSearch: PublicSkillSearchClient;
+  /** Ids of the readable Skills a search returned, for read telemetry only. */
+  onWorkspaceHits?: (ids: readonly string[]) => void;
 }): AttemptToolDefinition {
   return {
     identity: { serverId: "opengeni", toolName: "skill_search" },
@@ -59,6 +61,13 @@ export function createSkillSearchAttemptToolDefinition(input: {
           source: entry.source ?? "workspace",
           installed: !entry.source || entry.source === "workspace",
         }));
+      if (workspaceHits.length) {
+        try {
+          input.onWorkspaceHits?.(workspaceHits.map((entry) => entry.id));
+        } catch {
+          // Telemetry never changes a search.
+        }
+      }
       let publicResult: Awaited<ReturnType<PublicSkillSearchClient["search"]>> | null = null;
       let publicError: {
         source: "skills_sh";
