@@ -324,6 +324,7 @@ import {
   sendScheduledSlackBotPost,
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
+import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
   browseAtlassianSources,
@@ -2039,6 +2040,34 @@ function registerSlackBotTools(
         ...(offset !== undefined ? { offset } : {}),
       });
       return slackBotFileContentResult(result);
+    },
+  );
+
+  server.registerTool(
+    "slack_bot_upload_file",
+    {
+      description:
+        "Upload one explicitly selected retained workspace file (including generated images) into this session's existing Slack task thread as the OpenGeni bot. Use the file/artifact UUID returned by sandbox_file_publish or image generation. No channel or URL is accepted. Generate one operationId UUID per intended delivery and reuse the same operationId on every retry, including unknown outcomes; never start a replacement delivery to retry. Requires the bot's optional files:write scope: a Slack administrator must apply the bot manifest and reinstall an older bot, not connect a personal Slack account. Nonempty files up to 25 MiB; personal files stay in private task threads. Does not automatically upload files merely because they appear in a message.",
+      inputSchema: { fileId: z4.string().uuid(), operationId: z4.string().uuid() },
+    },
+    async ({ fileId, operationId }) => {
+      if (!sessionId) throw new Error("File upload requires an existing Slack task session");
+      return json(
+        await uploadSlackTaskFile(deps, {
+          grant,
+          sessionId,
+          fileId,
+          operationId,
+          authorize: async () => {
+            await authorizeFirstPartySession(
+              deps,
+              grant,
+              sessionId,
+              "session.first_party_mcp.call",
+            );
+          },
+        }),
+      );
     },
   );
 

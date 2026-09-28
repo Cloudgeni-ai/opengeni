@@ -83,6 +83,7 @@ const SLACK_READ_ONLY_CONTEXT_TOOLS = [
   "slack_bot_list_files",
   "slack_bot_file_info",
   "slack_bot_file_content",
+  "slack_bot_upload_file",
 ] as const;
 
 let available = true;

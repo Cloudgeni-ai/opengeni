@@ -78,6 +78,7 @@ import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
+export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
@@ -12598,6 +12599,41 @@ export async function getSlackInteractionByClientEventId(
       interaction: mapSlackInteraction(row.interaction),
       eventSessionId: row.eventSessionId,
     };
+  });
+}
+
+/** Exact bound session only: a child never inherits its root's Slack destination. */
+export async function getSlackInteractionForSession(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<SlackInteraction | null> {
+  return await withRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .select({ interaction: schema.slackInteractions })
+      .from(schema.slackInteractions)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.accountId, schema.slackInteractions.accountId),
+          eq(schema.sessions.workspaceId, schema.slackInteractions.workspaceId),
+          eq(schema.sessions.id, schema.slackInteractions.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.sessionId, input.sessionId),
+          sql`(
+            ${schema.slackInteractions.visibility} <> 'private'
+            or nullif(current_setting('opengeni.subject_id', true), '') is null
+            or ${schema.slackInteractions.owningSubjectId} = nullif(current_setting('opengeni.subject_id', true), '')
+            or ${schema.slackInteractions.owningSubjectId} = nullif(current_setting('opengeni.initiating_human_subject_id', true), '')
+          )`,
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteraction(row.interaction) : null;
   });
 }
 

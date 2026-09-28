@@ -2141,6 +2141,15 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.slack_file_upload_operations') IS NOT NULL THEN
+      -- Ordinary RLS repositories own the upload CAS, not owner capabilities.
+      -- Never allow deletion/truncation to erase its durable completion fence.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.slack_file_upload_operations FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.slack_file_upload_operations FROM PUBLIC;
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE opengeni_private.slack_file_upload_operations TO %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.guard_slack_file_upload_operation() FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.guard_slack_file_upload_operation() FROM PUBLIC', ${literal(schema)});
+    END IF;
     IF to_regclass('opengeni_private.scheduled_slack_bot_messages') IS NOT NULL THEN
       -- Prepared scheduled bot posts are reachable only through their two
       -- capabilities, so a saved destination can never be rewritten directly.

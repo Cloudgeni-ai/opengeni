@@ -55,4 +55,6 @@ export const embeddingMigrationTail = [
   "0515_autonomous_learning_defaults.sql",
   // Patches the 0509 trial grant trigger; replay after it.
   "0521_verified_signup_trial_runtime_switch.sql",
+  // References the files scope identity introduced by withheld 0461.
+  "0531_slack_file_upload_operations.sql",
 ];

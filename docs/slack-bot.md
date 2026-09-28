@@ -104,6 +104,7 @@ oauth_config:
       - chat:write
       - commands
       - files:read
+      - files:write
       - groups:history
       - groups:read
       - im:history
@@ -175,9 +176,16 @@ bun run slack:manifest
 
 This changes the provider app name, bot display name, slash command, shortcut label, and every provider callback URL. Keep `OPENGENI_SLACK_BOT_DISPLAY_NAME` and `OPENGENI_SLACK_COMMAND` set to the same exact values in the API runtime so installation verification, signed command delivery, and the generated provider manifest cannot drift. For managed Kubernetes, `bun run deployment:runtime-artifacts` carries `OPENGENI_SLACK_CLIENT_ID`, `OPENGENI_SLACK_CLIENT_SECRET`, `OPENGENI_SLACK_SIGNING_SECRET`, `OPENGENI_SLACK_BOT_DISPLAY_NAME`, and `OPENGENI_SLACK_COMMAND` into the generated runtime environment. Populate the three credential values from the matching environment's Slack app before publishing the runtime Secret; a staging release must never reuse the production triplet. `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED` rides the same generated runtime environment and is emitted only when it is set, so leaving it unset keeps the code default, which is now routing **on**. Set it explicitly to `false` in that environment to opt a deployment out. See [Which workspace Slack work lands in](#which-workspace-slack-work-lands-in).
 
-Generate the canonical JSON manifest with `bun run slack:manifest`. It defaults to the managed `https://app.opengeni.ai` base URL. Self-hosted deployments set their stable HTTPS `OPENGENI_PUBLIC_BASE_URL` before running the same command; every redirect, command, event, and interaction URL is derived from that value. The bot scopes remain the narrow first-party bot allowlist; the separate user scopes cover the full current Slack-hosted MCP tool catalog and `settings.is_mcp_enabled` enables that provider surface. Bot verification evaluates only the granted bot-token scopes, so hosted-MCP user scopes do not widen the bot principal. `reactions:read` is read-only and exists only for optional reaction summon; `reactions:write` belongs only to the hosted-MCP user principal. `search:read.public`, `search:read.files`, and `search:read.users` are the bot-token scopes Slack's Real-time Search API accepts (`OPENGENI_SLACK_BOT_SEARCH_SCOPES`); `search:read.private`, `search:read.im`, and `search:read.mpim` are user-token only and stay on the personal principal. Do not enable Socket Mode or token rotation, or add bot-side `channels:join`, `chat:write.public`, `chat:write.customize`, administrative, or enterprise-search scopes; Slack's native "Invite Them" prompt handles channels the bot has not joined. The canonical bot allowlist accepts the required manifest scopes plus the explicitly safe extras `team:read`, `reactions:read`, and the three bot search scopes; every other bot extra or unknown future scope fails closed across installation verification, core routing, and browser Installed-state projection. Like `reactions:read`, the search scopes are requested but not required for eligibility: an installation made before they were requested keeps working for mentions, commands, DMs, shortcuts, and tools, and gains bot search only after a reinstall with the canonical manifest (`hasOpenGeniSlackBotSearchScopes`).
+Generate the canonical JSON manifest with `bun run slack:manifest`. It defaults to the managed `https://app.opengeni.ai` base URL. Self-hosted deployments set their stable HTTPS `OPENGENI_PUBLIC_BASE_URL` before running the same command; every redirect, command, event, and interaction URL is derived from that value. The bot scopes remain the narrow first-party bot allowlist; the separate user scopes cover the full current Slack-hosted MCP tool catalog and `settings.is_mcp_enabled` enables that provider surface. Bot verification evaluates only the granted bot-token scopes, so hosted-MCP user scopes do not widen the bot principal. `reactions:read` is read-only and exists only for optional reaction summon; `reactions:write` belongs only to the hosted-MCP user principal. `search:read.public`, `search:read.files`, and `search:read.users` are the bot-token scopes Slack's Real-time Search API accepts (`OPENGENI_SLACK_BOT_SEARCH_SCOPES`); `search:read.private`, `search:read.im`, and `search:read.mpim` are user-token only and stay on the personal principal. Do not enable Socket Mode or token rotation, or add bot-side `channels:join`, `chat:write.public`, `chat:write.customize`, administrative, or enterprise-search scopes; Slack's native "Invite Them" prompt handles channels the bot has not joined. The canonical bot allowlist accepts the required manifest scopes plus the explicitly safe extras `team:read`, `reactions:read`, `files:write`, and the three bot search scopes; every other bot extra or unknown future scope fails closed across installation verification, core routing, and browser Installed-state projection. The reaction, search, and file-upload scopes are requested but not required for eligibility: older installations keep working for mentions, commands, DMs, shortcuts, and existing tools, and gain these optional capabilities after a reinstall with the canonical manifest (`hasOpenGeniSlackReactionScope`, `hasOpenGeniSlackBotSearchScopes`, `hasOpenGeniSlackFileUploadScope`).
 
 ## Install and connect the workspace bot
+
+`files:write` is an optional bot grant, requested by the canonical manifest but
+not required for existing installations to remain eligible. Apply the generated
+manifest to the Slack app before reinstalling the OpenGeni workspace bot. Older
+installations keep their existing reads and task replies; explicit file delivery
+reports that a Slack administrator must reinstall to grant `files:write`. A
+personal Slack connection is neither required nor substituted for this bot grant.
 
 1. In the intended OpenGeni workspace, open **Capabilities → Integrations → Slack**.
 2. Use the Slack sheet's **Set up** action (or **Reconnect** for a repair reinstall). The button calls OpenGeni's authenticated OAuth-start API; it is not a static provider link.
@@ -198,6 +206,42 @@ Where a conversation's **work** lands is a separate, additive fact. See [Which w
 Migration `0212_slack_installation_bindings.sql` backfills one newest row only when all verified legacy rows for a team agree on the exact account/workspace and bot principal. Exact-principal duplicates remain stored but are non-authoritative. Conflicting legacy rows retain their provider credentials and are marked `quarantined`; routing and reinstall fail closed until an explicit forward fix resolves them. The database trigger fences rolling-old writers before they can commit a second binding. After migration, roll forward with binding-aware code rather than dropping the ledger or guessing a tenant; removing the binding authority is not a supported rollback.
 
 ## Start and continue OpenGeni work from Slack
+
+### Explicit file delivery in the task thread
+
+Slack-created tasks include the first-party `slack_bot_upload_file` tool. It takes
+an explicitly selected retained `fileId` (also the artifact UUID returned by
+`sandbox_file_publish` or image generation) and one stable `operationId` UUID.
+The destination is the exact session's existing Slack interaction, not a channel,
+user, bot connection, or URL supplied by the agent. Nonempty, ready, SHA-256-bound
+files up to 25 MiB are supported. Personal files remain in private task threads;
+shared/externally shared and archived conversations are refused. There is no
+automatic attachment scraping or upload triggered by assistant Markdown.
+
+Source-file read authority, the live initiating attempt, the linked task requester,
+installation identity, current bot scope, and channel membership are rechecked
+before provider requests. Routed tasks use the installation's home credential
+while their file and delivery ledger remain in the source task's workspace.
+
+The source-local `slack_file_uploads` ledger binds an operation to its exact file,
+session, interaction, principal, and request digest. It checkpoints the allocated
+Slack file ID before transferring bytes and marks completion started before
+`files.completeUploadExternal` can share them. Temporary upload URLs and original
+bytes never enter the ledger, tool result, or audit metadata. A completed retry
+returns its original identity without another upload. A lost byte-transfer
+response may replace an **unshared** temporary file, never a file whose completion
+started. Uncertain completion is read/reconciled by exact file, bot principal,
+channel, and thread; it is never blindly replayed. Reuse the same `operationId`
+for recovery rather than creating a new intended delivery.
+
+Without the optional grant or a confirmed outcome, keep the authenticated
+OpenGeni artifact reference available and report the concrete blocker. Do not
+claim that an image was posted to Slack merely because it was retained in OpenGeni.
+This tool does not add arbitrary-channel delivery or scheduled-task file posting.
+After deploying this support, newly created Slack tasks receive the tool subject
+to deployment policy. Existing sessions and accepted attempts keep their frozen
+tool selections; use a new Slack task or an authorized session-policy update
+rather than automatically widening their authority.
 
 ### Private App Home task inbox
 
