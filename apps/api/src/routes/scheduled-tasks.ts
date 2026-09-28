@@ -2,17 +2,24 @@ import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
   RefreshScheduledTaskAccessRequest,
+  ScheduledTaskSlackChannelId,
+  ScheduledTaskSlackChannelListResponse,
   TriggerScheduledTaskRequest,
   UpdateScheduledTaskRequest,
+  type AccessGrant,
 } from "@opengeni/contracts";
 import { listScheduledTaskRuns, listScheduledTasks } from "@opengeni/db";
 import type { Hono } from "hono";
 import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import {
+  isAuthenticatedPersonAuthorization,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  requirePermission,
   resolveWorkspaceCatalogSettings,
+  validateOpenGeniSlackBotConnectionSelection,
+  type ScheduledTaskSlackChannelVerifier,
 } from "@opengeni/core";
 import {
   recordWorkspaceUsage,
@@ -46,10 +53,76 @@ import {
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { permissionsRequiredByFirstPartyTools } from "../mcp/first-party-tool-permissions";
+import {
+  createOpenGeniSlackBotInteractionClient,
+  verifyScheduledTaskSlackChannel,
+} from "../integrations/slack-bot";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient, objectStorage } = deps;
+  const slackChannelVerifier =
+    (grant: AccessGrant): ScheduledTaskSlackChannelVerifier =>
+    async ({ connectionId, channelId }) =>
+      await verifyScheduledTaskSlackChannel(deps, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        connectionId,
+        channelId,
+      });
+
+  // Channels a person may choose as a task's fixed Slack destination: active,
+  // non-shared channels the selected OpenGeni bot already belongs to.
+  app.get("/v1/workspaces/:workspaceId/scheduled-task-slack-channels", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:manage",
+    );
+    const grant = authorization.grant;
+    requirePermission(grant, "connections:write");
+    if (!isAuthenticatedPersonAuthorization(authorization)) {
+      throw new HTTPException(403, {
+        message: "Only a person can choose the Slack channel a scheduled task posts to",
+      });
+    }
+    const connectionId = c.req.query("connectionId");
+    if (!connectionId || !z.string().uuid().safeParse(connectionId).success) {
+      throw new HTTPException(400, { message: "connectionId is required" });
+    }
+    const cursor = c.req.query("cursor");
+    if (cursor !== undefined && cursor.length > 1_024) {
+      throw new HTTPException(400, { message: "invalid cursor" });
+    }
+    await validateOpenGeniSlackBotConnectionSelection(db, grant, workspaceId, connectionId);
+    const client = await createOpenGeniSlackBotInteractionClient(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      connectionId,
+      subjectId: grant.subjectId,
+    });
+    const result = await client.listChannels({ limit: 200, ...(cursor ? { cursor } : {}) });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      ScheduledTaskSlackChannelListResponse.parse({
+        channels: result.channels
+          .filter(
+            (channel) =>
+              channel.isMember &&
+              !channel.isArchived &&
+              !channel.isShared &&
+              !channel.isExternallyShared &&
+              !channel.isOrgShared &&
+              ScheduledTaskSlackChannelId.safeParse(channel.id).success,
+          )
+          .map((channel) => ({ id: channel.id, name: channel.name, isPrivate: channel.isPrivate })),
+        nextCursor: result.nextCursor || null,
+      }),
+    );
+  });
 
   // Drift is advisory: it is attached for viewers who can act on a task and
   // never fails the read it decorates.
@@ -140,6 +213,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       toolsProvided: scheduledTaskToolsProvided(rawPayload),
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
+      verifySlackChannel: slackChannelVerifier(grant),
     });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     return c.json(scheduledTaskForGrant(task, grant), 201);
@@ -269,6 +343,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       toolsProvided: scheduledTaskToolsProvided(rawPayload),
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
+      verifySlackChannel: slackChannelVerifier(grant),
     });
     const task = await updateScheduledTaskForApi(
       db,

@@ -194,6 +194,27 @@ describe("scheduled task form projection", () => {
     expect(agentConfigFromFormState(fresh)).not.toHaveProperty("slackBotConnectionId");
   });
 
+  test("round-trips the chosen Slack channel only with its bot and its own chats", () => {
+    const task = scheduledTask();
+    task.agentConfig.slackBotChannelId = "C0SCHED01";
+    const form = formStateFromScheduledTask(task);
+    expect(form.slackBotChannelId).toBe("C0SCHED01");
+    expect(agentConfigFromFormState(form, task)).toMatchObject({
+      slackBotConnectionId: connectionId,
+      slackBotChannelId: "C0SCHED01",
+    });
+    expect(agentConfigFromFormState({ ...form, slackBotChannelId: "" }, task)).not.toHaveProperty(
+      "slackBotChannelId",
+    );
+    expect(
+      agentConfigFromFormState({ ...form, slackBotConnectionId: "" }, task),
+    ).not.toHaveProperty("slackBotChannelId");
+    expect(
+      agentConfigFromFormState({ ...form, runMode: "existing_session" }, task),
+    ).not.toHaveProperty("slackBotChannelId");
+    expect(newScheduledTaskFormState(true).slackBotChannelId).toBe("");
+  });
+
   test("keeps the human description separate from agent instructions", () => {
     const task = scheduledTask();
     task.metadata = {

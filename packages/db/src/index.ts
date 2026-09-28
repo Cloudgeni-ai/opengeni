@@ -78,6 +78,7 @@ import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
+export * from "./scheduled-slack-bot-messages";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
@@ -74767,6 +74768,43 @@ export async function settleSessionIdleWithParentOutbox(
         )
         .limit(1);
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
+        return { action: "stale", episodeKey: null, events: [] } as const;
+      }
+      // Immediate machine input has no queued turn until claim. Its producer
+      // takes this same session fence, so a post-peek arrival must win before
+      // we publish the preceding episode's terminal result. Use the wake-class
+      // contract, not every pending row: deferred notices and unwaited command
+      // results do not reopen finished work. A late child notice likewise only
+      // reserves new work when its producer queued the session; active goals
+      // and held/due waits are independently protected below.
+      const pendingInputs = await tx
+        .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, sessionId),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+          ),
+        );
+      const pendingSteer = pendingInputs.some(({ kind }) => kind === "agent_steer_instruction");
+      const pendingImmediate = pendingInputs.some(
+        ({ kind }) =>
+          SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] === "immediate" &&
+          kind !== "background_command_result" &&
+          (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
+            session.status === "queued"),
+      );
+      if (
+        pendingSteer ||
+        (pendingImmediate &&
+          !(await latestFinishedTurnHasFailureCodeTx(
+            tx as unknown as Database,
+            workspaceId,
+            sessionId,
+            "context_compaction_failed",
+          )))
+      ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
       const [{ episodeSequence } = { episodeSequence: 0 }] = await tx

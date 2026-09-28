@@ -2141,6 +2141,23 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Channels a person may choose as a scheduled task's fixed Slack destination:
+   * active, non-shared channels the selected OpenGeni bot already belongs to.
+   */
+  async listScheduledTaskSlackChannels(
+    workspaceId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<SlackReactionChannelListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    if (cursor) query.set("cursor", cursor);
+    return await this.requestJson<SlackReactionChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/scheduled-task-slack-channels?${query}`,
+    );
+  }
+
   // --- Events: replay, send, stream ----------------------------------------
 
   /**
