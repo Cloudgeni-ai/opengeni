@@ -1334,6 +1334,17 @@ prefix (the parent session row is locked with the child) and the worker delivers
 the row right after the producing commit; the reaper covers crashes. See
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
+Normal idle completion performs goal evaluation, a final durable peek, and the
+transactional `markSessionIdle` boundary without an unconditional five-second
+grace period. The transaction rejects stale active/queued work and pending
+runnable machine input before producing an episode-deduplicated parent result.
+A signal accepted during the close chain causes another peek; later input
+retains its durable wake and may start a new
+workflow run of the same session, rather than coalescing into the prior idle
+episode. The `session-normal-idle-no-grace-v1` patch preserves old recorded
+timer commands for replay. Held input-wait, goal backoff, cancellation,
+quiescence, and capacity timers are unchanged.
+
 A workflow run closing during a current input wait or an active goal is parked,
 not completed work. Idle settlement preserves that projection and durable wake
 without creating a child terminal result. Goal completion, explicit goal pause,

@@ -90,6 +90,7 @@ const DOC_PATTERN = /^(?:docs\/|[^/]+\.md$)/;
 
 export const TEMPORAL_WORKFLOW_INTEGRATION_TESTS = [
   "test/integration/temporal-workflow.integration.ts",
+  "test/integration/session-idle-close.integration.ts",
 ] as const;
 
 const TEMPORAL_WORKFLOW_DEPENDENCIES = [
