@@ -1451,9 +1451,6 @@
 :where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
     bottom: calc(var(--spacing) * 4);
   }
-:where(.og-root).bottom-7,:where(.og-root) .bottom-7 {
-    bottom: calc(var(--spacing) * 7);
-  }
 :where(.og-root).bottom-14,:where(.og-root) .bottom-14 {
     bottom: calc(var(--spacing) * 14);
   }
