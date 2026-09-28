@@ -8,7 +8,6 @@ import {
   FolderIcon,
   FolderTreeIcon,
   GavelIcon,
-  LightbulbIcon,
   LinkIcon,
   ListIcon,
   LockIcon,
@@ -17,11 +16,8 @@ import {
   PencilIcon,
   PlusIcon,
   ShieldCheckIcon,
-  SirenIcon,
-  StickyNoteIcon,
   UploadIcon,
   UserRoundIcon,
-  type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -56,7 +52,6 @@ import {
   LineTabsTrigger,
 } from "@/components/ui/line-tabs";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -92,15 +87,6 @@ import type { PagePicks } from "./picks";
    Library tab: one toolbar that never reflows, rows that open one detail
    view, archived and rejected entries behind the Status filter.
    -------------------------------------------------------------------------- */
-
-export const TYPE_ICON: Record<EntryType, LucideIcon> = {
-  decision: GavelIcon,
-  requirement: ShieldCheckIcon,
-  incident: SirenIcon,
-  fact: LightbulbIcon,
-  note: StickyNoteIcon,
-  general: FileTextIcon,
-};
 
 export type ScopeFilter = "all" | KnowledgeScope;
 export type LibraryLayout = "list" | "collections";
@@ -314,7 +300,6 @@ export function LibraryTab({
     searching || view.scope !== "all" || Object.values(view.filters).some((ids) => ids.length > 0);
 
   const renderRow = (entry: LibraryEntry) => {
-    const Icon = TYPE_ICON[entry.type];
     const catalog = picks.list === "catalog";
     const sourceLine = entry.source
       ? entry.source.kind === "file"
@@ -327,7 +312,6 @@ export function LibraryTab({
     return (
       <ListRow
         key={entry.id}
-        leading={<LogoTile icon={<Icon />} name={TYPE_LABEL[entry.type]} />}
         title={entry.title}
         titleAddon={<ScopeTag scope={entry.scope} organizationWord={organizationWord} />}
         description={<Excerpt text={entry.content} query={view.query} />}
@@ -604,8 +588,9 @@ export function LibraryTab({
 
 /* ----------------------------------------------------------------------------
    One entry: its own page, like a skill in Claude's settings. Back link,
-   tile, title with its scope, a "by · in · updated" line, Overview and
-   History tabs, the text in the main column and the facts in a quiet card.
+   title with its scope, a "Decision · by · in · updated" line (the kind is a
+   word, not a tile), Overview and History tabs, the text in the main column
+   and the facts in a quiet card.
    Edit is its own page too.
    -------------------------------------------------------------------------- */
 
@@ -645,7 +630,6 @@ function EntryDetailPage({
   onRestoreRevision,
 }: EntryDetailProps) {
   const [tab, setTab] = useState<EntryTab>("overview");
-  const Icon = TYPE_ICON[entry.type];
   const words = scopeWords(organizationWord);
   const published = entry.status === "published";
 
@@ -660,9 +644,7 @@ function EntryDetailPage({
       >
         {whereLabel(entry.scope, organizationWord)}
       </DetailAsideItem>
-      <DetailAsideItem label="Type" icon={<Icon />}>
-        {TYPE_LABEL[entry.type]}
-      </DetailAsideItem>
+      <DetailAsideItem label="Type">{TYPE_LABEL[entry.type]}</DetailAsideItem>
       <DetailAsideItem label="Collection" icon={<FolderIcon />}>
         {entry.collection ?? <span className="text-fg-muted">None</span>}
       </DetailAsideItem>
@@ -691,7 +673,6 @@ function EntryDetailPage({
         className="min-w-0"
       >
         <DetailPageHeader
-          leading={<LogoTile icon={<Icon />} name={TYPE_LABEL[entry.type]} />}
           title={entry.title}
           chips={
             <>
@@ -700,6 +681,7 @@ function EntryDetailPage({
             </>
           }
           meta={[
+            TYPE_LABEL[entry.type],
             `by ${entry.author}`,
             entry.collection ? `in ${entry.collection}` : null,
             <span key="updated">

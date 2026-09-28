@@ -4,20 +4,10 @@ import { toast } from "sonner";
 
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FormDialog, FormFrame, type FormFrameProps } from "@/components/ui/form-dialog";
+import { Field, FieldStack, TextInput } from "@/components/ui/field";
+import { FormDialog, FormFrame } from "@/components/ui/form-dialog";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import {
-  EnvPastePreview,
-  SecretInput,
-  SecretOnce,
-  SecretValue,
-  importableEnvRows,
-  normalizeVariableName,
-  parseEnvText,
-  variableNameIssue,
-} from "@/components/ui/secret-field";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { SecretInput, SecretOnce, SecretValue } from "@/components/ui/secret-field";
 import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
 import type { WorkspaceVariableSet } from "@/types";
 import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
@@ -37,7 +27,6 @@ import {
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const aws = variableSetById("vs-aws-production");
-const github = variableSetById("vs-github-automation");
 const financeExports = variableSetById("vs-finance-exports");
 const awsSchedule = scheduleById("sched-aws-cost");
 
@@ -45,14 +34,6 @@ const EXAMPLE_SECRETS: Record<string, string> = {
   AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE",
   AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 };
-
-const PASTED_ENV = [
-  "# From the renovate runner",
-  "GITHUB_ORG=acme-robotics",
-  "GITHUB_TOKEN=ghp_example_not_a_real_token",
-  "RENOVATE_PLATFORM=github",
-  'RENOVATE_AUTODISCOVER="false"',
-].join("\n");
 
 const PEM_VALUE = [
   "-----BEGIN OPENSSH PRIVATE KEY-----",
@@ -69,245 +50,9 @@ const COLUMNS: RowListColumn[] = [
 ];
 
 /* ----------------------------------------------------------------------------
-   Add variable and Replace value.
+   Replace value. One variable is added inline under the list (the product's
+   AddVariableRow); a pasted .env has its own page (see Variable set page).
    -------------------------------------------------------------------------- */
-
-interface AddValues {
-  mode: "one" | "paste";
-  name: string;
-  value: string;
-  env: string;
-  secret: boolean;
-}
-
-const EMPTY_ADD: AddValues = { mode: "one", name: "", value: "", env: "", secret: true };
-
-function ModeControl({
-  value,
-  onChange,
-}: {
-  value: AddValues["mode"];
-  onChange: (value: AddValues["mode"]) => void;
-}) {
-  return (
-    <SegmentedControl
-      aria-label="How to add"
-      options={[
-        { value: "one", label: "One variable" },
-        { value: "paste", label: "Paste .env" },
-      ]}
-      value={value}
-      onValueChange={onChange}
-      size="sm"
-      className="self-start"
-    />
-  );
-}
-
-function addErrors(values: AddValues, existing: string[], submitted: boolean) {
-  const name = normalizeVariableName(values.name);
-  const issue = name ? variableNameIssue(name, existing) : null;
-  return {
-    name: issue?.message ?? (submitted && !name ? "Name the variable." : undefined),
-    value: submitted && !values.value ? "Enter a value." : undefined,
-  };
-}
-
-function AddVariableFields({
-  values,
-  onChange,
-  set,
-  policy,
-  submitted = false,
-  revealed = false,
-}: {
-  values: AddValues;
-  onChange: (next: AddValues) => void;
-  set: VariableSet;
-  policy: SecretPolicy;
-  submitted?: boolean;
-  revealed?: boolean;
-}) {
-  const existing = set.variables.map((variable) => variable.name);
-  const update = <K extends keyof AddValues>(key: K, value: AddValues[K]) =>
-    onChange({ ...values, [key]: value });
-  const normalized = normalizeVariableName(values.name);
-  const errors = addErrors(values, existing, submitted);
-  const rows = values.env.trim() ? parseEnvText(values.env, existing) : [];
-
-  return (
-    <FieldStack>
-      <ModeControl value={values.mode} onChange={(mode) => update("mode", mode)} />
-      {values.mode === "one" ? (
-        <>
-          <Field
-            label="Name"
-            error={errors.name}
-            hint={
-              normalized && normalized !== values.name ? (
-                <>
-                  Saved as <span className="font-mono text-fg">{normalized}</span>
-                </>
-              ) : (
-                "Letters, numbers and underscores. Saved in uppercase."
-              )
-            }
-          >
-            <TextInput
-              mono
-              value={values.name}
-              onChange={(event) => update("name", event.target.value)}
-              placeholder="e.g. DATABASE_URL"
-              autoComplete="off"
-              autoCapitalize="characters"
-              spellCheck={false}
-            />
-          </Field>
-          <Field
-            label="Value"
-            error={errors.value}
-            hint={
-              policy === "plain" && !values.secret
-                ? "Shown in the list. Anyone who can see this set can read it."
-                : "Hidden after you save it. Agents still get the value in their sandbox."
-            }
-          >
-            {policy === "plain" && !values.secret ? (
-              <TextArea
-                mono
-                rows={2}
-                value={values.value}
-                onChange={(event) => update("value", event.target.value)}
-                spellCheck={false}
-              />
-            ) : (
-              <SecretInput
-                multiline
-                rows={2}
-                defaultRevealed={revealed}
-                value={values.value}
-                onChange={(event) => update("value", event.target.value)}
-              />
-            )}
-          </Field>
-          {policy === "plain" ? (
-            <CheckboxField
-              label="Secret"
-              description="Hide the value after saving. Turn it off for config like a region or an account ID."
-              checked={values.secret}
-              onCheckedChange={(secret) => update("secret", secret)}
-            />
-          ) : null}
-        </>
-      ) : (
-        <>
-          <Field
-            label="Variables"
-            hint={
-              rows.length ? undefined : "One NAME=value per line. Comments and export are ignored."
-            }
-          >
-            <TextArea
-              mono
-              rows={5}
-              value={values.env}
-              onChange={(event) => update("env", event.target.value)}
-              placeholder={"DATABASE_URL=postgres://…\nPGSSLMODE=require"}
-              spellCheck={false}
-            />
-          </Field>
-          {rows.length ? <EnvPastePreview rows={rows} /> : null}
-        </>
-      )}
-    </FieldStack>
-  );
-}
-
-function addFrameProps(
-  values: AddValues,
-  set: VariableSet,
-): Pick<FormFrameProps, "title" | "description" | "submitLabel" | "pendingLabel"> {
-  const count =
-    values.mode === "paste"
-      ? importableEnvRows(
-          parseEnvText(
-            values.env,
-            set.variables.map((v) => v.name),
-          ),
-        ).length
-      : 1;
-  return {
-    title: "Add variable",
-    description: `To ${set.name}. New turns get it; turns already running don't.`,
-    submitLabel:
-      values.mode === "paste"
-        ? count > 0
-          ? `Add ${count} ${count === 1 ? "variable" : "variables"}`
-          : "Add variables"
-        : "Add variable",
-    pendingLabel: "Adding…",
-  };
-}
-
-/** A live panel of Add variable, for previews and states. */
-function AddVariablePanel({
-  set = aws,
-  policy = "write-only",
-  initial = EMPTY_ADD,
-  submitted,
-  revealed,
-  className,
-}: {
-  set?: VariableSet;
-  policy?: SecretPolicy;
-  initial?: AddValues;
-  submitted?: boolean;
-  revealed?: boolean;
-  className?: string;
-}) {
-  const [values, setValues] = useState(initial);
-  const [tried, setTried] = useState(submitted ?? false);
-  return (
-    <FormFrame
-      {...addFrameProps(values, set)}
-      onSubmit={async () => {
-        setTried(true);
-        const errors = addErrors(
-          values,
-          set.variables.map((v) => v.name),
-          true,
-        );
-        if (values.mode === "one" && (errors.name || errors.value)) return false;
-        await wait(700);
-        return true;
-      }}
-      onSubmitted={() => toast.success(`Added to ${set.name}`)}
-      onCancel={() => {
-        setValues(initial);
-        setTried(false);
-      }}
-      submitDisabled={
-        values.mode === "paste" &&
-        !importableEnvRows(
-          parseEnvText(
-            values.env,
-            set.variables.map((v) => v.name),
-          ),
-        ).length
-      }
-      className={className}
-    >
-      <AddVariableFields
-        values={values}
-        onChange={setValues}
-        set={set}
-        policy={policy}
-        submitted={tried}
-        revealed={revealed}
-      />
-    </FormFrame>
-  );
-}
 
 function ReplaceValueFields({
   variable,
@@ -568,16 +313,10 @@ export default function SecretValuesSection() {
         </Alternative>
         <Alternative id="c">
           <VariablesTable policy="plain" />
-          <div className="mt-6 flex min-w-0 justify-center">
-            <AddVariablePanel
-              policy="plain"
-              initial={{ ...EMPTY_ADD, name: "aws_default_output", value: "json", secret: false }}
-              className="w-full max-w-[560px]"
-            />
-          </div>
           <Caption>
-            Plain config shows inline with Copy; secrets stay write-only. Adding asks one question:
-            Secret, on by default. Needs a Secret flag on variables in the backend.
+            Plain config shows inline with Copy; secrets stay write-only. The inline add row would
+            ask one more question: Secret, on by default. Needs a Secret flag on variables in the
+            backend.
           </Caption>
         </Alternative>
       </Fork>
@@ -586,46 +325,21 @@ export default function SecretValuesSection() {
         columns={2}
         description="Write-only, the recommended version: adding, replacing, the saved row and the one-time view."
       >
-        <StateCell label="Add variable · empty" align="stretch">
-          <AddVariablePanel />
-        </StateCell>
         <StateCell
-          label="Typing · hidden"
+          label="Add variable (inline)"
           align="stretch"
-          note="The name is shown as it will be saved."
+          note="The product's row under the list. Name is uppercased as you type; a reserved or duplicate name (try GITHUB_TOKEN or AWS_REGION) is flagged inline."
         >
-          <AddVariablePanel
-            initial={{ ...EMPTY_ADD, name: "pg host-name", value: "db.staging.acme.internal" }}
-          />
-        </StateCell>
-        <StateCell
-          label="Typing · shown"
-          align="stretch"
-          note="The eye shows the value while typing. Nothing shows it after saving."
-        >
-          <AddVariablePanel
-            revealed
-            initial={{ ...EMPTY_ADD, name: "SENTRY_AUTH_TOKEN", value: "sntrys_example_7c1f0a" }}
-          />
-        </StateCell>
-        <StateCell label="Reserved name" align="stretch">
-          <AddVariablePanel
-            set={github}
-            initial={{ ...EMPTY_ADD, name: "GITHUB_TOKEN", value: "ghp_example" }}
-          />
-        </StateCell>
-        <StateCell label="Already in this set" align="stretch">
-          <AddVariablePanel initial={{ ...EMPTY_ADD, name: "aws_region", value: "eu-west-1" }} />
-        </StateCell>
-        <StateCell
-          label="Paste .env"
-          align="stretch"
-          note="One reserved name and one duplicate, flagged before anything is saved."
-        >
-          <AddVariablePanel
-            set={github}
-            initial={{ ...EMPTY_ADD, mode: "paste", env: PASTED_ENV }}
-          />
+          <div className="min-w-0 flex-1">
+            <AddVariableRow
+              set={aws as unknown as WorkspaceVariableSet}
+              onAdd={async ({ name }) => {
+                await wait(600);
+                toast.success(`Added ${name} to ${aws.name}`);
+              }}
+              onPaste={() => toast("Paste .env opens its own page")}
+            />
+          </div>
         </StateCell>
         <StateCell
           label="Replace value"

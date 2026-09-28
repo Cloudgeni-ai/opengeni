@@ -53,7 +53,8 @@ import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeter } from "@/components/ui/usage-meter";
-import { cn } from "@/lib/utils";
+import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
+import type { WorkspaceVariableSet } from "@/types";
 
 import {
   KIT_NOW,
@@ -229,17 +230,14 @@ function VariableSetMenu({ set }: { set: VariableSet }) {
   );
 }
 
-function AddVariableButton({ compact }: { compact?: boolean }) {
+/** As in the product: one variable is added inline under the list. */
+function AddVariableInline({ set }: { set: VariableSet }) {
   return (
-    <Button
-      type="button"
-      variant={compact ? "outline" : "default"}
-      size={compact ? "sm" : "default"}
-      className={cn(compact && "h-7 rounded-[10px] px-2.5", "pointer-coarse:h-11")}
-    >
-      <PlusIcon />
-      Add variable
-    </Button>
+    <AddVariableRow
+      set={set as unknown as WorkspaceVariableSet}
+      onAdd={() => new Promise<void>((resolve) => setTimeout(resolve, 500))}
+      onPaste={() => {}}
+    />
   );
 }
 
@@ -265,12 +263,7 @@ function VariableSetPage({ set, onBack }: { set: VariableSet; onBack: () => void
           set.usageLabel,
           <RelativeTime key="updated" date={set.updatedAt} prefix="updated" {...TIME} />,
         ]}
-        actions={
-          <>
-            <AddVariableButton />
-            <VariableSetMenu set={set} />
-          </>
-        }
+        actions={<VariableSetMenu set={set} />}
         tabs={
           <LineTabsNav aria-label={`${set.name} sections`}>
             <LineTabsLink asChild active={tab === "variables"} count={set.variables.length}>
@@ -312,6 +305,7 @@ function VariableSetPage({ set, onBack }: { set: VariableSet; onBack: () => void
             description="Secrets are write-only. Agents get them in their sandbox."
           >
             <VariablesList set={set} table />
+            <AddVariableInline set={set} />
           </DetailSection>
         ) : (
           <DetailSection
@@ -341,11 +335,9 @@ function VariableSetCompact({ set }: { set: VariableSet }) {
         />
       )}
       <DetailBody>
-        <DetailSection
-          title={`Variables (${set.variables.length})`}
-          action={<AddVariableButton compact />}
-        >
+        <DetailSection title={`Variables (${set.variables.length})`}>
           <VariablesList set={set} />
+          <AddVariableInline set={set} />
         </DetailSection>
         <DetailSection title="Used by">
           <UsedByList set={set} />

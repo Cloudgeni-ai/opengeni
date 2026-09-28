@@ -350,15 +350,11 @@ export default function PageHeaderSection() {
               meta={<MetaChip variant="outline">Organization</MetaChip>}
               description={financeExports.description}
               actions={
-                <>
-                  <Button variant="outline">
-                    <PlusIcon aria-hidden="true" />
-                    Add variable
-                  </Button>
-                  <Button variant="ghost" size="icon" aria-label="More actions for Finance exports">
-                    <MoreHorizontalIcon aria-hidden="true" />
-                  </Button>
-                </>
+                // As in the product: variables are added inline under the list,
+                // so the header keeps only the set's menu.
+                <Button variant="ghost" size="icon" aria-label="More actions for Finance exports">
+                  <MoreHorizontalIcon aria-hidden="true" />
+                </Button>
               }
             />
           </StateFrame>
