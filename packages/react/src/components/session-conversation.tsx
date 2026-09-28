@@ -81,7 +81,9 @@ function Conversation({
         renderMessageText={renderMessageText}
         userMessageDisclosureLabels={userMessageDisclosureLabels}
         className="min-h-0 flex-1"
+        events={feed.events}
         items={conversationTimeline(feed.timeline, queue, composer)}
+        turnSummary={{ rolling: true }}
         status={status}
         hasOlder={feed.hasOlder}
         loadingOlder={feed.loadingOlder}
@@ -94,6 +96,7 @@ function Conversation({
         }}
         loadingOldest={feed.loadingOldest}
         onJumpToLatest={feed.jumpToLatest}
+        onJumpToLatestQuestion={feed.jumpToLatestQuestion}
         onAnnotate={composer.addAnnotation}
       />
       <div className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto" data-og-conversation-inputs="">

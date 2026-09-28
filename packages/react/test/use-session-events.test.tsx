@@ -307,6 +307,86 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
+  test.each(["resolve", "reject"] as const)(
+    "a Latest question lookup cannot %s into a replacement session",
+    async (outcome) => {
+      let resolve!: (events: SessionEvent[]) => void;
+      let reject!: (reason: Error) => void;
+      const pending = new Promise<SessionEvent[]>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      const secondEvent = { ...event(2), sessionId: SECOND_SESSION_ID };
+      const client = fakeClient({
+        listEvents: async (_workspace, sessionId, options) =>
+          options?.includeTypes ? pending : sessionId === SESSION_ID ? [event(1)] : [secondEvent],
+        streamEvents: async function* () {},
+      });
+      const hook = await renderHook(
+        ({ sessionId }) => useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
+        { sessionId: SESSION_ID },
+      );
+      try {
+        await flush(20);
+        const lookup = hook.result.current.jumpToLatestQuestion();
+        await hook.rerender({ sessionId: SECOND_SESSION_ID });
+        await flush(20);
+        if (outcome === "resolve") resolve([event(1000)]);
+        else reject(new Error("old session unavailable"));
+        await actRun(async () => expect(await lookup).toBeNull());
+        expect(hook.result.current.events).toEqual([secondEvent]);
+        expect(hook.result.current.error).toBeNull();
+      } finally {
+        await hook.unmount();
+      }
+    },
+  );
+
+  test("Latest question propagates current lookup errors and permits retry", async () => {
+    const failure = new Error("lookup unavailable");
+    let fail = true;
+    const { client } = scriptedClient({
+      store: [event(1)],
+      listEvents: async (options) => {
+        if (options.includeTypes && fail) throw failure;
+        return [event(1)];
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () =>
+        expect(hook.result.current.jumpToLatestQuestion()).rejects.toBe(failure),
+      );
+      fail = false;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+      expect(hook.result.current.events).toEqual([event(1)]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question returns null when its resolved event is missing from exact context", async () => {
+    const { client } = scriptedClient({
+      store: [event(1)],
+      listEvents: async (options) => (options.includeTypes ? [event(9000)] : [event(1)]),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBeNull());
+      expect(hook.result.current.events).toEqual([event(1)]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("client replacement fences a pending target rejection without a session change", async () => {
     let reject!: (reason: Error) => void;
     const gate = new Promise<SessionEvent[]>((_resolve, rejectPromise) => {

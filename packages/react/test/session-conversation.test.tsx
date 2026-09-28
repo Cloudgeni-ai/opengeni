@@ -59,6 +59,7 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
 
 test("complete conversation loads queue and provides queue actions beside composer", async () => {
   let streams = 0;
+  let latestQuestionLookups = 0;
   let snapshot: SessionQueueSnapshot = {
     version: 1,
     effectiveControl: {
@@ -83,8 +84,12 @@ test("complete conversation loads queue and provides queue actions beside compos
     pendingInputAttachment: null,
   };
   const client = fakeClient({
-    listEvents: async () =>
-      [
+    listEvents: async (_workspace, _session, options) => {
+      if (options?.includeTypes?.includes("user.message")) {
+        latestQuestionLookups++;
+        expect(options.mode).toBe("forensic");
+      }
+      return [
         {
           id: "33333333-3333-4333-8333-333333333333",
           sessionId: SESSION_ID,
@@ -94,7 +99,8 @@ test("complete conversation loads queue and provides queue actions beside compos
           occurredAt: "2026-09-07T00:00:00Z",
           payload: { text: "A complete long message. ".repeat(80) },
         },
-      ] as never,
+      ] as never;
+    },
     getSession: async () =>
       ({
         id: SESSION_ID,
@@ -131,6 +137,14 @@ test("complete conversation loads queue and provides queue actions beside compos
   );
   try {
     await flush(100);
+    const latestQuestion = view.container.querySelector<HTMLButtonElement>(
+      "[data-og-jump-to-question]",
+    );
+    expect(latestQuestion).not.toBeNull();
+    expect(view.container.querySelectorAll("[data-og-jump-to-question]")).toHaveLength(1);
+    await actRun(() => latestQuestion!.click());
+    await flush(30);
+    expect(latestQuestionLookups).toBe(1);
     const disclosure = view.container.querySelector<HTMLButtonElement>(
       "[data-og-user-message-disclosure]",
     )!;
