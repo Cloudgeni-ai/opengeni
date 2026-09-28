@@ -92,8 +92,12 @@ describe("readable timeline browser regression", () => {
     }
   });
 
-  async function openHarness(scenario = "delegated"): Promise<Page> {
-    const context = await browser.newContext({ viewport: { width: 390, height: 560 } });
+  async function openHarness(scenario = "delegated", width = 390, touch = false): Promise<Page> {
+    const context = await browser.newContext({
+      viewport: { width, height: 560 },
+      hasTouch: touch,
+      isMobile: touch,
+    });
     const page = await context.newPage();
     page.on("pageerror", (error) => browserErrors.push(`pageerror: ${error.message}`));
     page.on("console", (message) => {
@@ -187,6 +191,114 @@ describe("readable timeline browser regression", () => {
 
   for (const width of [1280, 390]) {
     for (const theme of ["dark", "light"]) {
+      test(`expanded work sticks only through its section: ${width}px ${theme}`, async () => {
+        const page = await openHarness("sticky", width, width === 390);
+        try {
+          await page.setViewportSize({ width, height: 900 });
+          if (theme === "light")
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+          await page.evaluate(() => {
+            const driver = window.exchangeFoldHarness!;
+            driver.show(driver.indexOf("turn.completed")[0]! + 1);
+          });
+          await page.waitForTimeout(350);
+          const header = page.locator('[data-og-work-header="outer"]').first();
+          await header.click();
+          await page.waitForTimeout(300);
+          const scroller = page.locator("[data-og-timeline-scroller]");
+          await scroller.hover();
+          await page.mouse.wheel(0, -100);
+          await page.waitForTimeout(150);
+          const scrollInside = async () => {
+            await page.evaluate(() => {
+              const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+              const section = node.querySelector<HTMLElement>("[data-og-work-section]")!;
+              node.scrollTop +=
+                section.getBoundingClientRect().top - node.getBoundingClientRect().top + 280;
+            });
+            await page.waitForTimeout(200);
+          };
+          await scrollInside();
+          const geometry = await page.evaluate(() => {
+            const viewport = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+            const trigger = viewport.querySelector<HTMLElement>('[data-og-work-header="outer"]')!;
+            const rect = trigger.getBoundingClientRect();
+            const question = document
+              .querySelector("[data-og-jump-to-question]")!
+              .getBoundingClientRect();
+            const host = document.querySelector("header")!.getBoundingClientRect();
+            const questionSpace =
+              3.5 * parseFloat(getComputedStyle(document.documentElement).fontSize);
+            return {
+              position: getComputedStyle(trigger).position,
+              top: rect.top,
+              expectedTop: viewport.getBoundingClientRect().top + questionSpace,
+              questionBottom: question.bottom,
+              hostBottom: host.bottom,
+              hit: trigger.contains(
+                document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2),
+              ),
+              following: viewport.dataset.ogBottomFollow,
+              overflow: document.documentElement.scrollWidth > window.innerWidth,
+            };
+          });
+          expect(geometry.position).toBe("sticky");
+          expect(Math.abs(geometry.top - geometry.expectedTop)).toBeLessThanOrEqual(2);
+          expect(geometry.top).toBeGreaterThanOrEqual(geometry.questionBottom);
+          expect(geometry.top).toBeGreaterThanOrEqual(geometry.hostBottom);
+          expect(geometry.hit).toBe(true);
+          expect(geometry.following).toBe("false");
+          expect(geometry.overflow).toBe(false);
+          expect(await header.textContent()).toContain("42 steps");
+          expect(
+            await page.locator('[data-og-recorded-outcome="wait"] summary').textContent(),
+          ).toContain("Waiting for 2 agents");
+          const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+          if (output) {
+            mkdirSync(output, { recursive: true });
+            await page.screenshot({ path: `${output}/timeline-${width}-${theme}-sticky.png` });
+          }
+          // The pinned hit target remains the real collapse control.
+          await header.click();
+          expect(await header.getAttribute("aria-expanded")).toBe("false");
+          expect(await header.evaluate((node) => getComputedStyle(node).position)).not.toBe(
+            "sticky",
+          );
+          await header.click();
+          await page.evaluate(() =>
+            window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+          );
+          await page.waitForTimeout(350);
+          await scrollInside();
+          await page.evaluate(() => {
+            const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+            const section = node.querySelector<HTMLElement>("[data-og-work-section]")!;
+            node.scrollTop +=
+              section.getBoundingClientRect().bottom - node.getBoundingClientRect().top + 100;
+          });
+          await page.waitForTimeout(200);
+          expect(
+            await header.evaluate((node) => node.getBoundingClientRect().bottom),
+          ).toBeLessThanOrEqual(
+            await scroller.evaluate((node) => node.getBoundingClientRect().top),
+          );
+          // Classic nested cluster disclosures also stay ordinary in-flow rows.
+          await page.getByRole("button", { name: "Readable", exact: true }).click();
+          await page.waitForTimeout(350);
+          await page.locator('[data-og-work-header="outer"]').first().click();
+          await page.waitForTimeout(300);
+          const nested = page.locator('[data-og-work-header="nested"]');
+          expect(await nested.count()).toBeGreaterThan(0);
+          expect(
+            await nested.evaluateAll((nodes) =>
+              nodes.every((node) => getComputedStyle(node).position !== "sticky"),
+            ),
+          ).toBe(true);
+        } finally {
+          await page.context().close();
+        }
+      }, 60_000);
+
       test(`actual component ${width}px ${theme}: readable messages, disclosure and preview`, async () => {
         const page = await openHarness();
         try {
