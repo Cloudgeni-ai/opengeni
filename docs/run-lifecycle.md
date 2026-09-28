@@ -1030,6 +1030,12 @@ Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`
 and Codemode callers always receive content. The check reads only the acting
 session's active history and leaves the tool schema, instructions, and Skill index
 unchanged, so it does not move the cached prompt prefix.
+An identifier that resolves to no configured Skill fails with the available
+Skills listed by id and name only, the same set the index and `skill_search`
+show. Entries resembling the requested identifier come first, the list stops at
+25 entries or 4 KiB with a count that points to `skill_search`, and the requested
+identifier is not echoed. `skill_checkout` resolves through the same reader and
+fails the same way before starting a sandbox.
 Every `skill_read` increments `opengeni_skill_reads_total{source, skill, kind, caller}`.
 `source` is `builtin`, `session`, `workspace`, `organization`, `personal`, or
 `unknown` for a read refused before a Skill resolved; `skill` is the built-in id,
