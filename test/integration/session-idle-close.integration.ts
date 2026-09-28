@@ -3,6 +3,7 @@ import { Client, Connection, type WorkflowHandle } from "@temporalio/client";
 import { bundleWorkflowCode, NativeConnection, Worker } from "@temporalio/worker";
 import { startTestServices, type TestServices, waitFor } from "@opengeni/testing";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
+import type { MaybeContinueGoalResult } from "../../apps/worker/src/activities/types";
 
 const patchId = "session-normal-idle-no-grace-v1";
 const workflowsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname;
@@ -39,7 +40,7 @@ function durableQueue() {
         runs.push(next ?? "UNEXPECTED_EMPTY_DISPATCH");
         return { status: "idle", turnId: crypto.randomUUID(), attemptId: input.attemptId };
       },
-      maybeContinueGoal: async () => {
+      maybeContinueGoal: async (): Promise<MaybeContinueGoalResult> => {
         calls.push("maybeContinueGoal");
         return { action: "none" };
       },
@@ -263,7 +264,7 @@ describe("normal session idle close", () => {
     );
   }
 
-  for (const decision of ["none", "deferred", "held"] as const) {
+  for (const decision of ["none", "deferred", "paused"] as const) {
     test(
       `${decision} idle closes; a later ALLOW_DUPLICATE wake restarts the same session exactly once`,
       async () => {
@@ -272,7 +273,7 @@ describe("normal session idle close", () => {
         await withWorker(
           {
             ...state.activities,
-            maybeContinueGoal: async () => {
+            maybeContinueGoal: async (): Promise<MaybeContinueGoalResult> => {
               goalChecks += 1;
               return { action: decision };
             },

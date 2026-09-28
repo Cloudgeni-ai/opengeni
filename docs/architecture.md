@@ -101,11 +101,7 @@ attempts retain bounded, signal-interruptible waits without marking work idle,
 revoking writers, or dispatching successors. Temporal metadata cannot prove
 physical-writer quiescence.
 
-Normal idle closes without an unconditional grace timer after goal evaluation,
-a durable recheck, and transactional idle/parent-result settlement. Signals
-accepted during close trigger another peek; later durable wakes can start a new
-workflow run of the same session. Recorded legacy timers remain replay-safe.
-Held input waits and other lifecycle timers retain their existing behavior.
+Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
