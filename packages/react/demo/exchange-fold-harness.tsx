@@ -136,6 +136,57 @@ function notesScenario(): Draft[] {
   return drafts;
 }
 
+/** Long real work details plus following prose exercise section-scoped sticky headers. */
+function stickyScenario(): Draft[] {
+  const { drafts, add, tool, stream, settle } = script();
+  add(
+    "user.message",
+    { text: "Verify the signup analysis and have two agents check the results." },
+    null,
+  );
+  add("turn.started", {}, "turn-sticky");
+  for (let worker = 0; worker < 2; worker++) {
+    tool(
+      `worker-${worker}`,
+      "opengeni__session_create",
+      { initialMessage: "Verify signup totals." },
+      { sessionId: worker === 0 ? WORKER : "6f0c1a2e-7b3d-4c8e-9a61-2d4e6f8a0b1c" },
+      "turn-sticky",
+    );
+  }
+  for (let step = 0; step < 40; step++) {
+    if (step % 12 === 0)
+      stream(
+        `progress-${step}`,
+        `Checking batch ${step / 12 + 1}: **reconcile** source totals and verification counts.`,
+        "turn-sticky",
+      );
+    tool(
+      `verify-${step}`,
+      "exec_command",
+      { cmd: `psql -f signup-check-${step + 1}.sql` },
+      "Counts match the source ledger.",
+      "turn-sticky",
+    );
+  }
+  add(
+    "session.wait.started",
+    { actor: "agent", reason: "Waiting for both signup checks.", waitTurnId: "turn-sticky" },
+    "turn-sticky",
+  );
+  add("turn.completed", { output: "" }, "turn-sticky");
+  add("user.message", { text: "Show the verified breakdown." }, null, 20);
+  add("turn.started", {}, "turn-answer");
+  const answer = Array.from(
+    { length: 16 },
+    (_, index) =>
+      `### Verified batch ${index + 1}\n\nThe source totals match. All verification counts reconcile against the signup ledger; no duplicate records were found.`,
+  ).join("\n\n");
+  stream("sticky-answer", answer, "turn-answer");
+  settle(answer, "turn-answer");
+  return drafts;
+}
+
 /** Several exchanges, so a window that starts inside one can load older history. */
 function historyScenario(): Draft[] {
   const { drafts, add, tool, stream, settle } = script();
@@ -280,6 +331,7 @@ const SCENARIOS: Record<string, () => Draft[]> = {
   "follow-up": followUpScenario,
   notes: notesScenario,
   history: historyScenario,
+  sticky: stickyScenario,
   "machine-follow-up": machineFollowUpScenario,
 };
 

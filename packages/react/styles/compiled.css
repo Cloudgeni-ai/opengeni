@@ -1423,6 +1423,9 @@
 :where(.og-root).top-10,:where(.og-root) .top-10 {
     top: calc(var(--spacing) * 10);
   }
+:where(.og-root).top-\[var\(--og-work-header-top\,0px\)\],:where(.og-root) .top-\[var\(--og-work-header-top\,0px\)\] {
+    top: var(--og-work-header-top,0px);
+  }
 :where(.og-root).-right-0\.5,:where(.og-root) .-right-0\.5 {
     right: calc(var(--spacing) * -0.5);
   }

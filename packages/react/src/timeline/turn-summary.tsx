@@ -459,6 +459,7 @@ export function TurnSummary({
     <TurnSettleChromeContext.Provider value={settleChrome}>
       <div className={cn(copyable && "group/copy relative")}>
         <Collapsible.Root
+          data-og-work-section={bare ? undefined : ""}
           open={open}
           onOpenChange={onOpenChange}
           // History-only entrance. Never toggle this on after mount — see
@@ -466,7 +467,12 @@ export function TurnSummary({
           className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
         >
           <Collapsible.Trigger
+            data-og-work-header={bare ? "nested" : "outer"}
             className={cn(
+              // The section, not the viewport, bounds this sticky row. Content
+              // is a sibling: its disclosure overflow never traps the header.
+              // Nested rail folds must never stack additional sticky headers.
+              !bare && open && "sticky top-[var(--og-work-header-top,0px)] z-10 bg-og-bg",
               settling && "animate-og-settle-chip",
               // Top-level turn fold and (when used) nested cluster folds render as
               // FLAT rail rows — chevron + glyph + facets on the page background, no

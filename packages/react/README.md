@@ -908,6 +908,8 @@ every assistant progress message and answer stays fully formatted and visible.
 Each turn has its own Working / Worked disclosure and rolling latest step;
 routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
+Expanded outer work headers stay reachable at the top of the timeline (below
+Latest question when shown) until their own details end; nested headers never stick.
 
 Wire the newest-question resolver when history can be unloaded:
 
