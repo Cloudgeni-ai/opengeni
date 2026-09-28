@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS,
   TOOL_GATEWAY_INPUT_ISSUES_MAX,
@@ -414,5 +414,43 @@ describe("ToolGateway argument validation errors", () => {
     expect(error.issues).toEqual([
       { path: "context", keyword: "required", message: 'missing required property "context"' },
     ]);
+  });
+
+  test("never runs a pattern on a string longer than the schema's maxLength", async () => {
+    // Backtracking-heavy on a long non-matching string; `maxLength` is what
+    // keeps the accept/reject validator from ever running it on one.
+    const pattern = "^(\\w+\\s?)*$";
+    const { callModel } = gatewayFor({
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        tags: { type: "array", items: { type: "string", maxLength: 16, pattern } },
+      },
+      required: ["command", "context"],
+    });
+    const patternInputLengths: number[] = [];
+    const originalTest = RegExp.prototype.test;
+    const spy = spyOn(RegExp.prototype, "test").mockImplementation(function (
+      this: RegExp,
+      value: string,
+    ) {
+      if (this.source === pattern) patternInputLengths.push(String(value).length);
+      return originalTest.call(this, value);
+    });
+    let error: ToolGatewayInputValidationError;
+    try {
+      error = await rejection(
+        callModel({ command: "run", tags: ["short tag", `${"a".repeat(40)}!`, "bad!"] }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(error.issues.map((issue) => issue.message)).toEqual([
+      'missing required property "context"',
+      '"tags[1]" must NOT have more than 16 characters',
+      '"tags[2]" must match pattern "^(\\w+\\s?)*$"',
+    ]);
+    expect(patternInputLengths.length).toBeGreaterThan(0);
+    expect(patternInputLengths.every((length) => length <= 16)).toBe(true);
   });
 });

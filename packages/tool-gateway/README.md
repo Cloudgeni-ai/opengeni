@@ -80,4 +80,7 @@ the schema only and never quote argument values. The accept/reject decision uses
 a validator that stops at the first error, so a schema's own bounds keep
 limiting validation cost; a second, all-errors pass runs only after a rejection
 and only for arguments up to `TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS`
-serialized characters. Larger arguments report the first problem alone.
+serialized characters. Larger arguments report the first problem alone. The
+all-errors pass also never runs a `pattern` on a string that already exceeds the
+same subschema's `maxLength`, so it evaluates no pattern the accept/reject
+validator would not.

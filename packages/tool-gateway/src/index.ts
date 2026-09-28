@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import Ajv, { type ValidateFunction } from "ajv";
+import Ajv, {
+  _,
+  str,
+  type CodeKeywordDefinition,
+  type KeywordCxt,
+  type ValidateFunction,
+} from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import {
@@ -431,7 +437,8 @@ const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
  * failure so a schema's own bounds (for example `maxLength` ahead of `pattern`)
  * keep limiting validation cost. The diagnostic pass runs only after a
  * rejection and only on arguments this small; larger ones report the first
- * problem alone.
+ * problem alone. Its `pattern` keeps the `maxLength` guard (see
+ * `maxLengthGuardedPattern`).
  */
 export const TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS = 64 * 1024;
 
@@ -443,13 +450,62 @@ function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
     useDefaults: false,
     validateFormats: false,
   } as const;
-  return {
-    mode,
+  const validators = {
     draft7: new Ajv(options),
     draft2019: new Ajv2019(options),
     draft2020: new Ajv2020(options),
   };
+  if (mode === "all_errors") {
+    for (const ajv of Object.values(validators)) {
+      ajv.removeKeyword("pattern").addKeyword(maxLengthGuardedPattern);
+    }
+  }
+  return { mode, ...validators };
 }
+
+function codePointLength(value: string): number {
+  let length = 0;
+  for (const _codePoint of value) length += 1;
+  return length;
+}
+
+/**
+ * `pattern` for the all-errors diagnostic validators. The first-error validator
+ * checks `maxLength` before `pattern` and stops there, so a schema's
+ * `maxLength` bounds how long a string its (possibly backtracking-heavy)
+ * pattern ever sees. With `allErrors` the built-in keyword would still run the
+ * pattern on the over-long string. This version skips the pattern exactly when
+ * the sibling `maxLength` already fails, so every subschema's validity is
+ * unchanged and the diagnostic pass never runs a pattern on a string the
+ * accept/reject validator would not have. Error shape matches the built-in.
+ */
+const maxLengthGuardedPattern: CodeKeywordDefinition = {
+  keyword: "pattern",
+  type: "string",
+  schemaType: "string",
+  error: {
+    message: ({ schemaCode }) => str`must match pattern "${schemaCode}"`,
+    params: ({ schemaCode }) => _`{pattern: ${schemaCode}}`,
+  },
+  code(cxt: KeywordCxt) {
+    const { gen, data, schema, parentSchema, it } = cxt;
+    const flags = it.opts.unicodeRegExp ? "u" : "";
+    const regExp = gen.scopeValue("pattern", {
+      key: `${schema}/${flags}`,
+      ref: it.opts.code.regExp(schema as string, flags),
+    });
+    const maxLength: unknown = parentSchema.maxLength;
+    if (typeof maxLength !== "number") {
+      cxt.fail(_`!${regExp}.test(${data})`);
+      return;
+    }
+    const length =
+      it.opts.unicode === false
+        ? _`${data}.length`
+        : _`${gen.scopeValue("func", { ref: codePointLength })}(${data})`;
+    cxt.fail(_`${length} <= ${maxLength} && !${regExp}.test(${data})`);
+  },
+};
 
 /**
  * Describe why the first-error validator rejected `args`: every problem (capped)
