@@ -21,6 +21,8 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  sessionTurnSurfaceOrNull,
+  type SessionTurnSurface,
 } from "@opengeni/contracts";
 import {
   readReasoningConfiguration,
@@ -968,18 +970,31 @@ type HostExportRow = {
   initiator: unknown;
   initiator_context: unknown;
   origin: string | null;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
   payload: unknown;
   payload_codec_version: number | null;
   occurred_at: Date | string;
   source_recorded_at: Date | string;
 };
 
-type HostExportClaimRow = Omit<HostExportRow, "root_session_id" | "payload_codec_version">;
+type HostExportClaimRow = Omit<
+  HostExportRow,
+  "root_session_id" | "payload_codec_version" | "surface" | "model_provider" | "tool_family"
+>;
 
 type HostExportClaimSidecarRow = {
   export_cursor: string | number | bigint;
   root_session_id: string | null;
   payload_codec_version: number | null;
+};
+
+type HostExportClaimAnalyticsSidecarRow = {
+  export_cursor: string | number | bigint;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
 };
 
 function hostExportCursor(value: string | number | bigint): string {
@@ -1145,16 +1160,34 @@ export async function claimHostExportBatch(
     const sidecarByExportCursor = new Map(
       sidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
     );
+    const analyticsSidecars = await rawRows<HostExportClaimAnalyticsSidecarRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.host_export_claim_analytics_sidecars(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+        )
+      `,
+    );
+    const analyticsByExportCursor = new Map(
+      analyticsSidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
+    );
     const materializedRows = claimedRows.map((row): HostExportRow => {
       const cursor = hostExportCursor(row.export_cursor);
       const sidecar = sidecarByExportCursor.get(cursor);
       if (!sidecar) {
         throw new Error(`Host export sidecar lookup omitted leased cursor ${cursor}`);
       }
+      const analytics = analyticsByExportCursor.get(cursor);
+      if (!analytics) {
+        throw new Error(`Host export analytics sidecar lookup omitted leased cursor ${cursor}`);
+      }
       return {
         ...row,
         root_session_id: sidecar.root_session_id,
         payload_codec_version: sidecar.payload_codec_version,
+        surface: analytics.surface,
+        model_provider: analytics.model_provider,
+        tool_family: analytics.tool_family,
       };
     });
     return materializedRows;
@@ -1174,6 +1207,9 @@ export async function claimHostExportBatch(
         initiator: row.initiator,
         initiatorContext: row.initiator_context,
         origin: row.origin,
+        surface: row.surface,
+        modelProvider: row.model_provider,
+        toolFamily: row.tool_family,
         event: {
           id: row.source_id,
           workspaceId: row.workspace_id,
@@ -1259,6 +1295,8 @@ export async function claimHostExportBatch(
       initiator: row.initiator,
       initiatorContext: row.initiator_context,
       origin: row.origin,
+      surface: row.surface,
+      modelProvider: row.model_provider,
       usage: row.payload,
     });
     if (!parsed.success) {
@@ -6496,6 +6534,8 @@ export type EnqueueSessionTurnInput = {
   triggerEventId: string;
   temporalWorkflowId: string;
   source: SessionTurnSource;
+  /** Content-free product surface the request entered through. */
+  surface?: SessionTurnSurface | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -66670,6 +66710,8 @@ export type InitializeSessionStartInput = {
   reasoningEffortFallback: ReasoningEffort;
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
+  /** Content-free product surface the create request entered through. */
+  surface?: SessionTurnSurface | null;
   createdEventPayload: Record<string, unknown>;
   /** Trusted backend-only capture for a newly inserted initial turn. Runs under
    * the canonical activity transaction; failure rolls back events and turn.
@@ -67224,6 +67266,7 @@ export async function initializeSessionStartAtomically(
                   temporalWorkflowId,
                   status: "queued",
                   source: "user",
+                  surface: input.surface ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -67547,6 +67590,7 @@ export async function enqueueSessionTurn(
                 temporalWorkflowId: input.temporalWorkflowId,
                 status: "queued",
                 source: input.source,
+                surface: input.surface ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -70571,6 +70615,9 @@ export async function claimSessionWorkForAttempt(
                     executionGeneration: 1,
                     activeAttemptId: input.attemptId,
                     source: "compaction",
+                    // Maintenance continues the session's work; keep the
+                    // surface of the turn it compacts after.
+                    surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
                     position: Number(position),
                     prompt: "",
                     resources: [],
@@ -70906,6 +70953,13 @@ export async function claimSessionWorkForAttempt(
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
           const scheduledTaskRunId = delivered.updates[0]?.scheduledTaskRunId ?? null;
+          // A scheduled occurrence or another agent's message is a new request;
+          // any other machine input continues the session's latest surface.
+          const internalSurface: SessionTurnSurface | null = scheduledTaskRunId
+            ? "scheduled"
+            : agentCommandUpdate
+              ? "agent"
+              : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
@@ -71148,6 +71202,7 @@ export async function claimSessionWorkForAttempt(
                   executionGeneration: 1,
                   activeAttemptId: input.attemptId,
                   source: routingGoalUpdate ? "goal" : "system",
+                  surface: internalSurface,
                   position: Number(position),
                   prompt: "Process the delivered internal session updates.",
                   resources: [],

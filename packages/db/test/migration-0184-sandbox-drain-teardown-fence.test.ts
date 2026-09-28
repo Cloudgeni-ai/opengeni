@@ -90,7 +90,7 @@ const withheldMigrationNames = [
   // Patches the withheld 0509 trial grant trigger; replay after it.
   "0521_verified_signup_trial_runtime_switch.sql",
   // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
-  "0533_scheduled_admission_diagnostics.sql",
+  "0534_scheduled_admission_diagnostics.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

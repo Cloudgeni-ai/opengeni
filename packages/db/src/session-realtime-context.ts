@@ -316,6 +316,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
       },
     },
     source: "api",
+    surface: "voice",
   });
   const now = input.now ?? new Date();
   const [projection] = await db

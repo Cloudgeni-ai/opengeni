@@ -95,6 +95,17 @@ export type ReviewItem =
       skill: SkillSummary;
     };
 
+/** The exact proposal a decision was made on, so a newer one is not hidden. */
+function reviewItemRevision(item: ReviewItem): string {
+  if (item.kind === "knowledge") return item.entry.revision.id;
+  if (item.kind === "instruction") return item.item.revisionId;
+  return item.skill.pendingRevisionIds.join(",");
+}
+
+function hiddenId(key: string, revision: string): string {
+  return `${key}\u0000${revision}`;
+}
+
 interface ReviewGroup {
   key: string;
   origin: Origin;
@@ -341,21 +352,38 @@ export function ReviewTab({
 }: ReviewTabProps) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showDetail, setShowDetail] = useState(false);
-  const [hidden, setHidden] = useState<Set<string>>(new Set());
-  const items = queue.items.filter((item) => !hidden.has(item.key));
+  // Decided items, by key and the exact revision decided. They stay hidden
+  // until a refetch no longer lists that revision: a refetch that started
+  // before the decision still carries it and must not bring it back.
+  const [hidden, setHidden] = useState<ReadonlyMap<string, string>>(new Map());
+  const isHidden = (item: ReviewItem) => hidden.get(item.key) === reviewItemRevision(item);
+  const items = queue.items.filter((item) => !isHidden(item));
   const selected = items.find((item) => item.key === selectedKey) ?? items[0] ?? null;
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected?.key ?? null;
   const groups = queue.groups
-    .map((group) => ({ ...group, items: group.items.filter((item) => !hidden.has(item.key)) }))
+    .map((group) => ({ ...group, items: group.items.filter((item) => !isHidden(item)) }))
     .filter((group) => group.items.length > 0);
-  // Reviewed items leave the list at once; the queue refetches behind them.
-  useEffect(() => setHidden(new Set()), [queue.items]);
+  // Reviewed items leave the list at once; the queue refetches behind them,
+  // and a decided revision is forgotten once the queue no longer lists it.
+  useEffect(
+    () =>
+      setHidden((prior) => {
+        const listed = new Set(
+          queue.items.map((item) => hiddenId(item.key, reviewItemRevision(item))),
+        );
+        const next = new Map(
+          [...prior].filter(([key, revision]) => listed.has(hiddenId(key, revision))),
+        );
+        return next.size === prior.size ? prior : next;
+      }),
+    [queue.items],
+  );
 
   const next = (current: ReviewItem) => {
     const index = items.findIndex((item) => item.key === current.key);
     const following = items[index + 1] ?? items[index - 1] ?? null;
-    setHidden((prior) => new Set(prior).add(current.key));
+    setHidden((prior) => new Map(prior).set(current.key, reviewItemRevision(current)));
     // A decision that completes after the reviewer opened another change
     // must not move them off it; only a decision on what is open advances.
     const open = selectedRef.current;
@@ -366,6 +394,13 @@ export function ReviewTab({
       setSelectedKey(open);
     }
     notifyKnowledgeReviewUpdated();
+    onChanged();
+  };
+
+  // A prerequisite decided from another change's pane is listed on its own
+  // too: hide it now and refetch, so nothing advances onto a decided proposal.
+  const prerequisiteDone = (entryId: string, revisionId: string) => {
+    setHidden((prior) => new Map(prior).set(`knowledge:${entryId}`, revisionId));
     onChanged();
   };
 
@@ -442,8 +477,8 @@ export function ReviewTab({
                 items={group.items}
                 onDone={() => {
                   setHidden((prior) => {
-                    const done = new Set(prior);
-                    for (const item of group.items) done.add(item.key);
+                    const done = new Map(prior);
+                    for (const item of group.items) done.set(item.key, reviewItemRevision(item));
                     return done;
                   });
                   notifyKnowledgeReviewUpdated();
@@ -494,6 +529,7 @@ export function ReviewTab({
       item={selected}
       remaining={items.length}
       onDone={() => next(selected)}
+      onPrerequisiteDone={prerequisiteDone}
       onOpenEntry={onOpenEntry}
     />
   );
@@ -601,12 +637,14 @@ function ReviewDetail({
   item,
   remaining,
   onDone,
+  onPrerequisiteDone,
   onOpenEntry,
 }: {
   workspaceId: string;
   item: ReviewItem;
   remaining: number;
   onDone: () => void;
+  onPrerequisiteDone: (entryId: string, revisionId: string) => void;
   onOpenEntry: (id: string) => void;
 }) {
   const { client } = useAppContext();
@@ -629,13 +667,19 @@ function ReviewDetail({
     };
   }, []);
 
+  // A queue refetch hands over a new object for the same proposal; reload only
+  // when the proposal itself changes, never re-read one that was just decided.
+  const itemRef = useRef(item);
+  itemRef.current = item;
+  const itemIdentity = hiddenId(item.key, reviewItemRevision(item));
   useEffect(() => {
     let current = true;
+    const proposal = itemRef.current;
     setLoaded(null);
     setLoadError(null);
     void (async (): Promise<Loaded> => {
-      if (item.kind === "knowledge") {
-        const record = await firstReviewableEntry(item.entry.id, (id, options) =>
+      if (proposal.kind === "knowledge") {
+        const record = await firstReviewableEntry(proposal.entry.id, (id, options) =>
           client.getKnowledgeEntry(workspaceId, id, options),
         );
         const published = record.publishedRevisionId
@@ -648,11 +692,11 @@ function ReviewDetail({
           record,
           before: published?.revision.entry.content ?? "",
           beforeTitle: published?.revision.entry.title ?? null,
-          requiredFor: record.id === item.entry.id ? null : item.title,
+          requiredFor: record.id === proposal.entry.id ? null : proposal.title,
         };
       }
-      if (item.kind === "instruction") {
-        const target = item.item.target;
+      if (proposal.kind === "instruction") {
+        const target = proposal.item.target;
         const policies = await client.listWorkspaceInstructionPolicies(workspaceId, {
           kind: target.kind,
           scope: target.scope,
@@ -672,12 +716,12 @@ function ReviewDetail({
       }
       const record = await client.readWorkspaceSkill(
         workspaceId,
-        item.skill.id,
-        item.skill.pendingRevisionIds[0],
+        proposal.skill.id,
+        proposal.skill.pendingRevisionIds[0],
       );
-      const active = item.skill.activeRevisionId
+      const active = proposal.skill.activeRevisionId
         ? await client
-            .readWorkspaceSkill(workspaceId, item.skill.id, item.skill.activeRevisionId)
+            .readWorkspaceSkill(workspaceId, proposal.skill.id, proposal.skill.activeRevisionId)
             .catch(() => null)
         : null;
       return { kind: "skill", record, before: active ? skillText(active) : "" };
@@ -691,7 +735,7 @@ function ReviewDetail({
     return () => {
       current = false;
     };
-  }, [client, workspaceId, item, retry]);
+  }, [client, workspaceId, itemIdentity, retry]);
 
   const act = async (run: () => Promise<unknown>, message: string) => {
     setBusy(true);
@@ -703,6 +747,7 @@ function ReviewDetail({
         // A prerequisite is done; the change the reviewer picked is next.
         setEditing(false);
         setRetry((value) => value + 1);
+        onPrerequisiteDone(loaded.record.id, loaded.record.revision.id);
         notifyKnowledgeReviewUpdated();
       } else {
         onDone();

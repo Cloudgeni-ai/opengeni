@@ -12,7 +12,7 @@ const migration = "0478_sender_owned_connections.sql";
 const accountBindingsMigration = "0494_mcp_account_bindings.sql";
 const sharingMigration = "0501_session_sharing_execution.sql";
 // Replaces the owner trigger installed by this cutover.
-const admissionDiagnosticsMigration = "0533_scheduled_admission_diagnostics.sql";
+const admissionDiagnosticsMigration = "0534_scheduled_admission_diagnostics.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {

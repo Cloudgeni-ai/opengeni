@@ -2264,6 +2264,11 @@ export type AgentToolCallCreatedPayload = {
   name: string;
   arguments: unknown;
   raw?: unknown | undefined;
+  /**
+   * Content-free analytics family: an OpenGeni first-party tool name,
+   * `integration:<reviewed domain>`, or `custom`. Absent when unclassified.
+   */
+  toolFamily?: string | undefined;
 };
 export type AgentToolCallOutputPayload = { id: string | null; output: unknown };
 export type SessionStatusChangedPayload = { status: SessionStatus };

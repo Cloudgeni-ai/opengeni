@@ -19,6 +19,7 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   withMcpToolDisplayMetadata,
+  withToolCallFamily,
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
   interruptionKindForCallItem,
@@ -1338,11 +1339,16 @@ export async function runTurnStreamAttempt(
               : { messagePhases },
           );
         for (const event of normalized) {
-          if (event.type === "agent.toolCall.created")
-            event.payload = withMcpToolDisplayMetadata(
-              eventing.preparedTools?.mcpServers ?? [],
-              event.payload,
+          if (event.type === "agent.toolCall.created") {
+            const preparedServers = eventing.preparedTools?.mcpServers ?? [];
+            // Display metadata and the content-free analytics family are
+            // event-copy enrichments only; the executable call is unchanged.
+            event.payload = withToolCallFamily(
+              preparedServers,
+              runSettings.mcpServers,
+              withMcpToolDisplayMetadata(preparedServers, event.payload),
             );
+          }
           streamTiming.onEvent(event.type);
           await eventing.batcher.push(event);
           if (event.type === "agent.message.completed") {
