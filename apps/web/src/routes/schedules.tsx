@@ -371,7 +371,13 @@ export function SchedulesRoute({
         });
         // Rendering the notices here is the owner seeing them: clear the
         // navigation dot. Each card keeps its notice until a later run succeeds.
-        if (attention) markScheduledTaskAttentionSeen(workspaceId, attention);
+        // A session-filtered view renders only some cards, so only those count.
+        if (attention) {
+          markScheduledTaskAttentionSeen(
+            workspaceId,
+            attention.filter((item) => liveTaskIds.has(item.taskId)),
+          );
+        }
 
         await Promise.all(openTaskIds.map((id) => loadRunHistory(id, { notify: false })));
       } catch (error) {

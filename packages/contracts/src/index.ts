@@ -9762,8 +9762,10 @@ export const SCHEDULED_TASK_ACCESS_CONNECTORS_MAX = 64;
  * with what its owner would get by saving it again now. A task freezes its
  * connectors, its connector accounts and (when an agent created it, migration
  * 0428) its OpenGeni tool policy, so later workspace changes never reach its
- * runs on their own. This read-only projection names exactly what
- * `POST .../scheduled-tasks/:taskId/refresh-access` would change.
+ * runs on their own. This read-only projection names what
+ * `POST .../scheduled-tasks/:taskId/refresh-access` would add or remove; the
+ * refresh adds only the OpenGeni permissions those named tools need and drops
+ * frozen permissions the refreshing person no longer holds.
  *
  * Present only for a viewer who can act on it: the task owner, or anyone who
  * manages schedules for a task without an owner. `null` or absent means there

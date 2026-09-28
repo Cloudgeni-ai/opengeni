@@ -217,14 +217,23 @@ function sameMembers<T>(left: readonly T[], right: readonly T[]): boolean {
   return a.size === b.size && [...a].every((item) => b.has(item));
 }
 
+/** Permissions each first-party tool needs; the API passes its MCP registration table. */
+export type FirstPartyToolPermissionRequirements = (
+  tools: readonly FirstPartyMcpToolName[],
+) => readonly Permission[];
+
 /**
  * OpenGeni tools of an agent-created task (migration 0428). A human- or
  * API-created task has no frozen creator policy and already follows the
  * deployment default at each run, so there is nothing to refresh. For a frozen
- * policy the refresh adds the current default tools, and re-derives the
- * permission set from the calling person's grant: it keeps or adds a
- * permission only when that person holds it. The frozen session policy
- * (agent access, scope, memory) is never touched.
+ * policy the refresh adds the current default tools. Permissions stay
+ * least-privilege: a frozen permission is kept only while the refreshing
+ * person holds it, and the only permissions added are the ones the newly
+ * added tools need, within the default worker set and that person's grant. A
+ * refresh therefore never lifts a deliberately narrowed permission boundary
+ * for tools the task already had, and every addition follows a tool the drift
+ * report names. The frozen session policy (agent access, scope, memory) is
+ * never touched.
  */
 export function planScheduledTaskOpenGeniTools(input: {
   creatorPolicy: Pick<
@@ -233,6 +242,7 @@ export function planScheduledTaskOpenGeniTools(input: {
   > | null;
   settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">;
   grantPermissions: readonly Permission[];
+  permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
 }): ScheduledTaskOpenGeniToolPlan {
   const stored = input.creatorPolicy?.firstPartyMcpTools;
   if (!stored) return { missing: [], policy: null };
@@ -241,10 +251,17 @@ export function planScheduledTaskOpenGeniTools(input: {
     (tool) => !effective.has(tool),
   );
   const tools = [...new Set([...stored, ...missing])];
-  const priorPermissions = input.creatorPolicy?.firstPartyMcpPermissions ?? [];
-  const permissions = [
-    ...new Set<Permission>([...priorPermissions, ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]),
-  ].filter((permission) => hasPermission([...input.grantPermissions], permission));
+  // A frozen null permission set runs with the default worker set (see the
+  // scheduler), so that is the boundary a refresh starts from.
+  const priorPermissions: readonly Permission[] = input.creatorPolicy?.firstPartyMcpPermissions ?? [
+    ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  ];
+  const holds = (permission: Permission) => hasPermission([...input.grantPermissions], permission);
+  const defaults: ReadonlySet<Permission> = new Set(DEFAULT_FIRST_PARTY_MCP_PERMISSIONS);
+  const added = input
+    .permissionsRequiredByTools(missing)
+    .filter((permission) => defaults.has(permission) && holds(permission));
+  const permissions = [...new Set<Permission>([...priorPermissions.filter(holds), ...added])];
   const unchanged = sameMembers(tools, stored) && sameMembers(permissions, priorPermissions);
   return {
     missing,
@@ -421,6 +438,7 @@ export async function computeScheduledTaskAccessPlan(input: {
   task: ScheduledTask;
   source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
   creatorPolicy: ScheduledTaskCreatorPolicy | null;
+  permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
   cache?: ScheduledTaskAccessReadCache;
   workspaceSettings?: unknown;
 }): Promise<ScheduledTaskAccessPlan> {
@@ -510,6 +528,7 @@ export async function computeScheduledTaskAccessPlan(input: {
         creatorPolicy: input.creatorPolicy,
         settings,
         grantPermissions: input.grant.permissions,
+        permissionsRequiredByTools: input.permissionsRequiredByTools,
       })
     : { missing: [], policy: null };
   const toolKey = (tool: ToolRef) =>
@@ -559,6 +578,7 @@ export async function withScheduledTaskPolicyDrift(input: {
   settings: Settings;
   authorization: AccessGrantAuthorization;
   tasks: ScheduledTask[];
+  permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
   onError?: (error: unknown) => void;
 }): Promise<ScheduledTask[]> {
   const { grant } = input.authorization;
@@ -596,6 +616,7 @@ export async function withScheduledTaskPolicyDrift(input: {
         task,
         source: scheduledTaskAccessSource(task, grant)!,
         creatorPolicy: creatorPolicies.get(task.id) ?? null,
+        permissionsRequiredByTools: input.permissionsRequiredByTools,
         cache,
         workspaceSettings,
       });
@@ -627,6 +648,7 @@ export async function refreshScheduledTaskAccess(input: {
   authorization: AccessGrantAuthorization;
   taskId: string;
   request: RefreshScheduledTaskAccessRequest;
+  permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
   sessionAuthorization?: SessionAuthorizationPort | null | undefined;
   authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<ScheduledTask> {
@@ -667,6 +689,7 @@ export async function refreshScheduledTaskAccess(input: {
     task: existing,
     source,
     creatorPolicy,
+    permissionsRequiredByTools: input.permissionsRequiredByTools,
   });
   if (!plan.changed) return existing;
   const {

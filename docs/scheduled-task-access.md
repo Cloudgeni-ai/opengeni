@@ -48,10 +48,15 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
 - **OpenGeni tools** (agent-created tasks only). A human- or API-created task
   has no creator policy and already follows the deployment default at each run.
   For a frozen creator policy, the default tools it lacks are reported
-  (`missingOpenGeniTools`) and added. The permission set is re-derived from the
-  refreshing person: a stored or default permission is kept only when that
-  person holds it. The creator session policy (agent access, scope, memory) is
-  never rewritten.
+  (`missingOpenGeniTools`) and added. Permissions stay least-privilege: a
+  frozen permission is kept only while the refreshing person holds it, and the
+  only permissions added are the ones the newly added tools need
+  (`FIRST_PARTY_TOOL_AUTHORIZATION` in `apps/api/src/mcp/first-party-tool-permissions.ts`),
+  within the default worker set and that person's grant. A refresh therefore
+  never lifts a deliberately narrowed permission boundary (for example a
+  read-only operator session that created the task) for tools the task already
+  had, and every added permission follows a tool the drift report names. The
+  creator session policy (agent access, scope, memory) is never rewritten.
 
 Existing-session tasks, and reusable tasks whose session already exists, follow
 that session's tools, so only their accounts are part of the plan.

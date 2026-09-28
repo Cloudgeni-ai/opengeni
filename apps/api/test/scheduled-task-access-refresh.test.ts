@@ -27,6 +27,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { permissionsRequiredByFirstPartyTools } from "../src/mcp/first-party-tool-permissions";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 
 let available = true;
@@ -236,6 +237,7 @@ describe("scheduled task access drift and refresh", () => {
       settings: settings(),
       authorization: signedIn(workspace, workspace.owner),
       tasks: [task],
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
     expect(ownerView?.policyDrift).toEqual({
       missingConnectors: [{ id: "notion", name: "Notion" }],
@@ -250,6 +252,7 @@ describe("scheduled task access drift and refresh", () => {
       settings: settings(),
       authorization: signedIn(workspace, workspace.member),
       tasks: [task],
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
     expect(memberView).toEqual(task);
   }, 60_000);
@@ -266,6 +269,7 @@ describe("scheduled task access drift and refresh", () => {
         authorization,
         taskId: task.id,
         request: { executionDigest },
+        permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
       });
     await expectHttpError(
       refresh(
@@ -299,6 +303,7 @@ describe("scheduled task access drift and refresh", () => {
       authorization: signedIn(workspace, workspace.owner),
       taskId: task.id,
       request: { executionDigest: task.executionDigest },
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
 
     expect(refreshed.agentConfig.tools).toEqual([
@@ -322,6 +327,10 @@ describe("scheduled task access drift and refresh", () => {
       expect(PERSON_PERMISSIONS).toContain(permission);
     }
     expect(policy?.firstPartyMcpPermissions).toContain("sessions:read");
+    // Only what the added tools need is added: rig_list needs rigs:use, which
+    // this person does not hold, and browser_read needs sessions:read. Nothing
+    // else from the default worker set rides along.
+    expect(policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
     // The creator session policy is never rewritten by a refresh.
     expect(policy?.sessionPolicy).toEqual({
       agentAccess: "session",
@@ -334,6 +343,7 @@ describe("scheduled task access drift and refresh", () => {
       settings: settings(),
       authorization: signedIn(workspace, workspace.owner),
       tasks: [refreshed],
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
     expect(after?.policyDrift).toBeNull();
 
@@ -345,8 +355,71 @@ describe("scheduled task access drift and refresh", () => {
       authorization: signedIn(workspace, workspace.owner),
       taskId: task.id,
       request: { executionDigest: refreshed.executionDigest },
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
     });
     expect(again.authorityRevision).toBe(refreshed.authorityRevision);
+  }, 60_000);
+
+  test("fixing an account never lifts a narrowed agent task's permission boundary", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    // A read-only agent session created this task with today's default tools;
+    // only its Linear account is stale.
+    const task = await createScheduledTask(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      name: "Read-only digest",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3_600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Summarize",
+        resources: [],
+        tools: [
+          { kind: "mcp", id: "linear" },
+          { kind: "mcp", id: "notion", optional: true },
+        ],
+        metadata: {},
+        connectionAccounts: [{ serverId: "linear", connectionId: crypto.randomUUID() }],
+        connectionAccountsFrozen: true,
+      },
+      createdBy: { kind: "subject", subjectId: workspace.owner },
+      creatorPolicy: {
+        firstPartyMcpTools: ["sessions_list", "rig_list", "browser_read"],
+        firstPartyMcpPermissions: ["sessions:read"],
+        sessionPolicy: { agentAccess: "session", scopeSubjectId: null, memoryScope: null },
+      },
+      metadata: {},
+    });
+    const [view] = await withScheduledTaskPolicyDrift({
+      db: client.db,
+      settings: settings(),
+      authorization: signedIn(workspace, workspace.owner),
+      tasks: [task],
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+    });
+    expect(view?.policyDrift).toMatchObject({
+      missingConnectors: [],
+      missingOpenGeniTools: [],
+      unavailableAccounts: [{ id: "linear", name: "Linear" }],
+    });
+    const refreshed = await refreshScheduledTaskAccess({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      authorization: signedIn(workspace, workspace.owner),
+      taskId: task.id,
+      request: { executionDigest: task.executionDigest },
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+    });
+    expect(refreshed.agentConfig.connectionAccounts).toEqual([
+      { serverId: "linear", connectionId: workspace.liveConnectionId },
+    ]);
+    const policy = await getScheduledTaskCreatorPolicy(client.db, workspace.workspaceId, task.id);
+    expect(policy?.firstPartyMcpTools).toEqual(["sessions_list", "rig_list", "browser_read"]);
+    expect(policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
   }, 60_000);
 
   test("over HTTP an organization key sees drift on a task without an owner but cannot refresh", async () => {

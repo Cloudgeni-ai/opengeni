@@ -45,6 +45,7 @@ import {
 } from "@opengeni/core";
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
+import { permissionsRequiredByFirstPartyTools } from "../mcp/first-party-tool-permissions";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -70,6 +71,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       settings: catalogSettings,
       authorization,
       tasks,
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
       onError: (error) => {
         deps.observability?.warn("Scheduled task access drift could not be computed", {
           errorClass: error instanceof Error ? error.name : "ScheduledTaskPolicyDriftError",
@@ -210,6 +212,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       authorization,
       taskId: c.req.param("taskId"),
       request: parsed.data,
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });

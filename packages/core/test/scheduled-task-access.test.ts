@@ -169,6 +169,14 @@ describe("agent-created task OpenGeni tools (migration 0428 creator policy)", ()
   const settings = testSettings({
     defaultFirstPartyMcpTools: ["sessions_list", "rig_list", "browser_read"],
   });
+  // The API passes its MCP registration table; this mirrors those three rows.
+  const requirements: Partial<Record<FirstPartyMcpToolName, Permission[]>> = {
+    sessions_list: ["sessions:read"],
+    rig_list: ["rigs:use"],
+    browser_read: ["sessions:read"],
+  };
+  const permissionsRequiredByTools = (tools: readonly FirstPartyMcpToolName[]) =>
+    tools.flatMap((tool) => requirements[tool] ?? []);
 
   test("a human-created task has no frozen policy and nothing to refresh", () => {
     expect(
@@ -176,13 +184,14 @@ describe("agent-created task OpenGeni tools (migration 0428 creator policy)", ()
         creatorPolicy: { firstPartyMcpTools: null, firstPartyMcpPermissions: null },
         settings,
         grantPermissions: ["workspace:admin"],
+        permissionsRequiredByTools,
       }),
     ).toEqual({ missing: [], policy: null });
   });
 
-  test("names the newer default tools and re-derives permissions from the refreshing person", () => {
+  test("names the newer default tools and adds only what they need, within the person's grant", () => {
     const frozenPermissions = ["sessions:read", "secrets:read"] as Permission[];
-    const personHolds: Permission[] = ["sessions:read", "files:read"];
+    const personHolds: Permission[] = ["sessions:read", "files:read", "rigs:use"];
     const plan = planScheduledTaskOpenGeniTools({
       creatorPolicy: {
         firstPartyMcpTools: ["sessions_list"] as FirstPartyMcpToolName[],
@@ -190,19 +199,44 @@ describe("agent-created task OpenGeni tools (migration 0428 creator policy)", ()
       },
       settings,
       grantPermissions: personHolds,
+      permissionsRequiredByTools,
     });
     expect(plan.missing).toEqual(["rig_list", "browser_read"]);
     expect(plan.policy?.firstPartyMcpTools).toEqual(["sessions_list", "rig_list", "browser_read"]);
-    // Never wider than the person: a frozen permission they lack is dropped,
-    // and a default permission is added only when they hold it.
-    for (const permission of plan.policy!.firstPartyMcpPermissions) {
-      expect(personHolds).toContain(permission);
-    }
-    expect(plan.policy!.firstPartyMcpPermissions).not.toContain("secrets:read");
-    expect(plan.policy!.firstPartyMcpPermissions).toContain("sessions:read");
-    if ((DEFAULT_FIRST_PARTY_MCP_PERMISSIONS as readonly string[]).includes("files:read")) {
-      expect(plan.policy!.firstPartyMcpPermissions).toContain("files:read");
-    }
+    // A frozen permission the person lacks is dropped; rig_list's rigs:use is
+    // added; files:read is held by the person but no added tool needs it.
+    expect(plan.policy?.firstPartyMcpPermissions).toEqual(["sessions:read", "rigs:use"]);
+  });
+
+  test("a tool's permission the person does not hold is not added", () => {
+    const plan = planScheduledTaskOpenGeniTools({
+      creatorPolicy: {
+        firstPartyMcpTools: ["sessions_list"] as FirstPartyMcpToolName[],
+        firstPartyMcpPermissions: ["sessions:read"],
+      },
+      settings,
+      grantPermissions: ["sessions:read"],
+      permissionsRequiredByTools,
+    });
+    expect(plan.missing).toEqual(["rig_list", "browser_read"]);
+    expect(plan.policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
+  });
+
+  test("a narrowed permission boundary is never lifted when no tool is added", () => {
+    // An operator-narrowed session (read-only here) created the task. The
+    // refreshing person holds everything, but the refresh adds no tool, so it
+    // must not hand the schedule the rest of the default worker set.
+    expect(
+      planScheduledTaskOpenGeniTools({
+        creatorPolicy: {
+          firstPartyMcpTools: ["sessions_list", "rig_list", "browser_read"],
+          firstPartyMcpPermissions: ["sessions:read"],
+        },
+        settings,
+        grantPermissions: ["workspace:admin"],
+        permissionsRequiredByTools,
+      }),
+    ).toEqual({ missing: [], policy: null });
   });
 
   test("an up-to-date policy the person fully holds is left alone", () => {
@@ -213,6 +247,7 @@ describe("agent-created task OpenGeni tools (migration 0428 creator policy)", ()
         creatorPolicy: { firstPartyMcpTools: tools, firstPartyMcpPermissions: permissions },
         settings,
         grantPermissions: ["workspace:admin"],
+        permissionsRequiredByTools,
       }),
     ).toEqual({ missing: [], policy: null });
   });
