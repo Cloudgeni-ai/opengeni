@@ -203,7 +203,8 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
   );
 
   return {
-    loading: (inventory.loading && !inventory.state) || loadingContent,
+    loading:
+      (inventory.loading && !inventory.state) || (Boolean(inventory.state) && loadingContent),
     error: inventory.error && !inventory.state ? errorText(inventory.error) : contentError,
     reload: () => {
       void inventory.reload();
