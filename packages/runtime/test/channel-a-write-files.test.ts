@@ -26,7 +26,7 @@ import {
 } from "../src/sandbox";
 import {
   parseWriteFilesOutput,
-  WRITE_FILES_COMMAND_MAX_CHARS,
+  WRITE_FILES_COMMAND_MAX_BYTES,
 } from "../src/sandbox/write-files-script";
 
 setDefaultTimeout(30_000);
@@ -103,7 +103,7 @@ describe("fsWriteFiles", () => {
     });
 
     expect(commands).toHaveLength(1);
-    expect(commands[0]!.cmd.length).toBeLessThanOrEqual(WRITE_FILES_COMMAND_MAX_CHARS);
+    expect(Buffer.byteLength(commands[0]!.cmd)).toBeLessThanOrEqual(WRITE_FILES_COMMAND_MAX_BYTES);
     expect(result).toEqual({
       directory: "skills/demo",
       written: skillFiles.map((file) => file.path),
@@ -256,7 +256,7 @@ describe("fsWriteFiles", () => {
       expect(readFileSync(join(root, "big", file.path), "utf8")).toBe(file.content);
     }
     for (const command of commands) {
-      expect(command.cmd.length).toBeLessThanOrEqual(WRITE_FILES_COMMAND_MAX_CHARS);
+      expect(Buffer.byteLength(command.cmd)).toBeLessThanOrEqual(WRITE_FILES_COMMAND_MAX_BYTES);
     }
     // One read-only check, then several write batches.
     expect(commands.length).toBeGreaterThan(2);
@@ -264,6 +264,25 @@ describe("fsWriteFiles", () => {
 
     const repeated = await service(session).fsWriteFiles({ directory: "big", files });
     expect(repeated.unchanged).toHaveLength(files.length);
+  });
+
+  test("non-ASCII paths are budgeted in bytes so no command exceeds the argv limit", async () => {
+    const { root } = workspace();
+    const { session, commands } = shellSession(root);
+    // Each path is 60 three-byte characters: about 1.6x more bytes than
+    // characters, so a character budget would pack a command past 128 KiB.
+    const files = Array.from({ length: 230 }, (_, index) => ({
+      path: `${"\u53c2".repeat(60)}${index}.md`,
+      content: "x",
+    }));
+    const result = await service(session).fsWriteFiles({ directory: "wide", files });
+
+    expect(result.written).toHaveLength(files.length);
+    expect(commands.length).toBeGreaterThan(1);
+    for (const command of commands) {
+      expect(Buffer.byteLength(command.cmd)).toBeLessThanOrEqual(WRITE_FILES_COMMAND_MAX_BYTES);
+    }
+    expect(readFileSync(join(root, "wide", files[229]!.path), "utf8")).toBe("x");
   });
 
   test("a new directory holding only large files still counts as created", async () => {

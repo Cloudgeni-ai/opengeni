@@ -5,10 +5,11 @@
 // an existing path: an existing regular file with the same bytes is reported
 // unchanged, and anything else fails the whole command before it writes.
 
-/** Longest generated command. Linux caps one argv string at 128 KiB and the
- * provider passes the command as one argument; this stays at the size the
- * single-file inline write path already sends. */
-export const WRITE_FILES_COMMAND_MAX_CHARS = 88 * 1024;
+/** Longest generated command in UTF-8 bytes. Linux caps one argv string at
+ * 128 KiB of bytes and the provider passes the command as one argument; this
+ * stays at the size the single-file inline write path already sends. Paths
+ * may be non-ASCII, so budgets count bytes, not string length. */
+export const WRITE_FILES_COMMAND_MAX_BYTES = 88 * 1024;
 
 export type WriteFilesScriptDirectory = Readonly<{
   /** Index into the request's directory list; reported in markers. */
@@ -55,12 +56,12 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Characters one fragment adds to the final quoted `bash -c` command. */
-export function quotedLength(fragment: string): number {
+/** UTF-8 bytes one fragment adds to the final quoted `bash -c` command. */
+export function quotedByteLength(fragment: string): number {
   let quotes = 0;
   for (const character of fragment) if (character === "'") quotes += 1;
   // Each quote becomes '\'' inside the outer single-quoted script, plus a newline.
-  return fragment.length + quotes * 3 + 1;
+  return Buffer.byteLength(fragment, "utf8") + quotes * 3 + 1;
 }
 
 export function writeFilesPrelude(input: {

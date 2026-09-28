@@ -78,8 +78,8 @@ import {
   fileCheckFragment,
   filePutFragment,
   parseWriteFilesOutput,
-  quotedLength,
-  WRITE_FILES_COMMAND_MAX_CHARS,
+  quotedByteLength,
+  WRITE_FILES_COMMAND_MAX_BYTES,
   writeFilesPrelude,
   writeFilesScript,
   type WriteFilesOutput,
@@ -1167,10 +1167,10 @@ export class SandboxChannelAService {
     });
     // A runAs wrapper quotes the command twice more, multiplying each quote.
     const budget = this.runAs
-      ? Math.floor(WRITE_FILES_COMMAND_MAX_CHARS / 4)
-      : WRITE_FILES_COMMAND_MAX_CHARS;
+      ? Math.floor(WRITE_FILES_COMMAND_MAX_BYTES / 4)
+      : WRITE_FILES_COMMAND_MAX_BYTES;
     // Prelude, the bash -c wrapper, and the trailing marker.
-    const fixedCost = prelude.reduce((total, line) => total + quotedLength(line), 0) + 256;
+    const fixedCost = prelude.reduce((total, line) => total + quotedByteLength(line), 0) + 256;
     const written = new Set<number>();
     const unchanged = new Set<number>();
     const createdDirectories = new Set<number>();
@@ -1192,16 +1192,16 @@ export class SandboxChannelAService {
       const directoryCost = (index: number) => {
         const directory = plan.directories[index]!;
         return (
-          quotedLength(directoryCheckFragment(directory)) +
-          (mode === "check" ? 0 : quotedLength(directoryCreateFragment(directory)))
+          quotedByteLength(directoryCheckFragment(directory)) +
+          (mode === "check" ? 0 : quotedByteLength(directoryCreateFragment(directory)))
         );
       };
       for (const file of files) {
         const fileCost =
           mode === "directories"
             ? 0
-            : quotedLength(fileCheckFragment(scriptFile(file, false), mode)) +
-              (mode === "write" ? quotedLength(filePutFragment(scriptFile(file, true))) : 0);
+            : quotedByteLength(fileCheckFragment(scriptFile(file, false), mode)) +
+              (mode === "write" ? quotedByteLength(filePutFragment(scriptFile(file, true))) : 0);
         const standalone =
           fixedCost +
           fileCost +
@@ -1246,7 +1246,7 @@ export class SandboxChannelAService {
           files: batch.files.map((file) => scriptFile(file, mode === "write")),
         }),
       );
-      if (cmd.length > budget) {
+      if (Buffer.byteLength(cmd, "utf8") > budget) {
         throw new Error("workspace file batch exceeded its command budget");
       }
       return cmd;
