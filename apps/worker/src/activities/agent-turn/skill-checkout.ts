@@ -1,4 +1,5 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
+import { AGENT_AUTHORED_SKILL_STYLE } from "@opengeni/contracts";
 import type { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import type { SkillTextFile } from "@opengeni/runtime/skill-library";
 import { checkoutSkillDirectory, readSkillDirectory } from "./skill-transfer";
@@ -73,8 +74,7 @@ export function createSkillPublishAttemptToolDefinition(input: {
     modelName: "skill_publish",
     codemodePath: ["opengeni", "skill_publish"],
     title: "Publish Skill directory",
-    description:
-      "Save a complete sandbox Skill directory through the same Learning-controlled service as skill_save. Reads UTF-8 text files directly; do not serialize the directory into arguments. Files missing from the directory are removed from the new revision. Supply the checkout revision and scope version; stale edits are refused. The result reports whether the change is live or pending approval.",
+    description: `Save a complete sandbox Skill directory through the same Learning-controlled service as skill_save. ${AGENT_AUTHORED_SKILL_STYLE} Reads UTF-8 text files directly; do not serialize the directory into arguments. Files missing from the directory are removed from the new revision. Supply the checkout revision and scope version; stale edits are refused. The result reports whether the change is live or pending approval.`,
     inputSchema: {
       type: "object",
       properties: {

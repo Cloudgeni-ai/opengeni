@@ -19,6 +19,7 @@ import {
   slackReactionTaskText,
   SLACK_DELIVERY_EVENT_TYPES,
   SLACK_INTERACTION_MAX_BODY_BYTES,
+  SLACK_SESSION_INSTRUCTIONS,
   verifySlackRequestSignature,
 } from "../src/integrations/slack-interactions";
 
@@ -155,6 +156,24 @@ describe("Slack interaction signature boundary", () => {
       expect((await app.request(path, { method: "POST" })).status).toBe(401);
       expect(isApiContractProtectedMutation("POST", path)).toBe(true);
     }
+  });
+});
+
+describe("Slack session instructions", () => {
+  test("tell the agent its final reply is posted as written and cut off at 3,500 characters", () => {
+    // Replies in Slack sessions ran to 1,543 characters, and the model was never
+    // told where delivery truncates.
+    expect(SLACK_SESSION_INSTRUCTIONS).toEndWith(
+      "Your final reply is posted to the Slack thread as written: give the answer first in a few short lines, add detail only when asked, and stay well under 3,500 characters, where Slack cuts replies off. Keep it safe to send back to Slack.",
+    );
+    expect(SLACK_SESSION_INSTRUCTIONS).not.toContain("Keep user-visible output concise, bounded");
+    // The authority restrictions ahead of it are unchanged.
+    expect(SLACK_SESSION_INSTRUCTIONS).toStartWith(
+      "This session is an OpenGeni Slack task surface.",
+    );
+    expect(SLACK_SESSION_INSTRUCTIONS).toContain(
+      "Never expose private reasoning, credentials, secrets, raw logs, or unbounded output.",
+    );
   });
 });
 

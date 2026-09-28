@@ -140,6 +140,20 @@ describe("workspace repository skills", () => {
     });
   }
 
+  test("repository skill guidance does not ask the agent to announce Skill reads", async () => {
+    // The operational contract says "Do not announce Skill reads"; this section
+    // used to contradict it in sessions with repository Skills.
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+      fakeSession({
+        ".agents/skills/example/SKILL.md":
+          "---\nname: example\ndescription: Example guidance.\n---\n# Guidance",
+      }),
+    );
+    const instructions = await capability.instructions();
+    expect(instructions).toContain("- Use only the minimum relevant skills for the turn.\n");
+    expect(instructions).not.toContain("say briefly which ones you are using");
+  });
+
   test.skipIf(process.platform === "win32")(
     "Unix-local discovery excludes symlink Skill entrypoints consistently with reading",
     async () => {

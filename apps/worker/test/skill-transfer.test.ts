@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { FsTreeNode } from "@opengeni/contracts";
+import { AGENT_AUTHORED_SKILL_STYLE, type FsTreeNode } from "@opengeni/contracts";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   createSkillCheckoutAttemptToolDefinition,
@@ -164,6 +164,21 @@ describe("optional Skill directory transfers", () => {
     });
     expect(calls.slice(3)).toEqual(["authorize", "filesystem", "save"]);
     expect(publish.structuredContent).toMatchObject({ outcome: "pending" });
+  });
+
+  test("publish states the same Skill sizing rule as skill_save", () => {
+    const definition = createSkillPublishAttemptToolDefinition({
+      authorize: async () => {},
+      filesystem: async () => {
+        throw new Error("Discovery must not read the sandbox");
+      },
+      save: async () => {
+        throw new Error("Discovery must not save content");
+      },
+    });
+    expect(definition.description).toStartWith(
+      `Save a complete sandbox Skill directory through the same Learning-controlled service as skill_save. ${AGENT_AUTHORED_SKILL_STYLE} Reads UTF-8 text files directly;`,
+    );
   });
 
   test("reads nested text using structured filesystem calls and preserves BOM", async () => {

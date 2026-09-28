@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
+import { AGENT_AUTHORED_SKILL_STYLE } from "@opengeni/contracts";
 import {
   createSkillSaveAttemptToolDefinition,
   type SkillSaveRequest,
@@ -88,6 +89,24 @@ describe("skill_save gateway", () => {
     expect(definition.description).toContain("instruction_policy_save");
     expect(definition.description).toContain("Off prevents agent authoring");
     expect(definition.description).toContain("Private chats save personal Skills");
+  });
+
+  test("sizes a Skill to the request before any other guidance", () => {
+    const definition = createSkillSaveAttemptToolDefinition({
+      authorize: async () => {},
+      load: async () => {
+        throw new Error("Discovery must not load content");
+      },
+      save: async () => {
+        throw new Error("Discovery must not save content");
+      },
+    });
+    // A one-sentence preference became a 1,310-character Skill, and a
+    // description fix rewrote an 11 KB SKILL.md: the sizing rule comes right
+    // after what the tool is for.
+    expect(definition.description).toStartWith(
+      `Create or edit a Skill for reusable procedures or context-specific and personal behavioral preferences, not retrieval-only facts. ${AGENT_AUTHORED_SKILL_STYLE} Put when it applies in the SKILL.md description as one short sentence; only that descriptor enters the prompt index, and the full body is loaded with skill_read when relevant. Short always-on workspace rules use instruction_policy_save.`,
+    );
   });
 
   test("preserves omitted files and returns actual pending outcome", async () => {

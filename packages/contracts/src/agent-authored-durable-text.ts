@@ -88,13 +88,38 @@ export const AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE =
   "Write the shortest complete imperative rule in 1-3 sentences, with no numbered procedure, examples, " +
   "rationale, or restated defaults. Split unrelated rules, and move conditional procedure into a Skill.";
 
+/** The sizing rule the model reads on every tool that writes a Skill. */
 export const AGENT_AUTHORED_SKILL_STYLE =
-  "Write one focused Skill with a clear trigger and outcome. Include only the prerequisites, necessary steps, " +
-  "verification, and important failure handling an agent needs to execute it; omit background, repetition, " +
-  "generic advice, and decorative examples. Split unrelated workflows into separate Skills.";
+  "Size the Skill to the request: a stated preference or habit is two or three plain sentences in SKILL.md; " +
+  "a procedure keeps only its trigger, steps, checks, and important failure handling, with long references, " +
+  "schemas, or scripts in supporting files. Skip background, restated defaults, and lists of things not to do. " +
+  "When editing, change only what the request is about; do not expand other sections.";
 
-/** @deprecated Use the destination-specific instruction or Skill style. */
-export const AGENT_AUTHORED_DURABLE_TEXT_STYLE = AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE;
+/**
+ * Every Skill description is composed into every session's prompt index, so an
+ * agent-written description stays one short sentence. Bodies are not capped:
+ * they are read on demand, and legitimate procedures run to several thousand
+ * characters.
+ */
+export const AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS = 300;
+
+export const AGENT_AUTHORED_SKILL_DESCRIPTION_TOO_LONG_MESSAGE =
+  `Skill descriptions are at most ${AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS} characters because every ` +
+  "description is in every session's prompt index. Shorten it to one sentence saying when to use the Skill.";
+
+/**
+ * Refuse an agent-written Skill description over the cap. A description the
+ * write leaves exactly as it was in its base revision is not agent-written and
+ * passes, so an edit elsewhere never forces an unrelated description rewrite.
+ */
+export function assertAgentAuthoredSkillDescription(input: {
+  description: string;
+  baseDescription?: string | null;
+}): void {
+  if (input.description.length <= AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS) return;
+  if (input.baseDescription != null && input.baseDescription === input.description) return;
+  throw new Error(AGENT_AUTHORED_SKILL_DESCRIPTION_TOO_LONG_MESSAGE);
+}
 
 /**
  * Actionable over-budget message including the text the caller actually sent,

@@ -68,6 +68,16 @@ and 512 KiB of output; use checkout for larger files. Paths are root-relative, u
 contain traversal, backslashes, absolute paths, control characters, or drive
 prefixes. NUL, malformed Unicode, and binary storage are unsupported.
 
+An agent-written Skill description is at most 300 characters
+(`AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS` in
+[`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts)),
+because every description is in every session's prompt index. `skill_save` and
+`skill_publish` enforce it in their shared worker save path when the write
+creates the Skill or changes its `SKILL.md` description; a description carried
+over unchanged from the base revision passes, so an unrelated edit never forces a
+rewrite. `skill_install` copies an upstream source as is, human writes are not
+capped, stored revisions are never rewritten, and Skill bodies have no agent cap.
+
 Historical single-text revisions retain NULL `skill_files` and project their
 exact `content` as `SKILL.md`. Historical content hashes and snapshots are not
 rewritten. The existing content hash remains the hash of `SKILL.md`, not the

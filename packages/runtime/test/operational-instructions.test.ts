@@ -410,6 +410,31 @@ describe("proportional effort", () => {
     expect(guidance).toContain("Do not announce Skill reads");
   });
 
+  test("keeps text saved or sent for others short and sized to the request", () => {
+    // A one-sentence preference became a 1,310-character Skill, agent-written
+    // scheduled prompts ran 6-10x their request, and monitor posts were dense
+    // single paragraphs. Chat-reply guidance alone did not reach that text.
+    const guidance = section("## Writing style");
+    expect(guidance).toContain(
+      "Text you save or send for others (a Skill, a workspace instruction, a scheduled-task prompt, or a message to a person or channel) is short and plain by default and sized to the request.",
+    );
+    expect(guidance).toContain(
+      "A preference stated in one sentence becomes one to three sentences.",
+    );
+    expect(guidance).toContain(
+      "keeps evidence such as test counts, CI job names and commit ids in the linked item",
+    );
+    expect(guidance).toContain(
+      "Add detail only when the user asks for it or the reader could not act without it.",
+    );
+    expect(guidance).toContain("name an existing Skill or link instead of repeating it");
+    // Slack message sections do not render Markdown headings, `**bold**`, or
+    // `[label](url)`; text the agent posts itself must use Slack's own markup.
+    expect(guidance).toContain(
+      "In text you send to Slack through a tool, use Slack formatting (*bold*, <url|label>) and no headings.",
+    );
+  });
+
   test("drops directives that pushed simple asks toward audits", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("evidence-backed response");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("exhaust safe in-scope checks");
