@@ -12,6 +12,7 @@ import {
   listSkillPaths,
   PORTABLE_SKILL_MAX_FILES,
   readSkillFiles,
+  skillScriptIndex,
   SKILL_READ_MAX_PATHS,
   type SkillTextFile,
 } from "@opengeni/runtime/skill-library";
@@ -292,9 +293,15 @@ async function readResult(
       }),
     };
   }
+  if (args.paths !== undefined) {
+    return { kind: "files", result: textResult({ ...identity, ...selected }) };
+  }
+  // The default read also indexes runnable files (path and first usage line)
+  // so the commands are visible without a sandbox checkout.
+  const scripts = skillScriptIndex(files);
   return {
-    kind: args.paths === undefined ? "full" : "files",
-    result: textResult({ ...identity, ...selected }),
+    kind: "full",
+    result: textResult({ ...identity, ...selected, ...(scripts ?? {}) }),
   };
 }
 

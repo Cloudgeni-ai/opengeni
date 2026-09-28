@@ -219,6 +219,27 @@ describe("skill_read gateway definition", () => {
     });
   });
 
+  test("the default read indexes scripts; explicit paths and inventory do not", async () => {
+    const withScripts = [
+      ...files,
+      {
+        path: "scripts/report.py",
+        content: '#!/usr/bin/env python3\n"""Usage: python scripts/report.py --week 2026-W39"""\n',
+      },
+    ];
+    const read = reader(async () => withScripts);
+    expect((await read({})).structuredContent).toEqual({
+      files: [files[0]],
+      scripts: [
+        { path: "scripts/report.py", usage: "Usage: python scripts/report.py --week 2026-W39" },
+      ],
+    });
+    expect((await read({ paths: ["SKILL.md"] })).structuredContent).toEqual({ files: [files[0]] });
+    expect((await read({ listFiles: true })).structuredContent).toEqual({
+      paths: ["SKILL.md", "references/a.md", "scripts/report.py"],
+    });
+  });
+
   test("inventory returns paths and available identity without accessing any bodies", async () => {
     const identity = {
       skillId: "workspace-skill",

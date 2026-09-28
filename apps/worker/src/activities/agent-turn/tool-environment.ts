@@ -72,6 +72,7 @@ import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import {
+  recordSkillCheckout,
   recordSkillRead,
   recordToolPreparationPhase,
   recordTurnStartupPhase,
@@ -690,6 +691,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       indexedSkillIds: () => eventing.modelVisibleSkillIds,
       observe: (observation) => recordSkillRead(observability, observation),
     },
+    observeSkillCheckout: (observation) => recordSkillCheckout(observability, observation),
     filesystem: async () => {
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
