@@ -209,6 +209,12 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Do not delegate a scope that you will also perform yourself.",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "answer directly when the work takes only a few steps and this session has the access it needs",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "run that step in a child created with those `variableSetIds` instead of asking the user to attach it here",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain('waitFor: "completion"');
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A `goal.completed` event records goal state but is not a terminal child result",
