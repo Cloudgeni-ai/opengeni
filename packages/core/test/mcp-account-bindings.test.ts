@@ -46,6 +46,35 @@ function connection(subjectId: string | null = "alice"): ConnectionMetadata {
 }
 const input = { accountId, workspaceId, subjectId: "alice", servers: [server] };
 
+test("rejected frozen accounts retain safe structured identity and eligibility reason", () => {
+  const selected = connection();
+  for (const [servers, connections, reason] of [
+    [[], [selected], "connector_unavailable"],
+    [[server], [], "account_not_visible"],
+    [[server], [{ ...selected, status: "revoked" }], "account_inactive"],
+    [[server], [{ ...selected, providerDomain: "other.example.test" }], "account_mismatch"],
+  ] as const) {
+    let failure: unknown;
+    try {
+      mcpAccountBindingsFromVisibleConnections({
+        ...input,
+        servers: [...servers],
+        connections: [...connections] as ConnectionMetadata[],
+        selections: [{ serverId: server.id, connectionId: selected.id }],
+        selectionsFrozen: true,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(ConnectionAccountSelectionError);
+    expect((failure as ConnectionAccountSelectionError).diagnostic).toEqual({
+      version: 1,
+      reason: "selected_account_unavailable",
+      accounts: [{ serverId: server.id, connectionId: selected.id, reason }],
+    });
+  }
+});
+
 test("account selection cannot silently replace a persisted legacy session attachment", () => {
   const native = connection();
   const legacy = {

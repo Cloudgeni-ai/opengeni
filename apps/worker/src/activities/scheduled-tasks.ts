@@ -39,6 +39,7 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   bindScheduledTaskRunSessionInTransaction,
   createScheduledTaskRun,
+  recordScheduledTaskAdmissionFailure,
   createSession,
   createSessionWithIdempotencyKeyResult,
   enqueueSessionWorkflowWakeIfRunnable,
@@ -285,6 +286,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         producerKey: stableProducerKey,
       });
       if (priorRun?.actionKind === "agent_turn") {
+        if (priorRun.admissionDiagnostic) {
+          return {
+            action: "blocked",
+            reason: "connection_account_unavailable",
+            runId: priorRun.id,
+            diagnostic: priorRun.admissionDiagnostic,
+          };
+        }
         const acceptedExecution = await getScheduledTaskRunAcceptedExecution(db, {
           workspaceId: input.workspaceId,
           runId: priorRun.id,
@@ -520,11 +529,30 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           },
         ),
       }).catch((error: unknown) => {
-        if (error instanceof ConnectionAccountSelectionError) return null;
+        if (error instanceof ConnectionAccountSelectionError) return error;
         throw error;
       });
-      if (taskConnections === null) {
-        return { action: "blocked", reason: "connection_account_unavailable" };
+      if (taskConnections instanceof ConnectionAccountSelectionError) {
+        const receipt = await recordScheduledTaskAdmissionFailure(db, {
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          taskAuthorityRevision: task.authorityRevision,
+          taskExecutionDigest: task.executionDigest,
+          triggerType: input.triggerType,
+          producerKey: stableProducerKey,
+          diagnostic: taskConnections.diagnostic,
+        });
+        if (!receipt.admissionDiagnostic) {
+          // A concurrent delivery accepted this producer first. Follow the
+          // existing exact-receipt recovery path, never replace its outcome.
+          return createScheduledTaskActivities(services).dispatchScheduledTaskRun(input);
+        }
+        return {
+          action: "blocked",
+          reason: "connection_account_unavailable",
+          runId: receipt.id,
+          diagnostic: receipt.admissionDiagnostic,
+        };
       }
       const {
         personalConnectionDelegations: taskPersonalConnectionDelegations,

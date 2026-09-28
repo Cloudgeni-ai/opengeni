@@ -407,6 +407,11 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
     if (!selection && eligible.length > 1) {
       throw new ConnectionAccountSelectionError(
         `Choose an account for ${server.id}: multiple connected accounts match.`,
+        {
+          version: 1,
+          reason: "ambiguous_account",
+          accounts: [{ serverId: server.id, connectionId: null, reason: "selection_unavailable" }],
+        },
       );
     }
     const connection = selection
@@ -426,6 +431,14 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
   if (selections.size > 0) {
     throw new ConnectionAccountSelectionError(
       `Selected account is unavailable for: ${[...selections.keys()].join(", ")}`,
+      {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: [...selections.values()].map((selection) => ({
+          ...selection,
+          reason: "selection_unavailable",
+        })),
+      },
     );
   }
   return delegations;
@@ -815,6 +828,7 @@ export async function freezeConnectionAccounts(
     if (input.authoritySelections?.length) {
       throw new ConnectionAccountSelectionError(
         "Agent-created work inherits the exact parent accounts",
+        { version: 1, reason: "parent_accounts_required", accounts: [] },
       );
     }
     const inherited = await getSessionTurnMcpAccountBindings(
@@ -1012,6 +1026,7 @@ export async function freezePersonalConnectionDelegations(input: {
     if ((input.authoritySelections?.length ?? 0) > 0) {
       throw new ConnectionAccountSelectionError(
         "Selected connection account requires live owner workspace access",
+        { version: 1, reason: "owner_access_unavailable", accounts: [] },
       );
     }
     if (personalGitHubResources.length > 0) {
@@ -1040,6 +1055,14 @@ export async function freezePersonalConnectionDelegations(input: {
       `connection authority selection did not match a selected MCP server: ${unsupportedSelections
         .map((selection) => selection.serverId)
         .join(", ")}`,
+      {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: unsupportedSelections.map((selection) => ({
+          ...selection,
+          reason: "connector_unavailable",
+        })),
+      },
     );
   }
   const mcp = personalConnectionDelegationsFromVisibleConnections({

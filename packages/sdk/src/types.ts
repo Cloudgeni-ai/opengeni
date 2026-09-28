@@ -5644,6 +5644,28 @@ export type ScheduledTaskRun = {
   knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
   completedAt: string | null;
   error: string | null;
+  admissionDiagnostic?:
+    | {
+        version: 1;
+        reason:
+          | "selected_account_unavailable"
+          | "owner_access_unavailable"
+          | "ambiguous_account"
+          | "parent_accounts_required"
+          | "selection_unavailable";
+        accounts: Array<{
+          serverId: string;
+          connectionId: string | null;
+          reason:
+            | "connector_unavailable"
+            | "account_not_visible"
+            | "account_inactive"
+            | "account_mismatch"
+            | "selection_unavailable";
+        }>;
+      }
+    | null
+    | undefined;
   createdAt: string;
   updatedAt: string;
   /** Connectors this run could not use; projected only for a viewer who can act on the task. */
