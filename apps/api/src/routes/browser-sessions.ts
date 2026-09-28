@@ -2892,6 +2892,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         operation,
         retryControllerTransport: operation === "browser.read" || operation === "browser.action",
         allowOperationReplay,
+        ...(expectedPlacementInstanceId &&
+        (expectedPlacement?.kind === "sandbox_group" ||
+          expectedPlacement?.kind === "external_provider")
+          ? { retainedInstanceId: expectedPlacementInstanceId }
+          : {}),
       },
       async (handle) => {
         if (expectedPlacement?.kind === "sandbox_group") {
