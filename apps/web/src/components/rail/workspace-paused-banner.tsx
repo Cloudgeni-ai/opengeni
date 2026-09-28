@@ -3,12 +3,11 @@ import { PauseIcon, PlayIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { useWorkspaceTimerClock } from "@/components/settings/agent-activity";
-import { workspaceTimerLabel } from "@/components/workspace-runtime-control";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
 import { canManageWorkspaceSettings } from "@/lib/permissions";
+import { useWorkspaceTimerClock, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 /**
  * While agent work is paused, a banner across the workspace says so on every

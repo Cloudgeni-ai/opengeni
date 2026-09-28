@@ -4,7 +4,6 @@ import { Loader2Icon, PauseIcon, PlayIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { durationLabel, workspaceTimerLabel } from "@/components/workspace-runtime-control";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { Field, TextInput } from "@/components/ui/field";
@@ -12,6 +11,7 @@ import { FormDialog } from "@/components/ui/form-dialog";
 import { DisabledReasonTooltip, SettingRow } from "@/components/ui/setting-row";
 import { StatusDot } from "@/components/ui/status-dot";
 import { cn } from "@/lib/utils";
+import { durationLabel, useWorkspaceTimerClock, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 type Control = Workspace["inferenceControl"];
 type TimerRequest = Omit<WorkspacePauseTimerRequest, "clientEventId" | "expectedRevision">;
@@ -25,29 +25,6 @@ export interface AgentActivityProps {
   onControl: (action: "pause" | "resume") => Promise<void>;
   onTimer: (request: TimerRequest, revision: number) => Promise<void>;
   onRefresh: () => Promise<void>;
-}
-
-/** Keeps a server-corrected clock ticking while a timer runs, and re-reads the workspace. */
-export function useWorkspaceTimerClock(control: Control, onRefresh: () => Promise<void>) {
-  const [now, setNow] = useState(Date.now());
-  const [offset, setOffset] = useState(0);
-  useEffect(() => {
-    setOffset(control.serverTime ? Date.parse(control.serverTime) - Date.now() : 0);
-  }, [control.serverTime]);
-  useEffect(() => {
-    if (!control.timer) return;
-    const tick = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(tick);
-  }, [control.timer]);
-  useEffect(() => {
-    // SSE is the fast path. A bounded refresh also repairs a missed event or worker restart.
-    if (!control.timer) return;
-    const tick = setInterval(() => {
-      void onRefresh().catch(() => undefined);
-    }, 10000);
-    return () => clearInterval(tick);
-  }, [control.timer, onRefresh]);
-  return now + offset;
 }
 
 function failureMessage(failure: unknown): string {

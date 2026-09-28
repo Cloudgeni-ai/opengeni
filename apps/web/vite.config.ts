@@ -54,7 +54,7 @@ export default defineConfig({
               // Inspector changes must not pull account-management forms into
               // the direct-session graph through entry-aware chunk merging.
               name: "model-connection-settings",
-              test: /(?:components[\\/](?:codex-source-settings|connection-access-settings|model-connection-section|subscription-account-row|subscription-connect-action|subscription-device-code-panel)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
+              test: /(?:components[\\/](?:codex-source-settings|model-connection-section|subscription-account-row|subscription-connect-action|subscription-device-code-panel)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -187,9 +187,11 @@ export default defineConfig({
               // settings frame are reached only from lazy settings routes. Pin
               // them so entry-aware merging cannot co-locate one of them with a
               // session-used helper and make the management surface reachable
-              // from a direct session load.
+              // from a direct session load. Connection access renders a Models
+              // form page, so it lives here, not in model-connection-settings,
+              // whose shared icons the eager workspace graph imports.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:models[\\/][\w-]+|settings[\\/](?:agent-activity|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|models[\\/][\w-]+|settings[\\/](?:agent-activity|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
