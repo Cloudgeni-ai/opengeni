@@ -4,6 +4,8 @@ Before adding a control, search `src/components/ui`, `src/components/pickers.tsx
 composer for an existing workspace-wide pattern. Reuse or extend the shared component instead of
 building a route-specific lookalike.
 
+The binding UI spec (tokens, type, which control when, copy, decided component picks, pages not sheets) is [`DESIGN.md`](DESIGN.md).
+
 ## Product UI rules
 
 - Keep the primary task visible and progressively disclose secondary configuration. Do not put

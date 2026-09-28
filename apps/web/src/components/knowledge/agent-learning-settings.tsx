@@ -16,14 +16,8 @@ export const LEARNING_MODE_LABEL: Record<AgentLearningMode, string> = {
   review_first: "Review first",
   off: "Off",
 };
-const UPDATE_PERMISSION_LABEL: Record<AgentLearningMode, string> = {
-  automatic: "Allow updates",
-  review_first: "Review first",
-  off: "Don’t allow updates",
-};
-
 const UPDATE_PERMISSION_HELP =
-  "Allow updates applies changes automatically. Review first requires approval. Don’t allow updates prevents agent changes.";
+  "Automatic applies agent changes right away. Review first waits for your OK in Knowledge › Review. Off stops agent changes.";
 
 function LearningModeSelect(props: {
   id: string;
@@ -34,8 +28,9 @@ function LearningModeSelect(props: {
   describedBy?: string;
   onChange: (mode: AgentLearningMode | "inherit") => void;
 }) {
-  const labels = props.compact ? UPDATE_PERMISSION_LABEL : LEARNING_MODE_LABEL;
-  const effectiveMode = props.value === "inherit" ? props.defaultMode : props.value;
+  // One vocabulary everywhere: Automatic, Review first, Off. An inherited
+  // value says so, so an override is never mistaken for the default.
+  const labels = LEARNING_MODE_LABEL;
   return (
     <Select
       id={props.id}
@@ -43,13 +38,19 @@ function LearningModeSelect(props: {
       value={props.value}
       className={props.compact ? "w-[174px]" : undefined}
       displayValue={
-        props.compact ? (effectiveMode ? labels[effectiveMode] : "Use default") : undefined
+        props.compact
+          ? props.value === "inherit"
+            ? props.defaultMode
+              ? `Default (${labels[props.defaultMode]})`
+              : "Default"
+            : labels[props.value]
+          : undefined
       }
       onChange={(event) => props.onChange(event.target.value as AgentLearningMode | "inherit")}
     >
       {props.allowInherit ? (
         <option value="inherit">
-          Use default{props.defaultMode ? ` (${labels[props.defaultMode]})` : ""}
+          Default{props.defaultMode ? ` (${labels[props.defaultMode]})` : ""}
         </option>
       ) : null}
       {Object.entries(labels).map(([value, label]) => (
@@ -68,7 +69,7 @@ const CATEGORIES: { key: AgentLearningCategory; label: string; description: stri
   },
   {
     key: "instructions",
-    label: "Workspace instructions",
+    label: "Instructions",
     description: "Standing guidance that shapes how agents work.",
   },
   { key: "skills", label: "Skills", description: "Reusable procedures agents create or improve." },
@@ -217,7 +218,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       </fieldset>
       {props.compact ? (
         <p className="text-xs text-fg-muted">
-          Agents can still use these resources when updates are off.
+          Off stops agent changes. Agents still use what's already there.
         </p>
       ) : null}
       {props.canEdit === false ? (
@@ -316,7 +317,7 @@ export function AgentLearningDraftEditor(props: {
       </div>
       {props.compact ? (
         <p className="mt-3 text-xs text-fg-muted">
-          Agents can still use these resources when updates are off.
+          Off stops agent changes. Agents still use what's already there.
         </p>
       ) : null}
       {error ? (

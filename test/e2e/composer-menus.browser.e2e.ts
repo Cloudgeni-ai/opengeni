@@ -99,12 +99,15 @@ describe("consistent production composer menus", () => {
           if (name === "Chat settings") {
             const select = menu.getByLabel("Knowledge", { exact: true });
             await select.waitFor();
+            const shown = () =>
+              select.locator("..").locator('[aria-hidden="true"]').first().innerText();
             expect(await select.inputValue()).toBe("inherit");
-            expect(
-              await select.locator("..").locator('[aria-hidden="true"]').first().innerText(),
-            ).toBe("Allow updates");
+            // An inherited value names the effective default, so it is never
+            // mistaken for an override.
+            expect(await shown()).toBe("Default (Automatic)");
             await select.selectOption("off");
             expect(await select.inputValue()).toBe("off");
+            expect(await shown()).toBe("Off");
             await select.selectOption("inherit");
           }
           await page.keyboard.press("Escape");

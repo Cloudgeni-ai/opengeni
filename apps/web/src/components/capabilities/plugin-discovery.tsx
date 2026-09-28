@@ -4,18 +4,14 @@ import {
   type PluginInstallationSummary,
 } from "@opengeni/contracts";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import {
-  ConnectionInstalled,
-  ConnectionLogo,
-  PluginDiscovery as Catalog,
-  PluginDetails,
-} from "@opengeni/react/connect";
+import { ConnectionInstalled, PluginDiscovery as Catalog } from "@opengeni/react/connect";
 import { BoxesIcon } from "lucide-react";
 import type { PluginDiscoveryItem } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { CapabilityDialogContent } from "./detail-dialog";
+import { CapabilityMark } from "./capability-page";
+import { CapabilitySlotPage, useCapabilityPageSlot } from "./capability-page-slot";
+import { PluginPage, type PluginManageActions } from "./plugin-page";
+import { humanizeName } from "./skill-copy";
 
 const EMPTY_INSTALLED_PLUGINS: PluginInstallationSummary[] = [];
 
@@ -30,8 +26,11 @@ export function PluginDiscovery({
   onChanged,
   onOpenConnection,
   onManageInstalled,
+  manage,
   installedPlugins = EMPTY_INSTALLED_PLUGINS,
 }: {
+  /** Update and remove for an installed plugin, shown on its page. */
+  manage?: ((plugin: PluginInstallationSummary) => PluginManageActions) | undefined;
   beforeCatalog?: ReactNode;
   resultLimit?: number;
   onShowMore?: () => void;
@@ -44,7 +43,37 @@ export function PluginDiscovery({
   workspaceId: string;
   query: string;
 }) {
-  const [selected, setSelected] = useState<PluginDiscoveryItem | null>(null);
+  const slot = useCapabilityPageSlot();
+  const [selected, setSelectedState] = useState<PluginDiscoveryItem | null>(null);
+  // The plugin page lives in the route's page slot (`?open=plugin:<id>`).
+  function setSelected(item: PluginDiscoveryItem | null) {
+    setSelectedState(item);
+    if (item) {
+      if (slot && slot.openKey !== `plugin:${item.id}`) slot.open(`plugin:${item.id}`);
+    } else if (slot?.openKey?.startsWith("plugin:")) {
+      slot.close();
+    }
+  }
+  const slotKey = slot?.openKey ?? null;
+  useEffect(() => {
+    if (!slot) return;
+    if (!slotKey?.startsWith("plugin:")) {
+      // Keep the plugin while one of its connections is open, so Back returns to it.
+      if (!slotKey && selected) setSelectedState(null);
+      return;
+    }
+    if (selected && slotKey === `plugin:${selected.id}`) return;
+    // A reload or a shared link: only installed plugins can be looked up again.
+    const id = slotKey.slice("plugin:".length);
+    const plugin = installedPlugins.find(
+      (candidate) =>
+        candidate.pluginKey.startsWith("marketplace/") &&
+        candidate.pluginKey.slice("marketplace/".length).replace("/", ":") === id,
+    );
+    if (plugin) void openInstalled(plugin);
+    else if (!selected) slot.close({ replace: true });
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- follows the URL only
+  }, [slotKey]);
   const [selectedInstallation, setSelectedInstallation] =
     useState<PluginInstallationSummary | null>(null);
   const [connections, setConnections] = useState<CapabilityCatalogItem[]>([]);
@@ -105,7 +134,7 @@ export function PluginDiscovery({
           tags: ["mcp"],
           metadata: { authDiscovery: "unknown" },
         }));
-      setSelected(null);
+      // The connection opens its own page; Back returns to this plugin.
       onOpenConnection(item);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not open connection.");
@@ -123,6 +152,14 @@ export function PluginDiscovery({
     } catch {
       setError("Could not load plugin details.");
     }
+  }
+  function closePage() {
+    setSelected(null);
+    const target = opener.current;
+    opener.current = null;
+    queueMicrotask(() => {
+      if (target?.isConnected) target.focus();
+    });
   }
   const [busy, setBusy] = useState(false);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
@@ -169,6 +206,17 @@ export function PluginDiscovery({
     }
   }
   const opener = useRef<HTMLElement | null>(null);
+  const selectedIsInstalled =
+    selected !== null &&
+    (installedIds.has(selected.id) ||
+      Boolean(
+        selectedInstallation &&
+        installedPlugins.some((plugin) => plugin.pluginKey === selectedInstallation.pluginKey),
+      ));
+  const liveInstallation =
+    selectedInstallation &&
+    (installedPlugins.find((plugin) => plugin.pluginKey === selectedInstallation.pluginKey) ??
+      null);
   return (
     <>
       {!resultLimit ? (
@@ -182,16 +230,15 @@ export function PluginDiscovery({
             )
             .map((plugin) => ({
               id: plugin.pluginKey,
-              name: plugin.name,
+              name: humanizeName(plugin.name),
               status: plugin.status === "needs_attention" ? "Needs attention" : "Installed",
               needsAttention: plugin.status === "needs_attention",
               onOpen: () => void openInstalled(plugin),
               icon: (
-                <ConnectionLogo
+                <CapabilityMark
                   src={plugin.logoUrl ?? null}
                   name={plugin.name}
-                  size={40}
-                  fallback={<BoxesIcon aria-hidden="true" />}
+                  icon={<BoxesIcon />}
                 />
               ),
             }))}
@@ -200,13 +247,17 @@ export function PluginDiscovery({
       {!selected && error ? <p role="alert">{error}</p> : null}
       {beforeCatalog}
       <Catalog
-        defaultProvider={resultLimit ? "" : "openai"}
+        defaultProvider=""
         {...(resultLimit ? { resultLimit } : {})}
         {...(onShowMore ? { onShowMore } : {})}
         client={client}
         workspaceId={workspaceId}
         query={query}
         installedIds={installedIds}
+        formatName={humanizeName}
+        renderIcon={(item) => (
+          <CapabilityMark src={item.logoUrl} name={item.displayName} icon={<BoxesIcon />} />
+        )}
         onOpen={(item) => {
           opener.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -215,79 +266,58 @@ export function PluginDiscovery({
           setSelected(item);
         }}
       />
-      <Dialog
-        open={selected !== null}
-        onOpenChange={(open) => {
-          if (!open) setSelected(null);
-        }}
-      >
-        <CapabilityDialogContent
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            opener.current?.focus();
-          }}
-        >
-          {selected ? (
-            <div className="min-h-0 overflow-y-auto overscroll-contain">
-              <DialogTitle className="sr-only">{selected.displayName}</DialogTitle>
-              <DialogDescription className="sr-only">
-                Plugin overview and included capabilities
-              </DialogDescription>
-              <PluginDetails
-                key={selected.id}
-                item={selected}
-                busy={busy}
-                installed={
-                  installedIds.has(selected.id) ||
-                  Boolean(
-                    selectedInstallation &&
-                    installedPlugins.some(
-                      (plugin) => plugin.pluginKey === selectedInstallation.pluginKey,
-                    ),
-                  )
-                }
-                connections={Object.fromEntries(
-                  (selected.mcpServers ?? []).map((server) => [
-                    server.endpoint ?? "",
-                    Boolean(match(server.endpoint)?.enabled),
-                  ]),
-                )}
-                {...(canManage && onOpenConnection
+      {selected ? (
+        <SlotOrInline slotted={slot !== null} pageKey={`plugin:${selected.id}`}>
+          <PluginPage
+            key={selected.id}
+            item={selected}
+            installation={liveInstallation}
+            installed={selectedIsInstalled}
+            busy={busy}
+            error={error}
+            canManage={canManage}
+            connections={Object.fromEntries(
+              (selected.mcpServers ?? []).map((server) => [
+                server.endpoint ?? "",
+                Boolean(match(server.endpoint)?.enabled),
+              ]),
+            )}
+            onConnect={
+              canManage && onOpenConnection
+                ? (server: { name: string; endpoint: string | null }) => void connect(server)
+                : undefined
+            }
+            onInstall={canManage ? () => void install(selected) : undefined}
+            manage={
+              liveInstallation && manage
+                ? manage(liveInstallation)
+                : liveInstallation && onManageInstalled && canManage
                   ? {
-                      onConnect: (server: { name: string; endpoint: string | null }) =>
-                        void connect(server),
+                      busy,
+                      onUpdate: () =>
+                        onManageInstalled(liveInstallation, opener.current ?? document.body),
+                      onRemove: () =>
+                        onManageInstalled(liveInstallation, opener.current ?? document.body),
                     }
-                  : {})}
-                error={error}
-                {...(canManage ? { onInstall: () => void install(selected) } : {})}
-              />
-              {!canManage ? (
-                <p className="border-t border-border p-4 text-sm text-fg-muted">
-                  Workspace administrators can install, update, and remove imported Skills and
-                  Plugins.
-                </p>
-              ) : null}
-              {canManage && selectedInstallation && onManageInstalled ? (
-                <div className="border-t border-border p-4">
-                  <Button
-                    variant="outline"
-                    disabled={busy}
-                    onClick={(event) => {
-                      setSelected(null);
-                      onManageInstalled(
-                        selectedInstallation,
-                        opener.current ?? event.currentTarget,
-                      );
-                    }}
-                  >
-                    Manage installation
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </CapabilityDialogContent>
-      </Dialog>
+                  : undefined
+            }
+            onBack={closePage}
+          />
+        </SlotOrInline>
+      ) : null}
     </>
   );
+}
+
+/** In Capabilities the page goes to the route's page slot; elsewhere it renders in place. */
+function SlotOrInline({
+  slotted,
+  pageKey,
+  children,
+}: {
+  slotted: boolean;
+  pageKey: string;
+  children: ReactNode;
+}) {
+  return slotted ? <CapabilitySlotPage pageKey={pageKey}>{children}</CapabilitySlotPage> : children;
 }

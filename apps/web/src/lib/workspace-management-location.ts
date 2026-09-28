@@ -1,43 +1,54 @@
-export type WorkspaceSettingsSection =
-  | "general"
-  | "learning"
-  | "members"
-  | "plugins"
-  | "models"
-  | "api-keys"
-  | "danger";
+/**
+ * Workspace settings pages, addressed by `?section=` on `/settings`. Settings
+ * hold configuration only: the settings rail also links to the Agents and
+ * Insights dashboards and the runtime pages, which open as their own pages.
+ */
+export type WorkspaceSettingsSection = "general" | "access" | "models" | "api-keys" | "learning";
+
+/**
+ * Older `?section=` values. They keep working: Members is now Access, Danger
+ * zone is the last row of General, and Capabilities is its own page.
+ */
+export type LegacyWorkspaceSettingsSection = "members" | "danger" | "plugins" | "capabilities";
+
+export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = [
+  "general",
+  "access",
+  "models",
+  "api-keys",
+  "learning",
+];
 
 const WORKSPACE_PAGE_TARGETS = [
   "/workspaces/$workspaceId/agents",
   "/workspaces/$workspaceId/insights",
-  "/workspaces/$workspaceId/memory",
   "/workspaces/$workspaceId/variable-sets",
   "/workspaces/$workspaceId/rigs",
   "/workspaces/$workspaceId/machines",
 ] as const;
-type WorkspacePageTarget = (typeof WORKSPACE_PAGE_TARGETS)[number];
+export type WorkspacePageTarget = (typeof WORKSPACE_PAGE_TARGETS)[number];
 
 export type WorkspaceManagementLocation =
-  | { kind: "settings"; section: WorkspaceSettingsSection }
+  /** `section` is null when the URL asks for the settings list itself. */
+  | { kind: "settings"; section: WorkspaceSettingsSection | null }
   | { kind: "page"; target: WorkspacePageTarget };
 
-const DEFAULT_SETTINGS_SECTION: WorkspaceSettingsSection = "general";
-
-export function workspaceSettingsSectionFromSearch(value: unknown): WorkspaceSettingsSection {
-  return value === "learning" ||
-    value === "members" ||
-    value === "plugins" ||
-    value === "models" ||
-    value === "api-keys" ||
-    value === "danger"
-    ? value
-    : DEFAULT_SETTINGS_SECTION;
+/** Parses `?section=`, mapping older names to the page that holds them now. */
+export function workspaceSettingsSectionFromSearch(
+  value: unknown,
+): WorkspaceSettingsSection | null {
+  if (WORKSPACE_SETTINGS_SECTIONS.includes(value as WorkspaceSettingsSection)) {
+    return value as WorkspaceSettingsSection;
+  }
+  if (value === "members") return "access";
+  if (value === "danger") return "general";
+  return null;
 }
 
 /**
- * Resolve the workspace routes that share the persistent management shell.
- * Keep matching segment-aware: `/rigs/:rigId` belongs to Rigs, while a future
- * `/rigs-archive` route must not be captured accidentally.
+ * Resolve the workspace routes that open in settings mode: the settings rail
+ * replaces the main rail. Matching is segment-aware: `/rigs/:rigId` belongs to
+ * Sandbox environments, while a future `/rigs-archive` route is not captured.
  */
 export function workspaceManagementLocation(
   pathname: string,
@@ -54,10 +65,7 @@ export function workspaceManagementLocation(
 
   for (const target of WORKSPACE_PAGE_TARGETS) {
     const targetPath = target.replace("$workspaceId", encodeURIComponent(workspaceId));
-    if (
-      pathname === targetPath ||
-      (target.endsWith("/rigs") && pathname.startsWith(`${targetPath}/`))
-    ) {
+    if (pathname === targetPath || pathname.startsWith(`${targetPath}/`)) {
       return { kind: "page", target };
     }
   }

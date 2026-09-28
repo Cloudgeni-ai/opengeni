@@ -1,902 +1,472 @@
-// Variable sets: named organization-, workspace-, or user-scoped sets of secret variables that the
-// worker decrypts and injects into the sandbox as variable set variables at
-// session start. Generic reads are metadata-only; an explicitly permissioned
-// and audited endpoint reveals one value on demand.
-import { useVariableSets, useScheduledTasks, useWorkspaceSessions } from "@opengeni/react";
-import { variableSetVariableNameReservation } from "@opengeni/contracts";
-import { Link } from "@tanstack/react-router";
+// Variable sets: named organization-, workspace-, or user-scoped sets of secret
+// variables that the worker decrypts and injects into the sandbox at session
+// start. The web UI is write-only: values are never shown after saving (the
+// permissioned, audited API and MCP read paths are unchanged).
+//
+//   /variable-sets                 the list          ?view=new  New variable set
+//   /variable-sets/$variableSetId  the set's page    ?view=paste|edit
+//                                  (?view=add redirects to the set's page, where one variable
+//                                  is added inline at the bottom of the list)
 import {
-  BoxIcon,
-  CheckIcon,
-  ChevronDownIcon,
-  CopyIcon,
-  EyeIcon,
-  EyeOffIcon,
-  KeyRoundIcon,
-  Loader2Icon,
-  PencilIcon,
-  PlusIcon,
-  Trash2Icon,
-} from "lucide-react";
-import { useEffect, useState } from "react";
+  useOpenGeni,
+  useScheduledTasks,
+  useVariableSets,
+  useWorkspaceSessions,
+} from "@opengeni/react";
+import { useNavigate } from "@tanstack/react-router";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { LoadErrorState, PageHeader } from "@/components/common";
-import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  EditVariableSetPage,
+  NewVariableSetPage,
+  PasteVariablesPage,
+  ReplaceValueDialog,
+  type NewSetValues,
+  type NewVariableInput,
+} from "@/components/variable-sets/variable-set-forms";
+import {
+  blockedDeleteHint,
+  confirmDependencies,
+  errorParts,
+  joinAnd,
+  userFacingError,
+  variableSetUsage,
+  type VariableSetUsage,
+} from "@/components/variable-sets/variable-set-model";
+import {
+  VariableSetDetailLoading,
+  VariableSetDetailPage,
+  VariableSetMissing,
+  VariableSetsListPage,
+  type ListState,
+} from "@/components/variable-sets/variable-set-pages";
 import { ContentPage } from "@/components/ui/content-layout";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { Skeleton } from "@/components/ui/skeleton";
-import { ResourceScopePicker, resourceScopeLabel } from "@/components/resource-scope-picker";
+import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import { useAppContext } from "@/context";
-import { formatTimestamp } from "@/lib/format";
-import { listViewState } from "@/lib/load-state";
+import { orgLabel } from "@/lib/org";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
-import { sessionDisplayTitle } from "@/lib/session-rename";
-import type {
-  ScheduledTask,
-  Session,
-  WorkspaceVariableSet,
-  WorkspaceVariableSetSecret,
-} from "@/types";
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import type { WorkspaceVariableSet } from "@/types";
+import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 
-const VARIABLE_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
-const VARIABLE_NAME_MAX_LENGTH = 128;
+export {
+  sessionUsesVariableSet,
+  variableSetUsage,
+} from "@/components/variable-sets/variable-set-model";
 
-export function normalizeVariableNameInput(value: string): string {
-  return value
-    .toUpperCase()
-    .replace(/[^A-Z0-9_]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
+export type VariableSetListView = "new";
+export type VariableSetView = "paste" | "edit";
 
-export function variableNameError(value: string): string | null {
-  if (!value) return null;
-  if (value.length > VARIABLE_NAME_MAX_LENGTH) return "Use 128 characters or fewer.";
-  if (!/^[A-Z]/.test(value)) return "Start the name with a letter.";
-  if (!VARIABLE_NAME_PATTERN.test(value)) {
-    return "Use letters, numbers, and underscores only.";
-  }
-  const reservation = variableSetVariableNameReservation(value);
-  if (reservation?.kind === "prefix") {
-    return `Names beginning with ${reservation.value} are reserved. Choose another name.`;
-  }
-  if (reservation) return `${reservation.value} is reserved. Choose another name.`;
-  return null;
-}
-
-export function sessionUsesVariableSet(
-  session: Pick<Session, "variableSetIds" | "variableSetId">,
-  variableSetId: string,
-): boolean {
-  // An advertised plural field is the complete authoritative selection,
-  // including an intentionally empty one. Fall back to the singular alias only
-  // for sessions returned by older servers that do not advertise the array.
-  return session.variableSetIds === undefined
-    ? session.variableSetId === variableSetId
-    : session.variableSetIds.includes(variableSetId);
-}
-
-export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
+export function VariableSetsRoute({
+  workspaceId,
+  variableSetId,
+  view,
+}: {
+  workspaceId: string;
+  /** The open set, or undefined on the list. */
+  variableSetId?: string | undefined;
+  view?: string | undefined;
+}) {
   const context = useAppContext();
+  const navigate = useNavigate();
+  const { client } = useOpenGeni();
+  const access = context.accessContext;
   const canList =
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list") &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
-  const canWriteSet = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "variable-sets:write",
-  );
+    hasWorkspacePermission(access, workspaceId, "variable-sets:list") &&
+    hasWorkspacePermission(access, workspaceId, "secrets:list");
+  const canWriteSet = hasWorkspacePermission(access, workspaceId, "variable-sets:write");
   const canWriteSecrets =
-    canWriteSet && hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write");
-  const canReadSecrets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:read") &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:read");
-  const workspaceGrant = context.accessContext.workspaceGrants.find(
-    (grant) => grant.workspaceId === workspaceId,
-  );
+    canWriteSet && hasWorkspacePermission(access, workspaceId, "secrets:write");
+  const workspaceGrant = access.workspaceGrants.find((grant) => grant.workspaceId === workspaceId);
   const canManageOrganization = Boolean(
     workspaceGrant?.accountId &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+    hasAccountPermission(access, workspaceGrant.accountId, "account:admin"),
   );
   const canCreatePersonal = Boolean(
-    context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId &&
+    context.managedSelfContext?.identity.subjectId === access.subjectId &&
     workspaceGrant?.accountId &&
     context.managedSelfContext.memberships.some(
       (membership) =>
         membership.status === "active" && membership.organizationId === workspaceGrant.accountId,
     ),
   );
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const organizationName = workspace
+    ? orgLabel(workspace.accountId, access.accountGrants)
+    : "your organization";
+
   const variableSets = useVariableSets({ enabled: canList });
-  // Attachment views: which sessions and scheduled tasks carry each variableSet.
+  // What uses each set: chats, schedules, and environments that add it by default.
   const {
     sessions,
     loading: sessionsLoading,
     error: sessionsError,
   } = useWorkspaceSessions({ limit: 100 });
   const { tasks, loading: tasksLoading, error: tasksError } = useScheduledTasks();
-  // Fail closed: never delete a variable set while its attachment set is
-  // unknown (initial load or a failed read) — a false-empty attachment view
-  // could otherwise let a still-referenced variableSet be removed.
-  const attachmentsUnknown =
+  const rigs = useWorkspaceRigs();
+  // Fail closed: never offer Delete while what uses a set is unknown (initial
+  // load or a failed read); a false-empty view could remove a set in use.
+  const usageKnown = !(
     sessionsError !== null ||
     tasksError !== null ||
     (sessionsLoading && sessions.length === 0) ||
-    (tasksLoading && tasks.length === 0);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createName, setCreateName] = useState("");
-  const [createDescription, setCreateDescription] = useState("");
-  const [createScope, setCreateScope] = useState<WorkspaceVariableSet["scope"]>("workspace");
-  // Honest list state: a failed load renders as an error with retry, never as
-  // the "No variable sets yet…" empty state.
-  const variableSetsView = listViewState({
-    loading: variableSets.loading,
-    error: variableSets.error,
-    count: variableSets.variableSets.length,
-  });
+    (tasksLoading && tasks.length === 0)
+  );
+  const usageFor = useCallback(
+    (set: WorkspaceVariableSet): VariableSetUsage =>
+      variableSetUsage({
+        workspaceId,
+        variableSetId: set.id,
+        sessions,
+        tasks,
+        rigs: rigs.rigs,
+        defaultRigId: workspace?.defaultRigId ?? null,
+        known: usageKnown,
+      }),
+    [workspaceId, sessions, tasks, rigs.rigs, workspace?.defaultRigId, usageKnown],
+  );
 
-  async function createVariableSet() {
-    const name = createName.trim();
-    if (!name) {
-      toast.error("Variable set name is required");
-      return;
-    }
-    const created = await variableSets.create({
-      scope: createScope,
-      name,
-      ...(createDescription.trim() ? { description: createDescription.trim() } : {}),
-    });
-    if (created) {
-      setCreateOpen(false);
-      setCreateName("");
-      setCreateDescription("");
-      setCreateScope("workspace");
-      toast.success("Variable set created");
-    } else if (variableSets.mutationError) {
-      toast.error("Failed to create variableSet", {
-        description: variableSets.mutationError.message,
-      });
+  const sets = variableSets.variableSets;
+  const listState: ListState =
+    variableSets.loading && sets.length === 0
+      ? "loading"
+      : variableSets.error && sets.length === 0
+        ? "error"
+        : "ready";
+  const set = variableSetId ? sets.find((candidate) => candidate.id === variableSetId) : undefined;
+  const canManage = (candidate: WorkspaceVariableSet | undefined) =>
+    Boolean(candidate) && (candidate!.scope !== "organization" || canManageOrganization);
+  const canManageSet = canWriteSet && canManage(set);
+  const canManageSecrets = canWriteSecrets && canManage(set);
+
+  /* ------------------------------------------------------------ navigation */
+
+  const openList = useCallback(
+    (search: { view?: VariableSetListView } = {}) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/variable-sets",
+        params: { workspaceId },
+        search,
+      }),
+    [navigate, workspaceId],
+  );
+  const openSet = useCallback(
+    (id: string, search: { view?: VariableSetView } = {}) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/variable-sets/$variableSetId",
+        params: { workspaceId, variableSetId: id },
+        search,
+      }),
+    [navigate, workspaceId],
+  );
+
+  /* ------------------------------------------------------------ mutations */
+
+  // Direct client calls so a failure shows inside the form or dialog that
+  // caused it; the hook's list refreshes afterwards.
+  async function attempt<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      throw userFacingError(error);
     }
   }
+
+  async function createSet(values: NewSetValues) {
+    const created = await attempt(() =>
+      client.createVariableSet(workspaceId, {
+        scope: values.scope,
+        name: values.name,
+        ...(values.description ? { description: values.description } : {}),
+        variables: values.variables,
+      }),
+    );
+    await variableSets.refresh();
+    toast.success(`Created ${created.name}`);
+    openSet(created.id);
+  }
+
+  async function addVariables(
+    target: WorkspaceVariableSet,
+    variables: NewVariableInput[],
+    replaced: string[],
+  ) {
+    const saved: string[] = [];
+    try {
+      for (const variable of variables) {
+        await attempt(() =>
+          client.setVariableSetVariable(workspaceId, target.id, variable.name, variable.value),
+        );
+        saved.push(variable.name);
+      }
+    } catch (error) {
+      await variableSets.refresh();
+      const message = error instanceof Error ? error.message : String(error);
+      throw userFacingError(
+        error,
+        saved.length ? `Saved ${joinAnd(saved)}, then stopped: ${message}` : message,
+      );
+    }
+    await variableSets.refresh();
+    toast.success(
+      saved.length === 1
+        ? `Added ${saved[0]} to ${target.name}`
+        : `Added ${saved.length} variables to ${target.name}`,
+      replaced.length ? { description: `Replaced the value of ${joinAnd(replaced)}.` } : undefined,
+    );
+    openSet(target.id);
+  }
+
+  /** The inline row on the set's page: saves one variable and stays on the page. */
+  async function addOneVariable(target: WorkspaceVariableSet, variable: NewVariableInput) {
+    await attempt(() =>
+      client.setVariableSetVariable(workspaceId, target.id, variable.name, variable.value),
+    );
+    await variableSets.refresh();
+    toast.success(`Added ${variable.name}`);
+  }
+
+  async function saveDetails(
+    target: WorkspaceVariableSet,
+    name: string,
+    description: string | null,
+  ) {
+    await attempt(() => client.updateVariableSet(workspaceId, target.id, { name, description }));
+    await variableSets.refresh();
+    toast.success("Saved");
+    openSet(target.id);
+  }
+
+  // The old Add variable page: adding one variable now happens inline on the set's page.
+  useEffect(() => {
+    if (variableSetId && view === "add") {
+      void navigate({
+        to: "/workspaces/$workspaceId/variable-sets/$variableSetId",
+        params: { workspaceId, variableSetId },
+        search: {},
+        replace: true,
+      });
+    }
+  }, [navigate, variableSetId, view, workspaceId]);
+
+  /* ------------------------------------------------------------ dialogs */
+
+  const [replacing, setReplacing] = useState<string | null>(null);
+  const [deletingVariable, setDeletingVariable] = useState<string | null>(null);
+  const [deletingSet, setDeletingSet] = useState(false);
+
+  // Leaving a set closes its dialogs.
+  useEffect(() => {
+    setReplacing(null);
+    setDeletingVariable(null);
+    setDeletingSet(false);
+  }, [variableSetId]);
+
+  /* ------------------------------------------------------------ focus */
+
+  const pageKey = `${variableSetId ?? ""}|${view ?? ""}`;
+  const root = useFocusOnNavigation(pageKey, {
+    onList: pageKey === "|",
+    // An open set's page (not its forms): its title names its row on the list.
+    rememberTitle: Boolean(variableSetId) && !view,
+  });
+
+  /* ------------------------------------------------------------ pages */
+
+  let page: ReactNode;
+  if (!variableSetId) {
+    if (view === "new" && canList && canWriteSet) {
+      page = (
+        <NewVariableSetPage
+          sets={sets}
+          organizationName={organizationName}
+          organizationEnabled={canManageOrganization}
+          personalEnabled={canCreatePersonal}
+          onClose={() => openList()}
+          onCreate={createSet}
+        />
+      );
+    } else {
+      page = (
+        <VariableSetsListPage
+          state={listState}
+          error={variableSets.error}
+          sets={sets}
+          usageFor={usageFor}
+          organizationName={organizationName}
+          canCreate={canWriteSet}
+          canList={canList}
+          onRetry={() => void variableSets.refresh()}
+          onOpenSet={(each) => openSet(each.id)}
+          onNewSet={() => openList({ view: "new" })}
+        />
+      );
+    }
+  } else if (!canList) {
+    page = <VariableSetMissing onBack={() => openList()} />;
+  } else if (!set) {
+    page =
+      listState === "ready" ? (
+        <VariableSetMissing onBack={() => openList()} />
+      ) : listState === "error" ? (
+        <VariableSetMissing onBack={() => openList()} />
+      ) : (
+        <VariableSetDetailLoading onBack={() => openList()} />
+      );
+  } else if (view === "paste" && canManageSecrets) {
+    page = (
+      <PasteVariablesPage
+        set={set}
+        onClose={() => openSet(set.id)}
+        onAdd={(variables, replaced) => addVariables(set, variables, replaced)}
+      />
+    );
+  } else if (view === "edit" && canManageSet) {
+    page = (
+      <EditVariableSetPage
+        set={set}
+        sets={sets}
+        organizationName={organizationName}
+        onClose={() => openSet(set.id)}
+        onSave={(name, description) => saveDetails(set, name, description)}
+      />
+    );
+  } else {
+    page = (
+      <VariableSetDetailPage
+        set={set}
+        usage={usageFor(set)}
+        organizationName={organizationName}
+        canManageSet={canManageSet}
+        canManageSecrets={canManageSecrets}
+        actions={{
+          back: () => openList(),
+          addVariable: (variable) => addOneVariable(set, variable),
+          pasteEnv: () => openSet(set.id, { view: "paste" }),
+          replaceValue: setReplacing,
+          deleteVariable: setDeletingVariable,
+          editSet: () => openSet(set.id, { view: "edit" }),
+          deleteSet: () => setDeletingSet(true),
+          openUsage: (entry) => void navigate({ href: entry.href }),
+        }}
+      />
+    );
+  }
+
+  const usage = set ? usageFor(set) : null;
+  const inUse = Boolean(usage?.known && usage.entries.length > 0);
+  const variableUsers = usage?.known ? usage.entries.map((entry) => entry.name) : [];
 
   return (
     <ContentPage width="standard">
-      <PageHeader
-        icon={<BoxIcon className="size-4" />}
-        title="Variable sets"
-        description="Named secrets injected into managed sandboxes at session start. Values stay encrypted at rest; explicitly permissioned reads reveal one value on demand and are audited."
-        actions={
-          canWriteSet ? (
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setCreateOpen((open) => !open)}
-              className="h-9 pointer-coarse:min-h-10"
-            >
-              <PlusIcon className="size-3.5" />
-              New variable set
-            </Button>
-          ) : null
-        }
+      <div ref={root} className="min-w-0 pb-7">
+        {page}
+      </div>
+
+      <ReplaceValueDialog
+        set={set}
+        variableName={replacing}
+        onClose={() => setReplacing(null)}
+        onReplace={async (value) => {
+          if (!set || !replacing) return;
+          const name = replacing;
+          await attempt(() => client.setVariableSetVariable(workspaceId, set.id, name, value));
+          await variableSets.refresh();
+          toast.success(`Replaced ${name}`, { description: "New turns get the new value." });
+        }}
       />
 
-      {!canList ? (
-        <div className="mt-5">
-          <Notice tone="info">You don&apos;t have permission to list variable sets.</Notice>
-        </div>
-      ) : createOpen && canWriteSet ? (
-        <div className="mt-4 grid gap-4 rounded-lg border border-border bg-surface p-4">
-          <ResourceScopePicker
-            id="variable-set"
-            value={createScope}
-            onChange={setCreateScope}
-            organizationEnabled={canManageOrganization}
-            personalEnabled={canCreatePersonal}
-            disabled={variableSets.mutating}
-          />
-          <div className="grid gap-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
-            <div className="grid gap-1.5">
-              <Label htmlFor="variableSet-name">Name</Label>
-              <Input
-                id="variableSet-name"
-                suppressAutofill
-                name="variable-set-name"
-                value={createName}
-                onChange={(event) => setCreateName(event.target.value)}
-                placeholder="staging-aws"
-                autoComplete="off"
-                className="h-9 pointer-coarse:min-h-10"
-                autoFocus
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="variableSet-description">Description</Label>
-              <Input
-                id="variableSet-description"
-                name="variable-set-description"
-                value={createDescription}
-                onChange={(event) => setCreateDescription(event.target.value)}
-                placeholder="What these credentials reach"
-                autoComplete="off"
-                className="h-9 pointer-coarse:min-h-10"
-              />
-            </div>
-            <div className="flex items-end">
-              <Button
-                type="button"
-                disabled={variableSets.mutating || !createName.trim()}
-                onClick={() => void createVariableSet()}
-                className="h-9 pointer-coarse:min-h-10"
-              >
-                {variableSets.mutating ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <CheckIcon className="size-3.5" />
-                )}
-                Create
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="mt-5 grid gap-3">
-        {!canList ? null : variableSetsView === "loading" ? (
-          <>
-            {[0, 1].map((key) => (
-              <div key={key} className="rounded-lg border border-border bg-surface/45 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0 space-y-2">
-                    <Skeleton className="h-4 w-40" />
-                    <Skeleton className="h-3 w-56" />
-                  </div>
-                  <Skeleton className="size-8 rounded-md" />
-                </div>
-                <Skeleton className="mt-3 h-8 w-full" />
-              </div>
-            ))}
-          </>
-        ) : variableSetsView === "error" ? (
-          <LoadErrorState
-            title="Couldn't load variable sets"
-            error={variableSets.error}
-            onRetry={() => void variableSets.refresh()}
-          />
-        ) : variableSetsView === "empty" ? (
-          <EmptyState
-            icon={<BoxIcon className="size-4" />}
-            title="No variable sets yet"
-            description="Create one to give sessions and scheduled tasks credentials without pasting secrets into prompts."
-            action={
-              canWriteSet ? (
-                <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
-                  <PlusIcon className="size-3.5" />
-                  New variable set
-                </Button>
-              ) : undefined
-            }
-          />
-        ) : (
-          variableSets.variableSets.map((variableSet) => (
-            <VariableSetCard
-              key={variableSet.id}
-              workspaceId={workspaceId}
-              variableSet={variableSet}
-              attachedSessions={sessions.filter((session) =>
-                sessionUsesVariableSet(session, variableSet.id),
-              )}
-              attachedTasks={tasks.filter((task) => task.variableSetId === variableSet.id)}
-              attachmentsUnknown={attachmentsUnknown}
-              mutating={variableSets.mutating}
-              canWriteSet={canWriteSet}
-              canWriteSecrets={canWriteSecrets}
-              canManageOrganization={canManageOrganization}
-              canReadSecrets={canReadSecrets}
-              onUpdate={(patch) => variableSets.update(variableSet.id, patch)}
-              onDelete={async () => {
-                const removed = await variableSets.remove(variableSet.id);
-                if (removed) {
-                  toast.success("Variable set deleted");
-                }
-                return removed;
-              }}
-              onReadVariable={(name) => variableSets.readVariable(variableSet.id, name)}
-              onSetVariable={(name, value) => variableSets.setVariable(variableSet.id, name, value)}
-              onDeleteVariable={(name) => variableSets.deleteVariable(variableSet.id, name)}
-            />
-          ))
-        )}
-        {variableSets.mutationError ? (
-          <Notice
-            tone="failed"
-            action={
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={variableSets.clearMutationError}
-              >
-                Dismiss
-              </Button>
-            }
-          >
-            {variableSets.mutationError.message}
-          </Notice>
-        ) : null}
-      </div>
-    </ContentPage>
-  );
-}
-
-export function VariableSetCard(props: {
-  workspaceId: string;
-  variableSet: WorkspaceVariableSet;
-  attachedSessions: Session[];
-  attachedTasks: ScheduledTask[];
-  attachmentsUnknown: boolean;
-  mutating: boolean;
-  canWriteSet: boolean;
-  canWriteSecrets: boolean;
-  canManageOrganization?: boolean;
-  canReadSecrets: boolean;
-  onUpdate: (patch: {
-    name?: string;
-    description?: string | null;
-  }) => Promise<WorkspaceVariableSet | null>;
-  onDelete: () => Promise<boolean>;
-  onReadVariable: (name: string) => Promise<WorkspaceVariableSetSecret | null>;
-  onSetVariable: (name: string, value: string) => Promise<unknown>;
-  onDeleteVariable: (name: string) => Promise<boolean>;
-}) {
-  const { variableSet } = props;
-  const [editing, setEditing] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  const [nameDraft, setNameDraft] = useState(variableSet.name);
-  const [descriptionDraft, setDescriptionDraft] = useState(variableSet.description ?? "");
-  const [variableName, setVariableName] = useState("");
-  const [variableValue, setVariableValue] = useState("");
-  // Per-variable rotate drafts are separate from explicitly revealed values.
-  const [rotatingName, setRotatingName] = useState<string | null>(null);
-  const [rotateValue, setRotateValue] = useState("");
-  const [revealedValues, setRevealedValues] = useState<Record<string, string>>({});
-  const [readingName, setReadingName] = useState<string | null>(null);
-  // Destructive confirms (D5): delete the variableSet, or one of its variables.
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmDeleteVariable, setConfirmDeleteVariable] = useState<string | null>(null);
-  const attachmentCount = props.attachedSessions.length + props.attachedTasks.length;
-  const canManageSet =
-    props.canWriteSet && (variableSet.scope !== "organization" || props.canManageOrganization);
-  const canManageSecrets =
-    props.canWriteSecrets && (variableSet.scope !== "organization" || props.canManageOrganization);
-  const deleteBlocked = attachmentCount > 0 || props.attachmentsUnknown;
-  const deleteBlockedReason = props.attachmentsUnknown
-    ? "Checking where this variable set is used…"
-    : attachmentCount > 0
-      ? "Detach it from sessions and tasks first"
-      : undefined;
-  const normalizedVariableName = normalizeVariableNameInput(variableName);
-  const newVariableNameError =
-    variableName && !normalizedVariableName
-      ? "Start the name with a letter."
-      : variableNameError(normalizedVariableName);
-  const newVariableNameValid =
-    normalizedVariableName.length > 0 &&
-    normalizedVariableName.length <= VARIABLE_NAME_MAX_LENGTH &&
-    VARIABLE_NAME_PATTERN.test(normalizedVariableName);
-  const newVariableNameHint =
-    variableName && normalizedVariableName !== variableName.trim()
-      ? `Saved as ${normalizedVariableName}. Names become environment variables.`
-      : "Environment name. Spaces and hyphens become underscores.";
-  const variableNameHelpId = `new-variable-name-help-${variableSet.id}`;
-
-  useEffect(() => {
-    setRevealedValues({});
-  }, [variableSet.updatedAt]);
-
-  function clearRevealedValue(name: string) {
-    setRevealedValues((current) => {
-      if (!Object.hasOwn(current, name)) return current;
-      const next = { ...current };
-      delete next[name];
-      return next;
-    });
-  }
-
-  async function revealVariable(name: string) {
-    setReadingName(name);
-    try {
-      const secret = await props.onReadVariable(name);
-      if (secret) {
-        setRevealedValues((current) => ({ ...current, [name]: secret.value }));
-      }
-    } finally {
-      setReadingName((current) => (current === name ? null : current));
-    }
-  }
-
-  async function copyRevealedValue(name: string) {
-    const value = revealedValues[name];
-    if (value === undefined) return;
-    try {
-      await navigator.clipboard.writeText(value);
-      toast.success(`Copied ${name}`);
-    } catch {
-      toast.error("Clipboard access was denied");
-    }
-  }
-
-  async function saveDetails() {
-    const result = await props.onUpdate({
-      name: nameDraft.trim() || variableSet.name,
-      description: descriptionDraft.trim() ? descriptionDraft.trim() : null,
-    });
-    if (result) {
-      setEditing(false);
-      toast.success("Variable set updated");
-    }
-  }
-
-  async function addVariable() {
-    const name = normalizedVariableName;
-    if (!name || !variableValue) {
-      toast.error("Variable name and value are required");
-      return;
-    }
-    if (!newVariableNameValid) {
-      toast.error(newVariableNameError ?? "Enter a valid environment variable name");
-      return;
-    }
-    const result = await props.onSetVariable(name, variableValue);
-    if (result) {
-      setVariableName("");
-      setVariableValue("");
-      toast.success(`Variable ${name} set`);
-    }
-  }
-
-  async function rotateVariable(name: string) {
-    if (!rotateValue) {
-      toast.error("Enter the new value");
-      return;
-    }
-    const result = await props.onSetVariable(name, rotateValue);
-    if (result) {
-      setRotatingName(null);
-      setRotateValue("");
-      clearRevealedValue(name);
-      toast.success(`Variable ${name} rotated`);
-    }
-  }
-
-  return (
-    <Collapsible
-      open={expanded}
-      onOpenChange={(next) => {
-        setExpanded(next);
-        if (!next) {
-          setRevealedValues({});
-          setReadingName(null);
+      <DestructiveConfirm
+        open={Boolean(set && deletingVariable)}
+        onOpenChange={(open) => (open ? undefined : setDeletingVariable(null))}
+        title={deletingVariable ? `Delete ${deletingVariable}?` : ""}
+        consequences={
+          set && deletingVariable
+            ? [
+                variableUsers.length
+                  ? `New turns in ${joinAnd(variableUsers.slice(0, 3))}${
+                      variableUsers.length > 3 ? ` and ${variableUsers.length - 3} more` : ""
+                    } won't get ${deletingVariable}.`
+                  : `New turns that use ${set.name} won't get ${deletingVariable}.`,
+                "Turns already running keep it.",
+                "This can't be undone.",
+              ]
+            : undefined
         }
-      }}
-      asChild
-    >
-      <article className="min-w-0 rounded-xl border border-border bg-surface/45 p-3 sm:p-4">
-        <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-          {editing ? (
-            <div className="grid min-w-0 gap-2 md:grid-cols-2">
-              <Input
-                name="variable-set-name"
-                value={nameDraft}
-                onChange={(event) => setNameDraft(event.target.value)}
-                aria-label="Variable set name"
-                suppressAutofill
-                autoComplete="off"
-                className="h-8 text-sm"
-              />
-              <Input
-                name="variable-set-description"
-                value={descriptionDraft}
-                onChange={(event) => setDescriptionDraft(event.target.value)}
-                placeholder="Description"
-                aria-label="Variable set description"
-                autoComplete="off"
-                className="h-8 text-sm"
-              />
-            </div>
-          ) : (
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span
-                  className="break-words text-sm font-medium [overflow-wrap:anywhere]"
-                  title={variableSet.name}
-                >
-                  {variableSet.name}
-                </span>
-                <MetaChip title={`${resourceScopeLabel(variableSet.scope)} access`}>
-                  {resourceScopeLabel(variableSet.scope)}
-                </MetaChip>
-              </div>
-              <div className="mt-0.5 break-words text-xs text-fg-muted [overflow-wrap:anywhere]">
-                {variableSet.description ?? "No description"}
-              </div>
-              <div className="mt-1 text-2xs text-fg-subtle">
-                {variableSet.variables.length} variable
-                {variableSet.variables.length === 1 ? "" : "s"} · updated{" "}
-                {formatTimestamp(variableSet.updatedAt)}
-                {attachmentCount > 0
-                  ? ` · ${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`
-                  : ""}
-              </div>
-            </div>
-          )}
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 sm:shrink-0">
-            {editing ? (
-              <>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 pointer-coarse:min-h-10"
-                  onClick={() => setEditing(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-8 pointer-coarse:min-h-10"
-                  disabled={props.mutating}
-                  onClick={() => void saveDetails()}
-                >
-                  <CheckIcon className="size-3.5" />
-                  Save
-                </Button>
-              </>
-            ) : (
-              <>
-                <CollapsibleTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    className="h-8 pointer-coarse:min-h-10"
-                    aria-label={`${expanded ? "Hide" : "Manage"} variables for ${variableSet.name}`}
-                  >
-                    {expanded ? "Hide variables" : "Manage variables"}
-                    <ChevronDownIcon
-                      className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
-                    />
-                  </Button>
-                </CollapsibleTrigger>
-                {canManageSet ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 pointer-coarse:min-h-10"
-                    aria-label={`Edit details for ${variableSet.name}`}
-                    onClick={() => {
-                      setNameDraft(variableSet.name);
-                      setDescriptionDraft(variableSet.description ?? "");
-                      setEditing(true);
-                    }}
-                  >
-                    <PencilIcon className="size-3.5" />
-                    Edit details
-                  </Button>
-                ) : null}
-                {canManageSecrets ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Delete variable set"
-                    className="hover:text-status-failed pointer-coarse:size-10"
-                    disabled={props.mutating || deleteBlocked}
-                    title={deleteBlockedReason ?? "Delete variable set"}
-                    onClick={() => setConfirmDelete(true)}
-                  >
-                    <Trash2Icon className="size-3.5" />
-                  </Button>
-                ) : null}
-              </>
-            )}
-          </div>
-        </div>
+        confirmLabel="Delete variable"
+        pendingLabel="Deleting…"
+        onConfirm={async () => {
+          if (!set || !deletingVariable) return;
+          const name = deletingVariable;
+          await attempt(() => client.deleteVariableSetVariable(workspaceId, set.id, name));
+          await variableSets.refresh();
+          toast.success(`Deleted ${name}`, { description: `From ${set.name}` });
+        }}
+      />
 
-        <CollapsibleContent>
-          <div className="mt-3 border-t border-border/70 pt-3">
-            <div className="mb-2">
-              <p className="text-xs font-medium text-fg">Variables</p>
-              <p className="text-2xs text-fg-muted">
-                Add environment names, rotate secret values, or remove variables from this set.
-              </p>
-            </div>
-            <div className="space-y-1.5">
-              {variableSet.variables.length === 0 ? (
-                <p className="text-xs text-fg-subtle">
-                  No variables yet. Add one below to inject it into a managed sandbox.
-                </p>
-              ) : (
-                variableSet.variables.map((variable) => (
-                  <div
-                    key={variable.name}
-                    className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
-                  >
-                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                      <div className="flex min-w-0 items-start gap-2">
-                        <KeyRoundIcon className="mt-0.5 size-3 shrink-0 text-fg-subtle" />
-                        <span
-                          className="min-w-0 break-words font-mono text-xs [overflow-wrap:anywhere]"
-                          title={variable.name}
-                        >
-                          {variable.name}
-                        </span>
-                      </div>
-                      <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
-                        <span className="text-2xs text-fg-subtle">
-                          v{variable.version} · {formatTimestamp(variable.updatedAt)}
-                        </span>
-                        {revealedValues[variable.name] === undefined ? (
-                          <span
-                            className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
-                            title={
-                              props.canReadSecrets
-                                ? "Value is hidden until explicitly revealed"
-                                : "Requires variable-sets:read and secrets:read"
-                            }
-                            aria-label="Value hidden"
-                          >
-                            ••••••
-                          </span>
-                        ) : null}
-                        {props.canReadSecrets ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            className="h-7 text-2xs pointer-coarse:min-h-10"
-                            disabled={readingName === variable.name}
-                            aria-label={`${
-                              revealedValues[variable.name] === undefined ? "Reveal" : "Hide"
-                            } variable ${variable.name}`}
-                            onClick={() => {
-                              if (revealedValues[variable.name] === undefined) {
-                                void revealVariable(variable.name);
-                              } else {
-                                clearRevealedValue(variable.name);
-                              }
-                            }}
-                          >
-                            {readingName === variable.name ? (
-                              <Loader2Icon className="size-3 animate-spin" />
-                            ) : revealedValues[variable.name] === undefined ? (
-                              <EyeIcon className="size-3" />
-                            ) : (
-                              <EyeOffIcon className="size-3" />
-                            )}
-                            {revealedValues[variable.name] === undefined ? "Reveal" : "Hide"}
-                          </Button>
-                        ) : null}
-                        {props.canWriteSecrets ? (
-                          <>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="xs"
-                              className="h-7 text-2xs pointer-coarse:min-h-10"
-                              disabled={props.mutating}
-                              aria-label={`Rotate variable ${variable.name}`}
-                              aria-expanded={rotatingName === variable.name}
-                              onClick={() => {
-                                setRotatingName((current) =>
-                                  current === variable.name ? null : variable.name,
-                                );
-                                setRotateValue("");
-                              }}
-                            >
-                              Rotate
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label={`Delete variable ${variable.name}`}
-                              className="hover:text-status-failed pointer-coarse:size-10"
-                              disabled={props.mutating}
-                              onClick={() => setConfirmDeleteVariable(variable.name)}
-                            >
-                              <Trash2Icon className="size-3" />
-                            </Button>
-                          </>
-                        ) : null}
-                      </div>
-                    </div>
-                    {revealedValues[variable.name] !== undefined ? (
-                      <div
-                        className="mt-2 rounded-md border border-border bg-surface px-2.5 py-2"
-                        aria-label={`Revealed value for ${variable.name}`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <pre className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-xs text-fg">
-                            {revealedValues[variable.name]}
-                          </pre>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            className="h-7 shrink-0 text-2xs pointer-coarse:min-h-10"
-                            aria-label={`Copy variable ${variable.name}`}
-                            onClick={() => void copyRevealedValue(variable.name)}
-                          >
-                            <CopyIcon className="size-3" />
-                            Copy
-                          </Button>
-                        </div>
-                        <p className="mt-1.5 text-2xs text-fg-subtle">
-                          Audited plaintext read. Hide it when you&apos;re done.
-                        </p>
-                      </div>
-                    ) : null}
-                    {props.canWriteSecrets && rotatingName === variable.name ? (
-                      <form
-                        aria-label={`Rotate variable ${variable.name}`}
-                        autoComplete="off"
-                        className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void rotateVariable(variable.name);
-                        }}
-                      >
-                        <Input
-                          name="variable-value"
-                          type="password"
-                          value={rotateValue}
-                          onChange={(event) => setRotateValue(event.target.value)}
-                          placeholder="New value"
-                          aria-label={`New value for ${variable.name}`}
-                          autoComplete="new-password"
-                          className="h-8 flex-1 text-xs pointer-coarse:min-h-10"
-                          autoFocus
-                        />
-                        <Button
-                          type="submit"
-                          size="sm"
-                          className="h-8 pointer-coarse:min-h-10"
-                          disabled={props.mutating || !rotateValue}
-                        >
-                          <CheckIcon className="size-3.5" />
-                          Set
-                        </Button>
-                      </form>
-                    ) : null}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          {props.canWriteSecrets ? (
-            <form
-              aria-label={`Add variable to ${variableSet.name}`}
-              autoComplete="off"
-              className="mt-2 grid gap-2 sm:grid-cols-[12rem_minmax(0,1fr)_auto]"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void addVariable();
-              }}
-            >
-              <div className="grid gap-1">
-                <Input
-                  name="variable-name"
-                  suppressAutofill
-                  value={variableName}
-                  onChange={(event) => setVariableName(event.target.value)}
-                  placeholder="VARIABLE_NAME"
-                  aria-label="New variable name"
-                  aria-describedby={variableNameHelpId}
-                  aria-invalid={newVariableNameError ? true : undefined}
-                  autoComplete="off"
-                  className="h-8 font-mono text-xs pointer-coarse:min-h-10"
-                />
-                <p
-                  id={variableNameHelpId}
-                  className={
-                    newVariableNameError ? "text-2xs text-danger" : "text-2xs text-fg-muted"
-                  }
-                >
-                  {newVariableNameError ?? newVariableNameHint}
-                </p>
-              </div>
-              <Input
-                name="variable-value"
-                type="password"
-                value={variableValue}
-                onChange={(event) => setVariableValue(event.target.value)}
-                placeholder="Value"
-                aria-label="New variable value"
-                autoComplete="new-password"
-                className="h-8 text-xs pointer-coarse:min-h-10"
-              />
-              <Button
-                type="submit"
-                variant="secondary"
-                size="sm"
-                className="h-8 pointer-coarse:min-h-10"
-                disabled={props.mutating || !newVariableNameValid || !variableValue}
-              >
-                <PlusIcon className="size-3.5" />
-                Add variable
-              </Button>
-            </form>
-          ) : null}
-
-          {attachmentCount > 0 ? (
-            <div className="mt-3 border-t border-border/70 pt-2">
-              <span className="text-2xs font-medium text-fg-muted">Attached to</span>
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {props.attachedSessions.slice(0, 4).map((session) => (
-                  <Link
-                    key={session.id}
-                    to="/workspaces/$workspaceId/sessions/$sessionId"
-                    params={{
-                      workspaceId: props.workspaceId,
-                      sessionId: session.id,
-                    }}
-                    className="min-w-0 max-w-full rounded-md hover:text-fg"
-                    title={sessionDisplayTitle(session)}
-                  >
-                    <MetaChip className="hover:border-border-strong">
-                      session · {sessionDisplayTitle(session)}
-                    </MetaChip>
-                  </Link>
-                ))}
-                {props.attachedSessions.length > 4 ? (
-                  <MetaChip>+{props.attachedSessions.length - 4} more sessions</MetaChip>
-                ) : null}
-                {props.attachedTasks.map((task) => (
-                  <MetaChip key={task.id} title={task.name}>
-                    task · {task.name}
-                  </MetaChip>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </CollapsibleContent>
-
-        <ConfirmDialog
-          open={confirmDelete}
-          onOpenChange={setConfirmDelete}
-          title={`Delete variable set “${variableSet.name}”?`}
-          description="Its variables are removed and sessions can no longer use them. This can't be undone."
-          confirmLabel="Delete variable set"
-          onConfirm={() => props.onDelete()}
-        />
-        <ConfirmDialog
-          open={confirmDeleteVariable !== null}
-          onOpenChange={(next) => setConfirmDeleteVariable(next ? confirmDeleteVariable : null)}
-          title={`Delete variable “${confirmDeleteVariable ?? ""}”?`}
-          description="Sessions using this variable set can no longer read it. This can't be undone."
-          confirmLabel="Delete variable"
-          onConfirm={async () => {
-            const name = confirmDeleteVariable;
-            if (!name) {
-              return;
-            }
-            const removed = await props.onDeleteVariable(name);
-            if (removed) {
-              toast.success(`Variable ${name} deleted`);
-            }
-            return removed;
-          }}
-        />
-      </article>
-    </Collapsible>
+      <DestructiveConfirm
+        open={Boolean(set && deletingSet)}
+        onOpenChange={(open) => (open ? undefined : setDeletingSet(false))}
+        variant={!usage?.known || inUse ? "blocked" : "consequences"}
+        title={
+          !set
+            ? ""
+            : !usage?.known
+              ? `Checking what uses ${set.name}`
+              : inUse
+                ? `${set.name} is in use`
+                : `Delete ${set.name}?`
+        }
+        description={
+          !usage?.known
+            ? "Chats and schedules are still loading, or couldn't load. Try again in a moment."
+            : inUse
+              ? blockedDeleteHint(usage.entries)
+              : undefined
+        }
+        dependencies={inUse && usage ? confirmDependencies(usage.entries) : undefined}
+        onOpenDependency={(dependency) => {
+          setDeletingSet(false);
+          void navigate({ href: dependency.href });
+        }}
+        consequences={
+          set
+            ? [
+                set.variables.length
+                  ? `Its ${set.variables.length} ${
+                      set.variables.length === 1 ? "variable goes" : "variables go"
+                    } with it.`
+                  : "It has no variables.",
+                "No chat, schedule or environment here uses it, so nothing else changes.",
+                "This can't be undone.",
+              ]
+            : undefined
+        }
+        confirmLabel="Delete variable set"
+        pendingLabel="Deleting…"
+        onConfirm={async () => {
+          if (!set) return;
+          const name = set.name;
+          try {
+            await client.deleteVariableSet(workspaceId, set.id);
+          } catch (error) {
+            const parts = errorParts(error);
+            // The server also counts finished chats, older chats and other
+            // workspaces, which this page can't list.
+            throw userFacingError(
+              error,
+              parts.status === 409
+                ? `Something still uses ${name}, like an older or finished chat. Remove it there first.`
+                : parts.message,
+            );
+          }
+          setDeletingSet(false);
+          openList();
+          toast.success(`Deleted ${name}`);
+          await variableSets.refresh();
+        }}
+      />
+    </ContentPage>
   );
 }

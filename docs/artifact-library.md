@@ -39,10 +39,18 @@ catalog results contain no storage credentials or temporary download URLs.
 
 ## Presentation and version semantics
 
-The workspace library offers a preview grid and compact list, type filtering,
-title search, sorting, and an archived filter. The session panel uses the same
-catalog with a source-session filter. Both open the existing type-specific
-viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
+The workspace library opens as a preview gallery: cards with a thumbnail, the
+title and one meta line ("Site · updated 3 days ago"), the ⋯ menu on hover or
+focus. Images show their own pixels; a Site shows a still of its published
+HTML (`getWorkspaceArtifactHtml`) in a `srcdoc` frame with an empty `sandbox`
+and a `default-src 'none'` policy, so a card never runs Site code or makes a
+network request. Other types show their type glyph (and a file's extension).
+Previews load only near the viewport. A Gallery | List toggle in the toolbar
+switches to flat rows and is remembered in the browser
+(`opengeni:artifact-library:view:v1`). Both views keep the type tabs, title
+search, and a Filter menu for archived items and sorting. The session panel
+uses the same catalog with a source-session filter. Both open the existing
+type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
 
 Images load from retained storage, not the compute filesystem. Image publication
 results are primary chat output and reuse the retained-image viewer/lightbox.

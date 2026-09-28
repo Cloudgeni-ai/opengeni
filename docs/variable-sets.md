@@ -43,6 +43,12 @@ property of the resource, not a duplicate navigation hierarchy. Only an active
 managed organization member can create an Only-me set, and organization scope
 requires account-administrator authority.
 
+In the web app, Variable sets is a list page and each set opens its own page
+with **Variables** and **Used by** tabs. Variables are added inline at the
+bottom of the set's list, or several at once through **Paste .env**; old
+`?view=add` links open the set's page. Deleting a set that is in use is blocked
+and lists what uses it, with links.
+
 ## Invariants
 
 1. **Plaintext has one explicit read boundary.** Generic workspace, session, event, capability, installation, list, and variable-set metadata responses remain value-free. One dedicated REST route and one live-session MCP tool return exactly one configured value, and only when the caller holds both the resource permission and literal `secrets:read`.

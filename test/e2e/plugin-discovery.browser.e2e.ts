@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { chromium } from "playwright";
 import { freePort, startProcess } from "@opengeni/testing";
 
-test("plugin rows and centered details preserve keyboard focus, scrolling, and installation states", async () => {
+test("plugin rows and detail pages preserve keyboard focus, scrolling, and installation states", async () => {
   const port = await freePort();
   const origin = `http://127.0.0.1:${port}`;
   const web = await startProcess(
@@ -42,7 +42,7 @@ test("plugin rows and centered details preserve keyboard focus, scrolling, and i
         );
         await opener.waitFor();
         expect(await opener.locator("button").count()).toBe(0);
-        expect(await opener.locator(".og-connection-logo").count()).toBe(1);
+        expect(await opener.locator('[data-slot="logo-tile"]').count()).toBe(1);
         if (query.includes("installed")) {
           expect(await opener.getAttribute("aria-label")).toContain("Installed");
         } else {
@@ -52,56 +52,97 @@ test("plugin rows and centered details preserve keyboard focus, scrolling, and i
         }
         await opener.focus();
         await page.keyboard.press("Enter");
-        const dialog = page.getByRole("dialog");
-        await dialog.waitFor({ state: "visible" });
-        const box = (await dialog.boundingBox())!;
+        // Details open as a page in the route's page slot, not a dialog.
+        const detail = page.locator("[data-capability-page]");
+        await detail.waitFor({ state: "visible" });
+        expect(await page.getByRole("dialog").count()).toBe(0);
+        expect(await opener.isVisible()).toBe(false);
+        const box = (await detail.boundingBox())!;
         expect(box.x).toBeGreaterThanOrEqual(0);
         expect(box.x + box.width).toBeLessThanOrEqual(width + 1);
-        expect(box.y).toBeGreaterThanOrEqual(0);
-        expect(box.y + box.height).toBeLessThanOrEqual(height + 1);
-        if (width >= 640) {
-          expect(Math.abs(box.x + box.width / 2 - width / 2)).toBeLessThan(2);
-          expect(Math.abs(box.y + box.height / 2 - height / 2)).toBeLessThan(2);
-          expect(box.width).toBeGreaterThan(600);
-        }
-        expect(await dialog.locator("h2:not(.sr-only)").count()).toBe(1);
-        expect(await dialog.locator(".og-connection-logo").count()).toBe(1);
-        expect(await dialog.getByText("Requires a local runtime").count()).toBe(1);
+        expect(
+          await page.evaluate(
+            () => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+          ),
+        ).toBe(true);
+        const title = detail.locator("h1");
+        expect(await title.count()).toBe(1);
+        expect(await title.textContent()).toBe("Research suite");
+        await page.waitForFunction(() =>
+          document.activeElement?.matches('[data-slot="detail-page-title"]'),
+        );
+        expect(
+          await detail.locator('[data-slot="detail-page-header"] [data-slot="logo-tile"]').count(),
+        ).toBe(1);
+        expect(await detail.getByText("Can't connect here: requires a local runtime").count()).toBe(
+          1,
+        );
         if (query.includes("installed")) {
           expect(
-            await dialog.getByRole("button", { name: "Installed", exact: true }).isDisabled(),
-          ).toBe(true);
+            await detail
+              .locator('[data-slot="detail-page-header"] [data-slot="status-badge"]')
+              .textContent(),
+          ).toBe("Installed");
+          expect(
+            await detail.getByRole("button", { name: "Install plugin", exact: true }).count(),
+          ).toBe(0);
           const discoveredInstalled = page.locator('[data-plugin-id] [data-status="added"]');
           await discoveredInstalled.waitFor({ state: "attached" });
           expect(await discoveredInstalled.count()).toBe(1);
         } else if (query.includes("readonly")) {
           expect(
-            await dialog.getByRole("button", { name: "Install plugin", exact: true }).count(),
+            await detail.getByRole("button", { name: "Install plugin", exact: true }).count(),
           ).toBe(0);
-          expect(await dialog.getByRole("button", { name: "Connect", exact: true }).count()).toBe(
+          expect(await detail.getByRole("button", { name: "Connect", exact: true }).count()).toBe(
             0,
           );
+          expect(
+            await detail
+              .getByText("Only workspace admins can install, update and remove plugins.")
+              .count(),
+          ).toBe(1);
         } else {
           expect(
-            await dialog.getByRole("button", { name: "Install plugin", exact: true }).isEnabled(),
+            await detail.getByRole("button", { name: "Install plugin", exact: true }).isEnabled(),
           ).toBe(true);
         }
         if (query.includes("long")) {
+          // The long description is clamped until Read more; the page then scrolls to its end.
+          const readMore = detail.getByRole("button", { name: "Read more" });
+          await readMore.click();
           expect(
-            await dialog.locator(".overflow-y-auto").evaluate((node) => {
-              node.scrollTop = node.scrollHeight;
-              return node.clientHeight > 0 && node.scrollTop > 0;
+            await detail.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded"),
+          ).toBe("true");
+          const lastSkill = detail.getByRole("link", { name: "Research skill 25" });
+          await lastSkill.scrollIntoViewIfNeeded();
+          expect(await lastSkill.isVisible()).toBe(true);
+          // Whichever element scrolls the page (the document or an overflow container)
+          // has moved to reach the last skill.
+          expect(
+            await lastSkill.evaluate((link) => {
+              for (let node = link.parentElement; node; node = node.parentElement) {
+                if (node.scrollTop > 0 && node.scrollHeight > node.clientHeight) return true;
+              }
+              return false;
             }),
           ).toBe(true);
+          // Collapse again, which also keeps the full-page evidence screenshot small.
+          await detail.getByRole("button", { name: "Show less" }).click();
+          await detail.getByRole("button", { name: "Read more" }).waitFor();
+          await page.evaluate(() => window.scrollTo(0, 0));
+          await detail.locator("h1").focus();
         }
         await page.keyboard.press("Tab");
-        expect(await dialog.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+        expect(await detail.evaluate((node) => node.contains(document.activeElement))).toBe(true);
         await page.screenshot({
           path: `${evidence}${width}-${query.slice(1) || "available"}.png`,
           fullPage: true,
         });
-        await page.keyboard.press("Escape");
-        await dialog.waitFor({ state: "hidden" });
+        // Back to the catalog from the keyboard returns focus to the row that opened the page.
+        const back = detail.getByRole("button", { name: "Capabilities" });
+        await back.focus();
+        await page.keyboard.press("Enter");
+        await detail.waitFor({ state: "detached" });
         await page.waitForFunction(() =>
           document.activeElement?.matches("[data-plugin-id], .og-connection-installed button"),
         );

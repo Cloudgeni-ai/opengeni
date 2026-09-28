@@ -76,8 +76,7 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
   test("supports exact add/remove flows with a polished desktop layout", async () => {
     await openFixture(page, baseUrl);
     const gatewayCard = providerCard(page, "vercel-ai-gateway");
-    await gatewayCard.locator("summary").click();
-    await gatewayCard.getByText("2 models", { exact: true }).waitFor();
+    await expectCustomModelCount(gatewayCard, "Vercel AI Gateway", 2);
     expect(await gatewayCard.getByText("Connected", { exact: true }).count()).toBe(1);
     expect(await gatewayCard.getByLabel("Vercel AI Gateway model slug").count()).toBe(1);
 
@@ -124,7 +123,7 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
       .waitFor();
     await removeDialog
       .getByText(
-        "The model disappears from new selections. Already accepted turns and existing sessions can continue with their retained definition.",
+        "It disappears from new selections. Work already running and existing chats keep it.",
         { exact: true },
       )
       .waitFor();
@@ -135,13 +134,10 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
     await waitForAriaLabelFocus(page, "Remove deepseek/deepseek-v3.2");
 
     const openRouterCard = providerCard(page, "openrouter");
-    await openRouterCard.locator("summary").click();
-    await openRouterCard.getByText("2 models", { exact: true }).waitFor();
+    await expectCustomModelCount(openRouterCard, "OpenRouter", 2);
+    await openRouterCard.getByText("Your OpenRouter account", { exact: true }).waitFor();
     await openRouterCard
-      .getByText("The workspace's OpenRouter account is billed directly.", { exact: false })
-      .waitFor();
-    await openRouterCard
-      .getByText("separate from deployment-provided OpenRouter models", { exact: false })
+      .getByText("Deployment-provided OpenRouter models remain separate.", { exact: false })
       .waitFor();
 
     const openRouterSlug = openRouterCard.getByLabel("OpenRouter model slug");
@@ -188,12 +184,10 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
     try {
       await openFixture(mobilePage, baseUrl);
       const gatewayCard = providerCard(mobilePage, "vercel-ai-gateway");
-      await gatewayCard.locator("summary").click();
       await gatewayCard.getByText("Custom models", { exact: true }).waitFor();
 
       const slug = gatewayCard.getByLabel("Vercel AI Gateway model slug");
       const add = gatewayCard.getByRole("button", { name: "Add model" });
-      const key = gatewayCard.getByLabel("Vercel AI Gateway key");
       const remove = gatewayCard.getByRole("button", {
         name: "Remove deepseek/deepseek-v3.2",
       });
@@ -201,7 +195,6 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
       expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
       expect((await add.boundingBox())?.width).toBeGreaterThan(100);
       expect((await add.boundingBox())?.height).toBeGreaterThanOrEqual(44);
-      expect((await key.boundingBox())?.width).toBeGreaterThan(300);
       expect((await remove.boundingBox())?.width).toBeGreaterThanOrEqual(44);
       expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(44);
 
@@ -211,18 +204,27 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
         fullPage: true,
       });
 
-      await mobilePage.setViewportSize({ width: 844, height: 390 });
-      expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
-      await assertAccessibleAndBounded(mobilePage);
+      // The key field lives in the one-field Replace key prompt on the provider page.
+      await gatewayCard.getByRole("button", { name: "Replace key", exact: true }).click();
+      const replaceDialog = mobilePage.getByRole("dialog", {
+        name: "Replace the Vercel AI Gateway key",
+      });
+      await replaceDialog.waitFor();
+      const key = replaceDialog.getByLabel("Vercel AI Gateway key");
+      expect((await key.boundingBox())?.width).toBeGreaterThan(280);
+      await assertDialogBounded(mobilePage, replaceDialog);
+      await replaceDialog.getByRole("button", { name: "Cancel" }).click();
+      await replaceDialog.waitFor({ state: "detached" });
 
-      await mobilePage.setViewportSize({ width: 1024, height: 768 });
-      expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
-      expect((await add.boundingBox())?.height).toBeGreaterThanOrEqual(44);
-      expect((await remove.boundingBox())?.width).toBeGreaterThanOrEqual(44);
-      expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(44);
-      await assertAccessibleAndBounded(mobilePage);
+      // Rotated phone and tablet: fresh touch contexts, because resizing an
+      // emulated page drops Chromium's coarse-pointer emulation.
+      for (const viewport of [
+        { width: 844, height: 390 },
+        { width: 1024, height: 768 },
+      ]) {
+        await assertTouchViewport(browser, baseUrl, viewport);
+      }
 
-      await mobilePage.setViewportSize({ width: 390, height: 844 });
       const maximumSlug = "a".repeat(238);
       await slug.fill(maximumSlug);
       await add.click();
@@ -252,6 +254,30 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
   }, 60_000);
 });
 
+async function assertTouchViewport(
+  browser: Browser,
+  baseUrl: string,
+  viewport: { width: number; height: number },
+): Promise<void> {
+  const touchContext = await browser.newContext({ viewport, hasTouch: true, isMobile: true });
+  const touchPage = await touchContext.newPage();
+  try {
+    await openFixture(touchPage, baseUrl);
+    const gatewayCard = providerCard(touchPage, "vercel-ai-gateway");
+    const slug = gatewayCard.getByLabel("Vercel AI Gateway model slug");
+    const add = gatewayCard.getByRole("button", { name: "Add model" });
+    const remove = gatewayCard.getByRole("button", { name: "Remove deepseek/deepseek-v3.2" });
+    await remove.waitFor();
+    expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
+    expect((await add.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    expect((await remove.boundingBox())?.width).toBeGreaterThanOrEqual(44);
+    expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    await assertAccessibleAndBounded(touchPage);
+  } finally {
+    await touchContext.close();
+  }
+}
+
 async function openFixture(page: Page, baseUrl: string): Promise<void> {
   await page.goto(`${baseUrl}${fixturePath}`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "AI model connections", exact: true }).waitFor();
@@ -263,6 +289,20 @@ async function openFixture(page: Page, baseUrl: string): Promise<void> {
 
 function providerCard(page: Page, provider: "vercel-ai-gateway" | "openrouter"): Locator {
   return page.getByTestId(`${provider}-connection-card`);
+}
+
+async function expectCustomModelCount(
+  card: Locator,
+  providerTitle: string,
+  count: number,
+): Promise<void> {
+  const list = card.getByRole("list", { name: `Custom models on ${providerTitle}` });
+  await list.waitFor();
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && (await list.getByRole("listitem").count()) !== count) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(await list.getByRole("listitem").count()).toBe(count);
 }
 
 async function expectReceipt(page: Page, expected: Record<string, unknown>): Promise<void> {
@@ -303,7 +343,8 @@ async function waitForEnabled(locator: Locator): Promise<void> {
 
 async function assertDialogBounded(page: Page, dialog: Locator): Promise<void> {
   const bounds = await dialog.evaluate((dialogElement) => {
-    const title = dialogElement.querySelector<HTMLElement>('[data-slot="dialog-title"]');
+    const titleId = dialogElement.getAttribute("aria-labelledby");
+    const title = titleId ? document.getElementById(titleId) : null;
     const rect = dialogElement.getBoundingClientRect();
     return {
       left: rect.left,

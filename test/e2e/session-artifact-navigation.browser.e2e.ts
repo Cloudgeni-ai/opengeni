@@ -88,7 +88,7 @@ for (const width of [1440, 390]) {
         await page.goto(fixtureUrl(`${detailPath}?fromSession=${sessionId}`));
         await page.getByRole("heading", { name: heading, exact: true }).waitFor();
         await assertLibraryReturn(page, true);
-        await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+        await page.getByRole("link", { name: "Artifacts", exact: true }).click();
         await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
         await page.reload();
         const back = page.getByRole("link", { name: "Back to session", exact: true });
@@ -107,7 +107,7 @@ for (const width of [1440, 390]) {
         );
         await page.getByRole("heading", { name: heading, exact: true }).waitFor();
         await assertLibraryReturn(page, false);
-        await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+        await page.getByRole("link", { name: "Artifacts", exact: true }).click();
         await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
         expect(await back.count()).toBe(0);
         expect(page.url()).not.toContain("fromSession");
@@ -119,7 +119,7 @@ for (const width of [1440, 390]) {
 }
 
 async function assertLibraryReturn(page: import("playwright").Page, fromSession: boolean) {
-  const all = page.getByRole("link", { name: "All artifacts", exact: true });
+  const all = page.getByRole("link", { name: "Artifacts", exact: true });
   await all.waitFor();
   expect(await all.count()).toBe(1);
   expect(routerPath(await all.getAttribute("href"))).toBe(
@@ -153,7 +153,7 @@ for (const width of [1440, 390]) {
               path: `${process.env.OPENGENI_ARTIFACT_NAV_SCREENSHOT_DIR}/${modality}-${width}-${fromSession ? "session" : "direct"}.png`,
             });
           }
-          await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+          await page.getByRole("link", { name: "Artifacts", exact: true }).click();
           await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
           if (fromSession) {
             await page.reload();
@@ -188,7 +188,7 @@ for (const width of [1440, 390]) {
           path: `${process.env.OPENGENI_ARTIFACT_NAV_SCREENSHOT_DIR}/site-${width}-session.png`,
         });
       }
-      await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+      await page.getByRole("link", { name: "Artifacts", exact: true }).click();
       await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
       await page.reload();
       await page.getByRole("link", { name: "Back to session", exact: true }).waitFor();
@@ -206,7 +206,7 @@ for (const width of [1440, 390]) {
       await page.goto(fixtureUrl(entry));
       await page.getByRole("heading", { name: "Retained file", exact: true }).waitFor();
       await assertLibraryReturn(page, true);
-      await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+      await page.getByRole("link", { name: "Artifacts", exact: true }).click();
       await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
       await page.reload();
       await page.getByRole("link", { name: "Back to session", exact: true }).click();

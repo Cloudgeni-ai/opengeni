@@ -195,27 +195,39 @@ retain their prior workspace ownership instead of guessing an owner.
 
 ## Browsing Knowledge
 
-Agent Knowledge is one page with persistent **Knowledge**, **Files**,
-**Instructions** and **Skills** tabs. Each tab has a URL under `/state`; historical
-Memory and Documents links keep the same navigation. Files is a library of
-original copies with one Upload action. Opening a file shows its preview, extracted
-text and a link to related Knowledge. Readable source text stays attached to its
-original and in canonical Knowledge; there is no competing Add text form.
+The **Knowledge** page (`/state`) has **Library**, **Instructions** and
+**Review** tabs; Review shows only while proposals wait. Entries, collections,
+the Learning settings and add/edit flows open as pages with a back link, each
+addressed by URL. Files are a **Files** Type filter in the Library, and
+**Add → Upload files** saves originals that become File entries. Opening a file
+shows its preview, extracted text and a link to related Knowledge. Old
+`view=files` links open the Library filtered to files, and `view=skills` links
+open Capabilities → Skills. Old Memory and Documents links redirect to Knowledge.
 
-The workspace navigation marks Agent Knowledge with an amber indicator while
-accessible Knowledge proposals await review. That link opens Needs review directly.
+The workspace rail marks Knowledge with an indicator while accessible Knowledge
+proposals await review. That link opens the Review tab directly.
 The indicator refreshes after local decisions, on window focus, and every 30 seconds
 while visible; a transient refresh failure preserves the last known pending state.
 
-The Knowledge page uses a compact expandable tree. Collections appear as folders
-with one-line descriptions; entries open their content and evidence on click.
-Collections can nest and an entry can appear in several collections without
-copying it. Collection menus provide details and creation within that collection.
-Arrow keys navigate, expand and collapse folders. Search and review use compact
-flat results so matching entries remain discoverable regardless of their parents.
+The Library shows a flat list or a **By collection** layout: one section per
+top-level collection (no visible parent in the selected scope) listing its
+sub-collections first, as rows that open their own page, then its direct
+entries, and finally the entries not in a collection. A nested collection
+therefore appears once, inside its parent. Rows open the entry's or collection's
+own page with its content and evidence. A collection page lists its
+sub-collections as their own group before its entries, and every entry or
+collection page shows the path of parent collections (first parent at each
+level, for example "in Runbooks › Payments"), each part linking to that
+collection. Collections can nest and an entry can appear in several collections
+without copying it. Search and filters use flat results so matching entries
+remain discoverable regardless of their parents. Only collections and files carry
+an icon; other kinds are named in the row's meta line ("Decision · updated 3
+days ago").
 
-The root list uses `rootOnly` before server pagination; each expanded collection
-pages its direct members using `groupId`. A parent outside the selected scope,
+The section list uses `kind: "group"` with `rootOnly`, and the loose list
+`rootOnly`, both before server pagination; each collection pages its direct
+sub-collections (`groupId` with `kind: "group"`) and its direct members using
+`groupId`. A parent outside the selected scope,
 archived parent, or inaccessible parent does not hide an accessible child from
 the root. Published and outstanding pending membership edges are checked for
 cycles under the publication lock, including at approval and restoration.
@@ -233,7 +245,8 @@ All finding types share retrieval, review, permissions and revision history.
 
 ## Agent learning settings
 
-**Settings → Agent learning** groups three destinations together:
+**Knowledge → Learning** groups three destinations together (the old
+Settings → Agent learning URL redirects there):
 
 | Destination | New-workspace default | Storage authority |
 | --- | --- | --- |
@@ -254,8 +267,8 @@ separate from learning policy.
 
 Workspace or personal defaults can be overridden per chat or scheduled task.
 Overrides are sparse: selecting Inherit removes that category's override.
-Settings list the active overrides in one place; chat options and a schedule's
-collapsed advanced settings provide context shortcuts. Existing schedule
+Chat options and the Advanced section of a schedule's form set these
+overrides. Existing schedule
 overrides are drafts until Save; Cancel discards them. Schedule and learning
 changes commit together and restore together if scheduler synchronization fails. New-chat choices are retained
 in the composer draft and committed with the session before its first accepted

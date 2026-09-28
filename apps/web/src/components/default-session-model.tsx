@@ -1,10 +1,12 @@
 import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
 import type { DefaultModelSelectionSource, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { payerShortLabel } from "@/components/models/models-ui";
 import { ModelPicker } from "@/components/pickers";
+import { buttonVariants } from "@/components/ui/button";
+import { SettingRow } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import {
   availabilityReasonLabel,
@@ -15,6 +17,7 @@ import {
 } from "@/lib/model-policy";
 import { initialReasoningEffort } from "@/lib/session-tools";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { cn } from "@/lib/utils";
 import type { IntelligenceEffort } from "@/lib/session-tools";
 
 type Draft = { model: string; reasoningEffort: IntelligenceEffort };
@@ -23,11 +26,11 @@ type Draft = { model: string; reasoningEffort: IntelligenceEffort };
 function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): string {
   switch (source) {
     case "subscription":
-      return "Following your connected subscription until you choose one.";
+      return "Picked from your connected subscription until you choose one.";
     case "credits":
-      return "Following your OpenGeni credits until you choose one.";
+      return "Picked for your OpenGeni credits until you choose one.";
     default:
-      return "Following the deployment default until you choose one or connect a subscription.";
+      return "The deployment's default until you choose one.";
   }
 }
 
@@ -125,7 +128,6 @@ export function DefaultSessionModelPreferenceRow(props: {
   ]);
 
   const pickerRows = defaultModelPickerRows(catalog.rows, catalog.models, draft.model);
-  const summary = catalog.loading ? null : defaultModelSummary(catalog.models, draft.model);
 
   function updateDraft(next: Draft) {
     draftRef.current = next;
@@ -150,27 +152,32 @@ export function DefaultSessionModelPreferenceRow(props: {
     }
   }
 
+  const selected = pickerRows.find((row) => row.id === draft.model) ?? null;
+  const cantRun =
+    catalog.loading || catalog.error
+      ? null
+      : !selected
+        ? "The current default isn't available in this workspace, so new work can't start with it. Pick another model."
+        : !selected.selectable
+          ? `${selected.label} can't run right now${
+              selected.unavailableReason
+                ? `: ${selected.unavailableReason.toLocaleLowerCase()}`
+                : ""
+            }. Pick another model.`
+          : null;
+
   return (
-    <div className="flex min-h-14 items-center justify-between gap-4 py-2.5">
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-fg">Default model</p>
-        <p className="mt-0.5 text-xs text-fg-subtle">
-          Used for new chats and scheduled tasks in this workspace.
-          {configured ? null : ` ${automaticDefaultNote(automatic?.source)}`}
-        </p>
-        {summary ? (
-          <p className="mt-0.5 text-xs text-fg-muted">
-            {summary.text}
-            {summary.unavailable ? (
-              <span className="text-status-waiting"> · {summary.unavailable}</span>
-            ) : null}
-          </p>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        {saving ? (
-          <Loader2Icon aria-label="Saving default model" className="size-3.5 animate-spin" />
-        ) : null}
+    <SettingRow
+      label="Default model"
+      controlWidth="auto"
+      description={
+        configured
+          ? "New chats and schedules start with this model."
+          : `New chats and schedules start with this model. ${automaticDefaultNote(automatic?.source)}`
+      }
+      error={cantRun}
+      hint={saving ? "Saving…" : undefined}
+      control={
         <ModelPicker
           rows={pickerRows}
           model={draft.model}
@@ -181,11 +188,18 @@ export function DefaultSessionModelPreferenceRow(props: {
           loading={catalog.loading}
           error={catalog.error}
           messages={{ label: "Default model and reasoning" }}
+          triggerStyle="field"
+          triggerMeta={selected ? payerShortLabel(selected) : null}
+          // The secondary button's exact look, so every control on the row matches.
+          className={cn(
+            buttonVariants({ variant: "outline", size: "sm" }),
+            "max-w-full min-w-[180px] justify-start gap-2 rounded-[10px] px-2.5 pointer-coarse:h-11",
+          )}
           onModelChange={(model) => updateDraft({ ...draftRef.current, model })}
           onEffortChange={(effort) => void save(effort)}
           onLatencyModeChange={() => {}}
         />
-      </div>
-    </div>
+      }
+    />
   );
 }

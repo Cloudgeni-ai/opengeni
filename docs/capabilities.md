@@ -34,10 +34,10 @@ do not carry a private one-turn tool list.
 
 Built-in runtime tools are not exposed as granular workspace preferences. They
 follow the existing deployment and workspace policy; removing the settings UI
-does not rewrite stored restrictions. **Settings → Agent learning** owns scoped
+does not rewrite stored restrictions. **Knowledge → Learning** owns scoped
 knowledge retention and instruction/skill improvement defaults, independently of
 tool availability and action approvals.
-**Settings → Capabilities** controls whether workspace defaults automatically
+**Settings → General → New session defaults** controls whether workspace defaults automatically
 include connected apps or retain an exact connection list. Connector changes
 preserve the existing built-in defaults and temporarily unavailable selections.
 These controls set defaults for new sessions; they do not revoke an existing
@@ -102,7 +102,7 @@ The descriptor identifies catalog identity, actual complete Connection/host/no
 credential authority, tool-surface class, destinations, and safe-read-only
 replay policy, but grants no authority. Generic static-adapter selection rejects
 ambiguous matches and keeps provider matching out of the catalog importer,
-OAuth client/profiles, and web row/sheet components. OpenAPI and GraphQL
+OAuth client/profiles, and web row/page components. OpenAPI and GraphQL
 Integrations, including Google Drive, keep their existing local MCP adapters and
 do not claim this reviewed static bridge descriptor. Compiler-wide OpenAPI
 destination governance remains separate work. See
@@ -244,7 +244,7 @@ Google Drive and OneDrive expose drive-content Knowledge Sources; Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
 identity. In the web app these live in
 `apps/web/src/components/capabilities/integration-facets-panel.tsx`, mounted
-per account entry inside the integration sheet's **Connected accounts** block
+per account entry inside the integration page's **Connected accounts** section
 through the lazy `integration-account-facets.tsx` boundary (which also carries
 the provider-specific Google Drive knowledge-source dialog). The panel is
 scoped to exactly one `capabilityId`/`instanceKey`/`instanceVersion` and is
@@ -569,9 +569,8 @@ surfaces of their own.
 **Integrations** are built and run by OpenGeni: Slack, GitHub, Google Drive,
 Jira & Confluence, Outlook Mail, Outlook Calendar, Outlook Contacts, and
 OneDrive. They receive events, post as OpenGeni, and hold their own identity in
-the other product. Every integration renders through the same two components
-(`apps/web/src/components/capabilities/integration-row.tsx` and
-`integration-sheet.tsx`) fed by one plain view-model
+the other product. Every integration's page renders through the same component
+(`apps/web/src/components/capabilities/integration-page.tsx`) fed by one plain view-model
 (`integration-view-model.ts`); one adapter hook per provider
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
 `use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
@@ -583,7 +582,7 @@ account and never a separate control center: the shared multi-account layer
 (`use-api-integration-accounts.tsx`) folds every curated `IntegrationDefinition`
 instance a provider has (Outlook Mail/Calendar/Contacts, OneDrive, and extra
 Google Drive accounts beyond the primary knowledge connection) into that one
-row's rolled-up state. The row and the sheet contain no provider-specific
+row's rolled-up state. The page contains no provider-specific
 branch; every account/provider difference lives in the adapters.
 
 GitHub's Options block includes the attempt-frozen action approval policy for
@@ -596,15 +595,18 @@ it does not mutate connector-policy rows directly.
 - Connections, Skills, and Plugins share `CapabilityCatalogRow` from
   `@opengeni/react/connect`: icon, name, short description, and a decorative
   plus for available or quiet check for added. The whole row is one button;
-  clicking the name or glyph opens the same setup/management dialog. There is
-  no extra connection preview or separate glyph action. Normal state text is
+  clicking the name or glyph opens that capability's own page (with a back
+  link), not a dialog or side sheet. There is no separate glyph action. Normal state text is
   available to assistive technology; warnings, pending review, and unavailable
   states remain visible. Type, provenance, and component counts belong in
-  details, not in the catalog description. Multi-option services expand their
-  real connection choices before setup. Hosts provide explicit health state;
+  details, not in the catalog description. A provider with several modes
+  (Slack bot or personal account; Jira & Confluence sync or agent tools) opens
+  a provider page listing each mode, and each mode opens its own page. Hosts provide explicit health state;
   display labels never determine credential authority.
-- The detail sheet is a fixed frame with blocks in fixed order, empty blocks
-  omitted. **Connection** is label/value facts; **Access** is the scoped
+- The integration page (`integration-page.tsx`, rendering the same view-model
+  the sheet used) has sections in fixed order, empty sections omitted: About,
+  Where work starts, Access, **Settings**, Your data, then a collapsed
+  **Technical details**. Connection facts sit in the aside card; **Access** is the scoped
   resources (channels, repositories, folders, projects and spaces) with
   exactly one edit affordance - for a multi-account provider this block
   becomes **Connected accounts**: one entry per account, keyed on its own
@@ -617,13 +619,14 @@ it does not mutate connector-policy rows directly.
   folders it contributes stay visible as its sub-entries rather than
   disappearing when a second Drive account exists. A `+ Add account`
   edit-link sits in the block header;
-  **Options** are switches (and, where a setting is a choice, a compact
-  select); **Tools** is a flat, purely informational, monospace chip grid of
+  **Settings** holds the options as switches (and, where a setting is a choice, a compact
+  select); tool names are a flat, purely informational, monospace list inside
+  Technical details of
   the tool/function names the connection actually publishes (no toggles, no
   per-tool detail), populated only from an already-available cheap source
-  (a stored allowlist) and omitted entirely when unavailable; **Action** is a
-  footer from a closed set: `Reconnect` + `Disconnect` when connected, the
-  same pair with `Reconnect` primary when broken, `Set up` when not connected,
+  (a stored allowlist) and omitted entirely when unavailable; header actions
+  come from a closed set: `Reconnect` and `Disconnect` in the ⋯ menu when connected,
+  `Reconnect` as the primary button when broken, `Connect <name>` when not connected,
   or a locked sentence when the viewer cannot change anything (a multi-account
   row with at least one account also uses the locked sentence, pointing the
   viewer at the Connected accounts block above instead of an ambiguous
@@ -631,14 +634,14 @@ it does not mutate connector-policy rows directly.
   workspace admin looks after this integration. You do not need to connect
   anything."; an adapter may supply a truthful variant when the account
   needs its owner to reconnect. Provider limited-use
-  disclosures (Google's OAuth disclosures) render in a fixed place above the
-  footer, and the connect/publish affordances reference them via
+  disclosures (Google's OAuth disclosures) render in the fixed **Your data**
+  section, and the connect/publish affordances reference them via
   `aria-describedby`.
 - Role changes content, never layout. Anyone with connection management
   permission (`connections:write` or workspace admin) sees the Slack bot
   (installation facts, what OpenGeni can see, and install/reconnect/disconnect);
   the reaction shortcut, knowledge destination, and decision publication options
-  stay admin-gated inside that sheet. Everyone else sees their own personal
+  stay admin-gated on that page. Everyone else sees their own personal
   Slack account. Nobody is offered both. Deep provider dialogs (the Drive
   folder picker, the Jira/Confluence source picker, the reaction conversation
   picker, the Slack decision-publication settings) open from the Access block's
@@ -704,20 +707,20 @@ Open the **Capabilities** view in the web app to:
 - select enabled custom MCPs in the agent composer
 
 **Bundles** are Skills and Plugins: installable guidance and tools, distinct
-from live Connections. The catalog uses the same IntegrationRow and detail
-sheet patterns as the rest of the page, with search and installed-state chips.
+from live Connections. The catalog uses the same row and detail page patterns
+as the rest of Capabilities, with search and installed-state chips.
 Curated Skills identify their reviewed library source; imported Skills and
 Plugins show immutable source provenance. Unknown provenance is not guessed.
 
-Imported items open the IntegrationSheet with pinned identity, update review,
-and removal actions. Catalog Skills use the library detail sheet. Viewers see
+Imported Skills and Plugins open their own page with pinned identity, update
+review, and removal actions. Catalog Skills open the catalog item page. Viewers see
 the permission explanation instead of inactive administration buttons.
 
 Skills and Plugins are excluded from Connector projections. Dialog inputs and
 errors survive closing and reopening; mutation retries retain their exact
 idempotency key. Changed Connection bindings require a new preview. A failed
-Connection-list request is not treated as an empty inventory. Opening an import
-or removal dialog closes the detail sheet so only one modal is active.
+Connection-list request is not treated as an empty inventory. Import and removal
+dialogs open over the detail page, so only one modal is active.
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.
 

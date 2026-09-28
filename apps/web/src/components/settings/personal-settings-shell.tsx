@@ -1,36 +1,40 @@
 import { Link } from "@tanstack/react-router";
 import { ShieldCheckIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import { ContentPage } from "@/components/ui/content-layout";
-import { SettingsPageHeader } from "./settings-layout";
-import {
-  SettingsSidebar,
-  SETTINGS_SHELL_CLASS,
-  SETTINGS_NAV_CLASS,
-  settingsNavItemClass,
-} from "./settings-sidebar";
 
+import { SettingsShell, settingsHomeLink } from "./settings-sidebar";
+
+/** Personal settings: the same settings rail as workspace and organization settings. */
 export function PersonalSettingsShell({ email, children }: { email: string; children: ReactNode }) {
   return (
-    <div className={SETTINGS_SHELL_CLASS}>
-      <SettingsSidebar
-        label="Personal settings"
-        currentPage="Security"
-        identity={<p className="mt-1 break-words text-sm font-medium text-fg">{email}</p>}
-      >
-        <nav aria-label="Personal settings pages" className={SETTINGS_NAV_CLASS}>
-          <Link to="/settings/security" className={settingsNavItemClass(true)} aria-current="page">
-            <ShieldCheckIcon className="size-4" aria-hidden="true" /> Security
-          </Link>
-        </nav>
-      </SettingsSidebar>
-      <ContentPage width="standard">
-        <SettingsPageHeader
-          title="Security"
-          description="Manage how you sign in and protect your account."
-        />
-        <div className="max-w-3xl py-7">{children}</div>
-      </ContentPage>
-    </div>
+    <SettingsShell
+      label="Personal settings"
+      back={{ label: "Back to OpenGeni", link: <Link to="/" /> }}
+      home={settingsHomeLink()}
+      scope={
+        <div className="min-w-0 px-2.5">
+          <p className="text-sm leading-5 font-semibold text-fg">Personal settings</p>
+          <p className="truncate text-xs leading-4.5 text-fg-subtle">{email}</p>
+        </div>
+      }
+      groups={[
+        {
+          items: [
+            {
+              id: "security",
+              label: "Security",
+              icon: ShieldCheckIcon,
+              link: <Link to="/settings/security" />,
+            },
+          ],
+        },
+      ]}
+      activeId="security"
+      currentPage="Security"
+      // The Security page draws its own heading (it is the focus fallback after a dialog).
+      page={null}
+    >
+      {children}
+    </SettingsShell>
   );
 }

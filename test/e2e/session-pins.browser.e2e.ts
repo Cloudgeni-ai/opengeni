@@ -412,6 +412,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await settings.click();
       await page.getByRole("heading", { name: "General", exact: true }).waitFor();
       expect(managementRequests.length).toBeGreaterThan(0);
+      // Settings swap the rail; its "Back to sessions" link restores the main rail.
       await page.getByRole("link", { name: "Back to sessions", exact: true }).click();
       await page.getByRole("link", { name: "Settings", exact: true }).waitFor();
       expect(errors).toEqual([]);

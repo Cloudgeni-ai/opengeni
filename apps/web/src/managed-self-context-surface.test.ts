@@ -6,8 +6,11 @@ const switcherSource = await Bun.file(
 ).text();
 const settingsSource = await Bun.file(`${import.meta.dir}/routes/workspace-settings.tsx`).text();
 const organizationSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();
-const organizationAdminSource = await Bun.file(
-  `${import.meta.dir}/components/organization-admin.tsx`,
+const organizationShellSource = await Bun.file(
+  `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
+).text();
+const peoplePageSource = await Bun.file(
+  `${import.meta.dir}/components/organization/people-page.tsx`,
 ).text();
 
 describe("managed self-context surfaces", () => {
@@ -51,19 +54,23 @@ describe("managed self-context surfaces", () => {
     expect(settingsSource).toContain("personal ? (");
     expect(settingsSource).toContain("administrators and other members do not gain access");
     expect(settingsSource).toContain('import("./workspace-members-section")');
-    expect(settingsSource).toContain("<LazyMembersSection workspaceId={workspaceId}");
+    expect(settingsSource).toContain(
+      "<LazyMembersSection\n              workspaceId={workspaceId}",
+    );
   });
 
   test("separates organization administration from Personal content", () => {
-    expect(organizationAdminSource).toContain(
-      "Manage organization roles and shared workspace access. Personal workspaces and private",
+    expect(organizationShellSource).toContain(
+      "`Everyone in ${organizationName}, with one role each and a private Personal workspace.`",
     );
-    expect(organizationAdminSource).toContain("resources are never shared here.");
-    expect(organizationAdminSource).toContain(
-      "Create shared workspaces, then choose which organization members can use each one.",
+    expect(organizationShellSource).toContain(
+      "`Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`",
     );
-    expect(organizationAdminSource).toContain("Personal workspaces stay private.");
-    expect(organizationSource).toContain("<OrganizationPeopleSection");
-    expect(organizationSource).toContain("<OrganizationRetentionSection");
+    expect(peoplePageSource).toContain(
+      "Nobody else can open it, including owners and\n        admins.",
+    );
+    expect(organizationSource).toContain("<OrganizationPeoplePage");
+    // Retention lives on the Security & data page.
+    expect(organizationSource).toContain("<OrganizationSecurityPage");
   });
 });

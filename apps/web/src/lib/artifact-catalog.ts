@@ -43,6 +43,18 @@ export function artifactRoute(kind: ArtifactKind) {
   return "/workspaces/$workspaceId/artifacts/editable/$artifactId" as const;
 }
 
+/** The artifact's own page, as a plain URL (row links, Copy link). */
+export function artifactPath(
+  workspaceId: string,
+  item: { kind: ArtifactKind; id: string },
+  fromSession?: string,
+): string {
+  const base = artifactRoute(item.kind)
+    .replace("$workspaceId", encodeURIComponent(workspaceId))
+    .replace("$artifactId", encodeURIComponent(item.id));
+  return fromSession ? `${base}?fromSession=${encodeURIComponent(fromSession)}` : base;
+}
+
 export function filterArtifactCatalog(
   items: readonly ArtifactCatalogItem[],
   filters: ArtifactCatalogFilters,
@@ -64,20 +76,4 @@ export function filterArtifactCatalog(
             : b.updatedAt.localeCompare(a.updatedAt);
       return order || artifactKey(a).localeCompare(artifactKey(b));
     });
-}
-
-export const ARTIFACT_VIEW_KEY = "opengeni:artifact-library:view:v1";
-export function readArtifactView(): "grid" | "list" {
-  try {
-    return localStorage.getItem(ARTIFACT_VIEW_KEY) === "list" ? "list" : "grid";
-  } catch {
-    return "grid";
-  }
-}
-export function rememberArtifactView(view: "grid" | "list") {
-  try {
-    localStorage.setItem(ARTIFACT_VIEW_KEY, view);
-  } catch {
-    /* Storage may be disabled. */
-  }
 }

@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { inlineHtmlDocument } from "@opengeni/react/artifacts";
 import { useAppearance } from "@/lib/appearance";
 import { Select } from "@/components/ui/select";
@@ -195,9 +196,13 @@ function SiteEmbedContent({
               </option>
             ))}
           </Select>
-          <a className="text-xs underline" href={`/workspaces/${workspaceId}/artifacts/${siteId}`}>
+          <Link
+            className="text-xs underline"
+            to="/workspaces/$workspaceId/artifacts/$artifactId"
+            params={{ workspaceId, artifactId: siteId }}
+          >
             Open Site
-          </a>
+          </Link>
         </>
       }
     />
