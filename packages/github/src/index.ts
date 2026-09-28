@@ -908,6 +908,63 @@ export function createGitHubAppInstallationRepositoryLookup(
 }
 
 /**
+ * The repositories among `repositoryIds` that this App installation can no
+ * longer mint a token for, because the repository was deleted, removed from
+ * the installation, or the installation itself is gone. It asks exactly the
+ * question the sandbox token mint asks: one metadata-read token scoped to the
+ * whole list, and only when GitHub refuses that, one probe per repository to
+ * find which. The probe tokens never leave this function and grant nothing.
+ * Any other failure (timeout, 5xx, rate limit) throws, because it proves
+ * nothing about a single repository.
+ */
+export async function findInaccessibleGitHubAppInstallationRepositories(
+  settings: Settings,
+  input: { installationId: number; repositoryIds: number[] },
+): Promise<number[]> {
+  const missing = githubAppMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
+  const repositoryIds = [...new Set(input.repositoryIds)];
+  if (
+    !Number.isSafeInteger(input.installationId) ||
+    input.installationId <= 0 ||
+    repositoryIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+  ) {
+    throw new GitHubAppApiError("GitHub repository access check requires positive integer ids");
+  }
+  if (repositoryIds.length === 0) return [];
+  const jwt = await createGitHubAppJwt(settings);
+  const probe = async (ids: number[]): Promise<"accessible" | "inaccessible" | "gone"> => {
+    try {
+      await createInstallationToken(jwt, {
+        installationId: input.installationId,
+        repositoryIds: ids,
+        permissions: { metadata: "read" },
+        timeoutMs: githubRepositoryLookupTimeoutMs,
+      });
+      return "accessible";
+    } catch (error) {
+      if (error instanceof GitHubAppApiError) {
+        // 422: at least one repository does not exist or is not accessible to
+        // the installation. 404: the installation itself no longer exists.
+        if (error.status === 422) return "inaccessible";
+        if (error.status === 404) return "gone";
+      }
+      throw error;
+    }
+  };
+  const all = await probe(repositoryIds);
+  if (all === "accessible") return [];
+  if (all === "gone" || repositoryIds.length === 1) return repositoryIds;
+  const outcomes = await Promise.all(
+    repositoryIds.map(async (id) => ({ id, outcome: await probe([id]) })),
+  );
+  if (outcomes.some(({ outcome }) => outcome === "gone")) return repositoryIds;
+  return outcomes.flatMap(({ id, outcome }) => (outcome === "accessible" ? [] : [id]));
+}
+
+/**
  * List one bounded page of branch suggestions with an exact repository-scoped
  * installation token. The token remains local to this server-side helper and
  * is never returned in repository or branch metadata.
