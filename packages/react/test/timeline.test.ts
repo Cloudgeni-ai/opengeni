@@ -1875,6 +1875,18 @@ describe("buildTimeline", () => {
     expect(phase).toMatchObject({ phase: "repository", status: "failed", durationMs: 1_000 });
   });
 
+  test("a skipped optional repository report adds no transcript row", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.completed", {
+        name: "optional-repository-access",
+        repositoryCount: 2,
+        skippedOptionalRepositories: ["repos/github.com/example-org/removed"],
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
   test("file materialization is a distinct settled startup span", () => {
     reset();
     const items = buildTimeline([
