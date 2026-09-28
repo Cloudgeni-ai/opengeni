@@ -151,6 +151,63 @@ test("Lightpanda rejects screenshots before CDP can return placeholder pixels", 
   }
 });
 
+test.each(["Page.enable", "Page.getFrameTree"])(
+  "failed target initialization at %s detaches its session and permits a fresh attachment",
+  async (method) => {
+    const fixture = await captureFixture();
+    try {
+      await fixture.driver.start();
+      fixture.calls.length = 0;
+      fixture.stallNext(method);
+      jest.useFakeTimers();
+      const failed = fixture.driver.observe("target-2").catch((error: unknown) => error);
+      await fixture.waitUntilStalled();
+      jest.advanceTimersByTime(30_000);
+      await settle();
+      expect(await failed).toMatchObject(
+        method === "Page.getFrameTree" ? { code: "timeout", cause: { method } } : { method },
+      );
+      const initialization = fixture.calls.find((call) => call.method === method)!;
+      expect(fixture.calls.filter((call) => call.method === "Target.detachFromTarget")).toEqual([
+        expect.objectContaining({ params: { sessionId: initialization.sessionId } }),
+      ]);
+      expect(
+        fixture.calls.some((call) => ["Target.closeTarget", "Browser.close"].includes(call.method)),
+      ).toBe(false);
+      fixture.replyToStalled();
+      jest.useRealTimers();
+      expect((await fixture.driver.observe("target-2")).target.id).toBe("target-2");
+      expect(fixture.calls.filter((call) => call.method === "Target.attachToTarget")).toHaveLength(
+        2,
+      );
+    } finally {
+      jest.useRealTimers();
+      await fixture.driver.close();
+    }
+  },
+);
+
+test("a stalled detach preserves the initialization failure and bounds cleanup", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.stallNext("Page.enable");
+    jest.useFakeTimers();
+    const failed = fixture.driver.observe("target-2").catch((error: unknown) => error);
+    await fixture.waitUntilStalled();
+    fixture.stallNext("Target.detachFromTarget");
+    jest.advanceTimersByTime(30_000);
+    await fixture.waitUntilStalled();
+    jest.advanceTimersByTime(500);
+    await settle();
+    expect(await failed).toMatchObject({ method: "Page.enable" });
+    expect(await fixture.driver.isAvailable()).toBe(true);
+  } finally {
+    jest.useRealTimers();
+    await fixture.driver.close();
+  }
+});
+
 test("browser liveness does not depend on a renderer answering page commands", async () => {
   const fixture = await captureFixture();
   try {
