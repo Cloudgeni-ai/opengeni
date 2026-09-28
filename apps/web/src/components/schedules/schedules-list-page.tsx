@@ -46,6 +46,11 @@ import {
   useScheduleNavigation,
 } from "./schedule-parts";
 import { useScheduleActions } from "./use-schedule-actions";
+import {
+  CreateWithOpenGeniButton,
+  useCanCreateScheduleWithAgent,
+  useCreateWithOpenGeni,
+} from "./create-with-opengeni";
 
 /**
  * Fan-out bound for the per-schedule last-run probe. The list is served with a
@@ -197,6 +202,8 @@ export function SchedulesListPage({
   const columns = shared ? COLUMNS : COLUMNS.filter((column) => column.id !== "owner");
   const empty = viewState === "empty";
   const canCreate = access.canManage;
+  const canAsk = useCanCreateScheduleWithAgent(workspaceId);
+  const ask = useCreateWithOpenGeni(workspaceId);
 
   return (
     <>
@@ -206,10 +213,13 @@ export function SchedulesListPage({
         description="Recurring agent work in this workspace."
         actions={
           canCreate && !empty && viewState !== "loading" ? (
-            <Button type="button" onClick={() => go.create()} className="pointer-coarse:h-11">
-              <PlusIcon aria-hidden="true" />
-              New schedule
-            </Button>
+            <>
+              {canAsk ? <CreateWithOpenGeniButton onClick={ask.open} /> : null}
+              <Button type="button" onClick={() => go.create()} className="pointer-coarse:h-11">
+                <PlusIcon aria-hidden="true" />
+                New schedule
+              </Button>
+            </>
           ) : undefined
         }
       />
@@ -262,6 +272,7 @@ export function SchedulesListPage({
             filtered={Boolean(targetSessionId)}
             now={clock}
             onNew={() => go.create()}
+            onAsk={canAsk ? ask.open : undefined}
             onTemplate={(template) => go.create({ template })}
           />
         ) : (
@@ -330,6 +341,7 @@ export function SchedulesListPage({
         )}
       </div>
       {actions.dialogs}
+      {ask.dialog}
     </>
   );
 }
@@ -339,12 +351,15 @@ function SchedulesEmpty({
   filtered,
   now,
   onNew,
+  onAsk,
   onTemplate,
 }: {
   canCreate: boolean;
   filtered: boolean;
   now: Date;
   onNew: () => void;
+  /** "Create with OpenGeni"; absent without the permissions to start it. */
+  onAsk?: () => void;
   onTemplate: (templateId: string) => void;
 }) {
   if (filtered) {
@@ -368,10 +383,13 @@ function SchedulesEmpty({
       }
       action={
         canCreate ? (
-          <Button type="button" onClick={onNew} className="pointer-coarse:h-11">
-            <PlusIcon aria-hidden="true" />
-            New schedule
-          </Button>
+          <>
+            {onAsk ? <CreateWithOpenGeniButton onClick={onAsk} /> : null}
+            <Button type="button" onClick={onNew} className="pointer-coarse:h-11">
+              <PlusIcon aria-hidden="true" />
+              New schedule
+            </Button>
+          </>
         ) : undefined
       }
       className="pt-12"

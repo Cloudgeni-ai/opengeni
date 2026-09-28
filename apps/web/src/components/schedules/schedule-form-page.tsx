@@ -20,6 +20,7 @@ import { Disclosure } from "@/components/ui/disclosure";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, FieldStack, TextInput, useField } from "@/components/ui/field";
 import { FormPage } from "@/components/ui/form-dialog";
+import { HelpLink } from "@/components/ui/inline-help";
 import { Notice } from "@/components/ui/notice";
 import { SegmentedControl, type SegmentedControlProps } from "@/components/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
@@ -38,6 +39,7 @@ import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { cn } from "@/lib/utils";
 import type { ScheduledTask, Session } from "@/types";
 
+import { useCanCreateScheduleWithAgent, useCreateWithOpenGeni } from "./create-with-opengeni";
 import { ComposerField } from "./schedule-composer";
 import {
   NAME_MAX_LENGTH,
@@ -261,6 +263,8 @@ function AgentScheduleForm({
   const access = useScheduleAccess(workspaceId);
   const go = useScheduleNavigation(workspaceId);
   const editing = mode.kind === "edit";
+  const canAsk = useCanCreateScheduleWithAgent(workspaceId);
+  const ask = useCreateWithOpenGeni(workspaceId);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
   const canAttachOpenGeniTool = context.clientConfig.mcpServers.some(
@@ -653,6 +657,10 @@ function AgentScheduleForm({
     return true;
   };
 
+  // A fresh New schedule offers the chat route; a duplicate or a "Make
+  // recurring" launch already has its instructions.
+  const offerAgent = mode.kind === "create" && !mode.from && !sourceSessionId && canAsk;
+
   const noAccess = editing
     ? Boolean(task && !(ownsSchedule(task, access.viewerSubjectId) && access.canManage))
     : !access.canManage;
@@ -698,264 +706,275 @@ function AgentScheduleForm({
   ];
 
   return (
-    <FormPage
-      title={editing ? "Edit schedule" : "New schedule"}
-      description={editing ? task?.name : undefined}
-      submitLabel={editing ? "Save changes" : "Create schedule"}
-      pendingLabel={editing ? "Saving…" : "Creating…"}
-      onSubmit={onSubmit}
-      onCancel={back.onClick}
-      back={back}
-      submitDisabled={submitBlocked}
-      disabledReason={blockedReason}
-      footerStart="Runs with your connected accounts."
-    >
-      <FieldStack>
-        {cantRunHere ? (
-          <Notice
-            tone="waiting"
-            title={
-              editing
-                ? "This schedule can't run here yet"
-                : "Schedules need a connected machine here"
-            }
-            actionLayout="responsive"
-            action={
-              <Button asChild variant="outline" size="sm" className="pointer-coarse:h-11">
-                <Link to="/workspaces/$workspaceId/machines" params={{ workspaceId }}>
-                  Connect a machine
-                </Link>
-              </Button>
-            }
+    <>
+      <FormPage
+        title={editing ? "Edit schedule" : "New schedule"}
+        description={
+          editing ? (
+            task?.name
+          ) : offerAgent ? (
+            <>
+              Rather describe it? <HelpLink onClick={ask.open}>Create with OpenGeni</HelpLink>
+            </>
+          ) : undefined
+        }
+        submitLabel={editing ? "Save changes" : "Create schedule"}
+        pendingLabel={editing ? "Saving…" : "Creating…"}
+        onSubmit={onSubmit}
+        onCancel={back.onClick}
+        back={back}
+        submitDisabled={submitBlocked}
+        disabledReason={blockedReason}
+        footerStart="Runs with your connected accounts."
+      >
+        <FieldStack>
+          {cantRunHere ? (
+            <Notice
+              tone="waiting"
+              title={
+                editing
+                  ? "This schedule can't run here yet"
+                  : "Schedules need a connected machine here"
+              }
+              actionLayout="responsive"
+              action={
+                <Button asChild variant="outline" size="sm" className="pointer-coarse:h-11">
+                  <Link to="/workspaces/$workspaceId/machines" params={{ workspaceId }}>
+                    Connect a machine
+                  </Link>
+                </Button>
+              }
+            >
+              This OpenGeni server doesn't run managed sandboxes, and no machine that can run is
+              connected to this workspace yet.
+            </Notice>
+          ) : null}
+          {sourceSessionId ? (
+            <Notice>
+              Each run continues the chat you came from. Check the instructions and when it runs;
+              nothing repeats until you create the schedule.
+            </Notice>
+          ) : null}
+          <Field
+            label="What should the agent do?"
+            error={errors.prompt}
+            hint="Write it like a message to the agent. Every run starts from these instructions."
           >
-            This OpenGeni server doesn't run managed sandboxes, and no machine that can run is
-            connected to this workspace yet.
-          </Notice>
-        ) : null}
-        {sourceSessionId ? (
-          <Notice>
-            Each run continues the chat you came from. Check the instructions and when it runs;
-            nothing repeats until you create the schedule.
-          </Notice>
-        ) : null}
-        <Field
-          label="What should the agent do?"
-          error={errors.prompt}
-          hint="Write it like a message to the agent. Every run starts from these instructions."
-        >
-          <ComposerField
-            workspaceId={workspaceId}
-            draft={draft}
-            update={update}
-            modelRows={modelCatalog.rows}
-            defaultModelSelection={modelCatalog.defaultSelection}
-            modelsLoading={modelCatalog.loading}
-            modelsError={modelCatalog.error}
-            canAttachOpenGeniTool={canAttachOpenGeniTool}
-            existingChat={draft.runMode === "existing_session"}
-          />
-        </Field>
-        {connectionAccounts.accountGroups.length > 0 || connectionAccounts.error ? (
-          <div className="-mt-3 flex min-w-0 flex-col gap-2">
-            <ConnectionAccountPicker
-              groups={connectionAccounts.accountGroups}
-              choices={connectionAccounts.accountChoices}
-              onChoose={connectionAccounts.selectAccount}
+            <ComposerField
+              workspaceId={workspaceId}
+              draft={draft}
+              update={update}
+              modelRows={modelCatalog.rows}
+              defaultModelSelection={modelCatalog.defaultSelection}
+              modelsLoading={modelCatalog.loading}
+              modelsError={modelCatalog.error}
+              canAttachOpenGeniTool={canAttachOpenGeniTool}
+              existingChat={draft.runMode === "existing_session"}
             />
-            {connectionAccounts.error ? (
-              <Notice
-                tone="failed"
-                action={
-                  connectionAccounts.accessDenied ? undefined : (
+          </Field>
+          {connectionAccounts.accountGroups.length > 0 || connectionAccounts.error ? (
+            <div className="-mt-3 flex min-w-0 flex-col gap-2">
+              <ConnectionAccountPicker
+                groups={connectionAccounts.accountGroups}
+                choices={connectionAccounts.accountChoices}
+                onChoose={connectionAccounts.selectAccount}
+              />
+              {connectionAccounts.error ? (
+                <Notice
+                  tone="failed"
+                  action={
+                    connectionAccounts.accessDenied ? undefined : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void connectionAccounts.refresh()}
+                      >
+                        Try again
+                      </Button>
+                    )
+                  }
+                >
+                  {connectionAccounts.error}
+                </Notice>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="min-w-0">
+            <p id={whenLabelId} className="mb-2 text-sm leading-5 font-medium text-fg">
+              When
+            </p>
+            {draft.cadence ? (
+              <CadencePicker
+                aria-labelledby={whenLabelId}
+                value={draft.cadence}
+                onChange={(cadence) => update({ cadence })}
+                frequencies={SCHEDULE_FREQUENCIES}
+                now={now}
+                viewerTimeZone={viewerTimeZone()}
+                timeZones={suggestedZones(draft.cadence.timeZone)}
+              />
+            ) : (
+              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+                <p className="m-0 text-sm leading-5 text-fg-muted">
+                  Runs only when someone presses Run now.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => update({ cadence: defaultCadence() })}
+                >
+                  Add a schedule
+                </Button>
+              </div>
+            )}
+          </div>
+          <Field
+            label="Name"
+            optional
+            error={errors.name}
+            hint="Shown in the list and as the title of each run's chat."
+          >
+            <TextInput
+              value={draft.name}
+              onChange={(event) => update({ name: event.target.value })}
+              placeholder={derivedName || "Named after the instructions"}
+              suppressAutofill
+            />
+          </Field>
+          <Disclosure
+            variant="row"
+            title="Advanced"
+            summary={advancedSummary}
+            open={advancedOpen}
+            onOpenChange={setAdvancedOpen}
+          >
+            <FieldStack>
+              <Field label="Each run" hint={EACH_RUN_HINT[eachRun]}>
+                <FieldSegmented<EachRun>
+                  value={eachRun}
+                  onValueChange={(runMode) => update({ runMode })}
+                  options={[
+                    { value: "new_session_per_run", label: "New chat" },
+                    { value: "reusable_session", label: "One ongoing chat" },
+                    ...(initial.runMode === "existing_session" || eachRun === "existing_session"
+                      ? [{ value: "existing_session" as const, label: "An existing chat" }]
+                      : []),
+                  ]}
+                />
+              </Field>
+              {eachRun === "existing_session" ? (
+                <Field label="Chat" error={errors.target}>
+                  <SelectMenu
+                    variant={sessionOptions.length > 8 ? "combobox" : "menu"}
+                    options={sessionOptions}
+                    value={draft.targetSessionId || null}
+                    onValueChange={(targetSessionId) => update({ targetSessionId })}
+                    placeholder="Pick a chat"
+                    searchPlaceholder="Search chats"
+                    disabled={!access.canTargetSessions}
+                    disabledReason="You need permission to open chats in this workspace."
+                    invalid={Boolean(errors.target)}
+                    className="max-w-[420px]"
+                  />
+                </Field>
+              ) : null}
+              {eachRun !== "new_session_per_run" ? (
+                <Field
+                  label="If the previous run is still working"
+                  hint={IF_STILL_RUNNING_HINT[ifStillRunning]}
+                >
+                  <FieldSegmented<IfStillRunning>
+                    value={ifStillRunning}
+                    onValueChange={(value) =>
+                      update({ overlapPolicy: value === "skip" ? "skip" : "allow_concurrent" })
+                    }
+                    options={[
+                      { value: "queue", label: "Queue this run" },
+                      { value: "skip", label: "Skip this run" },
+                    ]}
+                  />
+                </Field>
+              ) : null}
+              {eachRun !== "existing_session" ? (
+                <Field label="Where it runs" error={errors.machine}>
+                  <SelectMenu
+                    options={whereOptions}
+                    value={whereValue}
+                    onValueChange={(value) =>
+                      value === "managed"
+                        ? update({ executionTarget: "managed" })
+                        : update({ executionTarget: "machine", machineSandboxId: value })
+                    }
+                    placeholder={fleet.loading ? "Loading machines…" : "Pick where it runs"}
+                    loading={fleet.loading && scheduledMachines.length === 0 && machineOnly}
+                    invalid={Boolean(errors.machine)}
+                    className="max-w-[360px]"
+                  />
+                </Field>
+              ) : null}
+              {eachRun !== "existing_session" &&
+              draft.executionTarget === "machine" &&
+              draft.machineSandboxId ? (
+                <Field
+                  label="Folder"
+                  optional
+                  hint="Absolute, or relative to the machine's workspace root. Empty uses the root."
+                >
+                  <TextInput
+                    value={draft.workingDir}
+                    onChange={(event) => update({ workingDir: event.target.value })}
+                    placeholder="/home/me/repos/project"
+                    suppressAutofill
+                  />
+                </Field>
+              ) : null}
+              {fleet.error && eachRun !== "existing_session" ? (
+                <p className="-mt-3 text-xs leading-4.5 text-danger">
+                  Connected machines couldn't load. Refresh the page and try again.
+                </p>
+              ) : null}
+              {learningLoading ? (
+                <p role="status" className="m-0 text-sm text-fg-muted">
+                  Loading this schedule's agent learning settings…
+                </p>
+              ) : learningError ? (
+                <ErrorMessage
+                  variant="inline"
+                  title="Agent learning settings couldn't load. You can still save other changes."
+                  details={[{ label: "Error", value: learningError }]}
+                  action={
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => void connectionAccounts.refresh()}
+                      onClick={() => setLearningRetry((value) => value + 1)}
                     >
                       Try again
                     </Button>
-                  )
-                }
-              >
-                {connectionAccounts.error}
-              </Notice>
-            ) : null}
-          </div>
-        ) : null}
-        <div className="min-w-0">
-          <p id={whenLabelId} className="mb-2 text-sm leading-5 font-medium text-fg">
-            When
-          </p>
-          {draft.cadence ? (
-            <CadencePicker
-              aria-labelledby={whenLabelId}
-              value={draft.cadence}
-              onChange={(cadence) => update({ cadence })}
-              frequencies={SCHEDULE_FREQUENCIES}
-              now={now}
-              viewerTimeZone={viewerTimeZone()}
-              timeZones={suggestedZones(draft.cadence.timeZone)}
-            />
-          ) : (
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-              <p className="m-0 text-sm leading-5 text-fg-muted">
-                Runs only when someone presses Run now.
-              </p>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => update({ cadence: defaultCadence() })}
-              >
-                Add a schedule
-              </Button>
-            </div>
-          )}
-        </div>
-        <Field
-          label="Name"
-          optional
-          error={errors.name}
-          hint="Shown in the list and as the title of each run's chat."
-        >
-          <TextInput
-            value={draft.name}
-            onChange={(event) => update({ name: event.target.value })}
-            placeholder={derivedName || "Named after the instructions"}
-            suppressAutofill
-          />
-        </Field>
-        <Disclosure
-          variant="row"
-          title="Advanced"
-          summary={advancedSummary}
-          open={advancedOpen}
-          onOpenChange={setAdvancedOpen}
-        >
-          <FieldStack>
-            <Field label="Each run" hint={EACH_RUN_HINT[eachRun]}>
-              <FieldSegmented<EachRun>
-                value={eachRun}
-                onValueChange={(runMode) => update({ runMode })}
-                options={[
-                  { value: "new_session_per_run", label: "New chat" },
-                  { value: "reusable_session", label: "One ongoing chat" },
-                  ...(initial.runMode === "existing_session" || eachRun === "existing_session"
-                    ? [{ value: "existing_session" as const, label: "An existing chat" }]
-                    : []),
-                ]}
-              />
-            </Field>
-            {eachRun === "existing_session" ? (
-              <Field label="Chat" error={errors.target}>
-                <SelectMenu
-                  variant={sessionOptions.length > 8 ? "combobox" : "menu"}
-                  options={sessionOptions}
-                  value={draft.targetSessionId || null}
-                  onValueChange={(targetSessionId) => update({ targetSessionId })}
-                  placeholder="Pick a chat"
-                  searchPlaceholder="Search chats"
-                  disabled={!access.canTargetSessions}
-                  disabledReason="You need permission to open chats in this workspace."
-                  invalid={Boolean(errors.target)}
-                  className="max-w-[420px]"
-                />
-              </Field>
-            ) : null}
-            {eachRun !== "new_session_per_run" ? (
-              <Field
-                label="If the previous run is still working"
-                hint={IF_STILL_RUNNING_HINT[ifStillRunning]}
-              >
-                <FieldSegmented<IfStillRunning>
-                  value={ifStillRunning}
-                  onValueChange={(value) =>
-                    update({ overlapPolicy: value === "skip" ? "skip" : "allow_concurrent" })
                   }
-                  options={[
-                    { value: "queue", label: "Queue this run" },
-                    { value: "skip", label: "Skip this run" },
-                  ]}
                 />
-              </Field>
-            ) : null}
-            {eachRun !== "existing_session" ? (
-              <Field label="Where it runs" error={errors.machine}>
-                <SelectMenu
-                  options={whereOptions}
-                  value={whereValue}
-                  onValueChange={(value) =>
-                    value === "managed"
-                      ? update({ executionTarget: "managed" })
-                      : update({ executionTarget: "machine", machineSandboxId: value })
+              ) : (
+                <AgentLearningDraftEditor
+                  workspaceId={workspaceId}
+                  scope={learningScope}
+                  value={draft.agentLearning ?? {}}
+                  onChange={(value) =>
+                    setDraft((previous) => ({
+                      ...previous,
+                      agentLearning: value,
+                      agentLearningDirty: true,
+                    }))
                   }
-                  placeholder={fleet.loading ? "Loading machines…" : "Pick where it runs"}
-                  loading={fleet.loading && scheduledMachines.length === 0 && machineOnly}
-                  invalid={Boolean(errors.machine)}
-                  className="max-w-[360px]"
                 />
-              </Field>
-            ) : null}
-            {eachRun !== "existing_session" &&
-            draft.executionTarget === "machine" &&
-            draft.machineSandboxId ? (
-              <Field
-                label="Folder"
-                optional
-                hint="Absolute, or relative to the machine's workspace root. Empty uses the root."
-              >
-                <TextInput
-                  value={draft.workingDir}
-                  onChange={(event) => update({ workingDir: event.target.value })}
-                  placeholder="/home/me/repos/project"
-                  suppressAutofill
-                />
-              </Field>
-            ) : null}
-            {fleet.error && eachRun !== "existing_session" ? (
-              <p className="-mt-3 text-xs leading-4.5 text-danger">
-                Connected machines couldn't load. Refresh the page and try again.
-              </p>
-            ) : null}
-            {learningLoading ? (
-              <p role="status" className="m-0 text-sm text-fg-muted">
-                Loading this schedule's agent learning settings…
-              </p>
-            ) : learningError ? (
-              <ErrorMessage
-                variant="inline"
-                title="Agent learning settings couldn't load. You can still save other changes."
-                details={[{ label: "Error", value: learningError }]}
-                action={
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setLearningRetry((value) => value + 1)}
-                  >
-                    Try again
-                  </Button>
-                }
-              />
-            ) : (
-              <AgentLearningDraftEditor
-                workspaceId={workspaceId}
-                scope={learningScope}
-                value={draft.agentLearning ?? {}}
-                onChange={(value) =>
-                  setDraft((previous) => ({
-                    ...previous,
-                    agentLearning: value,
-                    agentLearningDirty: true,
-                  }))
-                }
-              />
-            )}
-          </FieldStack>
-        </Disclosure>
-      </FieldStack>
-    </FormPage>
+              )}
+            </FieldStack>
+          </Disclosure>
+        </FieldStack>
+      </FormPage>
+      {ask.dialog}
+    </>
   );
 }
 
