@@ -87,13 +87,16 @@ test("blocked admission is a durable terminal occurrence, not accepted execution
   expect(concurrent.every((receipt) => receipt.id === first.id)).toBe(true);
   // Even the owner connection cannot promote or rewrite diagnostic evidence.
   await expect(
-    shared.admin`update scheduled_task_runs set status = 'queued' where id = ${first.id}`,
+    (async () =>
+      await shared.admin`update scheduled_task_runs set status = 'queued' where id = ${first.id}`)(),
   ).rejects.toThrow();
   await expect(
-    shared.admin`update scheduled_task_runs set admission_diagnostic = null where id = ${first.id}`,
+    (async () =>
+      await shared.admin`update scheduled_task_runs set admission_diagnostic = null where id = ${first.id}`)(),
   ).rejects.toThrow();
   await expect(
-    shared.admin`update scheduled_task_runs set accepted_execution_snapshot = '{}'::jsonb where id = ${first.id}`,
+    (async () =>
+      await shared.admin`update scheduled_task_runs set accepted_execution_snapshot = '{}'::jsonb where id = ${first.id}`)(),
   ).rejects.toThrow();
   await expect(
     db.recordScheduledTaskAdmissionFailure(client.db, {
