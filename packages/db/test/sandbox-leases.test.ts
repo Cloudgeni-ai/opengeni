@@ -5555,7 +5555,8 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(admitted.lease).toMatchObject({
       instanceId: "sb-retained",
       image: "img-A",
-      leaseEpoch: 0,
+      // Warming-to-warm commits epoch 1; retained admission must not advance it.
+      leaseEpoch: 1,
     });
     // New work still cannot silently share a different runtime.
     await expect(
