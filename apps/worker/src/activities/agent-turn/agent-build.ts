@@ -14,6 +14,7 @@ import {
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
+  skillCatalogEntryIds,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -582,6 +583,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     catalog: formatSkillCatalog(deps.skillCatalog),
   });
+  eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
       buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),

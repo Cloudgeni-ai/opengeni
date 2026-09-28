@@ -71,7 +71,11 @@ import {
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
-import { recordToolPreparationPhase, recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  recordSkillRead,
+  recordToolPreparationPhase,
+  recordTurnStartupPhase,
+} from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
@@ -681,6 +685,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         errorCode: "skill_read_history_lookup_failed",
         origin: "worker",
       }),
+    skillReadTelemetry: {
+      // Set once agent build freezes this turn's model-visible Skill index.
+      indexedSkillIds: () => eventing.modelVisibleSkillIds,
+      observe: (observation) => recordSkillRead(observability, observation),
+    },
     filesystem: async () => {
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();

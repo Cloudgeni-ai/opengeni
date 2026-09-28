@@ -141,6 +141,8 @@ export type EventingState = {
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
+  /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
+  modelVisibleSkillIds: ReadonlySet<string> | null;
 };
 
 /** Rig telemetry (M3): set once the session loads; empty string for a rig-less
@@ -278,6 +280,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
       companyBrainContextContributions: null,
+      modelVisibleSkillIds: null,
     },
     workspaceRefs: {
       variableSetId: "",
