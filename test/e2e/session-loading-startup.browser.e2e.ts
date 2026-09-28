@@ -210,6 +210,7 @@ function fixtures() {
     denyAccess: false,
     failHistory: false,
     emptyHistory: false,
+    paginatedHistory: false,
     failStream: false,
     deferDetail: false,
     gates: {
@@ -349,6 +350,20 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
     if (path.endsWith("/events")) {
       await state.gates.history.wait();
       if (state.failHistory) return json({ message: "Initial history unavailable" }, 503);
+      if (state.paginatedHistory) {
+        const params = new URL(request.url()).searchParams;
+        const limit = Number(params.get("limit") ?? 200);
+        const before = Number(params.get("before") ?? Number.MAX_SAFE_INTEGER);
+        const after = Number(params.get("after") ?? 0);
+        const matching = state.events.filter(
+          (event) => Number(event.sequence) > after && Number(event.sequence) < before,
+        );
+        return json(
+          params.has("before") || params.get("direction") === "before"
+            ? matching.slice(-limit)
+            : matching.slice(0, limit),
+        );
+      }
       return json(state.emptyHistory ? [] : state.events);
     }
     if (path.endsWith("/composer-draft/submit")) {
@@ -717,6 +732,92 @@ for (const width of [1280, 390]) {
         `${width}px: ${JSON.stringify(errors)}\n${await page.locator("body").innerText()}`,
         { cause: error },
       );
+    } finally {
+      for (const deferred of Object.values(state.gates)) deferred.release();
+      await context.close();
+    }
+  }, 90_000);
+
+  test(`production latest-tail reload never resurrects genesis at ${width}px`, async () => {
+    const context = await browser.newContext({
+      viewport: { width, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    const state = fixtures();
+    state.paginatedHistory = true;
+    state.session.initialMessage = "Original first question must not reappear.";
+    state.session.lastSequence = 5000;
+    state.events = Array.from({ length: 5000 }, (_, index) => ({
+      id: crypto.randomUUID(),
+      workspaceId,
+      sessionId,
+      turnId: crypto.randomUUID(),
+      sequence: index + 1,
+      type: "user.message",
+      payload: {
+        text: index === 0 ? state.session.initialMessage : `History question ${index + 1}`,
+        resources: [],
+      },
+      occurredAt: state.session.createdAt,
+    }));
+    for (const name of ["config", "access", "detail", "history"] as const)
+      state.gates[name].release();
+    await installApi(page, state);
+    const capture = (name: string) => page.screenshot({ path: `${output}/${width}-${name}.png` });
+    const transcript = page.locator('[data-testid="timeline-user"]');
+    const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+    const assertRetained = async () => {
+      assert.equal(
+        await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
+        0,
+      );
+      assert.equal(await input.getAttribute("data-reload-probe"), "same-composer");
+      assert(await input.isVisible());
+    };
+    try {
+      await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      await transcript.getByText("History question 5000", { exact: true }).waitFor();
+      await input.evaluate((node) => node.setAttribute("data-reload-probe", "same-composer"));
+      const scroller = page.locator("[data-og-timeline-scroller]");
+      await scroller.hover();
+      await page.mouse.wheel(0, -500);
+      await scroller.evaluate((node) => {
+        node.scrollTop = 0;
+      });
+      // Use the production keyboard action; the adjacent question-navigation
+      // overlay can cover this top-gutter pointer target while scrolling.
+      const oldest = page.getByRole("button", { name: "Jump to start", exact: true });
+      await oldest.focus();
+      await oldest.press("Enter");
+      await page.getByRole("button", { name: "Jump to latest", exact: true }).waitFor();
+      state.gates.history = gate();
+      await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
+      await state.gates.history.entered;
+      await page.locator("[data-page-loading]").waitFor();
+      await assertRetained();
+      await capture("latest-pending");
+      state.failHistory = true;
+      state.gates.history.release();
+      await page.getByRole("button", { name: "Retry conversation", exact: true }).waitFor();
+      await assertRetained();
+      await capture("latest-failed");
+      state.failHistory = false;
+      state.gates.history = gate();
+      await page.getByRole("button", { name: "Retry conversation", exact: true }).click();
+      await state.gates.history.entered;
+      await page.locator("[data-page-loading]").waitFor();
+      await assertRetained();
+      await capture("latest-retry");
+      state.gates.history.release();
+      await transcript.getByText("History question 5000", { exact: true }).waitFor();
+      await assertRetained();
+      await capture("latest-ready");
+    } catch (error) {
+      await capture("latest-failure");
+      throw new Error(`${width}px latest reload: ${await page.locator("body").innerText()}`, {
+        cause: error,
+      });
     } finally {
       for (const deferred of Object.values(state.gates)) deferred.release();
       await context.close();

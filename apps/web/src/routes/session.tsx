@@ -418,9 +418,10 @@ export function SessionRoute({
         : events,
     [events, viewClearedAfter],
   );
-  const opened = useSessionOpening(
+  const { opened, hasObservedHistory } = useSessionOpening(
     `${workspaceId}:${sessionId}`,
     Boolean(session && (initialHistoryReady || creationHandoff)),
+    events.length > 0,
   );
   const timeline = useMemo(() => {
     if (!session) {
@@ -430,8 +431,13 @@ export function SessionRoute({
     // projectSessionTimeline's initial-message fallback — on a large session
     // that fallback painted the GENESIS message at the top for the whole fetch
     // (user-reported). The fallback is only for genuinely-empty NEW sessions,
-    // i.e. after the load settles with no events.
-    if (!opened && visibleEvents.length === 0 && !creationHandoff) {
+    // i.e. after the load settles with no events. Once real history was seen,
+    // clearing the window for a reload (including failure) is never genesis.
+    if (
+      (!opened || initialLoading || hasObservedHistory) &&
+      visibleEvents.length === 0 &&
+      !creationHandoff
+    ) {
       return [];
     }
     const projected = projectSessionTimeline(
@@ -443,7 +449,15 @@ export function SessionRoute({
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
-  }, [creationHandoff, session, visibleEvents, viewClearedAfter, opened]);
+  }, [
+    creationHandoff,
+    session,
+    visibleEvents,
+    viewClearedAfter,
+    opened,
+    initialLoading,
+    hasObservedHistory,
+  ]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
@@ -1088,6 +1102,7 @@ export function SessionRoute({
       searchTarget={searchTarget}
       onJumpToSequence={jumpToSequence}
       initialLoading={initialLoading}
+      historyReloadFailed={hasObservedHistory && events.length === 0 && !!streamError}
       launch={launch}
       realtimeAutostartModel={realtimeAutostartModel}
       onRealtimeAutostartConsumed={consumeRealtimeAutostart}
@@ -1497,6 +1512,7 @@ function SessionChatPane(props: {
   searchTarget: SessionSearchRoute;
   onJumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   initialLoading: boolean;
+  historyReloadFailed: boolean;
   launch?: ComposerLaunchSearch;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed: () => void;
@@ -2692,6 +2708,16 @@ function SessionChatPane(props: {
                     <div className="flex min-h-[24rem]">
                       <LoadingPanel />
                     </div>
+                  ) : props.historyReloadFailed ? (
+                    <ProblemPanel
+                      title="Conversation couldn't be loaded"
+                      description="Your saved messages are unchanged. Try loading them again."
+                      action={
+                        <Button variant="secondary" onClick={() => void props.onJumpToLatest()}>
+                          Retry conversation
+                        </Button>
+                      }
+                    />
                   ) : (
                     <EmptyState
                       className="min-h-[24rem]"

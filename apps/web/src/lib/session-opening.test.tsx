@@ -13,7 +13,7 @@ beforeAll(() => {
 afterAll(() => GlobalRegistrator.unregister());
 
 function Probe({ id, ready }: { id: string; ready: boolean }) {
-  return <span>{useSessionOpening(id, ready) ? "opened" : "pending"}</span>;
+  return <span>{useSessionOpening(id, ready).opened ? "opened" : "pending"}</span>;
 }
 
 test("failed initialization/retry stays pending, later reads preserve the open composer, and A-B-A is a new visit", async () => {
@@ -39,6 +39,36 @@ test("failed initialization/retry stays pending, later reads preserve the open c
     expect(container.textContent).toBe("opened");
     await render("other-workspace:A", false);
     expect(container.textContent).toBe("pending");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("observed history outlives an empty reload, independently of known-empty initialization", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  function HistoryProbe({ id, hasEvents }: { id: string; hasEvents: boolean }) {
+    const value = useSessionOpening(id, true, hasEvents);
+    return (
+      <span>
+        {value.opened ? (value.hasObservedHistory ? "history" : "known-empty") : "pending"}
+      </span>
+    );
+  }
+  const render = async (id: string, hasEvents: boolean) => {
+    await act(async () => root.render(<HistoryProbe id={id} hasEvents={hasEvents} />));
+  };
+  try {
+    await render("A", false);
+    expect(container.textContent).toBe("known-empty");
+    await render("A", true);
+    expect(container.textContent).toBe("history");
+    await render("A", false); // pending, rejected, or retried latest-tail read
+    expect(container.textContent).toBe("history");
+    await render("B", false);
+    expect(container.textContent).toBe("known-empty");
+    await render("A", false);
+    expect(container.textContent).toBe("known-empty");
   } finally {
     await act(async () => root.unmount());
   }
