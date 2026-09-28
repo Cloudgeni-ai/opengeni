@@ -1430,9 +1430,7 @@ use `@opengeni/sdk/document-authority`. Root/`core` retain compatibility.
 Bundle-boundary/browser-surface tests keep non-web methods in optional entries,
 outside direct-session bundles.
 
-Deployment source changes offer a user-controlled reload through
-`apps/web/src/lib/deployment-update.ts`; they must not interrupt browser handoffs,
-drafts or uploads. API-contract incompatibility remains a separate safety gate.
+Updates offer reload; API-contract incompatibility retains its guard.
 
 Web loads structured questions, command controls and file attachments on mount;
 message text and repository chips stay eager. Local Suspense fallbacks preserve

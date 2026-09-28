@@ -1115,7 +1115,11 @@ export async function fetchClientConfig(signal?: AbortSignal): Promise<ClientCon
   const config = await request<ClientConfig>("/v1/config/client", { signal });
   signal?.throwIfAborted();
   reloadIfStaleApiContract(config);
-  notifyDeploymentUpdate(config.deploymentRevision, bundleDeploymentRevision);
+  void notifyDeploymentUpdate(config.deploymentRevision, bundleDeploymentRevision).catch(
+    (error) => {
+      console.warn("Unable to show deployment update notice", error);
+    },
+  );
   configureClientAuth(config.auth);
   return config;
 }
