@@ -17,6 +17,9 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance).toContain("`capability_catalog_search`");
     expect(guidance).toContain("`capability_authorization_request`");
     expect(guidance).toContain("Use available integration tools directly");
+    expect(guidance).toContain(
+      "If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.",
+    );
     expect(guidance).toContain("`setup.nextAction`");
     expect(guidance).toContain("does not need integration-management permission");
     expect(guidance).toContain("authenticated human must authorize");
@@ -208,6 +211,12 @@ describe("provider-neutral operational instructions", () => {
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Do not delegate a scope that you will also perform yourself.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "A session cannot gain a Variable Set while it works",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "run that step in a child created with those `variableSetIds` instead of asking the user to attach it.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain('waitFor: "completion"');
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
