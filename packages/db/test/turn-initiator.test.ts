@@ -279,6 +279,13 @@ async function addAcceptedScheduledOccurrence(
   return { taskId: task.id, runId: run.id };
 }
 
+async function turnSurface(turnId: string): Promise<string | null> {
+  const [row] = await shared.admin<Array<{ surface: string | null }>>`
+    select surface from session_turns where id = ${turnId}`;
+  if (!row) throw new Error(`turn ${turnId} not found`);
+  return row.surface;
+}
+
 describe("immutable session turn initiators", () => {
   test("uses a caller-preallocated UUID and rejects collisions", async () => {
     const grant = await fixture();
@@ -889,6 +896,8 @@ describe("immutable session turn initiators", () => {
     expect(steeredClaim.turn.model).toBe("scripted-model");
     expect(steeredClaim.turn.initiatingHumanSubjectId).toBe(sourceGrant.subjectId);
     expect(steeredClaim.turn.personalConnectionDelegations).toEqual(sourceDelegations);
+    // Another agent's Steer is a new request that entered through an agent.
+    expect(await turnSurface(steeredClaim.turn.id)).toBe("agent");
     expect(
       (
         await listSessionSystemUpdatesForTurn(
@@ -1076,6 +1085,9 @@ describe("immutable session turn initiators", () => {
     });
     expect(scheduledClaim.turn.initiatingHumanSubjectId).toBeNull();
     expect(scheduledClaim.turn.scheduledTaskRunId).toBe(scheduledRunId);
+    // A scheduled occurrence keeps origin `system` but records its own surface.
+    expect(scheduledClaim.turn.source).toBe("system");
+    expect(await turnSurface(scheduledClaim.turn.id)).toBe("scheduled");
     expect(scheduledClaim.turn.initiatorContext.scheduledRunIds).toEqual([scheduledRunId]);
     const [scheduledHistory] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
