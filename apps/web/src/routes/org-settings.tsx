@@ -125,7 +125,9 @@ export function OrgSettingsRoute({
     visible.add("identity");
     if (canReadBilling) visible.add("billing");
     if (canManageOrganizationApiKeys) visible.add("developer");
-    if (administrator) visible.add("security");
+    // Recovery contacts are members, not only owners and admins: they accept
+    // and approve recovery on this page, so every managed person can reach it.
+    if (administrator || (managedHumanSession && !singleUser)) visible.add("security");
     return visible;
   }, [
     administrator,

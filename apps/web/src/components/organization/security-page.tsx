@@ -40,29 +40,37 @@ export function OrganizationSecurityPage() {
   const directory = useOrganizationDirectory();
   const client = useAppContext().client;
   const managedPeople = directory.managedSession && !directory.singleUser;
+  // Members see only Recovery: they may be recovery contacts.
+  const administrator = directory.canAdminister;
   return (
     <SectionStack>
-      {managedPeople ? (
+      {managedPeople && administrator ? (
         <Section title="Chats">
           <PrivateChatsRow client={client} identity={directory.identity} />
         </Section>
       ) : null}
-      <Section
-        title="Retention"
-        description="How long a removed person's personal data is kept. Their access always ends right away."
-      >
-        <RetentionRow
-          client={client}
-          identity={directory.identity}
-          canEdit={directory.actorRole === "owner"}
-        />
-      </Section>
+      {administrator ? (
+        <Section
+          title="Retention"
+          description="How long a removed person's personal data is kept. Their access always ends right away."
+        >
+          <RetentionRow
+            client={client}
+            identity={directory.identity}
+            canEdit={directory.actorRole === "owner"}
+          />
+        </Section>
+      ) : null}
       {managedPeople ? (
         <Section
           title={
-            <span className="inline-flex items-center gap-2">
-              Recovery <MetaChip variant="outline">Owners only</MetaChip>
-            </span>
+            administrator ? (
+              <span className="inline-flex items-center gap-2">
+                Recovery <MetaChip variant="outline">Owners only</MetaChip>
+              </span>
+            ) : (
+              "Recovery"
+            )
           }
           description="If every owner loses access, recovery contacts can make another member an owner."
         >
