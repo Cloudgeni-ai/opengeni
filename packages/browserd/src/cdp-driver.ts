@@ -1538,16 +1538,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
     if (typeof attached.sessionId !== "string") throw new Error("CDP did not attach the target");
     const sessionId = attached.sessionId;
-    await Promise.all([
-      connection.send("Page.enable", {}, { sessionId }),
-      connection.send("Runtime.enable", {}, { sessionId }),
-      connection.send("DOM.enable", {}, { sessionId }),
-      connection.send("Accessibility.enable", {}, { sessionId }),
-      connection.send("Network.enable", {}, { sessionId }),
-      connection.send("Log.enable", {}, { sessionId }),
-    ]);
-    await this.applyEmulation(connection, sessionId);
-    const frame = await this.mainFrame(sessionId);
+    let frame: MainFrame;
+    try {
+      await Promise.all([
+        connection.send("Page.enable", {}, { sessionId }),
+        connection.send("Runtime.enable", {}, { sessionId }),
+        connection.send("DOM.enable", {}, { sessionId }),
+        connection.send("Accessibility.enable", {}, { sessionId }),
+        connection.send("Network.enable", {}, { sessionId }),
+        connection.send("Log.enable", {}, { sessionId }),
+      ]);
+      await this.applyEmulation(connection, sessionId);
+      frame = await this.mainFrame(sessionId);
+    } catch (error) {
+      // Failed initialization never enters states, so normal target cleanup cannot
+      // find it. Release only this CDP attachment; preserve the page and profile.
+      await connection
+        .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 500 })
+        .catch(() => undefined);
+      throw error;
+    }
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
