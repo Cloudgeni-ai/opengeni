@@ -149,7 +149,13 @@ in-app:
   that chose accounts with the same account plan the drift uses, and lists it
   with `unavailableAccounts` (the connectors) and a null `runId`/`firedAt`. It
   clears once the account is usable again or the owner refreshes or edits the
-  accounts. This is read-time only: no migration, no stored notice.
+  accounts. This is read-time only: no migration, no stored notice. Not
+  reported yet: a reusable-session schedule whose live session no longer uses
+  a connector the schedule chose an account for (for example, someone turned
+  that connector off in the session). The scheduler resolves the reusable
+  session's own tool policy and refuses the leftover choice, while the plan
+  follows the task's frozen tools, so a refresh does not fix it either; turning
+  the connector back on in that session does.
 - **Attention list.** `GET .../scheduled-tasks/attention` lists the active
   schedules that need attention, one item per schedule: the latest run with a
   turn failed closed on access (`runId`, `failures`), a chosen account can no
