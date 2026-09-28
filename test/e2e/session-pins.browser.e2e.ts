@@ -591,20 +591,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const projectBGroup = page.getByRole("group", { name: projectB.name });
       const projectARows = projectAGroup.locator("a[data-session-row]");
       const projectBRows = projectBGroup.locator("a[data-session-row]");
-      await waitFor(async () => (await projectARows.count()) === 50, { timeoutMs: 30_000 });
-      await waitFor(async () => (await projectBRows.count()) === 50, { timeoutMs: 30_000 });
+      await waitFor(async () => (await projectARows.count()) === 4, { timeoutMs: 30_000 });
+      await waitFor(async () => (await projectBRows.count()) === 4, { timeoutMs: 30_000 });
       const loadProjectA = projectAGroup.getByRole("button", {
-        name: `Load older sessions in ${projectA.name}`,
+        name: `Show 4 more sessions in ${projectA.name}`,
       });
       const loadProjectB = projectBGroup.getByRole("button", {
-        name: `Load older sessions in ${projectB.name}`,
+        name: `Show 4 more sessions in ${projectB.name}`,
       });
       await loadProjectA.waitFor();
       await loadProjectB.waitFor();
       expect(
         await page
           .getByRole("group", { name: emptyProject.name })
-          .getByRole("button", { name: /Load older/ })
+          .getByRole("button", { name: /Show \d+ more|Load older|Retry/ })
           .count(),
       ).toBe(0);
       expect(
@@ -613,14 +613,24 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const footerBefore = await page
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
+      const continuationRequests = () =>
+        paginationRequests.filter((request) => request.searchParams.has("cursor"));
+      // Explicit disclosure uses the cached 50-row page without growing any
+      // other project or issuing continuation requests.
+      for (let visible = 8; visible <= 48; visible += 4) {
+        await loadProjectA.click();
+        await waitFor(async () => (await projectARows.count()) === visible, {
+          timeoutMs: 30_000,
+        });
+        expect(await projectBRows.count()).toBe(4);
+        expect(continuationRequests()).toHaveLength(0);
+      }
       await loadProjectA.scrollIntoViewIfNeeded();
       // Scrolling through folders must not grow the rail and hide Archived.
       await page.waitForTimeout(500);
-      const continuationRequests = () =>
-        paginationRequests.filter((request) => request.searchParams.has("cursor"));
       expect(continuationRequests()).toHaveLength(0);
-      expect(await projectARows.count()).toBe(50);
-      expect(await projectBRows.count()).toBe(50);
+      expect(await projectARows.count()).toBe(48);
+      expect(await projectBRows.count()).toBe(4);
       const scroll = await page.locator("[data-rail-scroll-viewport]").evaluate((element) => ({
         top: element.scrollTop,
         height: element.clientHeight,
@@ -638,17 +648,28 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const projectAOlderPage = (await projectAOlderResponse.json()) as BrowserSessionPage;
       expect(projectAOlderPage.sessions).toHaveLength(6);
       expect(projectAOlderPage.nextCursor).toBeNull();
-      await waitFor(async () => (await projectARows.count()) === 56, { timeoutMs: 30_000 });
-      expect(await projectBRows.count()).toBe(50);
+      await waitFor(async () => (await projectARows.count()) === 52, { timeoutMs: 30_000 });
+      expect(await projectBRows.count()).toBe(4);
       expect(continuationRequests()).toHaveLength(1);
       expect(continuationRequests()[0]!.searchParams.get("channelId")).toBe(projectA.id);
       expect(continuationRequests()[0]!.searchParams.get("cursor")).toBe(projectAPage.nextCursor);
       expect(continuationRequests()[0]!.searchParams.get("limit")).toBe("50");
+      await loadProjectA.click();
+      await waitFor(async () => (await projectARows.count()) === 56, { timeoutMs: 30_000 });
+      expect(continuationRequests()).toHaveLength(1);
 
       const footerAfter = await page
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
       expect(footerAfter?.y).toBe(footerBefore?.y);
+      for (let visible = 8; visible <= 48; visible += 4) {
+        await loadProjectB.click();
+        await waitFor(async () => (await projectBRows.count()) === visible, {
+          timeoutMs: 30_000,
+        });
+        expect(await projectARows.count()).toBe(56);
+        expect(continuationRequests()).toHaveLength(1);
+      }
       const [projectBOlderResponse] = await Promise.all([
         projectPage(projectB.id, projectBPage.nextCursor),
         loadProjectB.click(),
@@ -656,12 +677,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const projectBOlderPage = (await projectBOlderResponse.json()) as BrowserSessionPage;
       expect(projectBOlderPage.sessions).toHaveLength(6);
       expect(projectBOlderPage.nextCursor).toBeNull();
-      await waitFor(async () => (await projectBRows.count()) === 56, { timeoutMs: 30_000 });
+      await waitFor(async () => (await projectBRows.count()) === 52, { timeoutMs: 30_000 });
       expect(await projectARows.count()).toBe(56);
       expect(continuationRequests()).toHaveLength(2);
       expect(continuationRequests()[1]!.searchParams.get("channelId")).toBe(projectB.id);
       expect(continuationRequests()[1]!.searchParams.get("cursor")).toBe(projectBPage.nextCursor);
       expect(continuationRequests()[1]!.searchParams.get("limit")).toBe("50");
+      await loadProjectB.click();
+      await waitFor(async () => (await projectBRows.count()) === 56, { timeoutMs: 30_000 });
+      expect(continuationRequests()).toHaveLength(2);
       expect(await loadProjectA.count()).toBe(0);
       expect(await loadProjectB.count()).toBe(0);
     } finally {
@@ -1809,9 +1833,31 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
       const todayGroup = page.getByRole("group", { name: "Today" });
       const loadOlder = todayGroup.getByRole("button", {
-        name: "Load older sessions in Today",
+        name: "Show 4 more sessions in Today",
       });
       await loadOlder.waitFor({ timeout: 15_000 });
+      const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
+      await waitFor(async () => (await visibleRows.count()) === 4, { timeoutMs: 30_000 });
+      const filteredRequests: URL[] = [];
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (
+          request.method() === "GET" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
+          url.searchParams.has("updatedFrom") &&
+          !url.searchParams.has("updatedBefore") &&
+          !url.searchParams.has("search")
+        ) {
+          filteredRequests.push(url);
+        }
+      });
+      for (let visible = 8; visible <= 48; visible += 4) {
+        await loadOlder.click();
+        await waitFor(async () => (await visibleRows.count()) === visible, {
+          timeoutMs: 30_000,
+        });
+        expect(filteredRequests).toHaveLength(0);
+      }
       const filteredFirstPageResponse = page.waitForResponse(
         (response) => {
           const url = new URL(response.url());
@@ -1825,21 +1871,46 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         },
         { timeout: 10_000 },
       );
+      const filteredSecondPageResponse = page.waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return (
+            successfulSessionPageResponse(response, workspaceId) &&
+            url.searchParams.has("cursor") &&
+            url.searchParams.has("updatedFrom") &&
+            !url.searchParams.has("updatedBefore")
+          );
+        },
+        { timeout: 10_000 },
+      );
       await loadOlder.scrollIntoViewIfNeeded();
       await loadOlder.click();
       const filteredFirstPage = (await (
         await filteredFirstPageResponse
       ).json()) as BrowserSessionPage;
-      expect(filteredFirstPage.sessions).toHaveLength(100);
+      expect(filteredFirstPage.sessions).toHaveLength(50);
       expect(filteredFirstPage.nextCursor).toBeTruthy();
-      const retainedId = filteredFirstPage.sessions[0]!.id;
-      const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
-      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
-      await page.waitForFunction(
-        () =>
-          document.querySelectorAll("[data-sessionpin-session-list] a[data-session-row]").length ===
-          100,
+      const secondPageResponse = await filteredSecondPageResponse;
+      expect(new URL(secondPageResponse.url()).searchParams.get("cursor")).toBe(
+        filteredFirstPage.nextCursor,
       );
+      const filteredSecondPage = (await secondPageResponse.json()) as BrowserSessionPage;
+      expect(filteredSecondPage.sessions).toHaveLength(50);
+      expect(filteredSecondPage.nextCursor).toBeTruthy();
+      expect(filteredRequests).toHaveLength(2);
+      expect(filteredRequests.every((request) => request.searchParams.get("limit") === "50")).toBe(
+        true,
+      );
+      const retainedId = filteredFirstPage.sessions[0]!.id;
+      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
+      await waitFor(async () => (await visibleRows.count()) === 52, { timeoutMs: 30_000 });
+      for (let visible = 56; visible <= 100; visible += 4) {
+        await loadOlder.click();
+        await waitFor(async () => (await visibleRows.count()) === visible, {
+          timeoutMs: 30_000,
+        });
+        expect(filteredRequests).toHaveLength(2);
+      }
       expect(await visibleRows.count()).toBe(100);
 
       // Searching an older title uses the global dialog and must not replace
@@ -1867,7 +1938,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         const url = new URL(route.request().url());
         if (
           !injectedFailure &&
-          url.searchParams.get("cursor") === filteredFirstPage.nextCursor &&
+          url.searchParams.get("cursor") === filteredSecondPage.nextCursor &&
           !url.searchParams.get("search")
         ) {
           injectedFailure = true;
@@ -1883,7 +1954,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await loadOlder.scrollIntoViewIfNeeded();
       await loadOlder.click();
       const retryOlder = todayGroup.getByRole("button", {
-        name: "Retry older sessions in Today",
+        name: "Retry sessions in Today",
       });
       await retryOlder.waitFor({ timeout: 10_000 });
       expect(injectedFailure).toBe(true);
@@ -1901,7 +1972,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const finalPageResponse = page.waitForResponse(
         (response) =>
           successfulSessionPageResponse(response, workspaceId, {
-            cursor: filteredFirstPage.nextCursor,
+            cursor: filteredSecondPage.nextCursor,
           }),
         { timeout: 10_000 },
       );
@@ -1910,6 +1981,17 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
+      // Retrying a failed page does not silently disclose it. The final six
+      // cached roots still require a four-row step and the remaining two.
+      await loadOlder.and(page.locator(":focus")).waitFor();
+      expect(await visibleRows.count()).toBe(100);
+      await loadOlder.press("Enter");
+      await waitFor(async () => (await visibleRows.count()) === 104, { timeoutMs: 30_000 });
+      const showLastTwo = todayGroup.getByRole("button", {
+        name: "Show 2 more sessions in Today",
+        exact: true,
+      });
+      await showLastTwo.press("Enter");
       await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor();
       await page.waitForFunction(
         () => document.activeElement?.id === "session-group-today",
@@ -3491,7 +3573,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
       const activeGroup = page.getByRole("group", { name: "Active", exact: true });
       const discoverOlder = activeGroup.getByRole("button", {
-        name: "Load older sessions in Active",
+        name: "Show 4 more sessions in Active",
         exact: true,
       });
       await discoverOlder.waitFor();
@@ -3501,6 +3583,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await activeGroup.locator(`a[data-session-row="${ancestor.id}"]`).waitFor();
       // Other scenarios in this shared workspace can also leave active roots.
       expect(await activeGroup.locator("a[data-session-row]").count()).toBeGreaterThanOrEqual(2);
+      expect(await activeGroup.locator("a[data-session-row]").count()).toBeLessThanOrEqual(4);
     } finally {
       for (const sessionId of activatedIds) {
         await appendSessionEventsAndUpdateSession(
@@ -3548,7 +3631,8 @@ async function navigateWithProjectPages(
     await Promise.all(channelIds.map((channelId) => firstPages.get(channelId)!));
     await waitFor(
       async () =>
-        (await page.getByRole("button", { name: /^Loading older sessions in / }).count()) === 0,
+        (await page.getByRole("button", { name: /^Loading(?: older)? sessions in / }).count()) ===
+        0,
       { timeoutMs: 30_000 },
     );
   } finally {
