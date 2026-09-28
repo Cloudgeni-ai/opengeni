@@ -109,6 +109,11 @@ OPE-99 normal tip-follow continues through long answers. Manual scroll, older
 history anchors, and explicit Jump to latest retain their existing behavior.
 There is no forced answer stop and no automatic repin on subsequent work.
 
+An expanded outer work header sticks inside the timeline viewport while its
+details scroll, keeping collapse reachable. It releases at the end of its own
+section, stays below Latest question when present, and never makes nested work
+headers sticky. This is section-scoped CSS, not another scroll owner.
+
 One **Latest question** button targets the newest actual user message, never the
 question nearest the viewport. Hosts with bounded history wire
 `onJumpToLatestQuestion={events.jumpToLatestQuestion}` from `useSessionEvents`.

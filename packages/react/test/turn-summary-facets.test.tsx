@@ -13,6 +13,26 @@ import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
+test("only the expanded outer work header is sticky; nested folds remain in flow", async () => {
+  const view = await renderComponent(
+    <TurnSummary items={[]} defaultOpen>
+      <TurnSummary items={[]} defaultOpen bare>
+        <p>Nested detail</p>
+      </TurnSummary>
+    </TurnSummary>,
+  );
+  try {
+    const outer = view.container.querySelector('[data-og-work-header="outer"]')!;
+    const nested = view.container.querySelector('[data-og-work-header="nested"]')!;
+    expect(outer.classList.contains("sticky")).toBe(true);
+    expect(nested.classList.contains("sticky")).toBe(false);
+    expect(view.container.querySelectorAll("[data-og-work-section]")).toHaveLength(1);
+    expect(outer.parentElement).toBe(view.container.querySelector("[data-og-work-section]"));
+  } finally {
+    await view.unmount();
+  }
+});
+
 function toolCall(
   id: string,
   name: string,

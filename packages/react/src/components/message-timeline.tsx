@@ -39,7 +39,7 @@ import {
   TriangleAlertIcon,
   XCircleIcon,
 } from "lucide-react";
-import type { ComponentType } from "react";
+import type { ComponentType, CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Collapsible } from "radix-ui";
 import {
@@ -2106,7 +2106,15 @@ export function MessageTimeline({
             <EntranceAnimationProvider value={false}>
               <TooltipProvider delayDuration={400}>
                 <TimelineAnnotationSourceRootContext.Provider value={scrollRef}>
-                  <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+                  <div
+                    className={cn("og-root relative flex min-h-0 flex-col", className)}
+                    // Sticky insets start at the scroller's padded content edge
+                    // (pt-16). Subtract that padding, then reserve 3.5rem for the
+                    // floating question action, including its touch hit target.
+                    style={
+                      { "--og-work-header-top": questionNav ? "-0.5rem" : "-4rem" } as CSSProperties
+                    }
+                  >
                     {onAnnotate ? (
                       <Suspense fallback={null}>
                         <TimelineAnnotationSelection
