@@ -1687,11 +1687,13 @@ function isActivityItem(item: TimelineItem): item is WorkActivityItem {
 export type GroupTimelineOptions = {
   /**
    * Compact exchange presentation. Assistant commentary joins its activity
-   * cluster instead of splitting it, and everything an exchange produces
-   * between two human boundaries folds behind one row, followed by the latest
-   * answer. Routine machine inputs, recorded waits, goal continuations, and
-   * compaction fold inside; failures, approvals, auth recovery, human input,
-   * scheduled prompts, and presented images stay visible.
+   * cluster instead of splitting it, and the work an exchange produces folds
+   * behind one row per stretch of work. Only work folds: turns, routine machine
+   * inputs, recorded waits, goal continuations, compaction, and progress notes.
+   * Every answer stays a visible message, including an answer that later
+   * machine-triggered turns follow; their work folds into a new row below it.
+   * Failures, approvals, auth recovery, human input, scheduled prompts, and
+   * presented images also stay visible.
    */
   foldExchanges?: boolean;
 };
@@ -1702,6 +1704,8 @@ export function groupTimeline(
 ): TimelineGroup[] {
   const foldExchanges = options.foldExchanges === true;
   const commentary = foldExchanges ? commentaryMessageIds(items) : null;
+  // Messages lifted out of a settled turn only because it wrote no answer.
+  const notes = new Set<string>();
   const groups: TimelineGroup[] = [];
   for (const item of items) {
     if (isActivityItem(item) || (item.kind === "agent-message" && commentary?.has(item.id))) {
@@ -1719,12 +1723,12 @@ export function groupTimeline(
     }
     if (item.kind === "turn-end") {
       stampTurnOutcome(groups, item);
-      foldSettledTurn(groups, item, foldExchanges);
+      foldSettledTurn(groups, item, foldExchanges, notes);
       continue;
     }
     groups.push({ kind: "item", item });
   }
-  return foldExchanges ? foldExchangeRuns(groups) : groups;
+  return foldExchanges ? foldExchangeRuns(groups, notes) : groups;
 }
 
 /**
@@ -1796,10 +1800,15 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
   "child_progress",
 ]);
 
-/** Whether a top-level item folds into its exchange instead of staying visible. */
-function foldsIntoExchange(item: TimelineItem): boolean {
+/**
+ * Whether a top-level item folds into its exchange instead of staying visible.
+ * An assistant message folds only when it is a turn's stand-in note or has no
+ * visible text. An answer never folds: work after it starts a new row.
+ */
+function foldsIntoExchange(item: TimelineItem, notes: ReadonlySet<string>): boolean {
   switch (item.kind) {
     case "agent-message":
+      return notes.has(item.id) || !item.text.trim();
     case "worker-completion":
       return true;
     case "machine-input-batch":
@@ -1815,10 +1824,10 @@ function foldsIntoExchange(item: TimelineItem): boolean {
   }
 }
 
-function endsExchangeFold(group: TimelineGroup): boolean {
+function endsExchangeFold(group: TimelineGroup, notes: ReadonlySet<string>): boolean {
   switch (group.kind) {
     case "item":
-      return !foldsIntoExchange(group.item);
+      return !foldsIntoExchange(group.item, notes);
     case "activity":
       return activityPresentsImage(group.items);
     case "turn":
@@ -1841,42 +1850,49 @@ function groupContainsAuthNeeded(group: TimelineGroup): boolean {
   }
 }
 
-function foldExchangeRuns(groups: TimelineGroup[]): TimelineGroup[] {
+function foldExchangeRuns(groups: TimelineGroup[], notes: ReadonlySet<string>): TimelineGroup[] {
   const folded: TimelineGroup[] = [];
   let run: TimelineGroup[] = [];
-  const flush = () => {
-    folded.push(...foldExchangeRun(run));
+  const flush = (atTip: boolean) => {
+    folded.push(...foldExchangeRun(run, atTip));
     run = [];
   };
   for (const group of groups) {
-    if (endsExchangeFold(group)) {
-      flush();
+    if (endsExchangeFold(group, notes)) {
+      flush(false);
       folded.push(group);
     } else {
       run.push(group);
     }
   }
-  flush();
+  flush(true);
   return folded;
 }
 
 /**
- * Fold one uninterrupted run of an exchange behind a single row. A trailing
- * assistant message stays visible as the answer. A live cluster at the end
- * carries the earlier work of the run; otherwise the run becomes one settled
- * turn group whose children keep their own turn chips.
+ * Fold one uninterrupted run of work behind a single row. Answers end a run,
+ * so a trailing assistant message here is the stand-in note of a turn that
+ * wrote no answer, and it stays visible as that turn's reply. A live cluster at
+ * the end carries the earlier work of the run; otherwise the run becomes one
+ * settled turn group whose children keep their own turn chips. Input delivered
+ * at the tip opens its row at once, so the row that the next turn continues
+ * is already on screen.
  */
-function foldExchangeRun(run: TimelineGroup[]): TimelineGroup[] {
+function foldExchangeRun(run: TimelineGroup[], atTip: boolean): TimelineGroup[] {
   const last = run[run.length - 1];
-  const answer = last?.kind === "item" && last.item.kind === "agent-message" ? last : undefined;
-  const body = answer ? run.slice(0, -1) : run;
-  if (body.length < 2 || !body.some((group) => group.kind !== "item")) {
+  const reply = last?.kind === "item" && last.item.kind === "agent-message" ? last : undefined;
+  const body = reply ? run.slice(0, -1) : run;
+  const resuming =
+    atTip &&
+    !reply &&
+    body.some((group) => group.kind === "item" && group.item.kind === "machine-input-batch");
+  if (!resuming && (body.length < 2 || !body.some((group) => group.kind !== "item"))) {
     return run;
   }
   const id = `exchange-${timelineGroupIdentity(body[0]!)}`;
   const tail = body[body.length - 1]!;
   if (tail.kind === "activity" && tail.outcome === undefined) {
-    return [{ ...tail, id, earlier: body.slice(0, -1) }, ...(answer ? [answer] : [])];
+    return [{ ...tail, id, earlier: body.slice(0, -1) }, ...(reply ? [reply] : [])];
   }
   let lastTurn: Extract<TimelineGroup, { kind: "turn" }> | undefined;
   for (const group of body) {
@@ -1898,7 +1914,7 @@ function foldExchangeRun(run: TimelineGroup[]): TimelineGroup[] {
     groups: body,
     ...(compactions > 0 ? { contextCompactionCount: compactions } : {}),
   };
-  return answer ? [merged, answer] : [merged];
+  return reply ? [merged, reply] : [merged];
 }
 
 function timelineGroupIdentity(group: TimelineGroup): string {
@@ -2208,6 +2224,7 @@ function foldSettledTurn(
   groups: TimelineGroup[],
   turnEnd: TurnEndItem,
   commentaryInClusters = false,
+  notes?: Set<string>,
 ): void {
   let startIndex = groups.length;
   let stoppedAtForeignTurn = false;
@@ -2271,6 +2288,10 @@ function foldSettledTurn(
       collected = lifted.groups;
       fallbackMessage = lifted.message;
     }
+  }
+  if (fallbackMessage?.item.kind === "agent-message") {
+    // A note standing in for a missing answer still folds with the work.
+    notes?.add(fallbackMessage.item.id);
   }
   const visibleMessage = finalMessage ?? fallbackMessage;
   const body = visibleMessage ? collected.filter((group) => group !== visibleMessage) : collected;

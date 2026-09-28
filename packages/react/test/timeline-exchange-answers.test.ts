@@ -296,6 +296,81 @@ describe("answers stay visible in the exchange fold", () => {
     expect(visibleMessages(fold(events))).toEqual([ANSWER_A]);
   });
 
+  test("input delivered after an answer opens the next row below it at once", () => {
+    const answered = answeredFirstTurn();
+    const input = machineInput("agent_message", "turn-2");
+    const groups = fold([...answered, input]);
+    expect(topLevelKinds(groups)).toEqual(["user-message", "turn", "agent-message", "turn"]);
+    expect(visibleMessages(groups)).toEqual([ANSWER_A]);
+    // The row the next turn continues, so it keeps its identity.
+    const opened = groups.at(-1);
+    expect(opened?.kind === "turn" ? opened.id : null).toBe(`exchange-${input.id}`);
+    const working = fold([
+      ...answered,
+      input,
+      event("turn.started", {}, "turn-2"),
+      ...tool("follow-up", "exec_command", "turn-2"),
+    ]);
+    const live = working.at(-1);
+    expect(live?.kind === "activity" ? live.id : null).toBe(`exchange-${input.id}`);
+  });
+
+  test("a later turn that writes only a note keeps the answer and folds its own work", () => {
+    const events = [
+      ...answeredFirstTurn(),
+      machineInput("child_terminal_result", "turn-2"),
+      event("turn.started", {}, "turn-2"),
+      ...tool("check", "exec_command", "turn-2"),
+      ...note("The worker finished; nothing else changed.", "turn-2"),
+      ...tool("title", "opengeni__set_session_title", "turn-2"),
+      event("turn.completed", { output: "" }, "turn-2"),
+    ];
+    const groups = fold(events);
+    // The note stands in for the later turn's missing answer, below its row.
+    expect(topLevelKinds(groups)).toEqual([
+      "user-message",
+      "turn",
+      "agent-message",
+      "turn",
+      "agent-message",
+    ]);
+    expect(visibleMessages(groups)).toEqual([
+      ANSWER_A,
+      "The worker finished; nothing else changed.",
+    ]);
+  });
+
+  test("a note that more work followed still folds, next to the answer", () => {
+    const events = [
+      ...answeredFirstTurn(),
+      machineInput("child_terminal_result", "turn-2"),
+      event("turn.started", {}, "turn-2"),
+      ...note("Checking the worker result.", "turn-2"),
+      ...tool("check", "exec_command", "turn-2"),
+      event("turn.completed", { output: "" }, "turn-2"),
+      ...[machineInput("session_wait_timeout", "turn-3"), ...quietTurn("turn-3")],
+    ];
+    const groups = fold(events);
+    expect(visibleMessages(groups)).toEqual([ANSWER_A]);
+    expect(topLevelKinds(groups)).toEqual(["user-message", "turn", "agent-message", "turn"]);
+  });
+
+  test("the classic grouping is unchanged", () => {
+    const events = [
+      ...answeredFirstTurn(),
+      machineInput("agent_message", "turn-2"),
+      ...quietTurn("turn-2"),
+    ];
+    expect(topLevelKinds(groupTimeline(buildTimeline(events)))).toEqual([
+      "user-message",
+      "turn",
+      "agent-message",
+      "machine-input-batch",
+      "turn",
+      "notice",
+    ]);
+  });
+
   test("a structured human-input answer and the answer after it stay visible", () => {
     sequence = 0;
     const request = {
