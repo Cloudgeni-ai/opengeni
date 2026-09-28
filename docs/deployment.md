@@ -1770,8 +1770,9 @@ from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The publisher runs from protected `main`
 and admits an exact ancestor commit, so branch movement does not invalidate a
-frozen candidate. Package provenance identifies that checked-out source; the
-workflow controller can be newer. The runtime includes these pins beside
+frozen candidate. Standard npm provenance identifies the trusted workflow
+controller; the verified checkout and source-named receipt identify the package
+source, which can be older. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.

@@ -70,14 +70,12 @@ jobs:
 
       - name: Publish canary versions
         env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
           OPENGENI_RELEASE: "1"
-        run: |
-          # Package provenance names the checked-out source, not the workflow controller.
-          export GITHUB_SHA="$SOURCE_SHA"
-          bun scripts/publish-canary.ts
+        # npm verifies GITHUB_SHA against the signed workflow identity.
+        # Verify exact source above and the source-named receipt bind the checkout.
+        run: bun scripts/publish-canary.ts
 
       - name: Retain exact Site package pins for this deployment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
