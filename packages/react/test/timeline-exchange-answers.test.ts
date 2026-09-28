@@ -355,6 +355,30 @@ describe("answers stay visible in the exchange fold", () => {
     expect(topLevelKinds(groups)).toEqual(["user-message", "turn", "agent-message", "turn"]);
   });
 
+  test("a declared final answer that a trailing step of its turn follows stays visible", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Build the regional report" }, null),
+      event("turn.started", {}, "turn-1"),
+      ...note("Querying the regional tables.", "turn-1"),
+      ...tool("query", "exec_command", "turn-1"),
+      event(
+        "agent.message.delta",
+        { text: ANSWER_A, phase: "final_answer", messageId: "turn-1-answer" },
+        "turn-1",
+      ),
+      event("agent.message.completed", { text: ANSWER_A, phase: "final_answer" }, "turn-1"),
+      ...tool("title", "opengeni__set_session_title", "turn-1"),
+      event("turn.completed", { output: "" }, "turn-1"),
+      machineInput("agent_message", "turn-2"),
+      ...quietTurn("turn-2"),
+    ];
+    const groups = fold(events);
+    // The answer, not the earlier progress note, is the turn's visible reply.
+    expect(visibleMessages(groups)).toEqual([ANSWER_A]);
+    expect(topLevelKinds(groups)).toEqual(["user-message", "turn", "agent-message", "turn"]);
+  });
+
   test("the classic grouping is unchanged", () => {
     const events = [
       ...answeredFirstTurn(),

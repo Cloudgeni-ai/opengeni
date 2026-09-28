@@ -2275,7 +2275,13 @@ function foldSettledTurn(
           group.item.phase !== "commentary" &&
           group.item.annotationSource?.eventType === "agent.message.completed",
       ) ?? waitMessages.at(-1);
-  const finalMessage = waitResponse ?? extractFinalAgentMessage(collected, turnEnd);
+  const finalMessage =
+    waitResponse ??
+    extractFinalAgentMessage(collected, turnEnd) ??
+    // Commentary lives inside the clusters here, so a top-level message of
+    // this turn is its answer even when a trailing step of the turn followed
+    // it. It stays the visible reply instead of folding into the turn.
+    (commentaryInClusters ? extractLatestTopLevelAnswer(collected, turnEnd) : null);
   let fallbackMessage =
     finalMessage || hasOrdinaryFinalAgentMessage(collected, turnEnd)
       ? null
@@ -2408,6 +2414,26 @@ function extractFinalAgentMessage(
     return null;
   }
   return tail;
+}
+
+function extractLatestTopLevelAnswer(
+  groups: TimelineGroup[],
+  turnEnd: TurnEndItem,
+): Extract<TimelineGroup, { kind: "item" }> | null {
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index];
+    if (group?.kind !== "item" || group.item.kind !== "agent-message") continue;
+    const message = group.item;
+    if (
+      !message.streaming &&
+      message.phase !== "commentary" &&
+      message.text.trim().length > 0 &&
+      belongsToTurn(message, turnEnd.turnId)
+    ) {
+      return group;
+    }
+  }
+  return null;
 }
 
 function hasOrdinaryFinalAgentMessage(groups: TimelineGroup[], turnEnd: TurnEndItem): boolean {
