@@ -143,9 +143,10 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0531_product_lifecycle_fact_export.sql",
+          (migration) =>
+            migration.path === "0531_session_attach_sandbox_environment_default_variable_sets.sql",
         )
-          ? "0531_product_lifecycle_fact_export.sql"
+          ? "0531_session_attach_sandbox_environment_default_variable_sets.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0530_scheduled_slack_bot_messages.sql",
               )
@@ -289,8 +290,9 @@ describe("release schema contract", () => {
     const scheduledSlackBotMessages = completeSourceContract.migrations.some(
       (migration) => migration.path === "0530_scheduled_slack_bot_messages.sql",
     );
-    const productLifecycleFactExport = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0531_product_lifecycle_fact_export.sql",
+    const sessionAttachDefaultVariableSets = completeSourceContract.migrations.some(
+      (migration) =>
+        migration.path === "0531_session_attach_sandbox_environment_default_variable_sets.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -549,7 +551,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
-        (productLifecycleFactExport ? 1 : 0) +
+        (sessionAttachDefaultVariableSets ? 1 : 0) +
         (scheduledSlackBotMessages ? 1 : 0) +
         (slackInteractionSessionDefaultsLine ? 1 : 0) +
         (systemUpdateOutboxClaimOrder ? 1 : 0) +
@@ -899,8 +901,8 @@ describe("release schema contract", () => {
       ...(scheduledSlackBotMessages
         ? { latestMigration: "0530_scheduled_slack_bot_messages.sql" }
         : {}),
-      ...(productLifecycleFactExport
-        ? { latestMigration: "0531_product_lifecycle_fact_export.sql" }
+      ...(sessionAttachDefaultVariableSets
+        ? { latestMigration: "0531_session_attach_sandbox_environment_default_variable_sets.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -925,7 +927,7 @@ describe("release schema contract", () => {
             "0528_system_update_outbox_claim_order.sql",
             "0529_slack_interaction_session_defaults_line.sql",
             "0530_scheduled_slack_bot_messages.sql",
-            "0531_product_lifecycle_fact_export.sql",
+            "0531_session_attach_sandbox_environment_default_variable_sets.sql",
           ].includes(migration.path),
       ),
     };
@@ -2398,7 +2400,7 @@ describe("release schema contract", () => {
       "0528_system_update_outbox_claim_order.sql",
       "0529_slack_interaction_session_defaults_line.sql",
       "0530_scheduled_slack_bot_messages.sql",
-      "0531_product_lifecycle_fact_export.sql",
+      "0531_session_attach_sandbox_environment_default_variable_sets.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -2923,7 +2925,7 @@ describe("release schema contract", () => {
       "0528_system_update_outbox_claim_order.sql",
       "0529_slack_interaction_session_defaults_line.sql",
       "0530_scheduled_slack_bot_messages.sql",
-      "0531_product_lifecycle_fact_export.sql",
+      "0531_session_attach_sandbox_environment_default_variable_sets.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
