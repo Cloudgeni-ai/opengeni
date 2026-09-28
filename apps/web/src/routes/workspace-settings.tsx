@@ -34,6 +34,7 @@ import { useAppContext } from "@/context";
 import type { ModelsView } from "@/lib/models-route";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
 import { orgLabel } from "@/lib/org";
+import { useOrganizationName } from "@/lib/use-organization-name";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   completeWorkspaceDeletionFollowUp,
@@ -120,8 +121,17 @@ function OperationalWorkspaceSettingsRoute({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
+  const organizationRole =
+    context.accessContext.accountGrants.find((grant) => grant.accountId === accountId)?.role ??
+    null;
+  const canManageOrganizationModels =
+    (context.clientConfig.auth.mode === "managedSession" ||
+      context.clientConfig.productAccessMode === "local") &&
+    (organizationRole === "owner" || organizationRole === "admin");
+  // The real name when known (an admin reads it from the organization overview).
+  const organizationName = useOrganizationName(accountId, canManageOrganizationModels);
   const organizationLabel = accountId
-    ? orgLabel(accountId, context.accessContext.accountGrants)
+    ? (organizationName ?? orgLabel(accountId, context.accessContext.accountGrants))
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const canManageSettings = canManageWorkspaceSettings(
@@ -139,15 +149,9 @@ function OperationalWorkspaceSettingsRoute({
     workspaceId,
     "connections:write",
   );
-  // Same rule as Organization settings > Models: owners and admins in an
-  // organization administrator session (or the single local user).
-  const organizationRole =
-    context.accessContext.accountGrants.find((grant) => grant.accountId === accountId)?.role ??
-    null;
-  const canManageOrganizationModels =
-    (context.clientConfig.auth.mode === "managedSession" ||
-      context.clientConfig.productAccessMode === "local") &&
-    (organizationRole === "owner" || organizationRole === "admin");
+  // canManageOrganizationModels (above) is the same rule as Organization settings >
+  // Models: owners and admins in an organization administrator session (or the single
+  // local user).
   const [gatewayRevision, setGatewayRevision] = useState(0);
 
   return (
@@ -181,7 +185,8 @@ function OperationalWorkspaceSettingsRoute({
           key={`models:${workspaceId}`}
           workspaceId={workspaceId}
           workspaceName={activeWorkspace?.name ?? "this workspace"}
-          organizationName={organizationLabel}
+          organizationId={accountId}
+          organizationName={organizationName ?? "your organization"}
           canManageSettings={canManageSettings}
           canManageConnections={canManageConnections}
           canManageOrganizationModels={canManageOrganizationModels}
@@ -607,7 +612,7 @@ export function DangerZone(props: {
           className="text-danger hover:text-danger pointer-coarse:h-11"
         >
           <Trash2Icon aria-hidden="true" />
-          Delete…
+          Delete
         </Button>
       }
     >

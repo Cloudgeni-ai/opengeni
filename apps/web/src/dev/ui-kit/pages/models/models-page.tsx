@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUpRightIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import { ArrowUpRightIcon, BuildingIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { codexPoolCopy } from "@/components/models/codex-models";
 import { DetailInline, DetailPage } from "@/components/ui/detail-sheet";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
@@ -56,7 +59,6 @@ import {
   type ModelsData,
   type Rotation,
   type Scope,
-  type Source,
 } from "./state";
 
 /* ----------------------------------------------------------------------------
@@ -75,7 +77,7 @@ const COLUMNS: RowListColumn[] = [
 const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "vercel"];
 
 const PICK_HELP =
-  "Spread work sends new work to whichever account has the most room left. Primary only uses the primary account and waits when its limit runs out.";
+  "Spread work sends each new chat to the account with the most usage left. Primary only uses the primary account and waits when it runs out.";
 
 const LEGACY_SOURCE_OPTIONS: SelectOption<LegacySource>[] = [
   {
@@ -342,6 +344,7 @@ function WorkspaceModels() {
               description="Subscriptions and API keys that pay for models here."
               action={connect}
             >
+              <KitPoolNotice />
               <AccountsList scope="workspace" />
             </Section>
             {codexOn(data, questions) || data.workspaceAccounts.length > 0 ? (
@@ -563,6 +566,7 @@ function AccountsList({ scope }: { scope: Scope }) {
   if (scope === "organization") {
     codexAccounts = data.orgAccounts;
   } else {
+    // Both pools in one list: the one new work uses first, the other muted as "Not in use".
     const own = data.workspaceAccounts;
     const shared = scenario.orgAssigned ? data.orgAccounts : [];
     codexAccounts = source === "organization" ? [...shared, ...own] : [...own, ...shared];
@@ -635,41 +639,8 @@ function CodexSettings() {
   const pool = accountsOf(data, source);
   const showRotation = source === "workspace" && data.workspaceAccounts.length >= 2;
 
-  const saveSource = async (value: Source) => {
-    setData((current) => ({ ...current, source: value }));
-    setPending("source");
-    await wait(700);
-    setPending(null);
-    toast.success(
-      value === "organization"
-        ? `New work in ${currentWorkspace.name} now uses subscriptions from ${ORG_NAME}`
-        : `New work in ${currentWorkspace.name} now uses this workspace's accounts`,
-    );
-  };
-
   return (
     <SettingRowGroup>
-      {questions.q13 === "segmented" && scenario.orgAssigned ? (
-        <SettingRow
-          variant={picks.settingRow}
-          controlWidth="auto"
-          label="Subscriptions from"
-          description={`${ORG_NAME} shares its Codex accounts with this workspace. New work uses theirs or the ones connected here, never both.`}
-          control={
-            <SegmentedControl<Source>
-              variant={picks.segmented}
-              size="sm"
-              pending={pending === "source"}
-              value={data.source}
-              onValueChange={(value) => void saveSource(value)}
-              options={[
-                { value: "organization", label: "Organization" },
-                { value: "workspace", label: "This workspace" },
-              ]}
-            />
-          }
-        />
-      ) : null}
       {questions.q13 === "select" ? (
         <SettingRow
           variant={picks.settingRow}
@@ -712,17 +683,15 @@ function CodexSettings() {
       ) : null}
       <SettingRow
         variant={picks.settingRow}
-        label="Allow switching to other providers"
-        description="Lets a Codex chat move to a model from another provider. Off keeps long chats more accurate."
+        label="Keep Codex chats portable"
+        description="Summarizes long chats in a form another provider's model can continue. Off keeps new chats on Codex, with better memory of long conversations."
         control={
           <Switch
             checked={portable}
             onCheckedChange={(next) => {
               setPortable(next);
               toast.success(
-                next
-                  ? "New Codex chats can switch to other providers"
-                  : "New Codex chats stay on Codex",
+                next ? "New Codex chats are portable" : "New Codex chats stay on Codex",
               );
             }}
           />
@@ -753,7 +722,7 @@ function RotationRow({
     <SettingRow
       variant={picks.settingRow}
       controlWidth="auto"
-      label="When several accounts are connected"
+      label="Sharing work between accounts"
       description={PICK_HELP}
       control={
         <SegmentedControl<Rotation>
@@ -785,9 +754,68 @@ function useDetailRowProps(target: DetailTarget, render: () => ReactNode) {
   };
 }
 
+/** ⋯ on an organization row: keep new work on the organization's accounts. */
+function AlwaysOrganizationItem() {
+  const { setData } = useModels();
+  return (
+    <DropdownMenuItem
+      onSelect={() => {
+        setData((current) => ({ ...current, legacySource: "organization" }));
+        toast.success(`New work in ${currentWorkspace.name} now uses the organization's accounts`);
+      }}
+    >
+      <BuildingIcon />
+      Always use the organization's accounts
+    </DropdownMenuItem>
+  );
+}
+
+/** Which Codex accounts new work uses, above the list. Same words as the real page. */
+function KitPoolNotice() {
+  const { data, setData, questions, scenario } = useModels();
+  if (!codexOn(data, questions) || !scenario.orgAssigned) return null;
+  const source = effectiveSource(data, questions, scenario);
+  const mode = data.legacySource === "disabled" ? "automatic" : data.legacySource;
+  const copy = codexPoolCopy({
+    mode,
+    inUse: source,
+    organizationAvailable: data.orgAccounts.length > 0,
+    workspaceCount: source === "workspace" ? data.workspaceAccounts.length : 0,
+    organizationCount: data.orgAccounts.length,
+    canConnect: true,
+  });
+  return (
+    <Notice
+      tone={copy.blocked ? "waiting" : "muted"}
+      actionLayout="responsive"
+      className="mb-2"
+      action={
+        mode === "automatic" ? undefined : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setData((current) => ({ ...current, legacySource: "automatic" }));
+              toast.success(
+                `New work in ${currentWorkspace.name} picks Codex accounts automatically`,
+              );
+            }}
+            className="rounded-[10px] pointer-coarse:h-11"
+          >
+            Use automatically
+          </Button>
+        )
+      }
+    >
+      {copy.text}
+    </Notice>
+  );
+}
+
 function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Scope }) {
   const models = useModels();
-  const { openDetail, setScenario } = models;
+  const { data, openDetail, setScenario } = models;
   const picks = useModelsPicks();
   const inUse = accountInUse(account, models);
   const status = accountStatus(account, inUse);
@@ -808,6 +836,18 @@ function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Sc
     />
   ));
   const shared = account.scope === "organization" && pageScope === "workspace";
+  if (!inUse && pageScope === "workspace") {
+    return (
+      <ListRow
+        disabled
+        leading={<ProviderTile provider="codex" size="lg" />}
+        title={account.name}
+        meta={[account.plan, shared ? `Shared by ${ORG_NAME}` : "Connected here"]}
+        cells={{ usage: <span className="text-xs font-medium text-fg-subtle">Not in use</span> }}
+        menu={shared ? <AlwaysOrganizationItem /> : undefined}
+      />
+    );
+  }
   return (
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
@@ -822,7 +862,7 @@ function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Sc
         resetsLabel(account.resets.length),
       ]}
       cells={{
-        usage: account.needsReconnect ? null : status.status === "paused" ? (
+        usage: account.needsReconnect ? null : status?.status === "paused" ? (
           <StatusBadge status="paused" variant={picks.statusRow} />
         ) : weekly ? (
           <UsageReadout
@@ -832,6 +872,7 @@ function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Sc
           />
         ) : null,
       }}
+      menu={shared && data.legacySource === "automatic" ? <AlwaysOrganizationItem /> : undefined}
       indicator={
         account.needsReconnect
           ? { kind: "attention", label: "Needs reconnect" }

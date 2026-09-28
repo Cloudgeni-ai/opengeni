@@ -149,12 +149,12 @@ function PreviewControls() {
         />
         <Control
           label="Q13 Codex source"
-          help={`Recommended: "Use: Organization | This workspace", shown only when ${org} shares an account. Other answer: today's four-option select.`}
+          help={`Decided 28 Sep: no control. New work uses this workspace's accounts when any are connected, otherwise ${org}'s; a line above Accounts says which, and the other pool's rows show "Not in use". Other answer: today's four-option select.`}
           value={questions.q13}
           recommended="segmented"
           onChange={question("q13")}
           options={[
-            { value: "segmented", label: "Two options" },
+            { value: "segmented", label: "Automatic" },
             { value: "select", label: "Select" },
           ]}
         />

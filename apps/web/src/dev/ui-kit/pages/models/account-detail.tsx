@@ -2,20 +2,19 @@ import { useState, type ReactNode } from "react";
 import {
   BuildingIcon,
   CheckIcon,
+  CopyIcon,
   FolderIcon,
   KeyRoundIcon,
-  LockIcon,
   MinusCircleIcon,
   MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
   UnplugIcon,
-  UserIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { CopyField, copyText } from "@/components/ui/copy-field";
 import {
   DetailBody,
   DetailFact,
@@ -52,7 +51,6 @@ import { ProviderTile } from "./marks";
 import { useModelsPicks } from "./picks";
 import {
   ORG_NAME,
-  availabilitySummary,
   effectiveSource,
   findAccount,
   makePrimary,
@@ -122,12 +120,7 @@ export function buttonWidth(variant: string): "compact" | "auto" {
 
 /** The one-line "who manages this" note on a read-only account. */
 function ManagedNote({ children }: { children: ReactNode }) {
-  return (
-    <p className="flex items-start gap-2 py-4 text-xs leading-4.5 text-fg-muted">
-      <LockIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
-      <span className="min-w-0">{children}</span>
-    </p>
-  );
+  return <p className="m-0 py-4 text-sm leading-5 text-fg-muted">{children}</p>;
 }
 
 /** Where the account is used from the page being viewed. */
@@ -140,14 +133,15 @@ export interface AccountView {
   onClose?: () => void;
 }
 
+/** A state that needs attention. Healthy accounts show none (no green "Connected"). */
 export function accountStatus(
   account: CodexAccount,
   inUse: boolean,
-): { status: "connected" | "paused" | "needs_reconnect"; label?: string; tone?: "neutral" } {
+): { status: "paused" | "needs_reconnect"; label?: string; tone?: "neutral" } | null {
   if (account.needsReconnect) return { status: "needs_reconnect" };
   if (!account.useForNewWork) return { status: "paused" };
-  if (!inUse) return { status: "connected", label: "Not in use", tone: "neutral" };
-  return { status: "connected" };
+  if (!inUse) return { status: "paused", label: "Not in use", tone: "neutral" };
+  return null;
 }
 
 /** The account belongs to the Codex pool new work uses right now. */
@@ -189,18 +183,25 @@ export function CodexAccountDetail({
   const readOnly = account.scope === "organization" && view.pageScope === "workspace";
   const orgAdmin = scenario.viewer === "org_admin";
   const status = accountStatus(account, accountInUse(account, models));
-  const scopeLabel = account.scope === "organization" ? "Organization" : "Workspace";
-
-  const managedNote = readOnly ? (
-    <ManagedNote>
-      Managed by {ORG_NAME}.{" "}
-      {orgAdmin ? "Change it in organization settings." : "Only organization admins can change it."}
-    </ManagedNote>
+  const scopeLabel =
+    account.scope === "organization"
+      ? view.pageScope === "organization"
+        ? "Organization account"
+        : `Shared by ${ORG_NAME}`
+      : "This workspace";
+  const statusBadge = status ? (
+    <StatusBadge status={status.status} tone={status.tone} variant={picks.statusHeader}>
+      {status.label}
+    </StatusBadge>
   ) : null;
+
+  // Admins get "Manage in organization settings" in the header; everyone else one sentence.
+  const managedNote =
+    readOnly && !orgAdmin ? <ManagedNote>Managed by your organization.</ManagedNote> : null;
   const sections = (
     <>
       <UsageSection account={account} />
-      {readOnly ? <ReadOnlyFacts account={account} /> : <SettingsSection account={account} />}
+      {readOnly ? null : <SettingsSection account={account} />}
       {account.scope === "organization" && !readOnly ? (
         <AvailabilitySection account={account} />
       ) : null}
@@ -214,21 +215,14 @@ export function CodexAccountDetail({
         <DetailPageHeader
           leading={<ProviderTile provider="codex" />}
           title={account.name}
-          chips={
-            <>
-              <StatusBadge status={status.status} tone={status.tone} variant={picks.statusHeader}>
-                {status.label}
-              </StatusBadge>
-              {/* "Primary" is not repeated here: the Settings row below says it. */}
-              {readOnly ? <MetaChip variant={picks.chip}>Organization</MetaChip> : null}
-            </>
-          }
-          meta={[account.plan, scopeLabel, `connected ${account.connectedOn}`]}
+          chips={statusBadge}
+          meta={[account.plan, scopeLabel]}
           actions={
             <CodexActions account={account} readOnly={readOnly} orgAdmin={orgAdmin} view={view} />
           }
         />
-        <DetailPageBody aside={<CodexAside account={account} />}>
+        {/* No aside: it only repeated the header. The account ID is "Copy account ID" in ⋯. */}
+        <DetailPageBody>
           {managedNote}
           {sections}
         </DetailPageBody>
@@ -244,11 +238,7 @@ export function CodexAccountDetail({
           title={account.name}
           subtitle={`${account.plan} · ${scopeLabel}`}
           // "Primary" is not repeated here: the Settings row below says it.
-          status={
-            <StatusBadge status={status.status} tone={status.tone} variant={picks.statusHeader}>
-              {status.label}
-            </StatusBadge>
-          }
+          status={statusBadge}
         />
       ) : null}
       <DetailBody>
@@ -274,21 +264,45 @@ function CodexActions({
   view: AccountView;
 }) {
   const { openDialog } = useModels();
+  const copyId = (
+    <DropdownMenuItem
+      onSelect={() =>
+        void copyText(account.accountId).then((copied) =>
+          copied ? toast.success("ChatGPT account ID copied") : toast.error("Couldn't copy"),
+        )
+      }
+    >
+      <CopyIcon />
+      Copy account ID
+    </DropdownMenuItem>
+  );
   if (readOnly) {
-    return orgAdmin && view.onManageInOrganization ? (
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => view.onManageInOrganization?.(account.id)}
-        className="rounded-[10px] pointer-coarse:h-11"
-      >
-        Manage in organization settings
-      </Button>
-    ) : null;
+    return (
+      <>
+        {orgAdmin && view.onManageInOrganization ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => view.onManageInOrganization?.(account.id)}
+            className="rounded-[10px] pointer-coarse:h-11"
+          >
+            Manage in organization settings
+          </Button>
+        ) : null}
+        <MoreMenu label={`More actions for ${account.name}`}>{copyId}</MoreMenu>
+      </>
+    );
   }
   return (
     <MoreMenu label={`More actions for ${account.name}`}>
+      <DropdownMenuItem
+        onSelect={() => openDialog({ kind: "rename", scope: account.scope, id: account.id })}
+      >
+        <PencilIcon />
+        Rename
+      </DropdownMenuItem>
+      {copyId}
       <DropdownMenuItem
         variant="destructive"
         onSelect={() =>
@@ -328,31 +342,6 @@ function MoreMenu({ label, children }: { label: string; children: ReactNode }) {
 
 function ScopeValue({ scope }: { scope: Scope }) {
   return <>{scope === "organization" ? ORG_NAME : currentWorkspace.name}</>;
-}
-
-/** The quiet card on the right: who connected it, where it lives, its ID. */
-function CodexAside({ account }: { account: CodexAccount }) {
-  return (
-    <DetailAside label={`About ${account.name}`}>
-      <DetailAsideItem label="Connected by" icon={<UserIcon />}>
-        {account.connectedBy}
-      </DetailAsideItem>
-      <DetailAsideItem
-        label="Belongs to"
-        icon={account.scope === "organization" ? <BuildingIcon /> : <FolderIcon />}
-      >
-        <ScopeValue scope={account.scope} />
-      </DetailAsideItem>
-      {account.scope === "organization" ? (
-        <DetailAsideItem label="Available in">
-          {availabilitySummary(account.availability)}
-        </DetailAsideItem>
-      ) : null}
-      <DetailAsideItem label="Account ID">
-        <CopyField value={account.accountId} label="account ID" truncate="middle" />
-      </DetailAsideItem>
-    </DetailAside>
-  );
 }
 
 export function PrimaryChip({
@@ -400,20 +389,8 @@ function UsageSection({ account }: { account: CodexAccount }) {
   );
 }
 
-function ReadOnlyFacts({ account }: { account: CodexAccount }) {
-  return (
-    <DetailSection title="Details">
-      <DetailFacts>
-        <DetailFact label="Available in">{availabilitySummary(account.availability)}</DetailFact>
-        <DetailFact label="Models it can serve">{servedSummary(account.modelsServed)}</DetailFact>
-        <DetailFact label="Use for new work">{account.useForNewWork ? "On" : "Off"}</DetailFact>
-      </DetailFacts>
-    </DetailSection>
-  );
-}
-
 function SettingsSection({ account }: { account: CodexAccount }) {
-  const { data, setData, questions, openDialog } = useModels();
+  const { data, setData, questions } = useModels();
   const picks = useModelsPicks();
   const [pending, setPending] = useState<"use" | "apps" | "primary" | null>(null);
   const legacy = questions.q14 === "legacy";
@@ -437,11 +414,11 @@ function SettingsSection({ account }: { account: CodexAccount }) {
       <SettingRowGroup className="-my-3">
         <SettingRow
           variant={picks.settingRow}
-          label={legacy ? "Use for new automatic turns" : "Use for new work"}
+          label={legacy ? "Use for new automatic turns" : "Available for new chats"}
           description={
             legacy
               ? "Enabled accounts can be picked for new automatic turns."
-              : "When off, this account isn't picked for new chats, schedules or sessions pinned to it. Work already running continues."
+              : "Turn off to stop sending new chats and schedules to this account. Work already running continues."
           }
           control={
             <Switch
@@ -524,21 +501,6 @@ function SettingsSection({ account }: { account: CodexAccount }) {
                 )
               }
             />
-          }
-        />
-        <SettingRow
-          variant={picks.settingRow}
-          controlWidth={buttonWidth(picks.settingRow)}
-          label="Name"
-          description={account.name}
-          control={
-            <RowButton
-              label={`Rename ${account.name}`}
-              onClick={() => openDialog({ kind: "rename", scope: account.scope, id: account.id })}
-            >
-              <PencilIcon aria-hidden="true" />
-              Rename
-            </RowButton>
           }
         />
         {account.scope === "workspace" ? (

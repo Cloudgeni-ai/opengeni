@@ -65,6 +65,7 @@ export const PRODUCT_STATUSES = {
   failed: { label: "Failed", tone: "danger" },
   expired: { label: "Expired", tone: "danger", icon: ClockIcon },
   invite_failed: { label: "Invitation failed", tone: "danger", icon: MailIcon },
+  out_of_usage: { label: "Out of usage", tone: "danger" },
   // Grey: paused or off.
   paused: { label: "Paused", tone: "neutral", icon: CirclePauseIcon },
   queued: { label: "Queued", tone: "neutral", icon: CircleDashedIcon },

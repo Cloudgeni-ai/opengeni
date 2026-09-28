@@ -6,11 +6,19 @@ import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
 
 /**
- * "Allow switching to other providers": the default for NEW Codex chats. Off
- * (`remote_v2`) keeps ChatGPT's compaction, so long chats stay accurate but
- * can only use Codex models. On (`portable`) lets a chat switch to other
- * providers. Chats already started keep the setting they started with.
+ * Whether NEW Codex chats here are portable (`codexCompactionDefault`).
+ * On (`portable`): long chats are compacted into a plain-text summary any
+ * provider can read, so the chat can move to another provider's model.
+ * Off (`remote_v2`, the default): ChatGPT's own compaction, which keeps long
+ * chats more accurate but only admits Codex models for the chat's lifetime.
+ * Chats already started keep the setting they started with.
  */
+export function useCodexChatsPortable(workspaceId: string): boolean {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  return workspace?.settings?.codexCompactionDefault === "portable";
+}
+
 export function CodexProviderSwitchRow({
   workspaceId,
   canManage,
@@ -19,8 +27,7 @@ export function CodexProviderSwitchRow({
   canManage: boolean;
 }) {
   const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const portable = workspace?.settings?.codexCompactionDefault === "portable";
+  const portable = useCodexChatsPortable(workspaceId);
   const [saving, setSaving] = useState(false);
 
   async function toggle(nextPortable: boolean) {
@@ -33,9 +40,7 @@ export function CodexProviderSwitchRow({
       });
       if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
         toast.success(
-          nextPortable
-            ? "New Codex chats can switch to other providers"
-            : "New Codex chats stay on Codex",
+          nextPortable ? "New Codex chats are portable" : "New Codex chats stay on Codex",
         );
       }
     } finally {
@@ -45,8 +50,8 @@ export function CodexProviderSwitchRow({
 
   return (
     <SettingRow
-      label="Allow switching to other providers"
-      description="Lets a Codex chat move to a model from another provider. Off keeps long chats more accurate."
+      label="Keep Codex chats portable"
+      description="Summarizes long chats in a form another provider's model can continue. Off keeps new chats on Codex, with better memory of long conversations."
       control={
         <Switch
           checked={portable}

@@ -1,15 +1,5 @@
 import type { SuperGrokAccount } from "@opengeni/sdk";
-import {
-  BuildingIcon,
-  CheckIcon,
-  CircleCheckIcon,
-  FolderIcon,
-  LoaderCircleIcon,
-  LockIcon,
-  PencilIcon,
-  UnplugIcon,
-  UserIcon,
-} from "lucide-react";
+import { CheckIcon, CircleCheckIcon, LoaderCircleIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
@@ -27,13 +17,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import {
-  DetailAside,
-  DetailAsideItem,
-  DetailPage,
-  DetailPageBody,
-  DetailPageHeader,
-} from "@/components/ui/detail-page";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
 import {
   DetailFact,
   DetailFacts,
@@ -284,12 +268,12 @@ function SuperGrokAccountDetail({
     enabled: canEdit,
   });
   const scopeLabel = grok.inherited
-    ? places.organizationName
+    ? `Shared by ${places.organizationName}`
     : account.scope === "user"
       ? "Only you"
       : organization
         ? "Organization account"
-        : "Workspace account";
+        : "This workspace";
   return (
     <DetailPage
       back={{ label: "Models", onClick: places.backToList }}
@@ -298,12 +282,7 @@ function SuperGrokAccountDetail({
       <DetailPageHeader
         leading={<ProviderTile provider="supergrok" />}
         title={name}
-        chips={
-          <>
-            <StatusBadge status={status} variant="outline" />
-            {grok.inherited ? <MetaChip variant="outline">Organization</MetaChip> : null}
-          </>
-        }
+        chips={status === "connected" ? null : <StatusBadge status={status} variant="outline" />}
         meta={[
           planOf(account),
           account.email && account.email !== name ? account.email : null,
@@ -320,35 +299,9 @@ function SuperGrokAccountDetail({
           ) : null
         }
       />
-      <DetailPageBody
-        aside={
-          <DetailAside label={`About ${name}`}>
-            <DetailAsideItem
-              label="Belongs to"
-              icon={
-                account.scope === "user" ? (
-                  <UserIcon />
-                ) : grok.inherited || organization ? (
-                  <BuildingIcon />
-                ) : (
-                  <FolderIcon />
-                )
-              }
-            >
-              {account.scope === "user"
-                ? "Only you"
-                : grok.inherited
-                  ? places.organizationName
-                  : places.scopeName}
-            </DetailAsideItem>
-            <DetailAsideItem label="Plan">{planOf(account)}</DetailAsideItem>
-          </DetailAside>
-        }
-      >
+      <DetailPageBody>
         {grok.inherited ? (
-          <ManagedNote>
-            {`Shared by ${places.organizationName}. Only organization owners and admins can change it.`}
-          </ManagedNote>
+          <ManagedNote>Managed by your organization.</ManagedNote>
         ) : !canEdit ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
         ) : null}
@@ -507,12 +460,7 @@ function formatReset(value: string): string {
 }
 
 function ManagedNote({ children }: { children: ReactNode }) {
-  return (
-    <p className="flex items-start gap-2 pt-2 pb-6 text-xs leading-4.5 text-fg-muted">
-      <LockIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
-      <span className="min-w-0">{children}</span>
-    </p>
-  );
+  return <p className="m-0 pt-2 pb-6 text-sm leading-5 text-fg-muted">{children}</p>;
 }
 
 export function SuperGrokAccessPage({

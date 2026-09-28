@@ -24,9 +24,11 @@ import {
   CodexAccountPage,
   CodexAccountRows,
   CodexConnectPage,
+  CodexPoolNotice,
   CodexSettingRows,
   codexListedCount,
   codexSectionVisible,
+  useSetAsideOrganizationAccounts,
   type CodexPlaces,
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
@@ -51,6 +53,7 @@ import { SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import { accountKeyOf, type ModelsView } from "@/lib/models-route";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { currentPageReturnTo } from "@/lib/return-to";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 
 /* ----------------------------------------------------------------------------
@@ -64,6 +67,7 @@ import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 export function WorkspaceModelsPage({
   workspaceId,
   workspaceName,
+  organizationId,
   organizationName,
   canManageSettings,
   canManageConnections,
@@ -74,6 +78,9 @@ export function WorkspaceModelsPage({
 }: {
   workspaceId: string;
   workspaceName: string;
+  /** The organization that owns the workspace. */
+  organizationId?: string | undefined;
+  /** Its name, or "your organization" when it has none. */
   organizationName: string;
   /** Workspace admins: default model, Allowed models, custom models. */
   canManageSettings: boolean;
@@ -99,6 +106,11 @@ export function WorkspaceModelsPage({
   };
 
   const codex = useCodexSubscriptions({ client, workspaceId, canManage: canManageConnections });
+  const setAsideOrganization = useSetAsideOrganizationAccounts(
+    codex,
+    organizationId,
+    canManageOrganizationModels,
+  );
   const grok = useSuperGrokSubscriptions({ client, workspaceId, canManage: canManageConnections });
   const vercel = useProviderConnection({
     client,
@@ -127,7 +139,11 @@ export function WorkspaceModelsPage({
     openAccess: (id) => nav.openView("model-access", `codex:${id}`),
     backToList,
     manageInOrganization: canManageOrganizationModels
-      ? (id) => organizationNav.openAccount(`codex:${id}`)
+      ? (id) =>
+          organizationNav.openAccount(
+            `codex:${id}`,
+            currentPageReturnTo(`${workspaceName} · Models`),
+          )
       : undefined,
   };
   const grokPlaces: SuperGrokPlaces = {
@@ -151,7 +167,7 @@ export function WorkspaceModelsPage({
     page = (
       <ConnectPickerPage
         codexAvailable={canManageConnections}
-        grokAvailable={!grok.unavailable}
+        grok={!canManageConnections ? "hidden" : grok.unavailable ? "not_enabled" : "available"}
         gateways={gateways}
         scopeName={workspaceName}
         onClose={backToList}
@@ -209,7 +225,7 @@ export function WorkspaceModelsPage({
     );
   } else {
     const listed = [
-      codexListedCount(codex),
+      codexListedCount(codex, setAsideOrganization),
       superGrokListedCount(grok),
       ...(["openrouter", "vercel"] as const).map((id) => (providerListed(gateways[id]) ? 1 : 0)),
     ];
@@ -228,9 +244,20 @@ export function WorkspaceModelsPage({
         empty={!loadingAccounts && listed.every((count) => count === 0)}
         onEditAllowed={() => nav.openView("allowed-models")}
         onConnect={() => nav.openView("connect")}
+        accountsNote={
+          <CodexPoolNotice
+            codex={codex}
+            places={codexPlaces}
+            organizationAccountCount={setAsideOrganization?.length}
+          />
+        }
         accounts={
           <RowList label="Accounts" columns={ACCOUNT_COLUMNS} flush>
-            <CodexAccountRows codex={codex} places={codexPlaces} />
+            <CodexAccountRows
+              codex={codex}
+              places={codexPlaces}
+              organizationAccounts={setAsideOrganization}
+            />
             <SuperGrokAccountRows grok={grok} places={grokPlaces} />
             {(["openrouter", "vercel"] as const)
               .filter((id) => providerListed(gateways[id]))
@@ -285,6 +312,7 @@ function ModelsList({
   empty,
   onEditAllowed,
   onConnect,
+  accountsNote,
   accounts,
   providerSections,
 }: {
@@ -296,6 +324,8 @@ function ModelsList({
   empty: boolean;
   onEditAllowed: () => void;
   onConnect: () => void;
+  /** The line above the list that says which Codex accounts new work uses. */
+  accountsNote?: ReactNode;
   accounts: ReactNode;
   providerSections: ReactNode;
 }) {
@@ -350,7 +380,10 @@ function ModelsList({
             className="pt-8 pb-6"
           />
         ) : (
-          accounts
+          <>
+            {accountsNote}
+            {accounts}
+          </>
         )}
       </Section>
       {providerSections}
@@ -363,11 +396,12 @@ type ConnectChoice = "codex" | "supergrok" | "vercel" | "openrouter";
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
  * opens that provider's own connect step; a provider that is already
- * connected opens its page instead.
+ * connected opens its page instead. A provider this server has turned off
+ * stays in the list, disabled, so people know it exists.
  */
 export function ConnectPickerPage({
   codexAvailable,
-  grokAvailable,
+  grok,
   gateways,
   scopeName,
   onClose,
@@ -375,7 +409,8 @@ export function ConnectPickerPage({
   onOpenConnected,
 }: {
   codexAvailable: boolean;
-  grokAvailable: boolean;
+  /** "not_enabled": this server has SuperGrok off. "hidden": the viewer can't connect it. */
+  grok: "available" | "not_enabled" | "hidden";
   gateways?: Record<"vercel" | "openrouter", ProviderConnection> | undefined;
   /** Where the account pays: the workspace's name, or the organization's shared workspaces. */
   scopeName: string;
@@ -389,12 +424,20 @@ export function ConnectPickerPage({
     title: string;
     summary: string;
     connected?: boolean;
+    notEnabled?: boolean;
   }[] = [
     ...(codexAvailable
       ? [{ id: "codex" as const, title: "Codex", summary: "Pay with your ChatGPT plan" }]
       : []),
-    ...(grokAvailable
-      ? [{ id: "supergrok" as const, title: "SuperGrok", summary: "Pay with your SuperGrok plan" }]
+    ...(grok !== "hidden"
+      ? [
+          {
+            id: "supergrok" as const,
+            title: "SuperGrok",
+            summary: "Pay with your SuperGrok plan",
+            notEnabled: grok === "not_enabled",
+          },
+        ]
       : []),
     ...(gateways
       ? (["openrouter", "vercel"] as const)
@@ -427,20 +470,31 @@ export function ConnectPickerPage({
           />
         ) : (
           <RowList label="Providers" flush>
-            {choices.map((choice) => (
-              <ListRow
-                key={choice.id}
-                leading={<ProviderTile provider={choice.id} size="lg" />}
-                title={choice.title}
-                meta={[choice.connected ? "Connected" : choice.summary]}
-                indicator="open"
-                onOpen={() =>
-                  choice.connected && (choice.id === "vercel" || choice.id === "openrouter")
-                    ? onOpenConnected?.(choice.id)
-                    : onPick(choice.id)
-                }
-              />
-            ))}
+            {choices.map((choice) =>
+              choice.notEnabled ? (
+                <ListRow
+                  key={choice.id}
+                  disabled
+                  leading={<ProviderTile provider={choice.id} size="lg" />}
+                  title={choice.title}
+                  meta={[choice.summary]}
+                  indicator={{ kind: "unavailable", label: "Not enabled on this server" }}
+                />
+              ) : (
+                <ListRow
+                  key={choice.id}
+                  leading={<ProviderTile provider={choice.id} size="lg" />}
+                  title={choice.title}
+                  meta={[choice.connected ? "Connected" : choice.summary]}
+                  indicator="open"
+                  onOpen={() =>
+                    choice.connected && (choice.id === "vercel" || choice.id === "openrouter")
+                      ? onOpenConnected?.(choice.id)
+                      : onPick(choice.id)
+                  }
+                />
+              ),
+            )}
           </RowList>
         )}
       </div>

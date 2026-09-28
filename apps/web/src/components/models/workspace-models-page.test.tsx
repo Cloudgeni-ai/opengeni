@@ -330,7 +330,7 @@ describe("Codex rows", () => {
     let failed = true;
     client.listCodexAccounts.mockImplementation(async () => {
       if (failed) throw new Error("Connection request failed");
-      return { ...accounts, accounts: [] };
+      return { ...accounts, accounts: [], source: { ...source, organizationAvailable: false } };
     });
     const view = await render();
     try {
@@ -391,7 +391,10 @@ describe("Models list", () => {
       expect(text).not.toContain("ChatGPT plan");
       expect(button(view.container, "More actions for Codex")).toBeUndefined();
       expect(button(view.container, "Edit")).toBeUndefined();
-      expect(view.container.querySelectorAll("[data-slot=list-row]")).toHaveLength(1);
+      // This workspace's account, then the organization's pool, muted.
+      expect(view.container.querySelectorAll("[data-slot=list-row]")).toHaveLength(2);
+      expect(text).toContain("Not in use");
+      expect(text).toContain("Shared by Acme");
     } finally {
       await cleanup(view);
     }
@@ -422,11 +425,11 @@ describe("Models list", () => {
     }
   });
 
-  test("the provider switch explains itself without On:/Off: copy", async () => {
+  test("the portability switch explains itself without On:/Off: copy", async () => {
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("Allow switching to other providers");
+      expect(text).toContain("Keep Codex chats portable");
       expect(text).not.toMatch(/\bOn: |\bOff: /);
     } finally {
       await cleanup(view);
@@ -439,6 +442,28 @@ describe("Models list", () => {
       await act(async () => button(view.container, "Turn off Codex")!.click());
       expect(view.container.textContent).toContain("Turn off Codex in Design preview?");
       expect(client.requestJson).not.toHaveBeenCalled();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Connect account shows SuperGrok disabled when this server has it off", async () => {
+    const { OpenGeniApiError } = await import("@opengeni/sdk/browser");
+    client.listSuperGrokAccounts.mockImplementation(async () => {
+      throw new OpenGeniApiError(
+        404,
+        JSON.stringify({ error: "SuperGrok subscriptions are not enabled" }),
+      );
+    });
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect" }));
+      await flush();
+      const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+        (candidate) => candidate.textContent?.includes("SuperGrok"),
+      )!;
+      expect(row.textContent).toContain("Not enabled on this server");
+      expect(row.querySelector("[data-row-action]")).toBeNull();
     } finally {
       await cleanup(view);
     }
@@ -466,13 +491,52 @@ describe("Models list", () => {
 });
 
 describe("Codex pool controls", () => {
-  test("Use switches the source only after an explicit choice", async () => {
+  test("says which pool new work uses, with no source control while automatic", async () => {
     const view = await render();
     try {
-      const group = view.container.querySelector('[role="radiogroup"]');
-      expect(group).not.toBeNull();
-      expect(client.requestJson).not.toHaveBeenCalled();
-      await act(async () => button(view.container, "Organization")!.click());
+      expect(view.container.querySelector('[role="radiogroup"]')).toBeNull();
+      expect(view.container.textContent).toContain(
+        "New work uses this workspace's Codex account. The organization's accounts are set aside while it's connected.",
+      );
+      expect(button(view.container, "Use automatically")).toBeUndefined();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("an explicit source shows truthfully and goes back to automatic", async () => {
+    accounts = { ...accounts, accounts: [], source: { ...source, mode: "workspace" } };
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain(
+        "New Codex work can't start. This workspace is set to use only its own accounts, and none are connected.",
+      );
+      await act(async () => button(view.container, "Use automatically")!.click());
+      await flush();
+      expect(client.requestJson).toHaveBeenCalledWith(
+        "PATCH",
+        "/v1/workspaces/workspace-a/codex/source",
+        { mode: "automatic" },
+      );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("an organization row can keep new work on the organization's accounts", async () => {
+    accounts = {
+      ...accounts,
+      source: { ...source, effectiveSource: "organization", workspaceAvailable: false },
+      accounts: [codexAccount({ source: "organization" })],
+    };
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain(
+        "New work uses the organization's Codex account. Connect an account here to use your own instead.",
+      );
+      await act(async () =>
+        button(view.container, "Always use the organization's accounts")!.click(),
+      );
       await flush();
       expect(client.requestJson).toHaveBeenCalledWith(
         "PATCH",
@@ -484,18 +548,20 @@ describe("Codex pool controls", () => {
     }
   });
 
-  test("Use is hidden when the organization shares no account, and for members", async () => {
+  test("no pool line when the organization shares nothing, and no action for members", async () => {
     accounts = { ...accounts, source: { ...source, organizationAvailable: false } };
     let view = await render();
     try {
-      expect(view.container.textContent).not.toContain("This workspace");
+      expect(view.container.textContent).not.toContain("New work uses");
+      expect(view.container.textContent).not.toContain("Not in use");
     } finally {
       await cleanup(view);
     }
-    accounts = { ...accounts, source };
+    accounts = { ...accounts, source: { ...source, mode: "workspace" } };
     view = await render(false);
     try {
-      expect(view.container.textContent).not.toContain("This workspace");
+      expect(view.container.textContent).toContain("New work uses this workspace's Codex account.");
+      expect(button(view.container, "Use automatically")).toBeUndefined();
       expect(button(view.container, "Connect account")).toBeUndefined();
     } finally {
       await cleanup(view);
@@ -539,7 +605,7 @@ describe("Codex account page", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
       const toggle = view.container.querySelector<HTMLButtonElement>(
-        'button[role="switch"][aria-label="Use Team plan for new work"]',
+        'button[role="switch"][aria-label="Team plan is available for new chats"]',
       )!;
       expect(toggle.getAttribute("aria-checked")).toBe("true");
       await act(async () => toggle.click());
@@ -551,6 +617,31 @@ describe("Codex account page", () => {
       await act(async () => button(view.container, "Models")!.click());
       await flush();
       expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("⋯ holds Rename, Copy account ID and Disconnect; no aside or Technical details", async () => {
+    accounts = {
+      ...accounts,
+      accounts: [codexAccount({ chatgptAccountId: "chatgpt-123" })],
+    };
+    const view = await render();
+    try {
+      await act(async () =>
+        view.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
+      );
+      await flush();
+      const items = [...view.container.querySelectorAll("[data-menu-item]")].map((item) =>
+        item.textContent?.trim(),
+      );
+      expect(items).toEqual(["Rename", "Copy account ID", "Disconnect"]);
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("ChatGPT Pro·team@example.com·This workspace");
+      expect(text).not.toContain("Technical details");
+      expect(text).not.toContain("Belongs to");
+      expect(text).not.toContain("Connected");
     } finally {
       await cleanup(view);
     }
@@ -588,14 +679,21 @@ describe("Codex account page", () => {
     };
     const view = await render();
     try {
-      expect(view.container.textContent).toContain("Organization");
+      expect(view.container.textContent).toContain("Shared by Acme");
       await act(async () =>
         view.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
       );
       await flush();
-      expect(view.container.textContent).toContain("Shared by Acme.");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Shared by Acme");
+      expect(text).toContain("Managed by your organization.");
+      // No green "Connected", no "Organization" chip, no aside repeating the header.
+      expect(text).not.toContain("Connected");
+      expect(text).not.toContain("Belongs to");
+      expect(text).not.toContain("Use for new work");
       expect(view.container.querySelector('button[role="switch"]')).toBeNull();
       expect(button(view.container, /Disconnect/)).toBeUndefined();
+      expect(button(view.container, /Rename/)).toBeUndefined();
       expect(client.getModelConnectionAccess).not.toHaveBeenCalled();
     } finally {
       await cleanup(view);

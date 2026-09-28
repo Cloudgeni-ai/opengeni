@@ -50,6 +50,7 @@ import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { parseReturnTo, returnToOf, type ReturnToSearch } from "@/lib/return-to";
 import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
 import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
@@ -497,7 +498,7 @@ const workspaceSettingsRoute = createRoute({
     view?: ModelsView | AccessUrlView;
     key?: string;
     member?: string;
-  } => {
+  } & ReturnToSearch => {
     // Older sections still parse: Members is Access, Danger zone lives in
     // General, and the Capabilities stub opens the Capabilities page.
     const section =
@@ -514,6 +515,7 @@ const workspaceSettingsRoute = createRoute({
       ...(view ? { view } : {}),
       ...(key ? { key } : {}),
       ...access,
+      ...parseReturnTo(search),
     };
   },
   component: WorkspaceSettings,
@@ -564,7 +566,7 @@ const workspaceOrganizationRoute = createRoute({
     person?: string;
     invitation?: string;
     workspace?: string;
-  } => {
+  } & ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
     const section = parseOrganizationSection(search.section);
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
@@ -587,6 +589,7 @@ const workspaceOrganizationRoute = createRoute({
       ...(person ? { person } : {}),
       ...(invitation ? { invitation } : {}),
       ...(workspace ? { workspace } : {}),
+      ...parseReturnTo(search),
     };
   },
   component: Organization,
@@ -937,7 +940,7 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
-  const { checkout, section, account, view, person, invitation, workspace } =
+  const { checkout, section, account, view, person, invitation, workspace, from, fromLabel } =
     workspaceOrganizationRoute.useSearch();
   const page = parseOrganizationSection(section);
   return (
@@ -947,6 +950,7 @@ function Organization() {
       section={page}
       modelsAccount={account}
       modelsView={page === "models" ? parseModelsView(view) : undefined}
+      returnTo={returnToOf({ from, fromLabel })}
       organizationView={page === "models" ? undefined : parseOrganizationView(view)}
       person={person}
       invitation={invitation}

@@ -1,6 +1,5 @@
 import type { CodexAccount } from "@opengeni/sdk";
 import {
-  BuildingIcon,
   CheckIcon,
   CircleCheckIcon,
   KeyRoundIcon,
@@ -53,13 +52,7 @@ import { useOrganizationProviderConnection } from "@/components/organization-mod
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import {
-  DetailAside,
-  DetailAsideItem,
-  DetailPage,
-  DetailPageBody,
-  DetailPageHeader,
-} from "@/components/ui/detail-page";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
 import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -74,6 +67,7 @@ import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
 import { accountKeyOf, type ModelsView } from "@/lib/models-route";
+import type { ReturnTo } from "@/lib/return-to";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -88,17 +82,20 @@ export function OrganizationModelsPage({
   organizationName,
   account,
   view,
+  returnTo,
 }: {
   workspaceId: string;
   organizationId: string;
   organizationName: string;
   account: string | undefined;
   view: ModelsView | undefined;
+  /** Where a cross-scope link came from (a workspace's Models); Back returns there. */
+  returnTo?: ReturnTo | undefined;
 }) {
   const client = useAppContext().client;
   const nav = useModelsNavigation(
     useMemo(() => ({ kind: "organization" as const, workspaceId }), [workspaceId]),
-    { account, view },
+    { account, view, returnTo },
   );
   const codex = useOrganizationCodexSubscriptions({ client, organizationId });
   const grok = useSuperGrokSubscriptions({ client, organizationId, canManage: true });
@@ -121,6 +118,9 @@ export function OrganizationModelsPage({
     openConnect: () => nav.openView("connect:codex"),
     openAccess: (id) => nav.openView("model-access", `codex:${id}`),
     backToList,
+    back: nav.returnTo
+      ? { label: nav.returnTo.label, onClick: () => nav.goBack(nav.returnTo!) }
+      : { label: "Models", onClick: backToList },
   };
   const grokPlaces: SuperGrokPlaces = {
     scopeName: organizationName,
@@ -137,7 +137,7 @@ export function OrganizationModelsPage({
     page = (
       <ConnectPickerPage
         codexAvailable
-        grokAvailable={!grok.unavailable}
+        grok={grok.unavailable ? "not_enabled" : "available"}
         gateways={gateways}
         scopeName={`${organizationName}'s shared workspaces`}
         onClose={backToList}
@@ -295,6 +295,8 @@ interface OrgCodexPlaces {
   openConnect: () => void;
   openAccess: (accountId: string) => void;
   backToList: () => void;
+  /** The account page's back link: "Models", or the page a cross-scope link came from. */
+  back: { label: string; onClick: () => void };
 }
 
 function OrgCodexRows({
@@ -386,7 +388,7 @@ function OrgCodexAccountPage({
   places: OrgCodexPlaces;
 }) {
   const account = codex.accounts.find((candidate) => candidate.id === accountId) ?? null;
-  const back = { label: "Models", onClick: places.backToList };
+  const back = places.back;
   if (codex.loading) {
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -430,16 +432,11 @@ function OrgCodexAccountDetail({
   });
   const reconnect = account.status !== "active";
   return (
-    <DetailPage
-      back={{ label: "Models", onClick: places.backToList }}
-      className={FLUSH_DETAIL_PAGE_CLASS}
-    >
+    <DetailPage back={places.back} className={FLUSH_DETAIL_PAGE_CLASS}>
       <DetailPageHeader
         leading={<ProviderTile provider="codex" />}
         title={name}
-        chips={
-          <StatusBadge status={reconnect ? "needs_reconnect" : "connected"} variant="outline" />
-        }
+        chips={reconnect ? <StatusBadge status="needs_reconnect" variant="outline" /> : null}
         meta={[
           planLabel(account.plan, "ChatGPT"),
           account.email && account.email !== name ? account.email : null,
@@ -447,6 +444,10 @@ function OrgCodexAccountDetail({
         ]}
         actions={
           <MoreMenu label={`More actions for ${name}`}>
+            <DropdownMenuItem onSelect={() => setRenaming(true)}>
+              <PencilIcon />
+              Rename
+            </DropdownMenuItem>
             <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
               <UnplugIcon />
               Disconnect
@@ -454,16 +455,7 @@ function OrgCodexAccountDetail({
           </MoreMenu>
         }
       />
-      <DetailPageBody
-        aside={
-          <DetailAside label={`About ${name}`}>
-            <DetailAsideItem label="Belongs to" icon={<BuildingIcon />}>
-              {places.organizationName}
-            </DetailAsideItem>
-            <DetailAsideItem label="Plan">{planLabel(account.plan, "ChatGPT")}</DetailAsideItem>
-          </DetailAside>
-        }
-      >
+      <DetailPageBody>
         {reconnect ? (
           <DetailSection>
             <Notice
@@ -512,16 +504,6 @@ function OrgCodexAccountDetail({
                 }
               />
             ) : null}
-            <SettingRow
-              label="Name"
-              description={name}
-              control={
-                <RowButton aria-label={`Rename ${name}`} onClick={() => setRenaming(true)}>
-                  <PencilIcon aria-hidden="true" />
-                  Rename
-                </RowButton>
-              }
-            />
             <ConnectionAccessRows
               access={access}
               organization

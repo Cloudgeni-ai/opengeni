@@ -8,6 +8,7 @@ import { FormDialog } from "@/components/ui/form-dialog";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 import type { ModelsView } from "@/lib/models-route";
+import { returnToSearch, type ReturnTo } from "@/lib/return-to";
 
 export type ModelsScope =
   | { kind: "workspace"; workspaceId: string }
@@ -114,23 +115,41 @@ export function errorText(error: unknown, fallback: string): string {
 export interface ModelsNavigation {
   account: string | undefined;
   view: ModelsView | undefined;
-  /** Opens an account's page, or the list with `undefined`. */
-  openAccount: (account: string | undefined) => void;
+  /**
+   * Where this page was opened from in another scope. It stays in the URL
+   * while an account and its forms are open; the list drops it.
+   */
+  returnTo: ReturnTo | undefined;
+  /** Opens an account's page, or the list with `undefined`. `from` crosses scopes. */
+  openAccount: (account: string | undefined, from?: ReturnTo) => void;
   /** Opens a form page, optionally for an account. */
   openView: (view: ModelsView | undefined, account?: string) => void;
+  /** Returns to where a cross-scope link came from. */
+  goBack: (returnTo: ReturnTo) => void;
 }
 
 export function useModelsNavigation(
   scope: ModelsScope,
-  current: { account?: string | undefined; view?: ModelsView | undefined },
+  current: {
+    account?: string | undefined;
+    view?: ModelsView | undefined;
+    returnTo?: ReturnTo | undefined;
+  },
 ): ModelsNavigation {
   const navigate = useNavigate();
+  const currentReturnTo = current.returnTo;
   const go = useCallback(
-    (search: { account?: string | undefined; view?: ModelsView | undefined }) => {
+    (search: {
+      account?: string | undefined;
+      view?: ModelsView | undefined;
+      from?: ReturnTo | undefined;
+    }) => {
+      const from = search.from ?? (search.account ? currentReturnTo : undefined);
       const next = {
         section: "models" as const,
         ...(search.account ? { account: search.account } : {}),
         ...(search.view ? { view: search.view } : {}),
+        ...returnToSearch(from),
       };
       if (scope.kind === "organization") {
         void navigate({
@@ -146,13 +165,15 @@ export function useModelsNavigation(
         });
       }
     },
-    [navigate, scope],
+    [navigate, scope, currentReturnTo],
   );
   return {
     account: current.account,
     view: current.view,
-    openAccount: useCallback((account) => go({ account }), [go]),
+    returnTo: currentReturnTo,
+    openAccount: useCallback((account, from) => go({ account, from }), [go]),
     openView: useCallback((view, account) => go({ account, view }), [go]),
+    goBack: useCallback((returnTo) => void navigate({ href: returnTo.path }), [navigate]),
   };
 }
 

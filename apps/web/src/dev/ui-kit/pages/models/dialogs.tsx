@@ -298,7 +298,13 @@ export function ConnectPage({
             scope === "organization"
               ? { ...value, orgAccounts: [...value.orgAccounts, account] }
               : { ...value, workspaceAccounts: [...value.workspaceAccounts, account] };
-          return askSource && useChoice === "workspace" ? { ...next, source: "workspace" } : next;
+          // Automatic uses this workspace's accounts once one is connected; "keep"
+          // saves the organization as an explicit choice.
+          if (!askSource) return next;
+          return {
+            ...next,
+            legacySource: useChoice === "organization" ? "organization" : "automatic",
+          };
         });
         toast.success(`Added ${account.name}`, {
           description:

@@ -66,6 +66,11 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 Grey (`fg-subtle`) is Paused, Not connected, Revoked, Off. Always a dot plus a sentence-case
 label; never color alone.
 
+**Only states that need attention are shown.** A healthy object carries no status: no green
+"Connected" or "Active" badge on a row or a page header. Show Needs reconnect, Paused, Out of
+usage, Failed and the like; when nothing is wrong, the badge is simply absent. Green stays for
+results the person just caused or is waiting on (Succeeded, Installed).
+
 ## 3. Type scale
 
 Inter Variable with `cv11 ss01 ss03`; JetBrains Mono for IDs, code and key prefixes only.
@@ -141,9 +146,10 @@ Retired: 13, 16 and 10px text, uppercase tracked group labels, opacity-muted tex
   the reference goes in Technical details.
 - One name per object across rail, title, back link, buttons and toasts. One noun per concept
   (schedule, not "scheduled task").
-- Descriptions say what the setting does, and what Off keeps if that matters: "Lets a Codex chat
-  move to a model from another provider. Off keeps long chats more accurate." Never spell out both
-  states as "On: ... Off: ...". Details only some people need go in a tooltip.
+- Descriptions say what the setting does, and what Off keeps if that matters: "Summarizes long
+  chats in a form another provider's model can continue. Off keeps new chats on Codex, with better
+  memory of long conversations." Never spell out both states as "On: ... Off: ...". Details only
+  some people need go in a tooltip.
 - Sentence case everywhere. Plain dashes (-), never em-dashes. Dates as "Mon 28 Sep, 08:00" or
   "3 days ago" with the exact time on hover; never seconds, never ISO.
 - Back links name the list they return to: "Variable sets", "Models", "Your skills". The arrow is
@@ -156,10 +162,16 @@ Learned on Settings > Models, 27 Sep 2026.
 - **One flat list per kind of thing.** Connected accounts of every provider are one divided list.
   No group headers inside a list, no pool-wide controls between rows, no ⋯ menu floating above
   them.
-- **Settings of a group get their own section, as setting rows.** "Subscriptions from", "When
-  several accounts are connected", "Allow switching to other providers": each row has exactly one
-  control. A destructive action for the group ("Turn off Codex") is the last row, as quiet danger
-  text (`SettingDangerRow`) that confirms in a dialog.
+- **Settings of a group get their own section, as setting rows.** "Sharing work between
+  accounts", "Keep Codex chats portable": each row has exactly one control. A destructive action
+  for the group ("Turn off Codex") is the last row, as quiet danger text (`SettingDangerRow`) that
+  confirms in a dialog. Show them directly; don't fold two or three rows under an "Advanced".
+- **No control for what the system decides.** When the product picks something automatically
+  (which Codex accounts new work uses), say the outcome in one line above the list ("New work uses
+  this workspace's Codex accounts. The organization's account is set aside while these are
+  connected.") and mute what is set aside ("Not in use") instead of offering a switch people read
+  as a filter. A saved explicit choice shows truthfully in that line with one quiet way back
+  ("Use automatically").
 - **Unconnected options are not rows.** A provider you haven't connected is a choice on the
   Connect (or New) page, never a list row with its own Connect button. With nothing connected, the
   list becomes the empty state with the one Connect action.
@@ -188,6 +200,15 @@ Learned on Settings > Models, 27 Sep 2026.
   it, with the reason; the rest of the form stays editable.
 - **Never claim a count you don't have.** Detail meta and "Used by" say "Checking use..." while
   unknown and fail closed (no count, no "Not used") when the check fails.
+- **Say each fact once.** A detail page's aside must not repeat what the header already says
+  (plan, owner, "Belongs to"). If the aside would only repeat the header, drop it. The header meta
+  is one line ("ChatGPT Pro · Shared by Acme" or "ChatGPT Pro · This workspace"); an object you
+  can't change says who can in one muted sentence ("Managed by your organization.") or, for those
+  who can, one button to the place that manages it.
+- **Name the organization or say "your organization".** Use its real name; never put a short id
+  ("Org f011ba91") into a sentence.
+- **Available, not hidden, when a server turns something off.** A provider this deployment has
+  turned off stays on the Connect page, disabled, with "Not enabled on this server".
 
 ## 8. Pages, not sheets
 
@@ -218,8 +239,15 @@ Main column: DetailSection ...        | Quiet aside card:
   counts). Header actions are 32px with the 10px radius (`size="sm"` buttons, `RowButton`, and
   `MoreMenu` for the ⋯); the default 36px button is for a list page's `PageHeader` primary only.
 - `DetailPageBody` - the main column of `DetailSection`s split by hairlines, and an optional
-  `aside` (`DetailAside` + `DetailAsideItem`: "Created by", "Available to", "Plan", IDs). The aside
-  drops under the main column below 620px of content width.
+  `aside` (`DetailAside` + `DetailAsideItem`: "Created by", "Available to", IDs). The aside
+  drops under the main column below 620px of content width. **It must not repeat header facts**;
+  when it would, there is no aside.
+- A single technical fact (one ID) is not worth a "Technical details" disclosure: put it in the ⋯
+  menu ("Copy account ID") or on one quiet row. A disclosure holds two or more things.
+- **Back returns where you came from.** A link into another scope (a workspace's settings ->
+  organization settings, or back) passes its origin (`from` + `fromLabel`, `lib/return-to.ts`),
+  and the destination's back link says and returns there ("← Design preview · Models"). Without
+  it, Back goes to the page's own parent.
 - Focus moves to the page title when the page opens in place; the title is focusable from script
   (`useFocusOnNavigation`). Back on the list, focus returns to the row that was opened.
 

@@ -131,10 +131,12 @@ describe("organization administration surface", () => {
     expect(organizationCodexSource).toContain("setLoadError(");
     expect(organizationModelsSource).toContain("<ErrorMessage");
     expect(organizationModelsSource).toContain("Try again");
-    // Workspace Codex: one "Subscriptions from" choice instead of the source select; the only
-    // link to organization settings is on a shared account's page, for org admins.
-    expect(workspaceCodexSource).toContain('label="Subscriptions from"');
-    expect(workspaceCodexSource).toContain('<SegmentedControl<"organization" | "workspace">');
+    // Workspace Codex: no source control; one line says which pool new work uses, with
+    // "Use automatically" for a saved explicit choice. The only link to organization
+    // settings is on a shared account's page, for org admins.
+    expect(workspaceCodexSource).not.toContain('label="Subscriptions from"');
+    expect(workspaceCodexSource).toContain("export function CodexPoolNotice");
+    expect(workspaceCodexSource).toContain("Use automatically");
     expect(workspaceCodexSource).toContain("Manage in organization settings");
     expect(workspaceCodexSource).toContain("manageInOrganization");
     expect(routeSource).toContain("canManageOrganizationKnowledge");

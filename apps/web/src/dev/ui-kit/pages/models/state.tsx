@@ -229,13 +229,12 @@ export function effectiveSource(
   scenario: Scenario,
 ): Source {
   if (!scenario.orgAssigned) return "workspace";
-  if (questions.q13 === "select") {
-    if (data.legacySource === "organization") return "organization";
-    if (data.legacySource === "workspace") return "workspace";
-    // Automatic: workspace accounts win as soon as one is connected.
-    return data.workspaceAccounts.length > 0 ? "workspace" : "organization";
-  }
-  return data.source;
+  // Decided 28 Sep: no source control. Automatic unless a saved choice says otherwise;
+  // workspace accounts win as soon as one is connected. (Q13's select writes the same field.)
+  void questions;
+  if (data.legacySource === "organization") return "organization";
+  if (data.legacySource === "workspace") return "workspace";
+  return data.workspaceAccounts.length > 0 ? "workspace" : "organization";
 }
 
 /** Codex is on for this workspace (the legacy select can also turn it off). */

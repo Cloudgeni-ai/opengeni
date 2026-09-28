@@ -7,6 +7,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, type ReactNode } from 
 import { toast } from "sonner";
 
 import { OrganizationModelsPage } from "@/components/models/organization-models-page";
+import type { ReturnTo } from "@/lib/return-to";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
 import { OrganizationGeneralPage } from "@/components/organization/general-page";
 import { OrganizationIdentityPage } from "@/components/organization/identity-page";
@@ -51,6 +52,7 @@ export function OrgSettingsRoute({
   section: requestedSection,
   modelsAccount,
   modelsView,
+  returnTo,
   organizationView,
   person,
   invitation,
@@ -63,6 +65,8 @@ export function OrgSettingsRoute({
   modelsAccount?: string | undefined;
   /** Models: the form page that is open. */
   modelsView?: ModelsView | undefined;
+  /** Where a cross-scope link came from; the back link returns there. */
+  returnTo?: ReturnTo | undefined;
   /** People or Workspaces: the form page that is open. */
   organizationView?: OrganizationView | undefined;
   /** People: the person whose page is open (organization membership id). */
@@ -295,6 +299,7 @@ export function OrgSettingsRoute({
             fallbackLabel={fallbackLabel}
             account={modelsAccount}
             view={modelsView}
+            returnTo={returnTo}
           />
         ) : null}
 
@@ -418,6 +423,7 @@ function OrganizationModelsSection({
   fallbackLabel: string;
   account: string | undefined;
   view: ModelsView | undefined;
+  returnTo: ReturnTo | undefined;
 }) {
   const directory = useOptionalOrganizationDirectory();
   return (
