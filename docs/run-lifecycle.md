@@ -1074,8 +1074,8 @@ Only a complete checkout that created its directory returns `revisionId` and
 `publishable: false`, because a reused directory may hold files outside the
 revision. Each call records `opengeni_skill_checkouts_total{outcome, selection}`,
 `opengeni_skill_checkout_duration_seconds{phase, outcome}` (`resolve`,
-`sandbox`, `write`, `total`; lazy box start falls in `write` when checkout is
-the turn's first sandbox operation) and `opengeni_skill_checkout_files_total{result}`.
+`sandbox`, `write`, `total`; lazy box start falls in `sandbox` when checkout is
+the turn's first sandbox use) and `opengeni_skill_checkout_files_total{result}`.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound

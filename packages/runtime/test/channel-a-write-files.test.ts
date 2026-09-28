@@ -49,6 +49,7 @@ function workspace(): { root: string; outside: string } {
 function shellSession(
   root: string,
   beforeExec?: (args: ChannelAExecArgs) => void | Promise<void>,
+  env?: () => Record<string, string | undefined>,
 ): { session: ChannelASession; commands: ChannelAExecArgs[] } {
   const commands: ChannelAExecArgs[] = [];
   return {
@@ -61,6 +62,7 @@ function shellSession(
           cwd: root,
           stdout: "pipe",
           stderr: "pipe",
+          ...(env ? { env: env() } : {}),
         });
         const [stdout, stderr, exitCode] = await Promise.all([
           new Response(child.stdout).text(),
@@ -264,6 +266,30 @@ describe("fsWriteFiles", () => {
     expect(repeated.unchanged).toHaveLength(files.length);
   });
 
+  test("a new directory holding only large files still counts as created", async () => {
+    const { root } = workspace();
+    const { session } = shellSession(root);
+    session.writeFile = async ({ path, content }) => {
+      writeFileSync(join(root, path), content);
+    };
+    const events: { payload: { changes: { path: string; isDir: boolean }[] } }[] = [];
+    const content = "x".repeat(70_000);
+    const result = await service(session, events as unknown[]).fsWriteFiles({
+      directory: "skills/large",
+      files: [{ path: "SKILL.md", content }],
+    });
+
+    // A complete checkout into a directory it created is a publish base.
+    expect(result).toMatchObject({ written: ["SKILL.md"], createdDirectory: true });
+    expect(readFileSync(join(root, "skills/large/SKILL.md"), "utf8")).toBe(content);
+    expect(
+      events.flatMap((event) => event.payload.changes.filter((change) => change.isDir)),
+    ).toEqual([
+      { path: "skills", kind: "created", isDir: true, sizeBytes: null },
+      { path: "skills/large", kind: "created", isDir: true, sizeBytes: null },
+    ]);
+  });
+
   test("a later batch conflict reports the partial write and a repeat finishes it", async () => {
     const { root } = workspace();
     const files = Array.from({ length: 4 }, (_, index) => ({
@@ -292,6 +318,56 @@ describe("fsWriteFiles", () => {
     expect(repeated.written.length + repeated.unchanged.length).toBe(files.length);
     for (const file of files) {
       expect(readFileSync(join(root, "big", file.path), "utf8")).toBe(file.content);
+    }
+  });
+
+  test("a failed or short write removes its own file so a repeat finishes the tree", async () => {
+    const { root, outside } = workspace();
+    // A base64 that stops early, as a full disk would. It fails on its third
+    // call so two files are complete before the batch stops.
+    const bin = join(outside, "bin");
+    mkdirSync(bin);
+    const counter = join(outside, "calls");
+    writeFileSync(
+      join(bin, "base64"),
+      `#!/bin/sh\nn=$(($(cat "${counter}" 2>/dev/null || echo 0) + 1))\necho "$n" > "${counter}"\nif [ "$n" = "$OG_FAIL_AT" ]; then head -c 3; exit "$OG_FAIL_STATUS"; fi\nexec /usr/bin/base64 "$@"\n`,
+      { mode: 0o755 },
+    );
+    let failure: { at: string; status: string } | null = null;
+    const { session } = shellSession(root, undefined, () =>
+      failure
+        ? {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            OG_FAIL_AT: failure.at,
+            OG_FAIL_STATUS: failure.status,
+          }
+        : { ...process.env },
+    );
+    const svc = service(session);
+    for (const [status, directory] of [
+      // base64 reports the failure.
+      ["1", "failed"],
+      // base64 exits cleanly after a short write; the size check catches it.
+      ["0", "short"],
+    ] as const) {
+      rmSync(counter, { force: true });
+      failure = { at: "3", status };
+      const error = await svc.fsWriteFiles({ directory, files: skillFiles }).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(ChannelAPartialMutationError);
+      expect(existsSync(join(root, directory, skillFiles[1]!.path))).toBe(true);
+      // The interrupted file is gone rather than left truncated.
+      expect(existsSync(join(root, directory, skillFiles[2]!.path))).toBe(false);
+
+      failure = null;
+      const repeated = await svc.fsWriteFiles({ directory, files: skillFiles });
+      expect(repeated.unchanged).toEqual([skillFiles[0]!.path, skillFiles[1]!.path]);
+      for (const file of skillFiles) {
+        expect(readFileSync(join(root, directory, file.path), "utf8")).toBe(file.content);
+      }
     }
   });
 

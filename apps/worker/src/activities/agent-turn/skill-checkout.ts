@@ -9,8 +9,8 @@ export type SkillCheckoutOutcome = "written" | "unchanged" | "refused" | "failed
  * Content-free timing of one skill_checkout call. `resolve` covers authority
  * and the Skill read, `sandbox` acquiring the turn's filesystem handle, and
  * `write` the batched filesystem write. On a lazily provisioned turn whose
- * first sandbox operation is this checkout, box start is inside `write`.
- * A phase that did not run is null.
+ * first sandbox use is this checkout, acquiring the handle starts the box, so
+ * box start is inside `sandbox`. A phase that did not run is null.
  */
 export type SkillCheckoutObservation = Readonly<{
   outcome: SkillCheckoutOutcome;

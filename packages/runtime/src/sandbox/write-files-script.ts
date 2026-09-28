@@ -106,12 +106,18 @@ export function writeFilesPrelude(input: {
       "}",
     ].join("\n"),
     // noclobber opens a missing path with O_EXCL, so a file that appeared
-    // since the check (including a dangling symlink) is never replaced.
+    // since the check (including a dangling symlink) is never replaced. A
+    // failed open exits 1 and leaves the path alone. Once the open succeeded
+    // the file is this call's own, so a failed or short write (a full disk,
+    // for example) removes it; otherwise a repeat would find a truncated file
+    // and report a conflict instead of finishing the write.
     [
       "og_put() {",
-      `( set -C; printf '%s' "$4" | base64 -d > "$2" ) 2>/dev/null || og_fail "__OPENGENI_FS_WRITE_FAILED__F$1__" 71`,
-      `og_n=$(wc -c < "$2") || og_fail "__OPENGENI_FS_WRITE_FAILED__F$1__" 71`,
-      `[ "$((og_n))" = "$3" ] || og_fail "__OPENGENI_FS_WRITE_FAILED__F$1__" 71`,
+      `( set -C; { printf '%s' "$4" | base64 -d || exit 72; } > "$2" ) 2>/dev/null`,
+      "og_s=$?",
+      `[ "$og_s" != 72 ] || { rm -f -- "$2"; og_fail "__OPENGENI_FS_WRITE_FAILED__F$1__" 71; }`,
+      `[ "$og_s" = 0 ] || og_fail "__OPENGENI_FS_WRITE_FAILED__F$1__" 71`,
+      `og_n=$(wc -c < "$2") && [ "$((og_n))" = "$3" ] || { rm -f -- "$2"; og_fail "__OPENGENI_FS_WRITE_FAILED__F$1__" 71; }`,
       `printf '__OGF_W__%s__' "$1"`,
       "}",
     ].join("\n"),

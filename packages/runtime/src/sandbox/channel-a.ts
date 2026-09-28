@@ -1182,7 +1182,9 @@ export class SandboxChannelAService {
       sha256: file.sha256,
       ...(withContent ? { base64: file.base64 } : {}),
     });
-    const pack = (files: readonly PlannedWriteFile[], mode: "check" | "write") => {
+    // "directories" packs only the files' parent directories into write
+    // commands, leaving the files themselves out of the batches.
+    const pack = (files: readonly PlannedWriteFile[], mode: "check" | "write" | "directories") => {
       const batches: { files: PlannedWriteFile[]; directories: Set<number> }[] = [];
       const oversize: PlannedWriteFile[] = [];
       let current: { files: PlannedWriteFile[]; directories: Set<number> } | null = null;
@@ -1191,13 +1193,15 @@ export class SandboxChannelAService {
         const directory = plan.directories[index]!;
         return (
           quotedLength(directoryCheckFragment(directory)) +
-          (mode === "write" ? quotedLength(directoryCreateFragment(directory)) : 0)
+          (mode === "check" ? 0 : quotedLength(directoryCreateFragment(directory)))
         );
       };
       for (const file of files) {
         const fileCost =
-          quotedLength(fileCheckFragment(scriptFile(file, false), mode)) +
-          (mode === "write" ? quotedLength(filePutFragment(scriptFile(file, true))) : 0);
+          mode === "directories"
+            ? 0
+            : quotedLength(fileCheckFragment(scriptFile(file, false), mode)) +
+              (mode === "write" ? quotedLength(filePutFragment(scriptFile(file, true))) : 0);
         const standalone =
           fixedCost +
           fileCost +
@@ -1222,7 +1226,7 @@ export class SandboxChannelAService {
           current.directories.add(index);
           cost += directoryCost(index);
         }
-        current.files.push(file);
+        if (mode !== "directories") current.files.push(file);
         cost += fileCost;
       }
       if (current) batches.push(current);
@@ -1286,6 +1290,12 @@ export class SandboxChannelAService {
           "write",
         );
         for (const batch of remaining.batches) await execute("write", batch);
+        // A large file's directories are created by the checked script too, so
+        // they are confined, announced, and count toward createdDirectory.
+        // A chain too long even for that is left to the single-file path.
+        for (const batch of pack(remaining.oversize, "directories").batches) {
+          await execute("write", batch);
+        }
         // A file too large to inline takes the single-file path, which moves
         // bytes out of band when the provider can. It emits its own change.
         for (const file of remaining.oversize) {

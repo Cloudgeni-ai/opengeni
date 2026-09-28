@@ -2467,7 +2467,7 @@ export function recordSkillCheckout(
     if (seconds === null) continue;
     observability.observeHistogram({
       name: "opengeni_skill_checkout_duration_seconds",
-      help: "Wall time of skill_checkout phases: resolve (authority and Skill read), sandbox (filesystem handle), write (batched file write, including lazy box start), and total.",
+      help: "Wall time of skill_checkout phases: resolve (authority and Skill read), sandbox (filesystem handle, including lazy box start), write (batched file write), and total.",
       buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60],
       labels: { phase, outcome: checkout.outcome },
       value: Math.max(0, seconds),
