@@ -340,17 +340,17 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
         }}
       >
         <span style={{ width: 10, height: 10, borderRadius: "50%", background: C.verm, display: "inline-block" }} />
-        AN AGENT IN YOUR PRODUCT
+        OPENGENI
       </div>
       <div style={{ position: "absolute", left: 150, top: 262, ...line, opacity: clamp01(l1 * 1.3), transform: `translateY(${(1 - l1) * 26}px)` }}>
-        Your app could do this.
+        Give your users
       </div>
       <div style={{ position: "absolute", left: 150, top: 262 + 116, ...line, opacity: clamp01(l2 * 1.3), transform: `translateY(${(1 - l2) * 26}px)` }}>
-        Put an agent inside<span style={{ color: C.verm }}>.</span>
+        an agent<span style={{ color: C.verm }}>.</span>
         <RestingCursor t={t} />
       </div>
       <div style={{ position: "absolute", left: 152, top: 560, fontFamily: F.ui, fontSize: 33, color: C.paperDim, opacity: clamp01(m * 1.4), transform: `translateY(${(1 - m) * 10}px)` }}>
-        Start with a chat. Connect your own tools.
+        Inside your app. Powered by OpenGeni.
       </div>
       <div style={{ position: "absolute", left: 150, right: 150, top: 690, height: 1, background: C.paper, opacity: 0.3 * m, transformOrigin: "left", transform: `scaleX(${m})` }} />
       <div style={{ position: "absolute", left: 150, top: 736, opacity: clamp01(m * 1.4), transform: `translateY(${(1 - m) * 14}px)` }}>
