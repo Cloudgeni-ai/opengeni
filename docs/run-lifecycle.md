@@ -1030,6 +1030,24 @@ Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`
 and Codemode callers always receive content. The check reads only the acting
 session's active history and leaves the tool schema, instructions, and Skill index
 unchanged, so it does not move the cached prompt prefix.
+Every `skill_read` increments `opengeni_skill_reads_total{source, skill, kind, caller}`.
+`source` is `builtin`, `session`, `workspace`, `organization`, `personal`, or
+`unknown` for a read refused before a Skill resolved; `skill` is the built-in id,
+or `custom` for every other Skill, so tenant ids, names, and requested identifiers
+never become labels; `kind` is `full` (default SKILL.md read), `already_in_context`,
+`files` (explicit paths), `list`, or `refused` (the read returned an error instead
+of Skill text); `caller` is `model` or `codemode`. A successful model read also
+carries a content-free `SkillUse` fact under MCP `_meta["opengeni/skillUse"]`:
+the resolved id and source, a ledger `revisionId` or, for a built-in or session
+artifact, the whole-artifact `contentSha256`, the kind, the UTF-8 `bytes` of the
+text returned, `inIndex` (listed in this turn's frozen, model-visible Skill
+index), and `searchedThisTurn` (returned by `skill_search` earlier in the same
+attempt). The model output is the text part alone, so `_meta` never reaches the
+model or model history; only the `agent.toolCall.output` event projection keeps
+it. It holds no Skill text, user text, or Skill title, and it is dropped rather
+than let a result cross the 1 MiB model-visible cap. Codemode results never carry
+it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
+stored event and drops fields a newer worker added instead of the whole fact.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound

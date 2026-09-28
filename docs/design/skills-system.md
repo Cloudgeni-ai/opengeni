@@ -131,6 +131,10 @@ skill_read({ skill, paths?, listFiles? })
   1,024) and available revision identity, with no file bodies and no sandbox.
   Combining inventory with `paths` is rejected. Inventory is on demand, never
   part of the standing prompt; omitted/false `listFiles` preserves text reads.
+- Telemetry: every read is counted in `opengeni_skill_reads_total`, and a model
+  read's tool-output event carries a content-free `opengeni/skillUse` fact in
+  MCP `_meta` (see [run lifecycle](../run-lifecycle.md)). Neither changes what
+  the model receives.
 
 ### Search and install
 

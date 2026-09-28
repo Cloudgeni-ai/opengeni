@@ -30,7 +30,11 @@ export {
   type McpObservationReceipt,
 } from "./mcp-operation-observation";
 import { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
-export { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
+export {
+  formatSkillCatalog,
+  skillCatalogEntryIds,
+  type SkillCatalogDescriptor,
+} from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
@@ -154,6 +158,7 @@ import {
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
+  modelToolResultFits,
   modelToolResultOverflowError,
   projectAttemptToolResultForCaller,
   spilledModelToolResult,

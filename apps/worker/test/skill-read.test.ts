@@ -1,4 +1,5 @@
-import { buildOpenGeniAgent } from "@opengeni/runtime";
+import { buildOpenGeniAgent, modelToolResultFits } from "@opengeni/runtime";
+import { SKILL_USE_META_KEY, skillUseFromToolOutput } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import { Capability, Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { describe, expect, test } from "bun:test";
@@ -7,7 +8,10 @@ import {
   DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 } from "@opengeni/codex";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
-import { createSkillReadAttemptToolDefinition } from "../src/activities/agent-turn/skill-read";
+import {
+  createSkillReadAttemptToolDefinition,
+  type SkillReadObservation,
+} from "../src/activities/agent-turn/skill-read";
 import { loadConfiguredBundledSkills } from "../src/activities/agent-turn/skill-selection";
 
 const scope = {
@@ -564,5 +568,270 @@ describe("skill_read gateway definition", () => {
         subjectId: "agent:test",
       }),
     ).rejects.toThrow("attempt no longer active");
+  });
+});
+
+describe("skill_read use telemetry", () => {
+  const files = [
+    { path: "SKILL.md", content: "---\nname: deploy\ndescription: Deploy it\n---\nmain" },
+    { path: "references/a.md", content: "support" },
+  ];
+  const digest = "a".repeat(64);
+  const builtin = {
+    files,
+    origin: { id: "builtin:opengeni-help", source: "builtin" as const, contentSha256: digest },
+  };
+  const workspace = {
+    skillId: "workspace-skill",
+    revisionId: "revision-1",
+    scopeVersion: 4,
+    files,
+    origin: { id: "workspace-skill", source: "workspace" as const },
+  };
+
+  function readers(
+    loaded: Parameters<typeof createSkillReadAttemptToolDefinition>[0]["load"] extends (
+      skill: string,
+    ) => Promise<infer T>
+      ? T
+      : never,
+    options: {
+      history?: Record<string, unknown>[];
+      indexed?: () => ReadonlySet<string> | null;
+      searched?: (id: string) => boolean;
+      observe?: (observation: SkillReadObservation) => void;
+    } = {},
+  ) {
+    const observations: SkillReadObservation[] = [];
+    const activeHistory = options.history
+      ? {
+          readResults: async () => options.history!,
+          toolOutputTruncationTokens: () => DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+        }
+      : undefined;
+    const definition = (telemetry: boolean) =>
+      createSkillReadAttemptToolDefinition({
+        authorize: async () => {},
+        load: async () => loaded,
+        ...(activeHistory ? { activeHistory } : {}),
+        ...(telemetry
+          ? {
+              telemetry: {
+                indexedSkillIds: options.indexed ?? (() => new Set(["builtin:opengeni-help"])),
+                searched: options.searched ?? (() => false),
+                observe: options.observe ?? ((observation) => void observations.push(observation)),
+              },
+            }
+          : {}),
+      });
+    const call = (telemetry: boolean) => {
+      const environment = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [definition(telemetry)],
+      });
+      return (args: Record<string, unknown>) =>
+        environment.callModel({
+          modelName: "skill_read",
+          arguments: { skill: "deploy", ...args },
+          subjectId: "agent:test",
+        });
+    };
+    return { observed: call(true), plain: call(false), definition, observations };
+  }
+
+  test("a model read carries the fact only in _meta and returns the same result", async () => {
+    for (const [loaded, provenance] of [
+      [builtin, { contentSha256: digest }],
+      [workspace, { revisionId: "revision-1" }],
+    ] as const) {
+      const { observed, plain, observations } = readers(loaded, {
+        searched: (id) => id === "workspace-skill",
+      });
+      for (const [args, kind] of [
+        [{}, "full"],
+        [{ paths: ["references/a.md"] }, "files"],
+        [{ listFiles: true }, "list"],
+      ] as const) {
+        const expected = await plain(args);
+        const actual = await observed(args);
+        expect(expected._meta).toBeUndefined();
+        const { _meta, ...visible } = actual;
+        // The model reads the text part alone; nothing it receives changes.
+        expect(visible).toEqual(expected);
+        expect(JSON.stringify(visible)).toBe(JSON.stringify(expected));
+        expect(Object.keys(_meta!)).toEqual([SKILL_USE_META_KEY]);
+        const text = (expected.content[0] as { text: string }).text;
+        expect(skillUseFromToolOutput(actual)).toEqual({
+          id: loaded.origin.id,
+          source: loaded.origin.source,
+          ...provenance,
+          kind,
+          bytes: Buffer.byteLength(text),
+          inIndex: loaded.origin.id === "builtin:opengeni-help",
+          searchedThisTurn: loaded.origin.id === "workspace-skill",
+        });
+        expect(JSON.stringify(_meta)).not.toContain("main");
+        expect(JSON.stringify(_meta)).not.toContain("Deploy it");
+      }
+      expect(observations).toEqual(
+        (["full", "files", "list"] as const).map((kind) => ({
+          caller: "model",
+          kind,
+          source: loaded.origin.source,
+          skill: loaded.origin.id,
+        })),
+      );
+    }
+  });
+
+  test("a repeated read reports already_in_context with the receipt's size", async () => {
+    const history = [
+      {
+        type: "function_call_result",
+        name: "skill_read",
+        callId: "call-1",
+        output: [
+          {
+            type: "input_text",
+            text: JSON.stringify({
+              skillId: "workspace-skill",
+              revisionId: "revision-1",
+              scopeVersion: 4,
+              files: [files[0]],
+            }),
+          },
+        ],
+      },
+    ];
+    const { observed, plain } = readers(workspace, { history });
+    const expected = await plain({});
+    const actual = await observed({});
+    expect(expected.structuredContent).toMatchObject({ alreadyInContext: true });
+    expect({ ...actual, _meta: undefined }).toEqual({ ...expected, _meta: undefined });
+    expect(skillUseFromToolOutput(actual)).toMatchObject({
+      kind: "already_in_context",
+      bytes: Buffer.byteLength((expected.content[0] as { text: string }).text),
+      revisionId: "revision-1",
+    });
+  });
+
+  test("Codemode reads are counted but never carry the fact", async () => {
+    const { definition, observations } = readers(builtin);
+    const output = await definition(true).execute(
+      { skill: "deploy" },
+      { operationId: crypto.randomUUID(), caller: { kind: "codemode", subjectId: "agent:test" } },
+    );
+    expect(output._meta).toBeUndefined();
+    expect(output.structuredContent).toEqual({ files: [files[0]] });
+    expect(observations).toEqual([
+      { caller: "codemode", kind: "full", source: "builtin", skill: "builtin:opengeni-help" },
+    ]);
+  });
+
+  test("a refused read is counted and its error is unchanged", async () => {
+    const observations: SkillReadObservation[] = [];
+    const environment = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        createSkillReadAttemptToolDefinition({
+          authorize: async () => {},
+          load: async (skill) => {
+            if (skill === "missing") throw new Error("Skill is not available in this session.");
+            return builtin;
+          },
+          telemetry: {
+            indexedSkillIds: () => null,
+            searched: () => false,
+            observe: (observation) => void observations.push(observation),
+          },
+        }),
+      ],
+    });
+    const read = (args: Record<string, unknown>) =>
+      environment.callModel({ modelName: "skill_read", arguments: args, subjectId: "agent:test" });
+    await expect(read({ skill: "missing" })).rejects.toThrow("not available");
+    await expect(read({ skill: "deploy", paths: ["nope.md"] })).rejects.toThrow();
+    expect(observations).toEqual([
+      { caller: "model", kind: "refused", source: null, skill: "missing" },
+      { caller: "model", kind: "refused", source: "builtin", skill: "builtin:opengeni-help" },
+    ]);
+  });
+
+  test("an authorization failure is not a Skill read", async () => {
+    const observations: SkillReadObservation[] = [];
+    const definition = createSkillReadAttemptToolDefinition({
+      authorize: async () => {
+        throw new Error("attempt no longer active");
+      },
+      load: async () => builtin,
+      telemetry: {
+        indexedSkillIds: () => null,
+        searched: () => false,
+        observe: (observation) => void observations.push(observation),
+      },
+    });
+    await expect(
+      definition.execute(
+        { skill: "deploy" },
+        { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "agent:test" } },
+      ),
+    ).rejects.toThrow("attempt no longer active");
+    expect(observations).toEqual([]);
+  });
+
+  test("failing telemetry never changes or fails a read", async () => {
+    const throwing = readers(builtin, {
+      observe: () => {
+        throw new Error("registry down");
+      },
+    });
+    expect(skillUseFromToolOutput(await throwing.observed({}))).toMatchObject({ kind: "full" });
+    const broken = readers(builtin, {
+      indexed: () => {
+        throw new Error("index unavailable");
+      },
+    });
+    expect(await broken.observed({})).toEqual(await broken.plain({}));
+  });
+
+  test("a read without a resolved origin carries no fact", async () => {
+    const { observed, plain, observations } = readers(files);
+    expect(await observed({})).toEqual(await plain({}));
+    expect(observations).toEqual([
+      { caller: "model", kind: "full", source: null, skill: "deploy" },
+    ]);
+  });
+
+  test("the fact is dropped rather than push a result past the model-visible cap", async () => {
+    const resultFor = async (size: number, telemetry: boolean) => {
+      const { observed, plain } = readers({
+        files: [{ path: "SKILL.md", content: "a".repeat(size) }],
+        origin: builtin.origin,
+      });
+      return await (telemetry ? observed : plain)({});
+    };
+    // The largest SKILL.md whose plain result the model still receives as is.
+    let low = 0;
+    let high = 600_000;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      const fits = await resultFor(middle, false)
+        .then(modelToolResultFits)
+        .catch(() => false);
+      if (fits) low = middle;
+      else high = middle - 1;
+    }
+    const plainAtCap = await resultFor(low, false);
+    expect(modelToolResultFits(plainAtCap)).toBe(true);
+    const belowCap = skillUseFromToolOutput(await resultFor(low - 1_000, true));
+    expect(belowCap).not.toBeNull();
+    // With the fact attached, the model would get a spill receipt instead.
+    expect(modelToolResultFits({ ...plainAtCap, _meta: { [SKILL_USE_META_KEY]: belowCap } })).toBe(
+      false,
+    );
+    const observedAtCap = await resultFor(low, true);
+    expect(observedAtCap).toEqual(plainAtCap);
   });
 });
