@@ -1,5 +1,6 @@
 import type {
   AttemptToolResult,
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   AuthRun,
   AuthRunListResponse,
@@ -87,6 +88,7 @@ export type InteractionDiscovery = {
   browsers: BrowserSession[];
   computers: ComputerSession[];
   identities: BrowserIdentity[];
+  attachedBrowserBridges: AttachedBrowserBridge[];
   attachedBrowsers: AttachedBrowserDevice[];
 };
 
@@ -256,6 +258,7 @@ export class OpenGeniCodemode {
 
   async discover(
     options: {
+      scope?: "current_session" | "workspace" | "attached_browsers" | undefined;
       includeTerminal?: boolean | undefined;
       includeArchivedIdentities?: boolean | undefined;
       includeDisconnectedDevices?: boolean | undefined;

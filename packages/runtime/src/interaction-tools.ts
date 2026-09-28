@@ -294,7 +294,7 @@ const TOOL_PERMISSION = {
 
 const DiscoveryInput = z
   .object({
-    scope: z.enum(["current_session", "workspace"]).optional(),
+    scope: z.enum(["current_session", "workspace", "attached_browsers"]).optional(),
     includeTerminal: z.boolean().optional(),
     includeArchivedIdentities: z.boolean().optional(),
     includeDisconnectedDevices: z.boolean().optional(),
@@ -690,13 +690,31 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
     description:
-      "List BrowserSessions and ComputerSessions associated with this agent session. The default current_session scope is deliberately small and omits workspace-wide identities, attached-browser bridges, and Chrome profiles. For requests about the user's existing/current/personal Chrome, reusable identities, or peer/child resources, call this with scope=workspace before browser_open and select an actual attachedBrowsers device; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
+      "Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
       const scope = value.scope ?? "current_session";
+      if (scope === "attached_browsers") {
+        const attached = await input.transport.listAttachedBrowsers(input.workspaceId, {
+          includeDisconnected: value.includeDisconnectedDevices ?? false,
+        });
+        // Each inventory uses the same workspace interaction revision. Empty arrays
+        // here are outside this scope, not evidence that the workspace has no sessions.
+        return {
+          browserRevision: attached.revision,
+          computerRevision: attached.revision,
+          identityRevision: attached.revision,
+          attachedBrowserRevision: attached.revision,
+          browsers: [],
+          computers: [],
+          identities: [],
+          attachedBrowserBridges: attached.bridges,
+          attachedBrowsers: attached.devices,
+        };
+      }
       const [browsers, computers, identities, attached] = await Promise.all([
         input.transport.listBrowserSessions(input.workspaceId),
         input.transport.listComputerSessions(input.workspaceId),

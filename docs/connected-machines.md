@@ -940,7 +940,13 @@ semantic content remains available. Subsequent observations report the measured
 geometry when valid; the controller does not substitute guessed dimensions.
 
 Attached Chrome is an explicit user-profile choice, never an automatic fallback
-for an unavailable managed browser. A new attached BrowserSession creates a new
+for an unavailable managed browser. Agents use `interaction.discover` with
+`scope: "attached_browsers"` to find personal Chrome profiles without loading
+unrelated workspace sessions or saved identities. This scope returns only
+`attachedBrowsers` and `attachedBrowserBridges`; other inventory arrays are empty
+by scope, and revision fields retain the shared workspace interaction revision.
+Use `scope: "workspace"` when the wider inventory is actually needed.
+A new attached BrowserSession creates a new
 background tab rather than navigating an existing personal tab. Startup waits
 for that exact target to appear in the bridge inventory; a missing target fails
 without borrowing another tab, including an existing blank tab. Attached startup

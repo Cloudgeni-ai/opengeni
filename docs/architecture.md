@@ -161,13 +161,14 @@ scalar windows, returning bounded snippets/cursors, not histories. See
 [`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
-They remain on the turn cancellation fence and stop before finalization, allowing
-an agent to test a preview server without waiting for it to exit.
+They remain on the turn cancellation fence and stop before finalization, letting
+agents test preview servers without awaiting exit.
 
-`wait_for_input` persists a turn and deadline; input or timeout resumes execution.
+`wait_for_input` persists its turn and deadline until input or timeout.
 Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
 drives working/recheck UI separately from unread. `session_wait`/`command_wait`
-are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
+are in-turn reads; child results carry final answers. See
+[durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
@@ -390,16 +391,13 @@ Requests carry capability epoch and root. The API binds one route per request;
 target/root changes return retryable conflicts instead of reinterpreting paths
 on another filesystem.
 
-Generated-session schedules follow the same explicit route: they persist an
-exact workspace- or organization-scoped machine target and seed the session's
-active pointer before its first turn. A targetless generated schedule cannot
-resolve to `selfhosted`; ingress rejects that configuration, and dispatch
-revalidates the frozen target rather than falling back to managed compute.
-Manual and generated creates preflight the target's current liveness and
-workspace root before insertion, then recheck durable target authority and
-commit the active pointer in the same transaction as the session row. A
-rejected target therefore leaves no queued session shell for discovery or
-parent-tree projections to mistake for live work.
+Generated-session schedules persist an exact workspace- or organization-scoped
+machine target and seed its active pointer before the first turn. Ingress
+rejects targetless `selfhosted` schedules; dispatch revalidates the frozen target
+without managed-compute fallback. Manual and generated creates preflight target
+liveness and workspace root, then recheck durable authority and atomically
+commit the active pointer with the session row. Rejection leaves no queued
+session shell in discovery or parent-tree projections.
 
 Child workers keep the ordinary low-friction rule: omitting placement shares
 the creator's box. Because a Connected Machine pointer is session-local, that
