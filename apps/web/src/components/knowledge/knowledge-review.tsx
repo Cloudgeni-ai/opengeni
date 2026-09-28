@@ -344,6 +344,8 @@ export function ReviewTab({
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const items = queue.items.filter((item) => !hidden.has(item.key));
   const selected = items.find((item) => item.key === selectedKey) ?? items[0] ?? null;
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = selected?.key ?? null;
   const groups = queue.groups
     .map((group) => ({ ...group, items: group.items.filter((item) => !hidden.has(item.key)) }))
     .filter((group) => group.items.length > 0);
@@ -354,8 +356,15 @@ export function ReviewTab({
     const index = items.findIndex((item) => item.key === current.key);
     const following = items[index + 1] ?? items[index - 1] ?? null;
     setHidden((prior) => new Set(prior).add(current.key));
-    setSelectedKey(following?.key ?? null);
-    if (!following) setShowDetail(false);
+    // A decision that completes after the reviewer opened another change
+    // must not move them off it; only a decision on what is open advances.
+    const open = selectedRef.current;
+    if (open === current.key) {
+      setSelectedKey(following?.key ?? null);
+      if (!following) setShowDetail(false);
+    } else if (open) {
+      setSelectedKey(open);
+    }
     notifyKnowledgeReviewUpdated();
     onChanged();
   };
@@ -612,12 +621,13 @@ function ReviewDetail({
   const [draftError, setDraftError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const alive = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Set on every mount: StrictMode mounts, unmounts and mounts again.
+    alive.current = true;
+    return () => {
       alive.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     let current = true;

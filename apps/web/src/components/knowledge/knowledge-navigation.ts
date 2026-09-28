@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 
 import type { KnowledgeSearch, KnowledgeSubpage, KnowledgeTab } from "@/lib/knowledge-route";
 
@@ -39,27 +39,33 @@ export function useKnowledgeNavigation(workspaceId: string): KnowledgeNavigation
     },
     [navigate, workspaceId],
   );
-  return {
-    showTab: useCallback((tab: KnowledgeTab) => go(tab === "library" ? {} : { view: tab }), [go]),
-    openEntry: useCallback(
-      (entry: string, options: { revision?: string; from?: KnowledgeTab } = {}) =>
-        go({
-          entry,
-          ...(options.revision ? { revision: options.revision } : {}),
-          ...(options.from && options.from !== "library" ? { view: options.from } : {}),
-        }),
-      [go],
-    ),
-    openPage: useCallback(
-      (page, extra = {}) =>
-        go({
-          page,
-          ...(extra.entry ? { entry: extra.entry } : {}),
-          ...(extra.collection ? { collection: extra.collection } : {}),
-          ...(extra.view && extra.view !== "library" ? { view: extra.view } : {}),
-        }),
-      [go],
-    ),
-    replace: useCallback((search: KnowledgeSearch) => go(search, true), [go]),
-  };
+  const showTab = useCallback(
+    (tab: KnowledgeTab) => go(tab === "library" ? {} : { view: tab }),
+    [go],
+  );
+  const openEntry = useCallback(
+    (entry: string, options: { revision?: string; from?: KnowledgeTab } = {}) =>
+      go({
+        entry,
+        ...(options.revision ? { revision: options.revision } : {}),
+        ...(options.from && options.from !== "library" ? { view: options.from } : {}),
+      }),
+    [go],
+  );
+  const openPage = useCallback<KnowledgeNavigation["openPage"]>(
+    (page, extra = {}) =>
+      go({
+        page,
+        ...(extra.entry ? { entry: extra.entry } : {}),
+        ...(extra.collection ? { collection: extra.collection } : {}),
+        ...(extra.view && extra.view !== "library" ? { view: extra.view } : {}),
+      }),
+    [go],
+  );
+  const replace = useCallback((search: KnowledgeSearch) => go(search, true), [go]);
+  // Stable across renders: pages depend on it in effects (legacy-link redirects).
+  return useMemo(
+    () => ({ showTab, openEntry, openPage, replace }),
+    [showTab, openEntry, openPage, replace],
+  );
 }

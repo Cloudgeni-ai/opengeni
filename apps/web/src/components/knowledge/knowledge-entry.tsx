@@ -245,10 +245,21 @@ function CollectionPath({
   onOpen: (id: string) => void;
 }) {
   const path = useCollectionPath(workspaceId, parentId);
-  if (path === null) return <Skeleton className="h-4 w-32" />;
+  // It renders inside the page's meta line (a <p>), so only phrasing elements.
+  if (path === null)
+    return (
+      <span
+        data-slot="skeleton"
+        className="inline-block h-4 w-32 animate-pulse rounded-md bg-accent align-middle"
+      />
+    );
   if (!path.length) return <span className="text-fg-muted">a collection you can't open</span>;
   return (
-    <nav aria-label="Collection path" className="inline-flex min-w-0 flex-wrap items-center">
+    <span
+      role="navigation"
+      aria-label="Collection path"
+      className="inline-flex min-w-0 flex-wrap items-center"
+    >
       {path.map((part, index) => (
         <span key={part.id} className="inline-flex min-w-0 items-center">
           {index > 0 ? (
@@ -261,7 +272,7 @@ function CollectionPath({
           </HelpLink>
         </span>
       ))}
-    </nav>
+    </span>
   );
 }
 
