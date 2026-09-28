@@ -157,8 +157,10 @@ export function DetailAside({
   label?: string;
   className?: string;
 }) {
+  // A labelled section, not <aside>: the page sits inside the app's main
+  // landmark, and a complementary landmark must be top level.
   return (
-    <aside
+    <section
       aria-label={label}
       data-slot="detail-aside"
       className={cn(
@@ -167,7 +169,7 @@ export function DetailAside({
       )}
     >
       {children}
-    </aside>
+    </section>
   );
 }
 
