@@ -60,6 +60,22 @@ Choose a fresh UUID `skillId`, set `expectedRevisionId` to null and
 Keep the main instructions focused; place longer references or scripts in
 supporting files. Text files may have any extension or no extension.
 
+Size a Skill to what the user asked. A preference or habit needs a one-sentence
+description and two or three plain sentences, not a checklist. A procedure needs
+only its trigger, steps, checks, and important failure handling; put long
+references, schemas, and scripts in supporting files. Write for an agent that
+already follows its operating rules: skip background, restated defaults, and
+lists of things not to do. When editing, change only the part the request is
+about. For example:
+
+```
+---
+name: preview-ui-changes
+description: Use when a user asks for a UI change.
+---
+Before merging a UI change, show the user a realistic preview built from the app's real components (a screenshot or running preview), not a generic mockup. If you cannot render the real components, say what is blocking.
+```
+
 Supply only files being changed. Omitted files are preserved; deletion must be
 explicit. Read existing content before editing it. If a save reports a stale
 edit, re-read and reconcile the change instead of forcing an overwrite.

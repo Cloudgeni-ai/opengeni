@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { scheduledTaskToolsProvided } from "@opengeni/core";
 import {
   createDb,
   createConnection,
@@ -19,9 +20,13 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import {
+  createWorkspaceToolGateway,
+  ToolGatewayInputValidationError,
+} from "@opengeni/tool-gateway";
 import postgres from "postgres";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
-import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { buildOpenGeniMcpServer, SCHEDULED_TASK_MCP_AGENT_CONFIG } from "../src/mcp/server";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -127,6 +132,166 @@ function resultText(result: unknown): string {
   const content = (result as { content?: Array<{ type?: string; text?: string }> }).content ?? [];
   return content.map((item) => item.text ?? "").join("\n");
 }
+
+/** Storage must never be reached: every case here fails, or is checked, before it. */
+function storageFreeDeps() {
+  const touches = { count: 0 };
+  const db = new Proxy(
+    {},
+    {
+      get() {
+        touches.count += 1;
+        throw new Error("invalid model request reached storage");
+      },
+    },
+  ) as ApiRouteDeps["db"];
+  const workspace = {
+    accountId: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
+    subjectId: `subject-${crypto.randomUUID()}`,
+  };
+  return { touches, server: buildOpenGeniMcpServer(deps(db), grantFor(workspace)) };
+}
+
+describe("first-party MCP scheduled task tool shapes", () => {
+  test("ask for a short prompt and declare the schedule and agentConfig shapes", async () => {
+    const { server } = storageFreeDeps();
+    const connected = await connectedClient(server);
+    try {
+      const tools = (await connected.client.listTools()).tools;
+      const create = tools.find((tool) => tool.name === "scheduled_tasks_create")!;
+      const update = tools.find((tool) => tool.name === "scheduled_tasks_update")!;
+      // Agent-written prompts ran 6-10x their request and baked in one-time
+      // context; a long prompt also produced long run output.
+      expect(create.description).toStartWith(
+        'Create a scheduled task. agentConfig.prompt is what a fresh agent reads on every run, so write it short and plain (usually under 800 characters): what to do, where the result goes, who reads it, and only the constraints the user gave. Name the Skills to follow instead of restating their steps, and leave out one-time context such as current PRs, dates, or conversation history unless every run needs it. When a run posts to people, say how long the post should be, for example "two or three short lines". ',
+      );
+      expect(create.description).toContain(
+        "Sessions generated for a task created from this session inherit this session's effective first-party tool selection",
+      );
+      expect(update.description).toBe(
+        "Update a scheduled task. When changing agentConfig.prompt, keep it short and plain as described for scheduled_tasks_create, and change only what the request is about.",
+      );
+      // Two production create attempts failed while the model guessed these
+      // shapes from an untyped schema.
+      for (const tool of [create, update]) {
+        const properties = tool.inputSchema.properties as Record<
+          string,
+          {
+            anyOf?: Array<{ properties: { type: { const: string } } }>;
+            oneOf?: Array<{ properties: { type: { const: string } } }>;
+            properties?: Record<string, { type?: string }>;
+            required?: string[];
+          }
+        >;
+        const variants = properties.schedule!.anyOf ?? properties.schedule!.oneOf ?? [];
+        expect(variants.map((variant) => variant.properties.type.const).sort(), tool.name).toEqual([
+          "calendar",
+          "interval",
+          "manual",
+          "once",
+        ]);
+        expect(properties.agentConfig!.properties?.prompt?.type, tool.name).toBe("string");
+        expect(properties.agentConfig!.required, tool.name).toEqual(["prompt"]);
+      }
+      expect(create.inputSchema.required).toEqual(
+        expect.arrayContaining(["name", "schedule", "agentConfig"]),
+      );
+
+      // The declared shape compiles in the tool gateway, accepts a real daily
+      // schedule with fields it does not declare, and refuses a guessed one.
+      const { gateway } = createWorkspaceToolGateway({
+        accountId: crypto.randomUUID(),
+        workspaceId: crypto.randomUUID(),
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "opengeni", toolName: "scheduled_tasks_create" },
+            modelName: "scheduled_tasks_create",
+            inputSchema: create.inputSchema as Record<string, unknown> & { type: "object" },
+            source: "opengeni",
+            approval: "none",
+            execute: () => ({ isError: false, content: [] }),
+          },
+        ],
+      });
+      const call = (arguments_: Record<string, unknown>) =>
+        gateway.callModel({
+          modelName: "scheduled_tasks_create",
+          arguments: arguments_,
+          subjectId: "agent:test",
+        });
+      await expect(
+        call({
+          name: "Daily new users",
+          schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+          agentConfig: {
+            prompt: "List yesterday's new users in two or three short lines.",
+            reasoningEffort: "low",
+            goal: { objective: "Post the list" },
+          },
+        }),
+      ).resolves.toMatchObject({ isError: false });
+      await expect(
+        call({ name: "Daily", schedule: "0 8 * * *", agentConfig: { prompt: "p" } }),
+      ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+      await expect(
+        call({ name: "Daily", schedule: { type: "manual" }, agentConfig: "p" }),
+      ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+    } finally {
+      await connected.close();
+    }
+  });
+
+  test("the declared agentConfig adds no defaults and keeps undeclared fields", () => {
+    // Whether agentConfig.tools is present at all selects explicit tools over
+    // the workspace defaults, so the model-facing shape must not add it.
+    const bare = SCHEDULED_TASK_MCP_AGENT_CONFIG.parse({ prompt: "p" });
+    expect(bare).toEqual({ prompt: "p" });
+    expect(scheduledTaskToolsProvided({ agentConfig: bare })).toBe(false);
+    const explicit = SCHEDULED_TASK_MCP_AGENT_CONFIG.parse({ prompt: "p", tools: [] });
+    expect(scheduledTaskToolsProvided({ agentConfig: explicit })).toBe(true);
+    const undeclared = {
+      prompt: "p",
+      goal: { objective: "Post the list" },
+      machineTarget: { targetSandboxId: crypto.randomUUID() },
+      bundledSkillIds: ["builtin:opengeni-skills"],
+    };
+    expect(SCHEDULED_TASK_MCP_AGENT_CONFIG.parse(undeclared)).toEqual(undeclared);
+  });
+
+  test("a guessed schedule is refused before storage and undeclared fields reach the contract parse", async () => {
+    const { server, touches } = storageFreeDeps();
+    const connected = await connectedClient(server);
+    try {
+      const guessed = await connected.client.callTool({
+        name: "scheduled_tasks_create",
+        arguments: {
+          name: "Daily new users",
+          schedule: { cron: "0 8 * * *" },
+          agentConfig: { prompt: "List yesterday's new users." },
+        },
+      });
+      expect(guessed).toMatchObject({ isError: true });
+      expect(resultText(guessed)).toContain("schedule");
+      // An undeclared agentConfig field is not stripped by the MCP layer: the
+      // contract parse still sees it and applies its own rule.
+      const undeclared = await connected.client.callTool({
+        name: "scheduled_tasks_create",
+        arguments: {
+          name: "Daily new users",
+          schedule: { type: "manual" },
+          agentConfig: { prompt: "List yesterday's new users.", sandboxBackend: "selfhosted" },
+        },
+      });
+      expect(undeclared).toMatchObject({ isError: true });
+      expect(resultText(undeclared)).toContain("selfhosted scheduled tasks require machineTarget");
+      expect(touches.count).toBe(0);
+    } finally {
+      await connected.close();
+    }
+  });
+});
 
 describe("first-party MCP scheduled task connectionAccounts", () => {
   test.each([false, true])(

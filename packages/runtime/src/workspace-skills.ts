@@ -203,7 +203,7 @@ ${available}
 ### How to use repository skills
 - If the user names a skill, or the task clearly matches a skill description, read its complete SKILL.md before acting.
 - Resolve referenced scripts, references, assets, and templates relative to that skill directory.
-- Use only the minimum relevant skills for the turn, and say briefly which ones you are using.
+- Use only the minimum relevant skills for the turn.
 - Do not assume a skill remains applicable on later turns; evaluate the current request again.`;
   }
 }

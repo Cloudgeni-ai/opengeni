@@ -7,6 +7,9 @@ import {
   AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
   AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
   AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS,
+  AGENT_AUTHORED_SKILL_DESCRIPTION_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_SKILL_STYLE,
   AgentAuthoredCompanyProfileContent,
   COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
   COMPANY_PROFILE_ENTRY_MAX_CHARS,
@@ -19,7 +22,9 @@ import {
   RememberRequest,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   agentAuthoredDurableTextTooLongMessage,
+  assertAgentAuthoredSkillDescription,
 } from "../src";
+import * as contracts from "../src";
 
 const OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 const CLAIM_ID = "00000000-0000-4000-8000-000000000002";
@@ -256,6 +261,43 @@ describe("agent-authored durable-text budgets", () => {
     expect(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS).toBeLessThan(
       PREFERENCE_REGISTRY_CONTENT_MAX_CHARS,
     );
+  });
+
+  test("an agent-written Skill description is one short sentence at most 300 characters", () => {
+    expect(AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS).toBe(300);
+    expect(AGENT_AUTHORED_SKILL_DESCRIPTION_TOO_LONG_MESSAGE).toBe(
+      "Skill descriptions are at most 300 characters because every description is in every session's prompt index. Shorten it to one sentence saying when to use the Skill.",
+    );
+    const atCap = "d".repeat(AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS);
+    const overCap = `${atCap}d`;
+    expect(() => assertAgentAuthoredSkillDescription({ description: atCap })).not.toThrow();
+    expect(() => assertAgentAuthoredSkillDescription({ description: overCap })).toThrow(
+      AGENT_AUTHORED_SKILL_DESCRIPTION_TOO_LONG_MESSAGE,
+    );
+    // A new Skill has no base, so a null base is still capped.
+    expect(() =>
+      assertAgentAuthoredSkillDescription({ description: overCap, baseDescription: null }),
+    ).toThrow(AGENT_AUTHORED_SKILL_DESCRIPTION_TOO_LONG_MESSAGE);
+    // Changing an already long description is agent-written text and is capped.
+    expect(() =>
+      assertAgentAuthoredSkillDescription({
+        description: overCap,
+        baseDescription: `${overCap}e`,
+      }),
+    ).toThrow(AGENT_AUTHORED_SKILL_DESCRIPTION_TOO_LONG_MESSAGE);
+    // An edit that leaves a stored long description unchanged is not forced to
+    // rewrite it: stored revisions and imported upstream text stay as they are.
+    expect(() =>
+      assertAgentAuthoredSkillDescription({ description: overCap, baseDescription: overCap }),
+    ).not.toThrow();
+  });
+
+  test("the Skill style sizes a Skill to the request and edits only what was asked", () => {
+    expect(AGENT_AUTHORED_SKILL_STYLE).toBe(
+      "Size the Skill to the request: a stated preference or habit is two or three plain sentences in SKILL.md; a procedure keeps only its trigger, steps, checks, and important failure handling, with long references, schemas, or scripts in supporting files. Skip background, restated defaults, and lists of things not to do. When editing, change only what the request is about; do not expand other sections.",
+    );
+    // The deprecated destination-agnostic alias is gone.
+    expect("AGENT_AUTHORED_DURABLE_TEXT_STYLE" in contracts).toBe(false);
   });
 
   test("the over-budget message reports how long the text actually is", () => {

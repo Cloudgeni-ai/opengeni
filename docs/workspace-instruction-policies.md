@@ -309,6 +309,7 @@ from the human editor limit:
 | --- | --- | --- |
 | Agent | `instruction_policy_save` supplied text and resulting instruction; legacy `remember`/proposal/promotion paths | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
 | Agent | `remember` lane `preference`, `preference_propose`, `task_note_promote_preference` | `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS` (1,200) |
+| Agent | `skill_save` / `skill_publish` new or changed `SKILL.md` description | `AGENT_AUTHORED_SKILL_DESCRIPTION_MAX_CHARS` (300) |
 | Human | Workspace State editor, HTTP/SDK policy routes | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144) |
 
 The constants and the actionable rejection messages live in
@@ -346,10 +347,14 @@ the naive one is wrong: shortening a preference's content does **not** shrink an
 prompt. Only its short title and description descriptors are composed; the full
 content stays behind the exact attempt's retrieval handle. Its length is
 therefore retrieval cost rather than standing prompt cost, which is why it gets
-more room than a rule rather than less. A Skill should state one trigger and
-outcome and include only necessary prerequisites, executable steps, verification,
-and important failure handling; background, repetition, generic advice, and
-decorative examples are omitted, and unrelated workflows are split. The Knowledge lane keeps the wider
+more room than a rule rather than less. A Skill is sized to the request
+(`AGENT_AUTHORED_SKILL_STYLE`, stated on `skill_save` and `skill_publish`): a
+stated preference or habit is two or three plain sentences; a procedure keeps
+only its trigger, steps, checks, and important failure handling, with long
+references, schemas, or scripts in supporting files. Background, restated
+defaults, and lists of things not to do are omitted, and an edit changes only
+what the request is about. The description is the one part in every prompt
+index, so an agent-written description is capped at 300 characters. The Knowledge lane keeps the wider
 `REMEMBER_CONTENT_MAX_CHARS` (4,000) ceiling because it is retrieval evidence and
 never joins the always-composed prefix.
 

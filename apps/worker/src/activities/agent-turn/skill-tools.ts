@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import { type SkillActor, type SkillScope, type SkillWriteReceipt } from "@opengeni/contracts";
+import {
+  assertAgentAuthoredSkillDescription,
+  parseSkillFrontmatter,
+  type SkillActor,
+  type SkillScope,
+  type SkillWriteReceipt,
+} from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
   getActiveSessionFunctionToolResults,
@@ -135,6 +141,12 @@ export function createWorkspaceSkillTools(input: {
     const base = request.expectedRevisionId
       ? await readSkill(input.db, context, request.skillId, request.expectedRevisionId)
       : null;
+    // skill_save and skill_publish both land here; skill_install copies an
+    // upstream source verbatim and is deliberately not capped.
+    assertAgentAuthoredSkillDescription({
+      description: artifact.description,
+      baseDescription: base ? baseSkillDescription(base) : null,
+    });
     return withReviewState(
       await saveSkill(input.db, {
         ...context,
@@ -305,6 +317,23 @@ export function createWorkspaceSkillTools(input: {
     }),
     createSkillPublishAttemptToolDefinition({ authorize, filesystem: input.filesystem, save }),
   ];
+}
+
+/** The base revision's description, read the same way the new one is. */
+function baseSkillDescription(base: {
+  description: string | null;
+  files: readonly SkillTextFile[];
+}): string | null {
+  const skillMarkdown = base.files.find((file) => file.path === "SKILL.md")?.content;
+  try {
+    if (skillMarkdown !== undefined) {
+      const parsed = parseSkillFrontmatter(skillMarkdown).description;
+      if (parsed !== null) return parsed;
+    }
+  } catch {
+    // An unreadable legacy header falls back to the stored index description.
+  }
+  return base.description;
 }
 
 function registrySkillSource(scope: SkillScope): SkillReadOrigin["source"] {

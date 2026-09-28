@@ -19,6 +19,8 @@ import {
 import {
   CreateScheduledTaskRequest,
   CreateSessionRequest,
+  ReasoningEffort,
+  ScheduledTaskScheduleSpec,
   GoalSpec,
   SessionGoalReportRequirements,
   SessionGoalReportDeliveries,
@@ -1435,14 +1437,14 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog.",
+          'Create a scheduled task. agentConfig.prompt is what a fresh agent reads on every run, so write it short and plain (usually under 800 characters): what to do, where the result goes, who reads it, and only the constraints the user gave. Name the Skills to follow instead of restating their steps, and leave out one-time context such as current PRs, dates, or conversation history unless every run needs it. When a run posts to people, say how long the post should be, for example "two or three short lines". Sessions generated for a task created from this session inherit this session\'s effective first-party tool selection and permission set; they never receive the deployment default catalog.',
         inputSchema: {
           name: z4.string(),
-          schedule: z4.unknown(),
+          schedule: ScheduledTaskScheduleSpec,
           runMode: z4.string().optional(),
           targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
-          agentConfig: z4.unknown(),
+          agentConfig: SCHEDULED_TASK_MCP_AGENT_CONFIG,
           status: z4.string().optional(),
           // Explicit credential-free connection authority selections; declared
           // so MCP validation doesn't strip them before the contract parse.
@@ -1501,15 +1503,16 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_update",
       {
-        description: "Update a scheduled task.",
+        description:
+          "Update a scheduled task. When changing agentConfig.prompt, keep it short and plain as described for scheduled_tasks_create, and change only what the request is about.",
         inputSchema: {
           id: z4.string().uuid(),
           name: z4.string().optional(),
-          schedule: z4.unknown().optional(),
+          schedule: ScheduledTaskScheduleSpec.optional(),
           runMode: z4.string().optional(),
           targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
-          agentConfig: z4.unknown().optional(),
+          agentConfig: SCHEDULED_TASK_MCP_AGENT_CONFIG.optional(),
           status: z4.string().optional(),
           // Omitted preserves the frozen selections, [] clears them, and an
           // array replaces them; declared so MCP validation doesn't strip it.
@@ -3623,6 +3626,25 @@ function registerPreferenceRegistryTools(
       json(await getPreferenceRegistryFullContent(deps.db, attemptClaims(), retrievalHandle)),
   );
 }
+
+/**
+ * The agentConfig shape scheduled_tasks_create/update show the model. The
+ * contract parse in each handler stays authoritative, so this declares no
+ * defaults and no stricter bounds, and it is loose so undeclared fields reach
+ * that parse unchanged. A default would also be a behavior change: whether
+ * agentConfig.tools is present at all decides between an explicit tool list
+ * and the workspace defaults (scheduledTaskToolsProvided).
+ */
+export const SCHEDULED_TASK_MCP_AGENT_CONFIG = z4.looseObject({
+  prompt: z4
+    .string()
+    .describe("The user message a fresh agent reads on every run. Keep it short and plain."),
+  model: z4.string().optional(),
+  reasoningEffort: ReasoningEffort.optional(),
+  tools: z4.array(z4.unknown()).optional(),
+  resources: z4.array(z4.unknown()).optional(),
+  metadata: z4.record(z4.string(), z4.unknown()).optional(),
+});
 
 function scheduledTaskReceipt(
   operation: string,
