@@ -841,8 +841,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       if (settlement.action !== "held") continue;
 
       // The durable outbox owns the long deadline. Keep this workflow run open
-      // only for the same bounded close-race window used by ordinary idle; any
-      // signal is a hint to re-peek PostgreSQL truth.
+      // for its bounded close-race window; unlike ordinary idle, this held-wait
+      // path is unchanged. Any signal is a hint to re-peek PostgreSQL truth.
       const seenWakeups = wakeups;
       const seenApprovalWakeups = approvalWakeups;
       const seenInterruptionWakeups = interruptionWakeups;
@@ -896,17 +896,24 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // idle-backoff goal keeps its durable obligation armed; the delayed
       // wake-outbox row at the pacing deadline or any producer signal restarts
       // the workflow. No Temporal timer is used for pacing.
-      const seenWakeups = wakeups;
-      const seenApprovalWakeups = approvalWakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
-      const woke = await condition(
-        () =>
-          interruptionWakeups !== seenInterruptionWakeups ||
-          wakeups !== seenWakeups ||
-          approvalWakeups !== seenApprovalWakeups,
-        "5s",
-      );
-      if (woke) continue;
+      // Evaluate at the changed command so old recorded timers still replay,
+      // while the next live idle cycle can close without a grace period.
+      if (!patched("session-normal-idle-no-grace-v1")) {
+        const seenWakeups = wakeups;
+        const seenApprovalWakeups = approvalWakeups;
+        const seenInterruptionWakeups = interruptionWakeups;
+        const woke = await condition(
+          () =>
+            interruptionWakeups !== seenInterruptionWakeups ||
+            wakeups !== seenWakeups ||
+            approvalWakeups !== seenApprovalWakeups,
+          "5s",
+        );
+        if (woke) continue;
+      }
+      // Keep both the durable recheck and the transactional idle/parent-outbox
+      // fence. A signal accepted during this activity chain makes us loop;
+      // later work restarts the same session via durable signalWithStart.
       const finalPeek = await activity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

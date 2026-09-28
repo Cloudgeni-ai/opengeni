@@ -101,6 +101,8 @@ attempts retain bounded, signal-interruptible waits without marking work idle,
 revoking writers, or dispatching successors. Temporal metadata cannot prove
 physical-writer quiescence.
 
+Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
+
 ### 3.3 Logical turns and physical attempts are different
 
 A **turn** is accepted work; an **attempt**, replaceable execution without duplicate

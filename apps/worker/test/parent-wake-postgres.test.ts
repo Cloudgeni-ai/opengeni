@@ -155,6 +155,14 @@ test("a finished child signals its parent parked in wait_for_input immediately",
     where session_id = ${parent.session.id}`;
   expect(deadline?.reason).toBe("session_input_wait_deadline");
 
+  // A close racing the still-owned turn cannot publish a parent result.
+  expect(await settleSessionIdleWithParentOutbox(db, workspaceId, child.session.id)).toEqual({
+    action: "stale",
+    episodeKey: null,
+    events: [],
+  });
+  expect(await listOutstandingSessionSystemUpdates(db, workspaceId, parent.session.id)).toEqual([]);
+
   // The child finishes; its idle boundary commits the parent outbox row.
   await settleIdle(child);
   const boundary = await settleSessionIdleWithParentOutbox(db, workspaceId, child.session.id);
@@ -190,6 +198,15 @@ test("a finished child signals its parent parked in wait_for_input immediately",
       return delivery;
     },
   };
+  await notifyParentOfChildIdle(services, workspaceId, child.session.id, boundary.episodeKey);
+
+  // A signal during close or an activity retry may revisit the same boundary.
+  // It must neither create another result nor signal the parent twice.
+  expect(await settleSessionIdleWithParentOutbox(db, workspaceId, child.session.id)).toMatchObject({
+    action: "settled",
+    episodeKey: boundary.episodeKey,
+    notifyParent: true,
+  });
   await notifyParentOfChildIdle(services, workspaceId, child.session.id, boundary.episodeKey);
 
   expect(errors).toEqual([]);
