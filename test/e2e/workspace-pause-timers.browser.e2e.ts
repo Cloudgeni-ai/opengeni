@@ -283,8 +283,7 @@ test("all timer states through the real settings UI and API", async () => {
   await page.keyboard.press("Escape");
   await dialog().waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
-  // Phones show the settings index first; General holds Agent activity.
-  await page.getByRole("link", { name: "General" }).click();
+  // Settings swap the rail (a drawer on phones), so General stays open.
   await runtime().getByRole("button", { name: "Change", exact: true }).click();
   await dialog().waitFor();
   await capture("16-mobile-editor", true);

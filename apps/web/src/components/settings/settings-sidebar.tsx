@@ -311,7 +311,8 @@ export function SettingsShell({
   return (
     <div className={SETTINGS_SHELL_CLASS}>
       {navigation}
-      <main
+      {/* A labelled region: the app shell already provides the one <main>. */}
+      <section
         aria-label={page?.title ?? currentPage}
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
@@ -332,7 +333,7 @@ export function SettingsShell({
             )}
           </PageHeaderStyleProvider>
         </SettingsActionsSlotContext.Provider>
-      </main>
+      </section>
     </div>
   );
 }
