@@ -4764,6 +4764,47 @@ describe("scheduled task posting to a fixed Slack channel", () => {
     expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(0);
   });
 
+  test("a channel change never hides that a prepared message was already posted", async () => {
+    if (!available) return;
+    const slack = fakeSlack({
+      extraMemberChannels: [TASK_CHANNEL, "C0OTHER01"],
+      loseFirstPostResponse: true,
+    });
+    const { task, session, grant } = await scheduledPostingFixture(slack);
+    const prepare = async (text: string) =>
+      await prepareScheduledSlackBotPost({ db: client.db, grant, sessionId: session.id, text });
+    const send = (messageId: string) =>
+      sendScheduledSlackBotPost({
+        db: client.db,
+        settings,
+        grant,
+        sessionId: session.id,
+        messageId,
+        slackFetch: slack.fetch,
+      });
+
+    // Slack commits the first send but its response is lost; the second one
+    // completes normally.
+    const interrupted = await prepare("Posted, but the response was lost");
+    await expect(send(interrupted.messageId)).rejects.toThrow();
+    const completed = await prepare("Posted and confirmed");
+    const posted = await send(completed.messageId);
+    expect(slack.committedPosts).toHaveLength(2);
+
+    await shared!.admin`UPDATE scheduled_tasks
+      SET agent_config = agent_config || '{"slackBotChannelId":"C0OTHER01"}'::jsonb
+      WHERE id = ${task.id}`;
+    // Replaying a confirmed send returns its original result without posting.
+    expect(await send(completed.messageId)).toMatchObject({
+      channelId: TASK_CHANNEL,
+      timestamp: posted.timestamp,
+    });
+    // An interrupted send is neither retried in the old channel nor reported
+    // as unsent, so the agent does not assume nothing reached Slack.
+    await expect(send(interrupted.messageId)).rejects.toThrow("may already have been posted");
+    expect(slack.committedPosts).toHaveLength(2);
+  });
+
   test("setup accepts only an active, unshared channel the bot belongs to", async () => {
     if (!available) return;
     const slack = fakeSlack({ extraMemberChannels: [TASK_CHANNEL] });

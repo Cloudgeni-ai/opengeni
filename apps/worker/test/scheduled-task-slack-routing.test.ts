@@ -400,6 +400,80 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     ).toMatchObject({ slackBotConnectionId: connection.id, slackBotChannelId: "C0SCHED01" });
   });
 
+  test("a person can always stop a reusable chat's posts, and restart them only where the chat can post", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const { connection } = await botConnection(workspace);
+    const settings = testSettings({ sandboxBackend: "none" });
+    const personGrant: AccessGrant = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      permissions: ["scheduled_tasks:manage", "connections:read", "connections:write"],
+      principalKind: "human_session",
+      metadata: {},
+    };
+    const person: AccessGrantAuthorization = {
+      grant: personGrant,
+      accountGrant: null,
+      authenticatedSubjectId: "subject-a",
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+      canonicalLocalHumanSession: false,
+    };
+    const verifySlackChannel = async () => undefined;
+    const worker = activities();
+    const materialize = async (slackBotChannelId?: string) => {
+      const task = await taskFixture(
+        workspace,
+        connection.id,
+        "reusable_session",
+        slackBotChannelId,
+      );
+      const run = await worker.dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `slack-routing-${crypto.randomUUID()}`,
+      });
+      expect(run.action).toBe("start");
+      const live = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
+      expect(live.reusableSessionId).not.toBeNull();
+      return live;
+    };
+    const update = (existing: Awaited<ReturnType<typeof materialize>>, channel?: string) => {
+      const agentConfig = { ...existing.agentConfig };
+      delete agentConfig.slackBotChannelId;
+      return validatedScheduledTaskUpdate({
+        settings,
+        db: client.db,
+        objectStorage: null,
+        grant: personGrant,
+        authorization: person,
+        existing,
+        toolsProvided: true,
+        verifySlackChannel,
+        payload: UpdateScheduledTaskRequest.parse({
+          agentConfig: { ...agentConfig, ...(channel ? { slackBotChannelId: channel } : {}) },
+        }),
+      });
+    };
+
+    // The chat was created with the posting tools: clearing the channel is the
+    // safe direction and never needs the task to be recreated.
+    const posting = await materialize("C0SCHED01");
+    const cleared = await update(posting);
+    expect(cleared.agentConfig).not.toHaveProperty("slackBotChannelId");
+    await updateScheduledTask(client.db, workspace.workspaceId, posting.id, cleared);
+    const off = (await getScheduledTask(client.db, workspace.workspaceId, posting.id))!;
+    // That chat still has the tools, so a person can turn posting back on.
+    expect((await update(off, "C0OTHER01")).agentConfig?.slackBotChannelId).toBe("C0OTHER01");
+
+    // A chat created without the tools cannot start posting.
+    const silent = await materialize();
+    await expect(update(silent, "C0SCHED01")).rejects.toMatchObject({ status: 409 });
+  });
+
   test("rejects personal and cross-workspace connection IDs for scheduled shared-bot routing", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

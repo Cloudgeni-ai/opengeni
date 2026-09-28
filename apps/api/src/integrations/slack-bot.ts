@@ -28,6 +28,7 @@ import {
   completeSlackBotUpdateOperation,
   getScheduledTask,
   getSession,
+  getSlackBotPostOperation,
   listConnectionsMetadata,
   prepareScheduledSlackBotMessage,
   readScheduledSlackBotMessage,
@@ -627,22 +628,11 @@ export async function sendScheduledSlackBotPost(input: {
   if (!message) {
     throw new Error("This prepared Slack message does not exist in this chat");
   }
-  if (
-    message.channelId !== target.channelId ||
-    message.scheduledTaskId !== target.scheduledTaskId
-  ) {
-    throw new Error(
-      "The task's Slack channel changed after this message was prepared, so it was not sent",
-    );
-  }
-  if (
+  const channelChanged =
+    message.channelId !== target.channelId || message.scheduledTaskId !== target.scheduledTaskId;
+  const botChanged =
     message.connectionId !== target.connection.id ||
-    message.connectionVersion !== target.connection.version
-  ) {
-    throw new Error(
-      "The OpenGeni Slack bot changed after this message was prepared. Check the channel before preparing a new message.",
-    );
-  }
+    message.connectionVersion !== target.connection.version;
   const client = createOpenGeniSlackBotClient(
     {
       db: input.db,
@@ -654,13 +644,40 @@ export async function sendScheduledSlackBotPost(input: {
     },
     target,
   );
-  return await client.postMessage({
-    operationId: message.id,
-    channelId: message.channelId,
-    ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
-    text: message.text,
-    requireActiveNonSharedChannel: true,
-  });
+  const post = () =>
+    client.postMessage({
+      operationId: message.id,
+      channelId: message.channelId,
+      ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
+      text: message.text,
+      requireActiveNonSharedChannel: true,
+    });
+  if (!channelChanged && !botChanged) return await post();
+  // The destination moved after this message was prepared, so it is never sent
+  // now. Say truthfully whether an earlier send already reached Slack, so the
+  // agent does not post the same content again believing nothing was sent.
+  const earlier = await getSlackBotPostOperation(
+    input.db,
+    input.grant.workspaceId,
+    message.connectionId,
+    message.id,
+  );
+  if (earlier?.status === "completed" && message.connectionId === target.connection.id) {
+    // Replays the recorded result from the post ledger; no Slack call is made.
+    return await post();
+  }
+  const reason = channelChanged
+    ? "The task's Slack channel changed after this message was prepared"
+    : "The OpenGeni Slack bot changed after this message was prepared";
+  if (earlier?.status === "completed") {
+    throw new Error(`${reason}. It had already been posted, so it was not sent again.`);
+  }
+  if (earlier && earlier.status !== "pending") {
+    throw new Error(
+      `${reason}. An earlier send was interrupted, so it may already have been posted to the previous channel; it was not sent again.`,
+    );
+  }
+  throw new Error(`${reason}, so it was not sent. Prepare a new message for the current channel.`);
 }
 
 /**

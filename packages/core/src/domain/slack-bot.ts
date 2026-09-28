@@ -171,7 +171,8 @@ export function isAuthenticatedPersonAuthorization(
  * therefore needs a signed-in person with `connections:write`, and the bot's
  * membership is verified at that moment. Keeping or clearing the existing
  * channel needs neither, so an agent editing other task fields cannot redirect
- * posts but also does not have to re-prove the person's choice.
+ * posts but also does not have to re-prove the person's choice. Clearing is the
+ * safe direction and is never refused, even for a task that continues one chat.
  */
 export async function validateScheduledTaskSlackChannel(input: {
   grant: AccessGrant;
@@ -179,20 +180,17 @@ export async function validateScheduledTaskSlackChannel(input: {
   previous: Pick<ScheduledTaskAgentConfig, "slackBotConnectionId" | "slackBotChannelId"> | null;
   next: Pick<ScheduledTaskAgentConfig, "slackBotConnectionId" | "slackBotChannelId">;
   runMode: ScheduledTask["runMode"];
-  /** The task already created the reusable chat its runs continue. */
-  reusableSessionLive: boolean;
+  /**
+   * Null unless the task already created the reusable chat its runs continue.
+   * Otherwise reports whether that chat was created with the posting tools,
+   * which are fixed at creation.
+   */
+  reusableSessionCanPost: (() => Promise<boolean>) | null;
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<void> {
   const previousChannel = input.previous?.slackBotChannelId ?? null;
   const nextChannel = input.next.slackBotChannelId ?? null;
-  // The reusable chat's tools were fixed when it was created, so turning
-  // posting on or off there would silently do nothing or leave stale tools.
-  if (input.reusableSessionLive && Boolean(previousChannel) !== Boolean(nextChannel)) {
-    throw new HTTPException(409, {
-      message:
-        "cannot turn Slack channel posting on or off for a task that continues the same chat; recreate the task",
-    });
-  }
+  // Clearing takes effect at once: the tools re-read the task and refuse.
   if (!nextChannel) return;
   if (!input.next.slackBotConnectionId) {
     throw new HTTPException(422, {
@@ -216,6 +214,14 @@ export async function validateScheduledTaskSlackChannel(input: {
     });
   }
   requirePermission(input.grant, "connections:write");
+  // A chat created without the posting tools keeps that tool set, so choosing
+  // a channel for it would silently post nothing.
+  if (input.reusableSessionCanPost && !(await input.reusableSessionCanPost())) {
+    throw new HTTPException(409, {
+      message:
+        "this task continues a chat that was created without Slack posting; recreate the task to post from it",
+    });
+  }
   if (!input.verifySlackChannel) {
     throw new HTTPException(422, {
       message: "Choose the Slack channel in the schedule editor",

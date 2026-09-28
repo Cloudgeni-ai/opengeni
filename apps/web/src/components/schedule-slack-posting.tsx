@@ -138,7 +138,8 @@ export function ScheduleSlackPosting(props: {
         </p>
       ) : bots !== null && botOptions.length === 0 && !props.connectionId ? (
         <p className="text-xs text-fg-subtle">
-          Install the OpenGeni Slack bot from Plugins to post scheduled updates to Slack.
+          No OpenGeni Slack bot is installed in this workspace. A task can post only through a bot
+          installed in its own workspace, from Plugins.
         </p>
       ) : (
         <>

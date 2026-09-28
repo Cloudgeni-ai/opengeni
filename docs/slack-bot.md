@@ -388,7 +388,7 @@ A scheduled task can post to **one** Slack channel as the OpenGeni workspace bot
 
 ### Choosing the channel
 
-In the schedule editor, **Post to Slack** lists the active channels the installed bot already belongs to that are not shared with another organization. Invite the bot to a channel in Slack to make it appear. The task stores the bot's exact connection UUID in `agentConfig.slackBotConnectionId` and the channel ID in `agentConfig.slackBotChannelId`.
+In the schedule editor, **Post to Slack** lists the active channels the installed bot already belongs to that are not shared with another organization. Invite the bot to a channel in Slack to make it appear. The task stores the bot's exact connection UUID in `agentConfig.slackBotConnectionId` and the channel ID in `agentConfig.slackBotChannelId`. A task can use only a bot installed in its own OpenGeni workspace, so tasks in other workspaces of the organization (including routed and Personal workspaces) cannot post through the installation workspace's bot.
 
 Choosing or changing the channel, or moving it to another bot connection, requires:
 
@@ -396,7 +396,7 @@ Choosing or changing the channel, or moving it to another bot connection, requir
 - `connections:write` in the workspace, besides `scheduled_tasks:manage`;
 - a live check with the bot's token that the bot is a member and the channel is active and unshared (`GET /v1/workspaces/:workspaceId/scheduled-task-slack-channels` lists the eligible channels).
 
-Keeping the saved channel while editing other task fields needs no new proof, and anyone who can edit the task can clear it. The channel requires a bot connection and a task that starts its own chats: a task that continues an existing chat cannot post. A task that continues the same chat cannot turn posting on or off after that chat exists, because the chat's tools were fixed when it was created; recreate the task instead.
+Keeping the saved channel while editing other task fields needs no new proof, and anyone who can edit the task can clear it, including a task that continues the same chat. The channel requires a bot connection and a task that starts its own chats: a task that continues an existing chat cannot post. A chat's tools are fixed when it is created, so a task that continues the same chat can choose a channel after that chat exists only if the chat was created with the posting tools; otherwise recreate the task.
 
 ### How a run posts
 
@@ -405,7 +405,7 @@ A generated run of a task with a chosen channel gets exactly two extra tools, st
 1. `slack_bot_prepare_message` saves the text (and optionally a `threadTimestamp` for a reply in that channel) as an immutable prepared message and returns its server-generated `messageId`. Nothing is sent.
 2. `slack_bot_send_prepared_message` sends that saved message, exactly as saved. The `messageId` is also the Slack post operation ID and `client_msg_id`, so a retry after an interrupted or unclear send reconciles the original post through the normal post ledger instead of posting twice.
 
-Both tools re-read the task on every call and refuse unless the session is the scheduler-created run of that task, the task still names the run's bot connection, and a channel is chosen. A prepared message is sent only if the task still names the same channel and the bot connection version is unchanged. So a person clearing or changing the channel stops or redirects future posts immediately, and never redirects an already prepared message. Posts also require an active, unshared, bot-member channel at send time. Child sessions and ordinary chats never qualify, even if they select the tools.
+Both tools re-read the task on every call and refuse unless the session is the scheduler-created run of that task, the task still names the run's bot connection, and a channel is chosen. A prepared message is sent only if the task still names the same channel and the bot connection version is unchanged. So a person clearing or changing the channel stops or redirects future posts immediately, and never redirects an already prepared message. Replaying a send that Slack already confirmed still returns the original result, and a send whose earlier attempt was interrupted is reported as possibly posted rather than as unsent. Posts also require an active, unshared, bot-member channel at send time. Child sessions and ordinary chats never qualify, even if they select the tools.
 
 Prepared messages live in the FORCE-RLS `opengeni_private.scheduled_slack_bot_messages` table. The runtime role has no table access; it reaches the rows only through `prepare_scheduled_slack_bot_message`, which re-proves the session, task, channel, and connection version in one snapshot, and `read_scheduled_slack_bot_message`, which returns only the preparing session's own messages. Rolling migration `0530_scheduled_slack_bot_messages.sql` adds them.
 

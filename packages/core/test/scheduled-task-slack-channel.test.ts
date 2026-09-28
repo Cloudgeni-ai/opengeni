@@ -73,7 +73,7 @@ async function validate(
     previous: null,
     next: { slackBotConnectionId: connectionId, slackBotChannelId: "C0SCHED01" },
     runMode: "new_session_per_run",
-    reusableSessionLive: false,
+    reusableSessionCanPost: null,
     ...overrides,
   });
 }
@@ -107,7 +107,7 @@ describe("scheduled task Slack channel", () => {
         previous: { slackBotConnectionId: connectionId, slackBotChannelId: "C0SCHED01" },
         next: { slackBotConnectionId: connectionId, slackBotChannelId: "C0OTHER01" },
         runMode: "new_session_per_run",
-        reusableSessionLive: false,
+        reusableSessionCanPost: null,
         verifySlackChannel: verifier.verify,
       }),
     ).rejects.toMatchObject({ status: 403 });
@@ -153,25 +153,38 @@ describe("scheduled task Slack channel", () => {
     expect(verifier.calls).toEqual([]);
   });
 
-  test("a live reusable chat cannot turn posting on or off", async () => {
+  test("a live reusable chat can always stop posting but starts only if it has the tools", async () => {
     const verifier = recordingVerifier();
+    const withoutTools = async () => false;
+    const withTools = async () => true;
     await expect(
-      validate({ reusableSessionLive: true, verifySlackChannel: verifier.verify }),
+      validate({ reusableSessionCanPost: withoutTools, verifySlackChannel: verifier.verify }),
     ).rejects.toMatchObject({ status: 409 });
-    await expect(
-      validate({
-        reusableSessionLive: true,
-        previous: { slackBotConnectionId: connectionId, slackBotChannelId: "C0SCHED01" },
-        next: { slackBotConnectionId: connectionId },
-      }),
-    ).rejects.toMatchObject({ status: 409 });
-    // Moving between channels keeps the chat's tools, so it is allowed.
+    // Clearing is the safe direction, whoever edits the task.
     await validate({
-      reusableSessionLive: true,
+      authorization: agentAttempt(),
+      reusableSessionCanPost: withoutTools,
+      previous: { slackBotConnectionId: connectionId, slackBotChannelId: "C0SCHED01" },
+      next: { slackBotConnectionId: connectionId },
+    });
+    // A chat created with the tools can move channels or post again.
+    await validate({
+      reusableSessionCanPost: withTools,
       previous: { slackBotConnectionId: connectionId, slackBotChannelId: "C0OTHER01" },
       verifySlackChannel: verifier.verify,
     });
-    expect(verifier.calls).toHaveLength(1);
+    await validate({ reusableSessionCanPost: withTools, verifySlackChannel: verifier.verify });
+    // An agent is refused as a person would be, before the chat is inspected.
+    await expect(
+      validate({
+        authorization: agentAttempt(),
+        reusableSessionCanPost: async () => {
+          throw new Error("must not inspect the chat");
+        },
+        verifySlackChannel: verifier.verify,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(verifier.calls).toHaveLength(2);
   });
 
   test("a verifier refusal stops the save", async () => {

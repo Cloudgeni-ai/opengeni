@@ -1,4 +1,5 @@
 import {
+  SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
 } from "@opengeni/contracts";
@@ -262,7 +263,7 @@ export async function createValidatedScheduledTask(input: {
     previous: null,
     next: agentConfig,
     runMode: input.payload.runMode,
-    reusableSessionLive: false,
+    reusableSessionCanPost: null,
     verifySlackChannel: input.verifySlackChannel,
   });
   if (knowledgeAction && input.payload.overlapPolicy === "allow_concurrent")
@@ -1127,8 +1128,19 @@ export async function validatedScheduledTaskUpdate(input: {
     previous: input.existing.agentConfig,
     next: nextAgentConfig,
     runMode: nextRunMode,
-    reusableSessionLive:
-      input.existing.runMode === "reusable_session" && input.existing.reusableSessionId !== null,
+    reusableSessionCanPost:
+      input.existing.runMode === "reusable_session" && input.existing.reusableSessionId !== null
+        ? async () => {
+            const chat = await getSession(
+              input.db,
+              input.existing.workspaceId,
+              input.existing.reusableSessionId!,
+            );
+            return SCHEDULED_SLACK_BOT_POSTING_TOOLS.every(
+              (tool) => chat?.firstPartyMcpTools?.includes(tool) === true,
+            );
+          }
+        : null,
     verifySlackChannel: input.verifySlackChannel,
   });
   const authorityTargetChanged =
