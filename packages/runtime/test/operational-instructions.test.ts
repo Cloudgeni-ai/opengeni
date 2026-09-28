@@ -210,7 +210,7 @@ describe("provider-neutral operational instructions", () => {
       "only for a concrete, bounded subtask that can run independently",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Do not delegate a scope that you will also perform yourself.",
+      "Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A session cannot gain a Variable Set while it works",
@@ -234,9 +234,13 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
-  test("prices delegation and uses the result-bearing wake instead of a poll ritual", () => {
+  test("defaults to direct handling but honors independent delegation and result-bearing wakes", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "A child costs minutes of wall time and a large context of its own",
+      "Delegation has setup and coordination overhead: by default",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("A child costs minutes");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "send a related follow-up to a child you already spawned with `session_send_message`",
@@ -251,7 +255,7 @@ describe("provider-neutral operational instructions", () => {
       "only when `finalAnswer` is absent or truncated",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "a `session_get` snapshot between waits is not new evidence",
+      "an unchanged `session_get` snapshot between waits is not new evidence",
     );
     // Guidance only: the join tool stays available and uncapped.
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
@@ -322,13 +326,13 @@ describe("provider-neutral operational instructions", () => {
       "Outside a question or status turn, do not end with only a status reply and leave an immediate continuation",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "only when further progress genuinely depends on unchanged work already in flight",
+      "when further progress genuinely depends on work already in flight or a meaningful timed recheck",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information.",
+      "A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.",
     );
     // Any turn may end with a wait instead of a final response, so a turn that
     // starts long work and waits still has a compliant ending.
@@ -374,9 +378,51 @@ describe("proportional effort", () => {
     expect(guidance).toContain(
       "Skip the opening update when you expect to answer within about 20 seconds",
     );
-    expect(guidance).toContain("at least every two minutes");
+    expect(guidance).not.toContain("at least every two minutes");
+    expect(guidance).toContain("During active work, update at meaningful milestones");
+    expect(guidance).toContain("including frequent updates when requested");
+    expect(guidance).toContain("Monitoring checks and user notifications have separate cadences");
+    expect(guidance).toContain(
+      "Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it",
+    );
     expect(guidance).toContain("Do not narrate Skill reads or waits");
     expect(guidance).toContain("do not post a status right before `wait_for_input`");
+  });
+
+  test("distinguishes overnight waits, meaningful monitoring, and live-attempt tool limits", () => {
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS;
+    expect(guidance).not.toContain("Avoid blocking sleep or wait calls longer than 60 seconds");
+    expect(guidance).toContain("No short execution wait or preliminary status recheck is required");
+    expect(guidance).toContain("hours or days can be appropriate");
+    expect(guidance).toContain("Both time out after at most 50 seconds");
+    expect(guidance).toContain("pending Codemode calls need the current live attempt");
+    expect(guidance).toContain(
+      "preservation of an existing deadline when answering a question during a wait",
+    );
+    expect(guidance).toContain("explicit user/task/Skill monitoring cadence");
+    expect(guidance).toContain(
+      "remaining time is below the tool's minimum or its deadline has passed",
+    );
+    expect(guidance).toContain(
+      "has not consumed immediate machine input may finish without replacing the retained wait",
+    );
+    expect(guidance).toContain("make any unavoidable deadline adjustment explicit");
+  });
+
+  test("preserves comprehensive audits, scoped evidence reuse, and evidence-based persistence", () => {
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS;
+    expect(guidance).toContain(
+      "Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill",
+    );
+    expect(guidance).toContain(
+      "Always retain the full completion audit and required completion evidence",
+    );
+    expect(guidance).toContain("recheck changed, stale, uncertain, or insufficient evidence");
+    expect(guidance).toContain(
+      "investigate recoverable failures and try plausible safe alternatives",
+    );
+    expect(guidance).toContain("can justify an immediate goal pause with evidence");
+    expect(guidance).toContain("Tool approvals remain human-only");
   });
 
   test("puts a blank line before every heading so the contract renders as Markdown", () => {
@@ -416,7 +462,7 @@ describe("proportional effort", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("point out likely pitfalls");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("in proportion to the question");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not introduce unsolicited warnings");
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("stop optional verification");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Stop optional verification");
   });
 
   test("the default persona is a general assistant with repository-conditional code guidance", () => {

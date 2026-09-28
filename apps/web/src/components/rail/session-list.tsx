@@ -81,6 +81,7 @@ import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
   applySessionArchiveProjection,
+  compareSessionArchiveOrder,
   authoritativeSessionContinuationChannels,
   emptySessionContinuation,
   mergeSessionContinuation,
@@ -96,6 +97,11 @@ import {
   type SessionPaginationBrowseFilter,
   type SessionPaginationGroup,
 } from "@/lib/session-group-pagination";
+import {
+  SESSION_GROUP_VISIBLE_STEP,
+  sessionGroupDisclosurePlan,
+  sessionGroupWindowNodes,
+} from "@/lib/session-group-window";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
@@ -274,6 +280,11 @@ type PendingSessionFocus = {
 type ChildPageState = SessionBranchPage;
 
 const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
+const ARCHIVED_SESSION_GROUP: SessionPaginationGroup = {
+  key: "archived",
+  label: "Archived",
+  kind: "archived",
+};
 
 function findSessionTreeNode(
   nodes: readonly SessionTreeNode[],
@@ -373,7 +384,7 @@ export function SessionList() {
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
     archiveStatus: browseStatus,
-    sortBy: browseSortBy,
+    ...(browseStatus === "archived" ? {} : { sortBy: browseSortBy }),
     pollIntervalMs: 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
@@ -454,6 +465,29 @@ export function SessionList() {
     paginationKey,
   );
   const pageGeneration = paginationIdentity.current.generation;
+  const [groupWindows, setGroupWindows] = useState<{
+    generation: number;
+    counts: ReadonlyMap<string, number>;
+  }>(() => ({ generation: pageGeneration, counts: new Map() }));
+  const visibleCountForGroup = useCallback(
+    (key: string) =>
+      (groupWindows.generation === pageGeneration ? groupWindows.counts.get(key) : undefined) ??
+      SESSION_GROUP_VISIBLE_STEP,
+    [groupWindows, pageGeneration],
+  );
+  const visibleNodesForGroup = useCallback(
+    (key: string, nodes: SessionTreeNode[]) =>
+      search ? nodes : sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId),
+    [activeSessionId, search, visibleCountForGroup],
+  );
+  const [archiveFolder, setArchiveFolder] = useState({
+    generation: pageGeneration,
+    expanded: browseStatus === "archived",
+  });
+  const archiveExpanded =
+    archiveFolder.generation === pageGeneration
+      ? archiveFolder.expanded
+      : browseStatus === "archived";
   const [groupContinuations, setGroupContinuations] = useState<
     ReadonlyMap<string, ReturnType<typeof emptySessionContinuation>>
   >(() => new Map());
@@ -474,8 +508,8 @@ export function SessionList() {
     // A retained first page can overlap a newer continuation. Preserve its
     // versioned archive decision separately from whole-row merge priority;
     // channel membership still follows its independent read authority below.
-    const continuationSessions = activeGroupContinuations.flatMap(([key, continuation]) =>
-      key === "archived" ? [] : continuation.sessions,
+    const continuationSessions = activeGroupContinuations.flatMap(
+      ([, continuation]) => continuation.sessions,
     );
     for (const session of [...sessions, ...continuationSessions]) {
       const previous = evidence.get(session.id);
@@ -512,23 +546,20 @@ export function SessionList() {
   }, [rail.workspaceId]);
   const extraSessions = useMemo(() => {
     const rows = new Map<string, Session>();
-    for (const [key, continuation] of activeGroupContinuations) {
-      if (key === "archived") continue;
+    for (const [, continuation] of activeGroupContinuations) {
       for (const session of continuation.sessions) rows.set(session.id, session);
     }
     return [...rows.values()];
   }, [activeGroupContinuations]);
   const authoritativeExtraSessionEvidence = useMemo(
     () =>
-      activeGroupContinuations.flatMap(([key, continuation]) =>
-        key === "archived"
-          ? []
-          : authoritativeSessionContinuationChannels(
-              continuation,
-              pageGeneration,
-              rootReadRevision,
-              rootReadGeneration,
-            ),
+      activeGroupContinuations.flatMap(([, continuation]) =>
+        authoritativeSessionContinuationChannels(
+          continuation,
+          pageGeneration,
+          rootReadRevision,
+          rootReadGeneration,
+        ),
       ),
     [activeGroupContinuations, pageGeneration, rootReadGeneration, rootReadRevision],
   );
@@ -1247,9 +1278,24 @@ export function SessionList() {
   // tree. Normal and custom-grouped browsing carry true roots, lazily loaded
   // children, and the active lineage.
   const projectedSessions = useMemo(
-    () => projectRailSessions(browseSessions, hierarchyMode),
-    [browseSessions, hierarchyMode],
+    () =>
+      projectRailSessions(
+        browseStatus === "archived" ? [] : browseSessions.filter((session) => !session.archived),
+        hierarchyMode,
+      ),
+    [browseSessions, browseStatus, hierarchyMode],
   );
+  const archivedNodes = useMemo(() => {
+    const archived = buildPinnedRailSections(
+      projectRailSessions(
+        browseSessions.filter((session) => browseStatus === "archived" || session.archived),
+        hierarchyMode,
+      ),
+    ).complete;
+    return [...archived.running, ...archived.grouped.flatMap((bucket) => bucket.sessions)].sort(
+      (a, b) => compareSessionArchiveOrder(a.session, b.session),
+    );
+  }, [browseSessions, browseStatus, hierarchyMode]);
   // The helper builds all three projections together so explicit nested pins
   // never disappear into an ancestor shortcut.
   const railSections = useMemo(
@@ -1268,6 +1314,23 @@ export function SessionList() {
         browseSortBy,
       ),
     [browseGroupBy, browseSortBy, creatorLabels, railSections.ordinary],
+  );
+  const visibleForest = useMemo(
+    () => ({
+      running: visibleNodesForGroup("activity:active", forest.running),
+      grouped: forest.grouped.map((bucket) => ({
+        ...bucket,
+        sessions: visibleNodesForGroup(
+          browseGroupBy === "none"
+            ? "workspace"
+            : browseGroupBy === "activity"
+              ? `activity:${bucket.group}`
+              : bucket.group,
+          bucket.sessions,
+        ),
+      })),
+    }),
+    [browseGroupBy, forest, visibleNodesForGroup],
   );
   // Keep personal pin order while applying the selected sort to shortcut descendants.
   const pinnedNodes = useMemo(
@@ -1300,6 +1363,7 @@ export function SessionList() {
               ),
             }))
             .filter((section) => {
+              if (browseStatus === "archived") return false;
               if (showEmptyGroups || section.sessions.length > 0) return true;
               const key = sessionPaginationProjectGroup(section.channelId, section.name).key;
               const continuation = activeSessionContinuation(
@@ -1316,6 +1380,7 @@ export function SessionList() {
       forest,
       channels,
       browseSortBy,
+      browseStatus,
       showEmptyGroups,
       groupContinuations,
       groupLoadingGenerations,
@@ -1692,8 +1757,9 @@ export function SessionList() {
     for (const bucket of railSections.complete.grouped) {
       for (const node of bucket.sessions) visit(node);
     }
+    for (const node of archivedNodes) visit(node);
     return result;
-  }, [railSections.complete]);
+  }, [archivedNodes, railSections.complete]);
 
   // Manual state is separate from the small derived active-path expansion.
   // Polls can therefore never reopen a branch the user explicitly collapsed.
@@ -1931,27 +1997,53 @@ export function SessionList() {
     const ordinaryRows = channelMode
       ? channelSections.flatMap((section) =>
           !collapsedChannelSections.has(section.key)
-            ? visibleTreeRows(section.sessions, expanded, activeSessionId)
+            ? visibleTreeRows(
+                visibleNodesForGroup(
+                  sessionPaginationProjectGroup(section.channelId, section.name).key,
+                  section.sessions,
+                ),
+                expanded,
+                activeSessionId,
+              )
             : (() => {
                 const selected = findSessionTreeNode(section.sessions, activeSessionId);
                 return selected ? [{ node: selected, depth: 0 }] : [];
               })(),
         )
-      : visibleForestRows(forest, expanded, activeSessionId);
-    return [...visibleTreeRows(pinnedNodes, expanded, activeSessionId), ...ordinaryRows].filter(
-      ({ node }) => {
-        if (seen.has(node.session.id)) return false;
-        seen.add(node.session.id);
-        return true;
-      },
-    );
+      : visibleForestRows(visibleForest, expanded, activeSessionId);
+    const archiveRows =
+      browseStatus === "active"
+        ? []
+        : archiveExpanded
+          ? visibleTreeRows(
+              visibleNodesForGroup("archived", archivedNodes),
+              expanded,
+              activeSessionId,
+            )
+          : (() => {
+              const selected = findSessionTreeNode(archivedNodes, activeSessionId);
+              return selected ? [{ node: selected, depth: 0 }] : [];
+            })();
+    return [
+      ...visibleTreeRows(pinnedNodes, expanded, activeSessionId),
+      ...ordinaryRows,
+      ...archiveRows,
+    ].filter(({ node }) => {
+      if (seen.has(node.session.id)) return false;
+      seen.add(node.session.id);
+      return true;
+    });
   }, [
     activeSessionId,
+    archiveExpanded,
+    archivedNodes,
+    browseStatus,
     channelMode,
     channelSections,
     expanded,
     collapsedChannelSections,
-    forest,
+    visibleForest,
+    visibleNodesForGroup,
     pinnedNodes,
   ]);
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
@@ -2108,7 +2200,7 @@ export function SessionList() {
   );
   loadedSessionIdsRef.current = new Set(allSessions.map((session) => session.id));
   const loadMoreInGroup = useCallback(
-    async (group: SessionPaginationGroup, refreshWindow = false) => {
+    async (group: SessionPaginationGroup, refreshWindow = false, minimumAdditional = 0) => {
       const requestGeneration = pageGeneration;
       const current = activeSessionContinuation(
         groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(requestGeneration),
@@ -2146,15 +2238,21 @@ export function SessionList() {
       const listPage = async (pageCursor?: string) => {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
         const page = await context.client.listSessionPage(rail.workspaceId, {
-          // Projects own 50-row pages. Other groups overlap the shared 50-row
-          // discovery page, so 100 guarantees progress without a hidden scan.
-          limit: group.kind === "channel" ? 50 : 100,
+          // Cache bounded server pages separately from four-row disclosure.
+          // A page covers the shared discovery window, avoiding repeated
+          // no-progress clicks when that window overlaps this group.
+          limit: 50,
           ...(pageCursor ? { cursor: pageCursor } : {}),
           ...(group.kind !== "archived" && search ? { search } : {}),
           ...(group.kind === "archived" || hierarchyMode ? { parentSessionId: null } : {}),
           ...groupQuery,
-          archiveStatus: browseStatus,
-          sortBy: browseSortBy,
+          archiveStatus:
+            group.kind === "archived"
+              ? "archived"
+              : browseStatus === "all"
+                ? "active"
+                : browseStatus,
+          ...(group.kind === "archived" ? {} : { sortBy: browseSortBy }),
         });
         return { page, readGeneration };
       };
@@ -2223,7 +2321,22 @@ export function SessionList() {
           rebased = true;
         }
         if (!requestIsCurrent()) return;
-        const page = filterPage(pageRead.page);
+        const reads = [pageRead];
+        const receivedIds = new Set(
+          filterPage(pageRead.page).sessions.map((session) => session.id),
+        );
+        const newlyLoadedCount = () =>
+          [...receivedIds].filter((id) => !loadedSessionIdsRef.current.has(id)).length;
+        // Client-only groups (running/creator discovery) and overlapping
+        // discovery pages can contain no new matches. One disclosure action
+        // continues until its small display step is filled or the cursor ends.
+        while (reads.at(-1)!.page.nextCursor && newlyLoadedCount() < minimumAdditional) {
+          const read = await listPage(reads.at(-1)!.page.nextCursor!);
+          if (!requestIsCurrent()) return;
+          reads.push(read);
+          for (const session of filterPage(read.page).sessions) receivedIds.add(session.id);
+        }
+        const page = filterPage(reads.at(-1)!.page);
         const pageReadGeneration = pageRead.readGeneration;
         const snapshotRevision =
           current.nextCursor === undefined || rebased ? attempt : current.snapshotRevision;
@@ -2231,17 +2344,15 @@ export function SessionList() {
           current.nextCursor === undefined || rebased
             ? pageReadGeneration
             : current.snapshotGeneration;
-        const newlyLoaded = page.sessions.filter(
-          (session) => !loadedSessionIdsRef.current.has(session.id),
-        ).length;
+        const newlyLoaded = newlyLoadedCount();
         const previousWindow = loadedGroupWindows.current.get(group.key);
         loadedGroupWindows.current.set(group.key, {
           generation: requestGeneration,
           group,
           pages:
             !rebased && previousWindow?.generation === requestGeneration
-              ? previousWindow.pages + 1
-              : 1,
+              ? previousWindow.pages + reads.length
+              : reads.length,
         });
         setGroupContinuations((states) => {
           if (!requestIsCurrent()) return states;
@@ -2249,26 +2360,30 @@ export function SessionList() {
             states.get(group.key) ?? emptySessionContinuation(requestGeneration),
             requestGeneration,
           );
-          const next = rebased
-            ? rebaseSessionContinuation(
-                latest,
-                requestGeneration,
-                requestGeneration,
-                page,
-                snapshotRevision,
-                snapshotGeneration,
-                "group",
-              )
-            : mergeSessionContinuation(
-                latest,
-                requestGeneration,
-                requestGeneration,
-                page,
-                snapshotRevision,
-                snapshotGeneration,
-                "group",
-                pageReadGeneration,
-              );
+          let next = latest;
+          for (const [index, read] of reads.entries()) {
+            next =
+              rebased && index === 0
+                ? rebaseSessionContinuation(
+                    next,
+                    requestGeneration,
+                    requestGeneration,
+                    filterPage(read.page),
+                    snapshotRevision,
+                    snapshotGeneration,
+                    "group",
+                  )
+                : mergeSessionContinuation(
+                    next,
+                    requestGeneration,
+                    requestGeneration,
+                    filterPage(read.page),
+                    snapshotRevision,
+                    snapshotGeneration,
+                    "group",
+                    read.readGeneration,
+                  );
+          }
           return new Map(states).set(group.key, {
             ...next,
             sessions: next.sessions.filter(
@@ -2278,12 +2393,12 @@ export function SessionList() {
         });
         setAnnouncement(
           newlyLoaded > 0
-            ? `Loaded ${newlyLoaded} older session${newlyLoaded === 1 ? "" : "s"} in ${group.label}.`
+            ? `More sessions are available in ${group.label}.`
             : page.nextCursor
               ? `No additional older sessions in ${group.label} yet.`
               : `No more older sessions in ${group.label}.`,
         );
-        return page.nextCursor === null;
+        return { exhausted: page.nextCursor === null, added: newlyLoaded, failed: false };
       } catch {
         if (!requestIsCurrent()) return;
         if (refreshWindow) return;
@@ -2296,6 +2411,7 @@ export function SessionList() {
           return new Map(states).set(group.key, { ...latest, failed: true });
         });
         setAnnouncement(`Older sessions in ${group.label} did not load. Retry is available.`);
+        return { exhausted: false, added: 0, failed: true };
       } finally {
         if (requestIsCurrent()) {
           const nextLoading = new Map(groupLoadingRef.current);
@@ -2323,7 +2439,7 @@ export function SessionList() {
   );
 
   useEffect(() => {
-    if (!channelMode || search) return;
+    if (!channelMode || search || browseStatus === "archived") return;
     for (const group of projectPaginationGroups) {
       const continuation = activeSessionContinuation(
         groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(pageGeneration),
@@ -2333,7 +2449,40 @@ export function SessionList() {
         void loadMoreInGroup(group);
       }
     }
-  }, [channelMode, loadMoreInGroup, pageGeneration, projectPaginationGroups, search]);
+  }, [browseStatus, channelMode, loadMoreInGroup, pageGeneration, projectPaginationGroups, search]);
+
+  // A workspace-wide discovery page may contain only one row for a creator.
+  // Hydrate each discovered creator independently before offering disclosure.
+  useEffect(() => {
+    if (browseGroupBy !== "creator" || search || browseStatus === "archived") return;
+    for (const bucket of forest.grouped) {
+      const creator = bucket.sessions[0]?.session.createdBy;
+      if (!creator) continue;
+      const group: SessionPaginationGroup = {
+        key: bucket.group,
+        label: bucket.label,
+        kind: "creator",
+        creator: { kind: creator.kind, subjectId: creator.subjectId },
+      };
+      const continuation = activeSessionContinuation(
+        groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(pageGeneration),
+        pageGeneration,
+      );
+      if (continuation.nextCursor === undefined && !continuation.failed)
+        void loadMoreInGroup(group);
+    }
+  }, [browseGroupBy, browseStatus, forest.grouped, loadMoreInGroup, pageGeneration, search]);
+
+  useEffect(() => {
+    if (browseStatus === "active" || search) return;
+    const continuation = activeSessionContinuation(
+      groupContinuationsRef.current.get("archived") ?? emptySessionContinuation(pageGeneration),
+      pageGeneration,
+    );
+    if (continuation.nextCursor === undefined && !continuation.failed) {
+      void loadMoreInGroup(ARCHIVED_SESSION_GROUP);
+    }
+  }, [browseStatus, loadMoreInGroup, pageGeneration, search]);
 
   const refreshGroupWindow = useRef(loadMoreInGroup);
   refreshGroupWindow.current = loadMoreInGroup;
@@ -2352,6 +2501,7 @@ export function SessionList() {
     group: SessionPaginationGroup,
     initialNextCursor: string | null,
     independentlyPaged = false,
+    nodes?: SessionTreeNode[],
   ): SessionGroupPaginationProps | undefined => {
     const continuation = activeSessionContinuation(
       groupContinuations.get(group.key) ?? emptySessionContinuation(pageGeneration),
@@ -2362,13 +2512,51 @@ export function SessionList() {
       continuation.nextCursor === undefined
         ? independentlyPaged || initialNextCursor !== null
         : continuation.nextCursor !== null;
-    if (!hasMore && !continuation.failed && !groupLoading) return undefined;
+    const visibleCount = visibleCountForGroup(group.key);
+    const hiddenLocally = !search && nodes !== undefined && nodes.length > visibleCount;
+    if (!hasMore && !hiddenLocally && !continuation.failed && !groupLoading) return undefined;
     return {
       group,
-      hasMore,
+      hasMore: hasMore || hiddenLocally || continuation.failed,
       loading: groupLoading,
       failed: continuation.failed,
-      onLoadMore: loadMoreInGroup,
+      isCurrent: () => paginationIdentity.current.generation === pageGeneration,
+      ...(nodes && !search
+        ? {
+            revealCount:
+              hasMore || continuation.failed
+                ? SESSION_GROUP_VISIBLE_STEP
+                : Math.min(SESSION_GROUP_VISIBLE_STEP, nodes.length - visibleCount),
+          }
+        : {}),
+      onLoadMore: async (requestedGroup) => {
+        if (!nodes || search)
+          return (await loadMoreInGroup(requestedGroup, false, SESSION_GROUP_VISIBLE_STEP))
+            ?.exhausted;
+        const { nextCount, needsPage } = sessionGroupDisclosurePlan(
+          visibleCount,
+          nodes.length,
+          hasMore,
+          continuation.failed,
+        );
+        const result = needsPage
+          ? await loadMoreInGroup(requestedGroup, false, Math.max(0, nextCount - nodes.length))
+          : { exhausted: !hasMore, added: 0, failed: false };
+        if (result === undefined || paginationIdentity.current.generation !== pageGeneration)
+          return;
+        // A current failure keeps its Retry control, but never advances the
+        // disclosure window. Stale/no-op loads still return no focus outcome.
+        if (result.failed) return false;
+        setGroupWindows((current) => ({
+          generation: pageGeneration,
+          counts: new Map(current.generation === pageGeneration ? current.counts : []).set(
+            group.key,
+            nextCount,
+          ),
+        }));
+        setAnnouncement(`Showing up to ${nextCount} sessions in ${group.label}.`);
+        return result.exhausted && nodes.length + result.added <= nextCount;
+      },
     };
   };
 
@@ -2409,7 +2597,9 @@ export function SessionList() {
   // Default is also a move destination: keep its header when its last row
   // leaves, even if there is no next page of unfiled sessions.
   const renderedChannelSections =
-    !showEmptyGroups || channelSections.some((section) => section.channelId === null)
+    browseStatus === "archived" ||
+    !showEmptyGroups ||
+    channelSections.some((section) => section.channelId === null)
       ? channelSections
       : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
   const renderedGroupedBuckets =
@@ -2707,7 +2897,10 @@ export function SessionList() {
               Retry
             </button>
           </div>
-        ) : flat.length === 0 && !showEmptyGroups && (search || browseControlsActive) ? (
+        ) : flat.length === 0 &&
+          !showEmptyGroups &&
+          (search || browseControlsActive) &&
+          (search || browseStatus === "active") ? (
           <div className="px-2 py-4 text-center text-xs text-fg-subtle">
             <p>No sessions match this view.</p>
             {matchingResultsPagination ? (
@@ -2761,7 +2954,7 @@ export function SessionList() {
                 ) : null}
               </>
             ) : null}
-            {channelMode ? (
+            {browseStatus === "archived" ? null : channelMode ? (
               renderedChannelSections.map((section) => (
                 <SessionGroup
                   key={section.key}
@@ -2796,6 +2989,10 @@ export function SessionList() {
                   sectionExpanded={!collapsedChannelSections.has(section.key)}
                   onToggleSection={() => toggleChannelSection(section.key)}
                   nodes={section.sessions}
+                  visibleNodes={visibleNodesForGroup(
+                    sessionPaginationProjectGroup(section.channelId, section.name).key,
+                    section.sessions,
+                  )}
                   pagination={
                     search
                       ? undefined
@@ -2803,6 +3000,7 @@ export function SessionList() {
                           sessionPaginationProjectGroup(section.channelId, section.name),
                           null,
                           true,
+                          section.sessions,
                         )
                   }
                   localDeliveryAttention={localDeliveryAttention}
@@ -2830,6 +3028,7 @@ export function SessionList() {
                   <SessionGroup
                     label="Active"
                     nodes={forest.running}
+                    visibleNodes={visibleForest.running}
                     pagination={paginationForGroup(
                       {
                         key: "activity:active",
@@ -2838,6 +3037,8 @@ export function SessionList() {
                         group: "active",
                       },
                       nextCursor,
+                      false,
+                      forest.running,
                     )}
                     localDeliveryAttention={localDeliveryAttention}
                     flat={flat}
@@ -2865,9 +3066,18 @@ export function SessionList() {
                       label={bucket.label}
                       hideHeading={browseGroupBy === "none"}
                       nodes={bucket.sessions}
+                      visibleNodes={visibleNodesForGroup(
+                        paginationGroup?.key ?? bucket.group,
+                        bucket.sessions,
+                      )}
                       pagination={
                         paginationGroup
-                          ? paginationForGroup(paginationGroup, nextCursor)
+                          ? paginationForGroup(
+                              paginationGroup,
+                              nextCursor,
+                              browseGroupBy === "creator",
+                              bucket.sessions,
+                            )
                           : undefined
                       }
                       localDeliveryAttention={localDeliveryAttention}
@@ -2914,8 +3124,50 @@ export function SessionList() {
                 ) : null}
               </>
             )}
-            {browseGroupBy !== "none" && (!channelMode || search) && workspacePagination ? (
+            {browseStatus !== "archived" &&
+            browseGroupBy !== "none" &&
+            browseGroupBy !== "creator" &&
+            (!channelMode || search) &&
+            workspacePagination ? (
               <SessionGroupPaginationControl {...workspacePagination} />
+            ) : null}
+            {browseStatus !== "active" ? (
+              <SessionGroup
+                label="Archived"
+                sectionId="archived"
+                channelHeader
+                allowNewSession={false}
+                showSummary={false}
+                emptyLabel="No archived sessions"
+                sectionExpanded={archiveExpanded}
+                onToggleSection={() =>
+                  setArchiveFolder({ generation: pageGeneration, expanded: !archiveExpanded })
+                }
+                nodes={archivedNodes}
+                visibleNodes={visibleNodesForGroup("archived", archivedNodes)}
+                pagination={paginationForGroup(
+                  ARCHIVED_SESSION_GROUP,
+                  null,
+                  !search,
+                  archivedNodes,
+                )}
+                localDeliveryAttention={localDeliveryAttention}
+                flat={flat}
+                activeSessionId={activeSessionId}
+                focusIndex={focusIndex}
+                onFocusSession={setFocusedSessionId}
+                expanded={expanded}
+                onToggleExpand={toggleExpand}
+                childPages={childPages}
+                onLoadMoreChildren={loadChildPage}
+                onRename={context.updateSessionTitle}
+                onPin={onPin}
+                channels={channels}
+                onMoveToChannel={onMoveToChannel}
+                onUpdateAttention={onUpdateAttention}
+                onArchive={onArchive}
+                onRequestDelete={setSessionPendingDelete}
+              />
             ) : null}
           </>
         )}
@@ -2980,40 +3232,114 @@ type SessionGroupPaginationProps = {
   hasMore: boolean;
   loading: boolean;
   failed: boolean;
+  isCurrent: () => boolean;
+  revealCount?: number;
   onLoadMore: (group: SessionPaginationGroup) => Promise<boolean | void>;
 };
 
 function SessionGroupPaginationControl(
   props: SessionGroupPaginationProps & { className?: string; fallbackFocusId?: string },
 ) {
-  const { failed, group, hasMore, loading, onLoadMore } = props;
+  const { failed, fallbackFocusId, group, hasMore, isCurrent, loading, onLoadMore, revealCount } =
+    props;
   const buttonRef = useRef<HTMLButtonElement>(null);
   const groupRef = useRef(group);
   groupRef.current = group;
+  const focusAttempt = useRef(0);
+  const pendingFocus = useRef<{
+    attempt: number;
+    exhausted?: boolean;
+    restore?: () => void;
+    cancel: () => void;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (!loading && hasMore) pendingFocus.current?.restore?.();
+  }, [loading, hasMore]);
+  useEffect(
+    () => () => {
+      // Removal can precede the promise's exhaustion result. Let that result
+      // decide fallback; a settled surviving-control intent is abandoned here.
+      if (pendingFocus.current?.exhausted === false) pendingFocus.current?.cancel();
+    },
+    [],
+  );
   const loadWithFocus = useCallback(async () => {
+    pendingFocus.current?.cancel();
     const button = buttonRef.current;
     const root = button?.closest<HTMLElement>("[data-sessionpin-session-list]") ?? null;
     const shouldRestoreFocus = document.activeElement === button;
-    const exhausted = await onLoadMore(groupRef.current);
-    if (!shouldRestoreFocus || !root || !exhausted) return;
-    requestAnimationFrame(() => {
-      if (!root.isConnected) return;
-      if (
-        document.activeElement &&
-        document.activeElement !== document.body &&
-        document.activeElement !== button
-      )
-        return;
-      const labelledFallback = props.fallbackFocusId
-        ? document.getElementById(props.fallbackFocusId)
-        : null;
-      const fallback =
-        labelledFallback && root.contains(labelledFallback)
-          ? labelledFallback
-          : (root.querySelector<HTMLElement>("a[data-session-row]") ?? root);
-      fallback.focus();
-    });
-  }, [onLoadMore, props.fallbackFocusId]);
+    const requestedGroup = groupRef.current;
+    const attempt = ++focusAttempt.current;
+    let focusMoved = false;
+    let cancelled = false;
+    const observeFocus = (event: FocusEvent) => {
+      if (event.target !== button && event.target !== document.body) focusMoved = true;
+    };
+    const cancel = () => {
+      cancelled = true;
+      document.removeEventListener("focusin", observeFocus, true);
+      if (pendingFocus.current?.attempt === attempt) pendingFocus.current = null;
+    };
+    if (shouldRestoreFocus) {
+      pendingFocus.current = { attempt, cancel };
+      document.addEventListener("focusin", observeFocus, true);
+    }
+    let restoreScheduled = false;
+    try {
+      const exhausted = await onLoadMore(requestedGroup);
+      if (!shouldRestoreFocus || !root || cancelled || exhausted === undefined) return;
+      const restore = () => {
+        if (cancelled) return;
+        if (
+          focusMoved ||
+          focusAttempt.current !== attempt ||
+          !isCurrent() ||
+          groupRef.current.key !== requestedGroup.key ||
+          !root.isConnected
+        ) {
+          cancel();
+          return;
+        }
+        if (
+          document.activeElement &&
+          document.activeElement !== document.body &&
+          document.activeElement !== button
+        ) {
+          cancel();
+          return;
+        }
+        if (!exhausted) {
+          if (
+            !button ||
+            buttonRef.current !== button ||
+            !button.isConnected ||
+            !root.contains(button)
+          ) {
+            cancel();
+            return;
+          }
+          // The promise can settle before React commits disabled={false}.
+          // Keep this intent for that commit instead of dropping focus to BODY.
+          if (button.disabled) return;
+          cancel();
+          button.focus({ preventScroll: true });
+          return;
+        }
+        cancel();
+        const labelledFallback = fallbackFocusId ? document.getElementById(fallbackFocusId) : null;
+        const fallback =
+          labelledFallback && root.contains(labelledFallback)
+            ? labelledFallback
+            : (root.querySelector<HTMLElement>("a[data-session-row]") ?? root);
+        fallback.focus();
+      };
+      pendingFocus.current = { attempt, exhausted, restore, cancel };
+      restoreScheduled = true;
+      requestAnimationFrame(restore);
+    } finally {
+      if (!restoreScheduled) cancel();
+    }
+  }, [onLoadMore, fallbackFocusId, isCurrent]);
   const isActiveGroup = group.kind === "activity" && group.group === "active";
 
   const action = loading ? "Loading" : failed ? "Retry" : "Load";
@@ -3023,21 +3349,37 @@ function SessionGroupPaginationControl(
         ref={buttonRef}
         type="button"
         disabled={loading || !hasMore}
-        aria-label={`${action} older sessions in ${group.label}`}
+        aria-label={
+          revealCount !== undefined
+            ? loading
+              ? `Loading sessions in ${group.label}`
+              : failed
+                ? `Retry sessions in ${group.label}`
+                : `Show ${revealCount} more sessions in ${group.label}`
+            : `${action} older sessions in ${group.label}`
+        }
         onClick={() => void loadWithFocus()}
         className="min-h-8 rounded-md px-2 text-xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
       >
-        {isActiveGroup
+        {revealCount !== undefined
           ? loading
-            ? "Checking older active sessions…"
-            : `${action} older active sessions`
-          : loading
-            ? "Loading older…"
+            ? "Loading…"
             : failed
-              ? "Retry older"
-              : group.kind === "results"
-                ? "Load older sessions"
-                : "Load older"}
+              ? "Retry"
+              : `Show ${revealCount} more`
+          : isActiveGroup
+            ? loading
+              ? "Checking older active sessions…"
+              : `${action} older active sessions`
+            : loading
+              ? "Loading older…"
+              : failed
+                ? "Retry older"
+                : group.kind === "creatorDiscovery"
+                  ? "Show more creators"
+                  : group.kind === "results"
+                    ? "Load older sessions"
+                    : "Load older"}
       </button>
       {failed ? (
         <p role="status" className="mt-1 text-2xs text-status-failed">
@@ -3078,6 +3420,9 @@ function SessionGroup(props: {
   sectionExpanded?: boolean;
   onToggleSection?: () => void;
   nodes: SessionTreeNode[];
+  /** Keyboard navigation uses this same disclosure window. Summaries retain all loaded nodes. */
+  visibleNodes?: SessionTreeNode[];
+  emptyLabel?: string;
   pagination?: SessionGroupPaginationProps;
   localDeliveryAttention: ReadonlyMap<string, number>;
   flat: Session[];
@@ -3106,7 +3451,7 @@ function SessionGroup(props: {
     ? findSessionTreeNode(props.nodes, props.activeSessionId)
     : null;
   const renderedNodes = sectionExpanded
-    ? props.nodes
+    ? (props.visibleNodes ?? props.nodes)
     : collapsedSelection
       ? [collapsedSelection]
       : [];
@@ -3282,6 +3627,9 @@ function SessionGroup(props: {
             />
           ))}
         </div>
+      ) : null}
+      {sectionExpanded && renderedNodes.length === 0 && props.emptyLabel && !props.pagination ? (
+        <p className="px-6 py-2 text-xs text-fg-subtle">{props.emptyLabel}</p>
       ) : null}
       {sectionExpanded && props.pagination ? (
         <SessionGroupPaginationControl {...props.pagination} fallbackFocusId={sectionId} />

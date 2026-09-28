@@ -151,15 +151,20 @@ child results, an immediate child notice may autonomously wake a parent with eit
 an active goal or a current session-level wait. Without either durable
 obligation, child lifecycle notices remain pending until new intent arrives.
 
-A failed or cancelled child reports from its settlement transaction, but an
-idle child reports only when its workflow closes. After the terminal turn
-settles, the child's `sessionWorkflow` idle branch waits the bounded 5 s signal
-race window, re-peeks PostgreSQL, and only then runs `markSessionIdle`, which
-commits the `child_terminal_result` outbox row and delivers it to the parent.
-That window therefore adds about 5 s to every idle handoff. Notifying the
-parent when the terminal turn settles, while keeping the window only for
-closing the run, changes the workflow's command sequence and needs a Temporal
-`patched()` gate plus a decision on what a notified-but-open `idle` child means.
+A failed or cancelled child reports from its settlement transaction. An idle
+child reports at its workflow's terminal-for-now idle boundary: after goal
+evaluation, the workflow re-peeks PostgreSQL and runs `markSessionIdle` without
+an unconditional grace timer. That transaction rechecks control, active and
+queued work and runnable machine input, suppresses completion for a held input
+wait or active goal, and commits the episode-deduplicated `child_terminal_result`
+outbox row with its
+frozen answer. Delivery can precede the workflow run's actual close; a signal
+accepted during the close activity chain causes another durable peek, and
+later work can start a new workflow run of the same session through the durable
+`signalWithStart` wake path. Follow-ups need not coalesce with the completed
+episode. The `session-normal-idle-no-grace-v1` patch preserves recorded legacy
+5 s timer commands for replay. Held input-wait and other lifecycle timers are
+unchanged.
 
 Terminal background-command settlement follows the same proof-first rule as
 the command lifecycle. The transaction that changes the exact command row from
