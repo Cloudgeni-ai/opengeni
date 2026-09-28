@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { BookOpenIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
 import { ConnectionInstalled } from "@opengeni/react/connect";
+import { useRouter } from "@tanstack/react-router";
 import "@opengeni/react/connect.css";
 import type {
   SkillRecord,
@@ -89,6 +90,7 @@ export function SkillsPanelContent({
   // Inside Capabilities a skill opens as its own page in the route's page slot
   // (`?open=skill:<id>`); elsewhere the page replaces the list in place.
   const slot = useCapabilityPageSlot();
+  const router = useRouter({ warn: false });
   const openerRef = useRef<HTMLElement | null>(null);
   const newSkillRef = useRef<HTMLButtonElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -133,6 +135,36 @@ export function SkillsPanelContent({
           file.path !== record.files[index]?.path || file.content !== record.files[index]?.content,
       )),
   );
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const navigationDecision = useRef<((blocked: boolean) => void) | null>(null);
+
+  useEffect(() => {
+    if (!router || !dirty) return;
+    // Block before the route/slot changes or unmounts the editor. The router's
+    // history owns Back/Forward rollback; this uses the same discard dialog as
+    // explicit page actions, rather than repairing the URL after losing a draft.
+    const unblock = router.history.block({
+      enableBeforeUnload: false,
+      blockerFn: ({ currentLocation, nextLocation }) => {
+        if (!dirtyRef.current) return false;
+        const currentKey = new URLSearchParams(currentLocation.search).get("open");
+        const nextKey = new URLSearchParams(nextLocation.search).get("open");
+        if (currentLocation.pathname === nextLocation.pathname && currentKey === nextKey)
+          return false;
+        return new Promise<boolean>((resolve) => {
+          navigationDecision.current?.(true);
+          navigationDecision.current = resolve;
+          setDiscardAction(() => () => resolve(false));
+        });
+      },
+    });
+    return () => {
+      navigationDecision.current?.(true);
+      navigationDecision.current = null;
+      unblock();
+    };
+  }, [router, dirty]);
 
   useEffect(() => {
     generation.current++;
@@ -631,13 +663,21 @@ export function SkillsPanelContent({
       <ConfirmDialog
         open={discardAction !== null}
         onOpenChange={(isOpen) => {
-          if (!isOpen) setDiscardAction(null);
+          if (!isOpen) {
+            navigationDecision.current?.(true);
+            navigationDecision.current = null;
+            setDiscardAction(null);
+          }
         }}
         title="Discard unsaved Skill changes?"
         description="Your edits have not been saved. Switching will discard them."
         confirmLabel="Discard changes"
         cancelAutoFocus
         onConfirm={() => {
+          // An already-confirmed explicit action may itself navigate. Clear the
+          // draft before it runs so the router doesn't ask the same question twice.
+          dirtyRef.current = false;
+          if (record) setFiles(record.files);
           discardAction?.();
         }}
       />
