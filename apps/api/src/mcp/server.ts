@@ -319,7 +319,9 @@ import {
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import {
   createOpenGeniSlackBotClient,
+  prepareScheduledSlackBotPost,
   resolveSlackBotConnectionForTool,
+  sendScheduledSlackBotPost,
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
@@ -1435,7 +1437,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog.",
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. To have runs post to Slack as the OpenGeni bot, a person must choose the channel in the schedule editor; you cannot set agentConfig.slackBotChannelId.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -2030,6 +2032,64 @@ function registerSlackBotTools(
         ...(offset !== undefined ? { offset } : {}),
       });
       return slackBotFileContentResult(result);
+    },
+  );
+
+  // Scheduled runs post only to the channel a person chose on the task. The
+  // tools take no channel: the destination is read from the task each time,
+  // and the prepared message id is the durable Slack delivery identity.
+  const authorizeScheduledPost = async () => {
+    if (sessionId === null) {
+      throw new Error("Posting to the task's Slack channel requires a scheduled task run");
+    }
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+  server.registerTool(
+    "slack_bot_prepare_message",
+    {
+      description:
+        "Prepare a message for this scheduled task's Slack channel, posted as the OpenGeni workspace bot. The channel was chosen by a person on the task; you cannot pick another one. This saves the exact text without sending it. Then call slack_bot_send_prepared_message with the returned messageId. Pass threadTimestamp (a timestamp returned by an earlier send) to reply in that thread of the same channel.",
+      inputSchema: {
+        text: z4.string().min(1).max(40_000),
+        threadTimestamp: z4
+          .string()
+          .regex(/^\d{1,20}\.\d{1,12}$/)
+          .optional(),
+      },
+    },
+    async ({ text, threadTimestamp }) => {
+      await authorizeScheduledPost();
+      return json(
+        await prepareScheduledSlackBotPost({
+          db: deps.db,
+          grant,
+          sessionId,
+          text,
+          ...(threadTimestamp ? { threadTimestamp } : {}),
+        }),
+      );
+    },
+  );
+  server.registerTool(
+    "slack_bot_send_prepared_message",
+    {
+      description:
+        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, to the task's Slack channel as the OpenGeni workspace bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: OpenGeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
+      inputSchema: { messageId: z4.string().uuid() },
+    },
+    async ({ messageId }) => {
+      await authorizeScheduledPost();
+      return json(
+        await sendScheduledSlackBotPost({
+          db: deps.db,
+          settings: deps.settings,
+          grant,
+          sessionId,
+          messageId,
+          ...(deps.slackFetch ? { slackFetch: deps.slackFetch } : {}),
+          authorizeProviderRequest: authorizeScheduledPost,
+        }),
+      );
     },
   );
 

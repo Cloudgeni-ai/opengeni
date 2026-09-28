@@ -39,6 +39,7 @@ import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { SchedulePersonalConnectionDisclosure } from "@/components/capabilities/schedule-personal-connection-disclosure";
+import { ScheduleSlackPosting } from "@/components/schedule-slack-posting";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -1785,6 +1786,22 @@ function ScheduledTaskForm(props: {
           </Notice>
         ) : null}
       </div>
+
+      {form.runMode === "existing_session" ? null : (
+        <ScheduleSlackPosting
+          workspaceId={props.workspaceId}
+          connectionId={form.slackBotConnectionId}
+          channelId={form.slackBotChannelId}
+          disabled={props.busy}
+          onChange={({ connectionId, channelId }) =>
+            setForm((current) => ({
+              ...current,
+              slackBotConnectionId: connectionId,
+              slackBotChannelId: channelId,
+            }))
+          }
+        />
+      )}
 
       <FormDisclosure
         title="Agent learning"

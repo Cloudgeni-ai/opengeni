@@ -97,6 +97,8 @@ import {
   hasReservedOpenGeniSlackBotSessionMetadata,
   scheduledSlackBotConnectionId,
   validateOpenGeniSlackBotConnectionSelection,
+  validateScheduledTaskSlackChannel,
+  type ScheduledTaskSlackChannelVerifier,
 } from "./slack-bot";
 import {
   normalizeResources,
@@ -220,6 +222,8 @@ export async function createValidatedScheduledTask(input: {
   toolsProvided?: boolean;
   sessionAuthorization?: SessionAuthorizationPort | null | undefined;
   authorizationSurface?: SessionAuthorizationSurface | undefined;
+  /** Proves the bot may post in a newly chosen task Slack channel. */
+  verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<ScheduledTask> {
   const learning = "agentLearning" in input.payload ? input.payload.agentLearning : undefined;
   const learningContext =
@@ -252,6 +256,15 @@ export async function createValidatedScheduledTask(input: {
     workspaceId: input.grant.workspaceId,
   });
   agentConfig.connectionAccounts = input.payload.connectionAccounts ?? [];
+  await validateScheduledTaskSlackChannel({
+    grant: input.grant,
+    authorization: input.authorization,
+    previous: null,
+    next: agentConfig,
+    runMode: input.payload.runMode,
+    reusableSessionLive: false,
+    verifySlackChannel: input.verifySlackChannel,
+  });
   if (knowledgeAction && input.payload.overlapPolicy === "allow_concurrent")
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
@@ -905,6 +918,8 @@ export async function validatedScheduledTaskUpdate(input: {
   toolsProvided?: boolean;
   sessionAuthorization?: SessionAuthorizationPort | null | undefined;
   authorizationSurface?: SessionAuthorizationSurface | undefined;
+  /** Proves the bot may post in a newly chosen task Slack channel. */
+  verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   if (input.payload.agentLearning) {
     const context = input.authorization
@@ -1106,6 +1121,16 @@ export async function validatedScheduledTaskUpdate(input: {
     };
   }
   const nextAgentConfig = update.agentConfig ?? input.existing.agentConfig;
+  await validateScheduledTaskSlackChannel({
+    grant: input.grant,
+    authorization: input.authorization,
+    previous: input.existing.agentConfig,
+    next: nextAgentConfig,
+    runMode: nextRunMode,
+    reusableSessionLive:
+      input.existing.runMode === "reusable_session" && input.existing.reusableSessionId !== null,
+    verifySlackChannel: input.verifySlackChannel,
+  });
   const authorityTargetChanged =
     nextRunMode !== input.existing.runMode ||
     nextTargetSessionId !== input.existing.targetSessionId ||
