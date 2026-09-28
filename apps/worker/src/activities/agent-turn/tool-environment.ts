@@ -33,6 +33,7 @@ import {
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
   mcpToolDisplayMetadata,
+  toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import {
   createGoogleDrivePublicationAttemptTool,
@@ -1190,6 +1191,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       undefined,
       {},
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
+      (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
     );
     eventing.codemodeDispatcher.start();
   };

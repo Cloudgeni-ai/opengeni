@@ -1036,6 +1036,7 @@ export function SessionChrome({
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
                           <IconAction
                             label="Steer first queued message"
+                            analyticsAction="steer"
                             text="Steer"
                             tip={QUEUE_STEER_TIP}
                             disabled={
@@ -1403,6 +1404,7 @@ function QueuePanel({
                   {onSteer ? (
                     <IconAction
                       label={`Steer queued prompt ${index + 1}`}
+                      analyticsAction="steer"
                       text="Steer"
                       tip={QUEUE_STEER_TIP}
                       disabled={settling || pending !== null}
@@ -1677,6 +1679,7 @@ const QUEUE_DELETE_TIP = "Delete this queued prompt";
 function IconAction({
   text,
   label,
+  analyticsAction,
   tip,
   onClick,
   disabled,
@@ -1684,6 +1687,8 @@ function IconAction({
   children,
 }: {
   label: string;
+  /** Stable, content-free control label a host's product analytics may read. */
+  analyticsAction?: "steer";
   text?: string;
   tip: ReactNode;
   onClick: () => void;
@@ -1697,6 +1702,7 @@ function IconAction({
         <button
           type="button"
           aria-label={label}
+          data-analytics-action={analyticsAction}
           disabled={disabled}
           onClick={onClick}
           className={cn(

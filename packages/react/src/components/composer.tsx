@@ -1279,6 +1279,7 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
     return (
       <ComposerTip tip={tip}>
         <button
+          data-analytics-action="pause"
           {...props}
           ref={mergeRefs(controller.pauseButtonRef, ref)}
           type="button"
@@ -1326,6 +1327,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
     return (
       <ComposerTip tip={tip}>
         <button
+          data-analytics-action="send"
           {...props}
           ref={ref}
           type="button"

@@ -1,6 +1,7 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
 import type { Context, MiddlewareHandler } from "hono";
+import { ANALYTICS_CONSENT_PATH } from "../routes/analytics-consent";
 import { CLIENT_ERRORS_PATH } from "../routes/client-errors";
 import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 import {
@@ -51,6 +52,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   // The web error beacon must count failures before sign-in. Its payload is a
   // closed, content-free report and the route bounds its own admission.
   if (c.req.method === "POST" && path === CLIENT_ERRORS_PATH) {
+    return true;
+  }
+  // The analytics banner is answered before sign-in too. The report is one
+  // closed decision and the route bounds its own admission.
+  if (c.req.method === "POST" && path === ANALYTICS_CONSENT_PATH) {
     return true;
   }
   if (path === "/v1/auth" || path.startsWith("/v1/auth/")) {

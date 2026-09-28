@@ -367,6 +367,11 @@ describe("QueueSurface", () => {
     await click(mounted.container.querySelector('button[aria-expanded="false"]'));
     expect(mounted.container.querySelectorAll("[data-queue-turn-id]")).toHaveLength(2);
 
+    expect(
+      mounted.container
+        .querySelector('button[aria-label="Steer queued prompt 2"]')
+        ?.getAttribute("data-analytics-action"),
+    ).toBe("steer");
     await click(mounted.container.querySelector('button[aria-label="Steer queued prompt 2"]'));
     await click(mounted.container.querySelector('button[aria-label="Delete queued prompt 1"]'));
     expect(calls).toEqual([

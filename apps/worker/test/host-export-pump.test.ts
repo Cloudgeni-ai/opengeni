@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import type { HostEventExportBatch } from "@opengeni/contracts";
+import type { HostEventExportBatch, HostLifecycleFactExportBatch } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   appendSessionEvents,
@@ -400,5 +400,44 @@ describe("host export pump", () => {
       where export_kind = 'usage_event' and consumer_id = 'pump-poison'
     `;
     expect(deadLetterStatus?.lastErrorCodecVersion).toBeNull();
+  });
+
+  test("delivers content-free lifecycle facts to a lifecycle sink", async () => {
+    const batches: HostLifecycleFactExportBatch[] = [];
+    const pump = createHostExportPump({
+      db: exporter.db,
+      lifecycleSink: {
+        consumerId: `pump-lifecycle-${crypto.randomUUID()}`,
+        deliverLifecycleFacts: async (batch) => {
+          batches.push(batch);
+        },
+      },
+      pollIntervalMs: 25,
+    });
+    await pump.start();
+    const userId = crypto.randomUUID();
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${userId}, 'Pump Person', ${`pump-${userId}@example.test`}, true)`;
+    await shared.admin`
+      insert into auth_identities (id, user_id, account_id, provider_id, created_at, updated_at)
+      values (${crypto.randomUUID()}, ${userId}, ${userId}, 'credential', now(), now())`;
+    const facts = () =>
+      batches
+        .flatMap((batch) => batch.events)
+        .filter((event) => event.fact.subjectId === `user:${userId}`);
+    await eventually(async () => facts().length === 2);
+    await pump.stop();
+    expect(
+      facts()
+        .map((event) => [event.fact.type, event.fact.attribute, event.accountId])
+        .sort(),
+    ).toEqual([
+      ["auth.email_verified", null, null],
+      ["auth.sign_up", "email", null],
+    ]);
+    expect(JSON.stringify(batches)).not.toContain("Pump Person");
+    expect(JSON.stringify(batches)).not.toContain("@example.test");
+    await pump.retire("lifecycle_fact");
   });
 });

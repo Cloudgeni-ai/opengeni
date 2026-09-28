@@ -21,6 +21,8 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  sessionTurnSurfaceOrNull,
+  type SessionTurnSurface,
 } from "@opengeni/contracts";
 import {
   readReasoningConfiguration,
@@ -233,6 +235,8 @@ import type {
   GitHubRepositoryScope,
   HostEventExport,
   HostEventExportBatch,
+  HostLifecycleFactExport,
+  HostLifecycleFactExportBatch,
   HostUsageExport,
   HostUsageExportBatch,
   ManagedAccount,
@@ -406,6 +410,8 @@ import {
   HostEventExport as HostEventExportContract,
   HostEventExportBatch as HostEventExportBatchContract,
   HostExportConsumerId,
+  HostLifecycleFactExport as HostLifecycleFactExportContract,
+  HostLifecycleFactExportBatch as HostLifecycleFactExportBatchContract,
   HostUsageExport as HostUsageExportContract,
   HostUsageExportBatch as HostUsageExportBatchContract,
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
@@ -896,7 +902,7 @@ export class SessionSpawnDeniedDbError extends Error {
 // Durable host export
 // ---------------------------------------------------------------------------
 
-export type HostExportKind = "session_event" | "usage_event";
+export type HostExportKind = "session_event" | "usage_event" | "lifecycle_fact";
 
 /**
  * A leased row did not satisfy this consumer build's export contract. Only
@@ -946,8 +952,9 @@ type HostExportRow = {
   lease_through: string | number | bigint;
   export_cursor: string | number | bigint;
   source_id: string;
-  account_id: string;
-  workspace_id: string;
+  // Null only for lifecycle facts (person-level, or organization-level facts).
+  account_id: string | null;
+  workspace_id: string | null;
   session_id: string | null;
   root_session_id: string | null;
   turn_id: string | null;
@@ -963,18 +970,31 @@ type HostExportRow = {
   initiator: unknown;
   initiator_context: unknown;
   origin: string | null;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
   payload: unknown;
   payload_codec_version: number | null;
   occurred_at: Date | string;
   source_recorded_at: Date | string;
 };
 
-type HostExportClaimRow = Omit<HostExportRow, "root_session_id" | "payload_codec_version">;
+type HostExportClaimRow = Omit<
+  HostExportRow,
+  "root_session_id" | "payload_codec_version" | "surface" | "model_provider" | "tool_family"
+>;
 
 type HostExportClaimSidecarRow = {
   export_cursor: string | number | bigint;
   root_session_id: string | null;
   payload_codec_version: number | null;
+};
+
+type HostExportClaimAnalyticsSidecarRow = {
+  export_cursor: string | number | bigint;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
 };
 
 function hostExportCursor(value: string | number | bigint): string {
@@ -986,7 +1006,7 @@ function hostExportTimestamp(value: Date | string): string {
 }
 
 function validateHostExportKind(kind: HostExportKind): void {
-  if (kind !== "session_event" && kind !== "usage_event") {
+  if (kind !== "session_event" && kind !== "usage_event" && kind !== "lifecycle_fact") {
     throw new Error(`Unknown host export kind: ${kind}`);
   }
 }
@@ -1068,6 +1088,18 @@ export async function claimHostExportBatch(
 export async function claimHostExportBatch(
   db: Database,
   input: {
+    kind: "lifecycle_fact";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
     kind: HostExportKind;
     consumerId: string;
     leaseToken: string;
@@ -1076,7 +1108,19 @@ export async function claimHostExportBatch(
     limit?: number;
     maxBytes?: number;
   },
-): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
   const rows = await db.transaction(async (tx) => {
     const transaction = tx as unknown as Database;
@@ -1116,16 +1160,34 @@ export async function claimHostExportBatch(
     const sidecarByExportCursor = new Map(
       sidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
     );
+    const analyticsSidecars = await rawRows<HostExportClaimAnalyticsSidecarRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.host_export_claim_analytics_sidecars(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+        )
+      `,
+    );
+    const analyticsByExportCursor = new Map(
+      analyticsSidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
+    );
     const materializedRows = claimedRows.map((row): HostExportRow => {
       const cursor = hostExportCursor(row.export_cursor);
       const sidecar = sidecarByExportCursor.get(cursor);
       if (!sidecar) {
         throw new Error(`Host export sidecar lookup omitted leased cursor ${cursor}`);
       }
+      const analytics = analyticsByExportCursor.get(cursor);
+      if (!analytics) {
+        throw new Error(`Host export analytics sidecar lookup omitted leased cursor ${cursor}`);
+      }
       return {
         ...row,
         root_session_id: sidecar.root_session_id,
         payload_codec_version: sidecar.payload_codec_version,
+        surface: analytics.surface,
+        model_provider: analytics.model_provider,
+        tool_family: analytics.tool_family,
       };
     });
     return materializedRows;
@@ -1145,6 +1207,9 @@ export async function claimHostExportBatch(
         initiator: row.initiator,
         initiatorContext: row.initiator_context,
         origin: row.origin,
+        surface: row.surface,
+        modelProvider: row.model_provider,
+        toolFamily: row.tool_family,
         event: {
           id: row.source_id,
           workspaceId: row.workspace_id,
@@ -1177,6 +1242,46 @@ export async function claimHostExportBatch(
     });
   }
 
+  if (input.kind === "lifecycle_fact") {
+    const facts = rows.map((row): HostLifecycleFactExport => {
+      const payload =
+        row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+          ? (row.payload as Record<string, unknown>)
+          : {};
+      const initiator =
+        row.initiator && typeof row.initiator === "object" && !Array.isArray(row.initiator)
+          ? (row.initiator as Record<string, unknown>)
+          : null;
+      const parsed = HostLifecycleFactExportContract.safeParse({
+        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+        cursor: hostExportCursor(row.export_cursor),
+        idempotencyKey: row.idempotency_key,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        fact: {
+          id: row.source_id,
+          type: row.event_type,
+          attribute: payload.attribute ?? null,
+          subjectKind: payload.subjectKind,
+          subjectId: initiator?.subjectId ?? null,
+          occurredAt: hostExportTimestamp(row.occurred_at),
+        },
+      });
+      if (!parsed.success) {
+        throw hostExportPayloadError(input, row, parsed.error.issues);
+      }
+      return parsed.data;
+    });
+    return HostLifecycleFactExportBatchContract.parse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      consumerId: first.consumer_id,
+      leaseToken: first.lease_token,
+      checkpoint: hostExportCursor(first.checkpoint),
+      throughCursor: hostExportCursor(first.lease_through),
+      events: facts,
+    });
+  }
+
   const events = rows.map((row): HostUsageExport => {
     const parsed = HostUsageExportContract.safeParse({
       schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
@@ -1190,6 +1295,8 @@ export async function claimHostExportBatch(
       initiator: row.initiator,
       initiatorContext: row.initiator_context,
       origin: row.origin,
+      surface: row.surface,
+      modelProvider: row.model_provider,
       usage: row.payload,
     });
     if (!parsed.success) {
@@ -6451,6 +6558,8 @@ export type EnqueueSessionTurnInput = {
   triggerEventId: string;
   temporalWorkflowId: string;
   source: SessionTurnSource;
+  /** Content-free product surface the request entered through. */
+  surface?: SessionTurnSurface | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -66618,6 +66727,8 @@ export type InitializeSessionStartInput = {
   reasoningEffortFallback: ReasoningEffort;
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
+  /** Content-free product surface the create request entered through. */
+  surface?: SessionTurnSurface | null;
   createdEventPayload: Record<string, unknown>;
   /** Trusted backend-only capture for a newly inserted initial turn. Runs under
    * the canonical activity transaction; failure rolls back events and turn.
@@ -67172,6 +67283,7 @@ export async function initializeSessionStartAtomically(
                   temporalWorkflowId,
                   status: "queued",
                   source: "user",
+                  surface: input.surface ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -67495,6 +67607,7 @@ export async function enqueueSessionTurn(
                 temporalWorkflowId: input.temporalWorkflowId,
                 status: "queued",
                 source: input.source,
+                surface: input.surface ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -70519,6 +70632,9 @@ export async function claimSessionWorkForAttempt(
                     executionGeneration: 1,
                     activeAttemptId: input.attemptId,
                     source: "compaction",
+                    // Maintenance continues the session's work; keep the
+                    // surface of the turn it compacts after.
+                    surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
                     position: Number(position),
                     prompt: "",
                     resources: [],
@@ -70854,6 +70970,13 @@ export async function claimSessionWorkForAttempt(
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
           const scheduledTaskRunId = delivered.updates[0]?.scheduledTaskRunId ?? null;
+          // A scheduled occurrence or another agent's message is a new request;
+          // any other machine input continues the session's latest surface.
+          const internalSurface: SessionTurnSurface | null = scheduledTaskRunId
+            ? "scheduled"
+            : agentCommandUpdate
+              ? "agent"
+              : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
@@ -71096,6 +71219,7 @@ export async function claimSessionWorkForAttempt(
                   executionGeneration: 1,
                   activeAttemptId: input.attemptId,
                   source: routingGoalUpdate ? "goal" : "system",
+                  surface: internalSurface,
                   position: Number(position),
                   prompt: "Process the delivered internal session updates.",
                   resources: [],

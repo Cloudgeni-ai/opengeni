@@ -22,6 +22,13 @@ import {
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
+import {
+  FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+  AnalyticsModelProvider,
+  SessionTurnSurface,
+  ToolFamily,
+} from "./product-analytics";
 export const HostMcpCreateSelections = z
   .array(
     z
@@ -51,6 +58,7 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
+import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
@@ -75,6 +83,7 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./signup-attribution";
+export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
@@ -86,6 +95,7 @@ export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
+export * from "./product-analytics";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -1091,6 +1101,23 @@ export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filt
     !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
     !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_TOOL_FAMILY_NAME_SET: ReadonlySet<string> = new Set<string>([
+  ...FIRST_PARTY_MCP_TOOL_NAMES,
+  ...FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  ...FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+]);
+
+/**
+ * Analytics tool family for a tool OpenGeni itself defines. Only names from
+ * OpenGeni's fixed first-party lists qualify; anything else returns null, so a
+ * model-invented or third-party name never becomes an exported value.
+ */
+export function firstPartyToolFamily(toolName: string | null | undefined): ToolFamily | null {
+  return typeof toolName === "string" && FIRST_PARTY_TOOL_FAMILY_NAME_SET.has(toolName)
+    ? toolName
+    : null;
+}
 
 /** Authored CodeMode paths for the canonical collaborative artifact surface. */
 export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
@@ -14720,6 +14747,14 @@ const HostExportAttribution = {
   initiator: HostExportInitiator.nullable(),
   initiatorContext: HostExportInitiatorContext,
   origin: SessionTurnSource.nullable(),
+  /**
+   * Product surface of the attributed turn (see `SessionTurnSurface`). Null
+   * for facts without a turn and for turns captured before surfaces existed.
+   * Optional so an older writer's batch still parses during a rolling upgrade.
+   */
+  surface: SessionTurnSurface.nullable().optional(),
+  /** Model provider family of the attributed turn's accepted execution policy. */
+  modelProvider: AnalyticsModelProvider.nullable().optional(),
 } as const;
 
 /**
@@ -14766,6 +14801,11 @@ export const HostEventExport = z.object({
    */
   rootSessionId: z.string().uuid().nullable(),
   ...HostExportAttribution,
+  /**
+   * Content-free family of an `agent.toolCall.created` event's tool (see
+   * `ToolFamily`). Null for every other event type and for older rows.
+   */
+  toolFamily: ToolFamily.nullable().optional(),
   event: HostSessionEvent,
 });
 export type HostEventExport = z.infer<typeof HostEventExport>;
@@ -14807,9 +14847,58 @@ export const HostUsageExportBatch = z.object({
 export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
 
 /**
+ * One content-free per-person lifecycle fact (`lifecycle_fact` export kind).
+ * `accountId` is null for facts that belong to a person rather than an
+ * organization (sign-up, email verification, sign-in); `workspaceId` is set
+ * only for workspace-scoped setup facts. `subjectId` is present only for opaque
+ * managed-user and API-key subjects. Type and attribute are bounded tokens so an
+ * older consumer can carry a newer writer's fact during a rolling upgrade; the
+ * known values are `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES`.
+ */
+export const HostLifecycleFact = z.object({
+  id: z.string().uuid(),
+  type: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z_]*\.[a-z][a-z_]*$/),
+  attribute: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .nullable(),
+  subjectKind: z
+    .string()
+    .max(32)
+    .regex(/^[a-z][a-z_]*$/),
+  subjectId: z.string().regex(PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN).nullable(),
+  occurredAt: z.string(),
+});
+export type HostLifecycleFact = z.infer<typeof HostLifecycleFact>;
+
+export const HostLifecycleFactExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  idempotencyKey: z.string().min(1).max(2048),
+  accountId: z.string().uuid().nullable(),
+  workspaceId: z.string().uuid().nullable(),
+  fact: HostLifecycleFact,
+});
+export type HostLifecycleFactExport = z.infer<typeof HostLifecycleFactExport>;
+
+export const HostLifecycleFactExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostLifecycleFactExport).min(1).max(256),
+});
+export type HostLifecycleFactExportBatch = z.infer<typeof HostLifecycleFactExportBatch>;
+
+/**
  * Optional embedded-host sinks. Delivery is at least once: the same batch may
  * be repeated after a process dies between sink success and checkpoint commit,
- * so sinks must deduplicate by event/usage idempotency key.
+ * so sinks must deduplicate by event/usage/fact idempotency key.
  */
 export type HostEventSink = {
   consumerId: HostExportConsumerId;
@@ -14819,6 +14908,11 @@ export type HostEventSink = {
 export type HostUsageSink = {
   consumerId: HostExportConsumerId;
   deliverUsage: (batch: HostUsageExportBatch) => Promise<void>;
+};
+
+export type HostLifecycleFactSink = {
+  consumerId: HostExportConsumerId;
+  deliverLifecycleFacts: (batch: HostLifecycleFactExportBatch) => Promise<void>;
 };
 
 export const SESSION_EVENT_TYPE_MAX_BYTES = 256;

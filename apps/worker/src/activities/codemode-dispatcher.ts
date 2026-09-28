@@ -17,6 +17,7 @@ import {
   type CodemodeOperation,
   type SessionEvent,
   type ToolDisplayMetadata,
+  type ToolFamily,
 } from "@opengeni/contracts";
 import {
   cancelQueuedCodemodeOperationsForAttempt,
@@ -72,6 +73,8 @@ export class CodemodeAttemptDispatcher {
     private readonly maxConcurrentCalls = CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
     timings: CodemodeDispatcherTimings = {},
     private readonly toolDisplayMetadata?: (modelName: string) => ToolDisplayMetadata | undefined,
+    /** Content-free analytics family for a catalog entry; event enrichment only. */
+    private readonly toolFamily?: (entry: AttemptToolCatalogEntry) => ToolFamily | null,
   ) {
     if (
       environment.catalog.accountId !== scope.accountId ||
@@ -353,6 +356,7 @@ export class CodemodeAttemptDispatcher {
         return true;
       }
     }
+    const toolFamily = this.toolFamily?.(entry) ?? null;
     try {
       const created = await appendAndPublishTurnEventsFenced(
         this.db,
@@ -380,6 +384,7 @@ export class CodemodeAttemptDispatcher {
               arguments: operation.arguments,
               origin: "codemode",
               subjectId: operation.caller.subjectId,
+              ...(toolFamily ? { toolFamily } : {}),
               raw: {
                 type: "codemode_call",
                 serverId: operation.identity.serverId,
