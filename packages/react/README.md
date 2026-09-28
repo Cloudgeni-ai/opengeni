@@ -911,6 +911,8 @@ continues through long answers, and manual scrolling never auto-repins on new wo
 
 Wire the newest-question resolver when history can be unloaded:
 
+`SessionConversation` includes the readable-turn presentation and this wiring automatically.
+
 ```tsx
 const events = useSessionEvents(sessionId);
 <MessageTimeline

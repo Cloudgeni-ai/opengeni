@@ -936,25 +936,30 @@ export function useSessionEvents(
     if (!sessionId) return null;
     const identity = navigationIdentityRef.current;
     const generation = navigationGenerationRef.current;
+    const current = () =>
+      identity.client === navigationIdentityRef.current.client &&
+      identity.streamKey === navigationIdentityRef.current.streamKey &&
+      identity.enabled === navigationIdentityRef.current.enabled &&
+      generation === navigationGenerationRef.current;
     let before: number | undefined;
     while (true) {
-      const latest = await client.listEvents(workspaceId, sessionId, {
-        direction: "before",
-        includeTypes: ["user.message"],
-        // Most sessions need one row. Historical worker completions also used
-        // user.message; page only this filtered index when they occupy the tail.
-        limit: before === undefined ? 1 : 64,
-        ...(before === undefined ? {} : { before }),
-        payloadMode: "full",
-        mode: "forensic",
-      });
-      if (
-        identity.client !== navigationIdentityRef.current.client ||
-        identity.streamKey !== navigationIdentityRef.current.streamKey ||
-        identity.enabled !== navigationIdentityRef.current.enabled ||
-        generation !== navigationGenerationRef.current
-      )
-        return null;
+      let latest: SessionEvent[];
+      try {
+        latest = await client.listEvents(workspaceId, sessionId, {
+          direction: "before",
+          includeTypes: ["user.message"],
+          // Most sessions need one row. Historical worker completions also used
+          // user.message; page only this filtered index when they occupy the tail.
+          limit: before === undefined ? 1 : 64,
+          ...(before === undefined ? {} : { before }),
+          payloadMode: "full",
+          mode: "forensic",
+        });
+      } catch (reason) {
+        if (!current()) return null;
+        throw reason;
+      }
+      if (!current()) return null;
       // Reuse canonical projection rather than guessing from text or treating
       // a legacy childCompletion as a human question. Invalid legacy payloads
       // intentionally remain ordinary messages, just as they do in the UI.
