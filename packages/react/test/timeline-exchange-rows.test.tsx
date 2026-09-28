@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { MessageTimeline } from "../src";
+import recordedAnswerExchange from "./fixtures/exchange-answer-before-machine-turns.json";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -361,6 +362,29 @@ describe("compact exchange rows", () => {
       await r.rerender(timeline([...streaming, ...done]));
       await flush();
       expect(statusTrigger(r.container).textContent).toMatch(/^Worked for 20s · 2 steps/);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("an answer stays a visible message when a machine-triggered turn follows it", async () => {
+    // Anonymized replay of a recorded exchange: the answer (bullets, an image,
+    // and a question) settles, then an agent message starts one more short
+    // turn that ends without prose.
+    const r = await renderComponent(
+      <MessageTimeline
+        events={recordedAnswerExchange as SessionEvent[]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      const question = "Do you approve this four-at-a-time layout?";
+      // The answer is not demoted to the row's muted two-line preview.
+      for (const note of r.container.querySelectorAll("[data-og-exchange-note]")) {
+        expect(note.textContent).not.toContain(question);
+      }
+      expect(topLevelMessages(r.container).some((text) => text.includes(question))).toBe(true);
     } finally {
       await r.unmount();
     }

@@ -3,8 +3,9 @@
 // the tip stops once the answer pushes the question to the top, the next
 // question resumes following, "Your question" returns a reader to the question
 // they are reading, a short answer never leaves a stale stop behind, progress
-// notes streamed without a phase never read as the answer, and loading older
-// history keeps the reader in place.
+// notes streamed without a phase never read as the answer, loading older
+// history keeps the reader in place, and an answer stays a visible message
+// when a machine-triggered turn follows it.
 import { existsSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
@@ -247,6 +248,38 @@ describe("timeline exchange fold browser regression", () => {
       expect(done.status).toBe("worked");
       expect(done.rowsBetween).toBe(1);
       expect(done.lastText).toContain("171 in total");
+    } finally {
+      await page.context().close();
+    }
+  }, 60_000);
+
+  test("an answer stays a visible message when a machine-triggered turn follows it", async () => {
+    const page = await openHarness("machine-follow-up");
+    try {
+      const total = await page.evaluate(() => window.exchangeFoldHarness!.total);
+      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), total);
+      await nextPaint(page);
+      await page.waitForTimeout(200);
+      const state = await page.evaluate(() => {
+        const question = "Do you approve this four-at-a-time layout?";
+        const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+        const message = [
+          ...scroller.querySelectorAll<HTMLElement>("[data-og-wide-table-message]"),
+        ].find(
+          (candidate) =>
+            candidate.textContent?.includes(question) &&
+            !candidate.closest("[data-og-fold-content]"),
+        );
+        return {
+          // The question is readable without expanding anything...
+          answerVisible: !!message && message.getBoundingClientRect().height > 0,
+          // ...and is not squeezed into a muted status-row preview.
+          inStatusNote: [...scroller.querySelectorAll("[data-og-exchange-note]")].some((note) =>
+            note.textContent?.includes(question),
+          ),
+        };
+      });
+      expect(state).toEqual({ answerVisible: true, inStatusNote: false });
     } finally {
       await page.context().close();
     }
