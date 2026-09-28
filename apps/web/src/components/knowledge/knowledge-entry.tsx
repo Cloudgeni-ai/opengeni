@@ -63,13 +63,18 @@ import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";
 import { KnowledgeIndexNotice } from "./knowledge-index-status";
 import {
   KNOWLEDGE_KIND_HELP,
-  KNOWLEDGE_KIND_ICON,
   KNOWLEDGE_KIND_LABEL,
   KNOWLEDGE_PICKABLE_KINDS,
   KNOWLEDGE_SCOPE_LABEL,
   KNOWLEDGE_SOURCE_LABEL,
+  knowledgeKindIcon,
 } from "./knowledge-labels";
-import { EntryList, KindTile, type EntryRowActions } from "./knowledge-library";
+import {
+  EntryList,
+  KindTile,
+  useCollectionMembers,
+  type EntryRowActions,
+} from "./knowledge-library";
 import { KnowledgeOriginalFile } from "./knowledge-original-file";
 import { MoreMenu } from "@/components/ui/page-actions";
 
@@ -192,6 +197,71 @@ function EntryLink({
     <HelpLink onClick={() => onOpen(id, revisionId)} className="text-left">
       {title}
     </HelpLink>
+  );
+}
+
+const PATH_DEPTH = 6;
+
+/**
+ * The chain of parent collections, top first, following the first parent at
+ * each level. Stops at a collection the viewer can't open, a loop, or
+ * PATH_DEPTH levels.
+ */
+export function useCollectionPath(workspaceId: string, parentId: string) {
+  const { client } = useAppContext();
+  const [path, setPath] = useState<{ id: string; title: string }[] | null>(null);
+  useEffect(() => {
+    let current = true;
+    setPath(null);
+    void (async () => {
+      const chain: { id: string; title: string }[] = [];
+      let next: string | undefined = parentId;
+      while (next && chain.length < PATH_DEPTH && !chain.some((part) => part.id === next)) {
+        try {
+          const record = await client.getKnowledgeEntry(workspaceId, next);
+          chain.unshift({ id: record.id, title: record.revision.entry.title });
+          next = record.revision.entry.groupIds[0];
+        } catch {
+          break;
+        }
+      }
+      if (current) setPath(chain);
+    })();
+    return () => {
+      current = false;
+    };
+  }, [client, workspaceId, parentId]);
+  return path;
+}
+
+/** "Runbooks › Payments": every part opens that collection. */
+function CollectionPath({
+  workspaceId,
+  parentId,
+  onOpen,
+}: {
+  workspaceId: string;
+  parentId: string;
+  onOpen: (id: string) => void;
+}) {
+  const path = useCollectionPath(workspaceId, parentId);
+  if (path === null) return <Skeleton className="h-4 w-32" />;
+  if (!path.length) return <span className="text-fg-muted">a collection you can't open</span>;
+  return (
+    <nav aria-label="Collection path" className="inline-flex min-w-0 flex-wrap items-center">
+      {path.map((part, index) => (
+        <span key={part.id} className="inline-flex min-w-0 items-center">
+          {index > 0 ? (
+            <span aria-hidden="true" className="px-1 text-fg-subtle">
+              ›
+            </span>
+          ) : null}
+          <HelpLink onClick={() => onOpen(part.id)} className="text-left">
+            {part.title}
+          </HelpLink>
+        </span>
+      ))}
+    </nav>
   );
 }
 
@@ -398,7 +468,7 @@ function EntryPageContent({
   ) : null;
 
   const firstCollection = entry.groupIds[0];
-  const KindIcon = KNOWLEDGE_KIND_ICON[entry.kind];
+  const otherCollections = entry.groupIds.length - 1;
 
   const aside = (
     <DetailAside label={`About ${entry.title}`}>
@@ -420,10 +490,8 @@ function EntryPageContent({
             ? "Organization"
             : "This workspace"}
       </DetailAsideItem>
-      <DetailAsideItem label="Type" icon={<KindIcon />}>
-        {KNOWLEDGE_KIND_LABEL[entry.kind]}
-      </DetailAsideItem>
-      {!collection ? (
+      {/* One collection is already the header's path; several are listed here. */}
+      {!collection && entry.groupIds.length !== 1 ? (
         <DetailAsideItem label="Collections" icon={<FolderIcon />}>
           {entry.groupIds.length ? (
             <span className="flex min-w-0 flex-col gap-1">
@@ -531,7 +599,7 @@ function EntryPageContent({
         className="min-w-0"
       >
         <DetailPageHeader
-          leading={<KindTile kind={entry.kind} />}
+          leading={knowledgeKindIcon(entry.kind) ? <KindTile kind={entry.kind} /> : null}
           title={entry.title}
           chips={
             <>
@@ -541,9 +609,21 @@ function EntryPageContent({
           }
           meta={[
             KNOWLEDGE_KIND_LABEL[entry.kind],
-            firstCollection && !collection ? (
-              <span key="in" className="inline-flex min-w-0 items-center gap-1">
-                in <EntryLink workspaceId={workspaceId} id={firstCollection} onOpen={onOpenEntry} />
+            firstCollection ? (
+              <span key="in" className="inline-flex min-w-0 flex-wrap items-center gap-1">
+                in{" "}
+                <CollectionPath
+                  workspaceId={workspaceId}
+                  parentId={firstCollection}
+                  onOpen={onOpenEntry}
+                />
+              </span>
+            ) : null,
+            // Entries list every collection in the aside; a collection says it here.
+            collection && otherCollections > 0 ? (
+              <span key="also">
+                also in {otherCollections} other{" "}
+                {otherCollections === 1 ? "collection" : "collections"}
               </span>
             ) : null,
             <span key="updated">
@@ -800,12 +880,9 @@ function CollectionMembers({
   canAdd: boolean;
   onAdd: () => void;
 }) {
-  const members = useKnowledgeList(
-    workspaceId,
-    { groupId: collectionId, view: "published", limit: 50 },
-    refresh,
-  );
-  const items = members.entries.filter((entry) => entry.id !== collectionId);
+  const members = useCollectionMembers(workspaceId, collectionId, undefined, refresh);
+  const { subCollections, entries } = members;
+  const any = subCollections.length > 0 || entries.length > 0;
   return (
     <DetailSection
       title="In this collection"
@@ -818,11 +895,11 @@ function CollectionMembers({
         ) : undefined
       }
     >
-      {members.loading && !items.length ? (
+      {members.loading && !any ? (
         <RowList label="In this collection" busy flush>
           <ListRowSkeleton count={2} />
         </RowList>
-      ) : members.error && !items.length ? (
+      ) : members.error && !any ? (
         <Notice
           tone="failed"
           title="Couldn't load the entries"
@@ -835,19 +912,42 @@ function CollectionMembers({
         >
           {members.error}
         </Notice>
-      ) : items.length ? (
-        <div className="flex min-w-0 flex-col gap-3">
-          <EntryList label="In this collection" entries={items} actions={actions} flush />
-          {members.cursor ? (
-            <Button
-              type="button"
-              variant="outline"
-              className="self-start"
-              disabled={members.loading}
-              onClick={() => void members.loadMore()}
-            >
-              Load more
-            </Button>
+      ) : any ? (
+        <div className="flex min-w-0 flex-col gap-6">
+          {subCollections.length ? (
+            <div className="flex min-w-0 flex-col gap-1.5">
+              {/* Sub-collections lead as their own quiet group. */}
+              <MembersLabel>Collections</MembersLabel>
+              <EntryList label="Collections" entries={subCollections} actions={actions} flush />
+              {members.subCursor ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-1.5 self-start"
+                  disabled={members.loading}
+                  onClick={() => void members.loadMoreSubs()}
+                >
+                  More collections
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          {entries.length || members.cursor ? (
+            <div className="flex min-w-0 flex-col gap-1.5">
+              {subCollections.length ? <MembersLabel>Entries</MembersLabel> : null}
+              <EntryList label="Entries" entries={entries} actions={actions} flush />
+              {members.cursor ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-1.5 self-start"
+                  disabled={members.loading}
+                  onClick={() => void members.loadMore()}
+                >
+                  Load more
+                </Button>
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : (
@@ -857,6 +957,10 @@ function CollectionMembers({
       )}
     </DetailSection>
   );
+}
+
+function MembersLabel({ children }: { children: string }) {
+  return <h3 className="m-0 text-xs leading-4.5 font-medium text-fg-subtle">{children}</h3>;
 }
 
 function EntryHistory({

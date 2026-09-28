@@ -25,7 +25,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
@@ -46,10 +46,10 @@ import {
 import { errorText, scopeFilterValue, useKnowledgeList } from "./knowledge-data";
 import { KnowledgeSearchFallback, knowledgeIndexLabel } from "./knowledge-index-status";
 import {
-  KNOWLEDGE_KIND_ICON,
   KNOWLEDGE_KIND_LABEL,
   KNOWLEDGE_SCOPE_LABEL,
   KNOWLEDGE_SOURCE_LABEL,
+  knowledgeKindIcon,
 } from "./knowledge-labels";
 
 /* ----------------------------------------------------------------------------
@@ -186,16 +186,11 @@ export function ScopeTag({ scope }: { scope: KnowledgeEntryScope }) {
   );
 }
 
+/** A folder for collections and a file for files; other kinds have no tile. */
 export function KindTile({ kind }: { kind: KnowledgeEntryKind }) {
-  const Icon = KNOWLEDGE_KIND_ICON[kind];
-  return <LogoTile icon={<Icon />} name={KNOWLEDGE_KIND_LABEL[kind]} />;
+  const Icon = knowledgeKindIcon(kind);
+  return Icon ? <LogoTile icon={<Icon />} name={KNOWLEDGE_KIND_LABEL[kind]} /> : null;
 }
-
-// The values explain themselves ("Decision", "8 days ago").
-const COLUMNS: RowListColumn[] = [
-  { id: "type", label: "Type", width: 112, hideLabel: true },
-  { id: "updated", label: "Updated", width: 112, hideLabel: true },
-];
 
 export interface EntryRowActions {
   canEdit: (entry: KnowledgeEntrySummary) => boolean;
@@ -231,11 +226,17 @@ export function EntryRow({
   const editable = actions.canEdit(entry);
   return (
     <ListRow
-      leading={<KindTile kind={entry.revision.kind} />}
+      leading={
+        knowledgeKindIcon(entry.revision.kind) ? <KindTile kind={entry.revision.kind} /> : null
+      }
       title={entry.revision.title}
       titleAddon={<ScopeTag scope={entry.scope} />}
       description={describe(entry, searching)}
       meta={[
+        KNOWLEDGE_KIND_LABEL[entry.revision.kind],
+        <span key="updated">
+          updated <RelativeTime date={entry.updatedAt} inSentence />
+        </span>,
         sourceLine(entry),
         entry.revision.change === "archive" ? "Archive requested" : null,
         status ? (
@@ -244,10 +245,6 @@ export function EntryRow({
           </StatusBadge>
         ) : null,
       ].filter(Boolean)}
-      cells={{
-        type: KNOWLEDGE_KIND_LABEL[entry.revision.kind],
-        updated: <RelativeTime date={entry.updatedAt} />,
-      }}
       onOpen={() => actions.onOpen(entry)}
       menu={
         <>
@@ -308,7 +305,7 @@ export function EntryList({
   flush?: boolean;
 }) {
   return (
-    <RowList label={label} columns={COLUMNS} busy={busy} flush={flush}>
+    <RowList label={label} busy={busy} flush={flush}>
       {entries.map((entry) => (
         <EntryRow
           key={entry.id}
@@ -397,7 +394,7 @@ export function LibraryTab({
     );
   } else if (list.loading && list.entries.length === 0) {
     body = (
-      <RowList label="Knowledge" columns={COLUMNS} busy>
+      <RowList label="Knowledge" busy>
         <ListRowSkeleton count={5} />
       </RowList>
     );
@@ -613,8 +610,9 @@ function LibraryEmpty({
 }
 
 /* ----------------------------------------------------------------------------
-   By collection: each collection with its entries, then everything that
-   isn't in one.
+   By collection: each top-level collection with its sub-collections (rows that
+   open their own page) and then its entries, and finally everything that
+   isn't in a collection. A nested collection appears once, inside its parent.
    -------------------------------------------------------------------------- */
 
 function CollectionsLayout({
@@ -631,9 +629,16 @@ function CollectionsLayout({
   empty: ReactNode;
 }) {
   const scoped = scopeFilterValue(scope);
+  // Only collections without a visible parent in this scope get a section.
   const groups = useKnowledgeList(
     workspaceId,
-    { kind: "group", view: "published", limit: 50, ...(scoped ? { scope: scoped } : {}) },
+    {
+      kind: "group",
+      rootOnly: true,
+      view: "published",
+      limit: 50,
+      ...(scoped ? { scope: scoped } : {}),
+    },
     refresh,
   );
   const roots = useKnowledgeList(
@@ -644,7 +649,7 @@ function CollectionsLayout({
   const loose = roots.entries.filter((entry) => entry.revision.kind !== "group");
   if ((groups.loading && !groups.entries.length) || (roots.loading && !roots.entries.length)) {
     return (
-      <RowList label="Knowledge" columns={COLUMNS} busy>
+      <RowList label="Knowledge" busy>
         <ListRowSkeleton count={5} />
       </RowList>
     );
@@ -774,49 +779,105 @@ function CollectionSection({
   refresh: number;
   actions: EntryRowActions;
 }) {
-  const members = useKnowledgeList(
-    workspaceId,
-    { groupId: group.id, view: "published", limit: 50, ...(scope ? { scope } : {}) },
-    refresh,
-  );
-  const items = members.entries.filter((entry) => entry.id !== group.id);
+  const members = useCollectionMembers(workspaceId, group.id, scope, refresh);
+  const rows = [...members.subCollections, ...members.entries];
   return (
     <section aria-label={group.revision.title} className="min-w-0">
       <GroupHeading
         name={group.revision.title}
-        count={members.loading && !items.length ? null : items.length}
-        more={Boolean(members.cursor)}
+        count={members.loading && !rows.length ? null : rows.length}
+        more={Boolean(members.cursor || members.subCursor)}
         onOpen={() => actions.onOpen(group)}
       />
-      {members.loading && !items.length ? (
-        <RowList label={group.revision.title} columns={COLUMNS} busy>
+      {members.loading && !rows.length ? (
+        <RowList label={group.revision.title} busy>
           <ListRowSkeleton count={1} />
         </RowList>
-      ) : members.error && !items.length ? (
+      ) : members.error && !rows.length ? (
         <p role="alert" className="border-t border-border px-3 py-3 text-sm text-danger">
           {errorText(members.error)}{" "}
           <button type="button" className="underline" onClick={members.reload}>
             Try again
           </button>
         </p>
-      ) : items.length ? (
-        <EntryList label={group.revision.title} entries={items} actions={actions} />
+      ) : rows.length ? (
+        <EntryList label={group.revision.title} entries={rows} actions={actions} />
       ) : (
         <p className="border-t border-border px-3 py-3 text-sm text-fg-muted">
           Empty. Add entries to it from their Edit page.
         </p>
       )}
-      {members.cursor ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="mt-3"
-          disabled={members.loading}
-          onClick={() => void members.loadMore()}
-        >
-          Load more
-        </Button>
+      {members.subCursor || members.cursor ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {members.subCursor ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={members.loading}
+              onClick={() => void members.loadMoreSubs()}
+            >
+              More collections
+            </Button>
+          ) : null}
+          {members.cursor ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={members.loading}
+              onClick={() => void members.loadMore()}
+            >
+              Load more
+            </Button>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );
+}
+
+/**
+ * A collection's direct members, split so sub-collections can lead: the
+ * sub-collections come from their own query, so one on a later page of the
+ * members still shows first. Load more pages the entries.
+ */
+export function useCollectionMembers(
+  workspaceId: string,
+  collectionId: string,
+  scope: KnowledgeEntryScope | undefined,
+  refresh: number,
+) {
+  const subs = useKnowledgeList(
+    workspaceId,
+    {
+      groupId: collectionId,
+      kind: "group",
+      view: "published",
+      limit: 50,
+      ...(scope ? { scope } : {}),
+    },
+    refresh,
+  );
+  const members = useKnowledgeList(
+    workspaceId,
+    { groupId: collectionId, view: "published", limit: 50, ...(scope ? { scope } : {}) },
+    refresh,
+  );
+  const subCollections = subs.entries.filter((entry) => entry.id !== collectionId);
+  const entries = members.entries.filter(
+    (entry) => entry.id !== collectionId && entry.revision.kind !== "group",
+  );
+  return {
+    subCollections,
+    entries,
+    subCursor: subs.cursor,
+    loadMoreSubs: subs.loadMore,
+    loading: subs.loading || members.loading,
+    error: subs.error ?? members.error,
+    cursor: members.cursor,
+    reload: () => {
+      subs.reload();
+      members.reload();
+    },
+    loadMore: members.loadMore,
+  };
 }

@@ -197,6 +197,9 @@ Learned on Settings > Models, 27 Sep 2026.
   then the back link is the way out.
 - **Empty lists carry their own action.** While a list is empty, its toolbar and the header's
   create action hide; the empty state holds the one action.
+- **Tiles for kinds of object, words for types.** A leading tile marks a different kind of object
+  in a list (a collection, a file). Types of the same object (Decision, Fact, Incident) are a
+  quiet word in the meta line ("Decision · updated 3 days ago"), not an icon each.
 - **Nothing to pick, nothing shown.** Hide a chip, filter or picker that has only one possible
   value or none.
 - **One row per provider.** A provider with several connection modes is one row; its page lists

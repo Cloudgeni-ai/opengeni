@@ -22,6 +22,8 @@ import { OrganizationWorkspacesPage } from "@/components/organization/workspaces
 import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { Button } from "@/components/ui/button";
+import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import type { ModelsView } from "@/lib/models-route";
@@ -250,7 +252,9 @@ export function OrgSettingsRoute({
     (section === "models" && Boolean(modelsAccount || modelsView)) ||
     (section === "people" && Boolean(person || invitation || organizationView)) ||
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
-    (section === "developer" && organizationView === "new-key");
+    (section === "developer" && organizationView === "new-key") ||
+    // Opened from another scope (a workspace's Models): Billing brings its own back link.
+    (section === "billing" && Boolean(returnTo));
 
   return (
     <OrganizationDirectoryProvider
@@ -350,12 +354,14 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "billing" ? (
-          <OrganizationBillingPage
-            key={`${identityKey}:billing`}
-            identity={adminIdentity}
-            canReadBilling={canReadBilling}
-            canManageBilling={canManageBilling}
-          />
+          <BillingSection returnTo={returnTo}>
+            <OrganizationBillingPage
+              key={`${identityKey}:billing`}
+              identity={adminIdentity}
+              canReadBilling={canReadBilling}
+              canManageBilling={canManageBilling}
+            />
+          </BillingSection>
         ) : null}
 
         {section === "security" ? <OrganizationSecurityPage /> : null}
@@ -412,6 +418,27 @@ function OrganizationSettingsFrame({
     >
       <div className="grid min-w-0 gap-8 text-left">{children}</div>
     </OrganizationSettingsShell>
+  );
+}
+
+/** Billing, with a back link to where a cross-scope link came from ("Design preview · Models"). */
+function BillingSection({
+  returnTo,
+  children,
+}: {
+  returnTo: ReturnTo | undefined;
+  children: ReactNode;
+}) {
+  const navigate = useNavigate();
+  if (!returnTo) return <>{children}</>;
+  return (
+    <DetailPage
+      back={{ label: returnTo.label, onClick: () => void navigate({ href: returnTo.path }) }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
+      <DetailPageHeader title="Billing & usage" />
+      <div className="mt-6 min-w-0">{children}</div>
+    </DetailPage>
   );
 }
 

@@ -209,15 +209,25 @@ proposals await review. That link opens the Review tab directly.
 The indicator refreshes after local decisions, on window focus, and every 30 seconds
 while visible; a transient refresh failure preserves the last known pending state.
 
-The Library shows a flat list or a **By collection** layout: each root
-collection with its entries, then entries not in a collection. Rows open the
-entry's or collection's own page with its content and evidence. Collections can
-nest and an entry can appear in several collections without copying it. Search
-and filters use flat results so matching entries remain discoverable regardless
-of their parents.
+The Library shows a flat list or a **By collection** layout: one section per
+top-level collection (no visible parent in the selected scope) listing its
+sub-collections first, as rows that open their own page, then its direct
+entries, and finally the entries not in a collection. A nested collection
+therefore appears once, inside its parent. Rows open the entry's or collection's
+own page with its content and evidence. A collection page lists its
+sub-collections as their own group before its entries, and every entry or
+collection page shows the path of parent collections (first parent at each
+level, for example "in Runbooks › Payments"), each part linking to that
+collection. Collections can nest and an entry can appear in several collections
+without copying it. Search and filters use flat results so matching entries
+remain discoverable regardless of their parents. Only collections and files carry
+an icon; other kinds are named in the row's meta line ("Decision · updated 3
+days ago").
 
-The root list uses `rootOnly` before server pagination; each expanded collection
-pages its direct members using `groupId`. A parent outside the selected scope,
+The section list uses `kind: "group"` with `rootOnly`, and the loose list
+`rootOnly`, both before server pagination; each collection pages its direct
+sub-collections (`groupId` with `kind: "group"`) and its direct members using
+`groupId`. A parent outside the selected scope,
 archived parent, or inaccessible parent does not hide an accessible child from
 the root. Published and outstanding pending membership edges are checked for
 cycles under the publication lock, including at approval and restoration.

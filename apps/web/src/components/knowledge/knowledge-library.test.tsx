@@ -6,10 +6,54 @@ import { createRoot } from "react-dom/client";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 let rows = true;
+let tree = false;
+
+const RUNBOOKS = "00000000-0000-4000-8000-000000000020";
+const PAYMENTS = "00000000-0000-4000-8000-000000000021";
+function summary(id: string, title: string, kind: string, groupIds: string[] = []) {
+  return {
+    id,
+    scope: "workspace",
+    version: 1,
+    publishedRevisionId: `${id.slice(0, -3)}999`,
+    latestRevisionId: `${id.slice(0, -3)}999`,
+    archived: false,
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-20T00:00:00.000Z",
+    excerpts: [],
+    revision: {
+      id: `${id.slice(0, -3)}999`,
+      title,
+      kind,
+      preview: "",
+      groupIds,
+      sourceKind: null,
+    },
+  };
+}
+// Runbooks > Payments, one entry directly in Runbooks and one loose entry.
+function treeEntries(request: KnowledgeEntryListRequest) {
+  const runbooks = summary(RUNBOOKS, "Runbooks", "group");
+  const payments = summary(PAYMENTS, "Payments", "group", [RUNBOOKS]);
+  const rollback = summary(
+    "00000000-0000-4000-8000-000000000022",
+    "Rolling back a bad deploy",
+    "decision",
+    [RUNBOOKS],
+  );
+  const loose = summary("00000000-0000-4000-8000-000000000023", "Loose fact", "fact");
+  if (request.groupId === RUNBOOKS)
+    return request.kind === "group" ? [payments] : [rollback, payments];
+  if (request.groupId === PAYMENTS) return [];
+  if (request.rootOnly) return request.kind === "group" ? [runbooks] : [runbooks, loose];
+  return [];
+}
+
 const listKnowledgeEntries = mock(
   async (_workspace: string, request: KnowledgeEntryListRequest) => ({
-    entries:
-      rows && !request.query
+    entries: tree
+      ? treeEntries(request)
+      : rows && !request.query
         ? [
             {
               id: "00000000-0000-4000-8000-000000000010",
@@ -53,8 +97,11 @@ afterAll(() => {
 });
 
 const opened: string[] = [];
-function Harness({ fileId }: { fileId?: string }) {
-  const [view, setView] = useState(initialLibraryView(false));
+function Harness({ fileId, collections }: { fileId?: string; collections?: boolean }) {
+  const [view, setView] = useState({
+    ...initialLibraryView(false),
+    ...(collections ? { layout: "collections" as const } : {}),
+  });
   return (
     <LibraryTab
       workspaceId={workspaceId}
@@ -139,5 +186,41 @@ test("an empty Library explains itself with the add actions instead of a toolbar
     await act(async () => root.unmount());
     container.remove();
     rows = true;
+  }
+});
+
+test("By collection shows only top-level collections, sub-collections first as rows", async () => {
+  tree = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness collections />));
+    await settle();
+    const sections = [...container.querySelectorAll("section")].map((section) =>
+      section.getAttribute("aria-label"),
+    );
+    // Payments nests in Runbooks, so it is a row there and never its own section.
+    expect(sections).toEqual(["Runbooks", "Not in a collection"]);
+    const runbooks = container.querySelector("section[aria-label=Runbooks]")!;
+    const titles = [...runbooks.querySelectorAll("[data-slot=list-row] [data-row-action]")].map(
+      (row) => row.textContent,
+    );
+    expect(titles).toEqual(["Payments", "Rolling back a bad deploy"]);
+    const rowsInRunbooks = [...runbooks.querySelectorAll("[data-slot=list-row]")];
+    // Only the collection has a tile; the decision says its kind in words.
+    expect(rowsInRunbooks[0]!.querySelector("[data-slot=logo-tile]")).not.toBeNull();
+    expect(rowsInRunbooks[1]!.querySelector("[data-slot=logo-tile]")).toBeNull();
+    expect(rowsInRunbooks[1]!.textContent).toContain("Decision");
+    expect(rowsInRunbooks[1]!.textContent).toContain("updated");
+    expect(
+      listKnowledgeEntries.mock.calls.some(
+        ([, request]) => request.kind === "group" && request.rootOnly === true,
+      ),
+    ).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    tree = false;
   }
 });

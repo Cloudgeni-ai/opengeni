@@ -1,14 +1,5 @@
 import type { KnowledgeEntryKind, KnowledgeEntryScope } from "@opengeni/sdk";
-import {
-  FileTextIcon,
-  FolderIcon,
-  GavelIcon,
-  LightbulbIcon,
-  ShieldCheckIcon,
-  SirenIcon,
-  StickyNoteIcon,
-  type LucideIcon,
-} from "lucide-react";
+import { FileTextIcon, FolderIcon, type LucideIcon } from "lucide-react";
 
 export const KNOWLEDGE_KIND_LABEL: Record<KnowledgeEntryKind, string> = {
   source: "File",
@@ -20,15 +11,15 @@ export const KNOWLEDGE_KIND_LABEL: Record<KnowledgeEntryKind, string> = {
   group: "Collection",
 };
 
-export const KNOWLEDGE_KIND_ICON: Record<KnowledgeEntryKind, LucideIcon> = {
-  source: FileTextIcon,
-  fact: LightbulbIcon,
-  decision: GavelIcon,
-  requirement: ShieldCheckIcon,
-  incident: SirenIcon,
-  note: StickyNoteIcon,
-  group: FolderIcon,
-};
+/**
+ * Only collections and files carry an icon. Every other kind is a quiet word in
+ * the meta line ("Decision · updated 3 days ago"), not a tile.
+ */
+export function knowledgeKindIcon(kind: KnowledgeEntryKind): LucideIcon | null {
+  if (kind === "group") return FolderIcon;
+  if (kind === "source") return FileTextIcon;
+  return null;
+}
 
 /** The types people pick when they add or edit an entry, most common first. */
 export const KNOWLEDGE_PICKABLE_KINDS = [

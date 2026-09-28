@@ -32,6 +32,7 @@ import {
   type CodexPlaces,
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
+import { OpenGeniCreditsRow, useOpenGeniCredits } from "@/components/models/opengeni-credits-row";
 import { ProviderTile, useModelsNavigation } from "@/components/models/models-ui";
 import { RowButton } from "@/components/ui/page-actions";
 import {
@@ -129,6 +130,7 @@ export function WorkspaceModelsPage({
     onConnectionChange: connectionChanged,
   });
   const gateways: Record<"vercel" | "openrouter", ProviderConnection> = { vercel, openrouter };
+  const credits = useOpenGeniCredits(organizationId);
 
   const backToList = () => nav.openAccount(undefined);
   const codexPlaces: CodexPlaces = {
@@ -225,6 +227,8 @@ export function WorkspaceModelsPage({
     );
   } else {
     const listed = [
+      // Credits pay for credit models, so the list is never "nothing pays" on such a deployment.
+      credits.visible ? 1 : 0,
       codexListedCount(codex, setAsideOrganization),
       superGrokListedCount(grok),
       ...(["openrouter", "vercel"] as const).map((id) => (providerListed(gateways[id]) ? 1 : 0)),
@@ -253,6 +257,11 @@ export function WorkspaceModelsPage({
         }
         accounts={
           <RowList label="Accounts" columns={ACCOUNT_COLUMNS} flush>
+            <OpenGeniCreditsRow
+              credits={credits}
+              workspaceId={workspaceId}
+              workspaceName={workspaceName}
+            />
             <CodexAccountRows
               codex={codex}
               places={codexPlaces}

@@ -39,6 +39,7 @@ import { useAppContext } from "@/context";
 import { canManageWorkspaceSettings, hasAccountPermission } from "@/lib/permissions";
 
 import { errorText } from "./knowledge-data";
+import { KNOWLEDGE_KIND_LABEL } from "./knowledge-labels";
 import { firstReviewableEntry } from "./knowledge-review-order";
 
 /* ----------------------------------------------------------------------------
@@ -451,7 +452,10 @@ export function ReviewTab({
                   leading={<LogoTile icon={<Icon />} name={KIND_LABEL[item.kind]} />}
                   title={item.title}
                   meta={[
-                    KIND_LABEL[item.kind],
+                    // Knowledge says which kind ("Decision"), in words like the Library.
+                    item.kind === "knowledge"
+                      ? KNOWLEDGE_KIND_LABEL[item.entry.revision.kind]
+                      : KIND_LABEL[item.kind],
                     item.createdAt ? <RelativeTime key="at" date={item.createdAt} /> : null,
                   ].filter(Boolean)}
                   selected={!narrow && item.key === selected.key}

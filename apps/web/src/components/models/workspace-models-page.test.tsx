@@ -137,10 +137,24 @@ const client = {
     allowedProviders: null,
     allowedModels: null,
   })),
+  getBilling: mock(
+    async (_request: { accountId: string }): Promise<unknown> => ({
+      mode: "stripe",
+      balance: { balanceMicros: 12_500_000, currency: "usd" },
+    }),
+  ),
 };
 
-const context = {
+const CREDITS_MODEL = { id: "gpt-credits", label: "GPT credits", cost: "credits" };
+const context: {
+  client: typeof client;
+  clientConfig: { billingMode: "disabled" | "stripe"; models: unknown[] };
+  accessContext: { accountGrants: { accountId: string; permissions: string[] }[] } | null;
+  [key: string]: unknown;
+} = {
   client,
+  clientConfig: { billingMode: "disabled", models: [] },
+  accessContext: null,
   workspaces: [],
   captureWorkspaceInvocation: () => null,
   ownsWorkspaceInvocation: () => false,
@@ -148,14 +162,18 @@ const context = {
 };
 
 let navigateTo: (search: { account?: string; view?: ModelsView }) => void = () => {};
+let lastNavigation: { to?: string; search: Record<string, unknown> } | null = null;
 
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({
   toast: { success: mock(() => undefined), error: mock(() => undefined) },
 }));
 mock.module("@tanstack/react-router", () => ({
-  useNavigate: () => (options: { search: { account?: string; view?: ModelsView } }) =>
-    navigateTo(options.search),
+  useNavigate:
+    () => (options: { to?: string; search: { account?: string; view?: ModelsView } }) => {
+      lastNavigation = options;
+      navigateTo(options.search);
+    },
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("@/components/default-session-model", () => ({
@@ -246,13 +264,14 @@ beforeEach(() => {
 
 const ACCOUNTS_SECTION = "Subscriptions and API keys that pay for models here.";
 
-function Harness({ canManage }: { canManage: boolean }) {
+function Harness({ canManage, organizationId }: { canManage: boolean; organizationId?: string }) {
   const [search, setSearch] = useState<{ account?: string; view?: ModelsView }>({});
   navigateTo = setSearch;
   return (
     <WorkspaceModelsPage
       workspaceId="workspace-a"
       workspaceName="Design preview"
+      organizationId={organizationId}
       organizationName="Acme"
       canManageSettings={canManage}
       canManageConnections={canManage}
@@ -270,11 +289,16 @@ async function flush(): Promise<void> {
   });
 }
 
-async function render(canManage = true): Promise<{ container: HTMLElement; root: Root }> {
+async function render(
+  canManage = true,
+  organizationId?: string,
+): Promise<{ container: HTMLElement; root: Root }> {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  await act(async () => root.render(<Harness canManage={canManage} />));
+  await act(async () =>
+    root.render(<Harness canManage={canManage} organizationId={organizationId} />),
+  );
   await flush();
   await flush();
   return { container, root };
@@ -742,4 +766,79 @@ describe("Connect Codex", () => {
       }
     });
   }
+});
+
+describe("OpenGeni credits", () => {
+  const noAccounts = () => {
+    accounts = { ...accounts, accounts: [], activeAccountId: null };
+  };
+  const creditsDeployment = (permissions: string[]) => {
+    context.clientConfig = { billingMode: "stripe", models: [CREDITS_MODEL] };
+    context.accessContext = { accountGrants: [{ accountId: "organization-a", permissions }] };
+  };
+
+  beforeEach(() => {
+    lastNavigation = null;
+    context.clientConfig = { billingMode: "disabled", models: [] };
+    context.accessContext = null;
+    client.getBilling.mockImplementation(async () => ({
+      mode: "stripe",
+      balance: { balanceMicros: 12_500_000, currency: "usd" },
+    }));
+  });
+
+  test("leads the Accounts list and counts as a payer, opening Billing for billing admins", async () => {
+    noAccounts();
+    creditsDeployment(["billing:manage"]);
+    (window as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
+      "http://localhost/workspaces/workspace-a/settings?section=models",
+    );
+    const view = await render(true, "organization-a");
+    const text = view.container.textContent ?? "";
+    expect(text).not.toContain("No accounts connected");
+    const row = button(view.container, "OpenGeni credits");
+    expect(row).toBeDefined();
+    expect(text).toContain("Pay as you go");
+    expect(text).toContain("$12.50 left");
+    expect(client.getBilling).toHaveBeenCalledWith({ accountId: "organization-a" });
+    await act(async () => row!.click());
+    expect(lastNavigation?.to).toBe("/workspaces/$workspaceId/organization");
+    expect(lastNavigation?.search.section).toBe("billing");
+    expect(lastNavigation?.search.fromLabel).toBe("Design preview · Models");
+    expect(lastNavigation?.search.from).toBe("/workspaces/workspace-a/settings?section=models");
+    await cleanup(view);
+  });
+
+  test("is a plain row without the balance for people who can't read billing", async () => {
+    creditsDeployment([]);
+    const view = await render(false, "organization-a");
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("OpenGeni credits");
+    expect(text).toContain("Pay as you go");
+    expect(text).not.toContain("$12.50");
+    expect(button(view.container, "OpenGeni credits")).toBeUndefined();
+    expect(client.getBilling).not.toHaveBeenCalled();
+    await cleanup(view);
+  });
+
+  test("shows the balance to billing readers without opening Billing", async () => {
+    creditsDeployment(["billing:read"]);
+    const view = await render(false, "organization-a");
+    expect(view.container.textContent).toContain("$12.50 left");
+    expect(button(view.container, "OpenGeni credits")).toBeUndefined();
+    await cleanup(view);
+  });
+
+  test("is hidden on deployments without credits", async () => {
+    noAccounts();
+    context.clientConfig = { billingMode: "disabled", models: [CREDITS_MODEL] };
+    context.accessContext = {
+      accountGrants: [{ accountId: "organization-a", permissions: ["billing:manage"] }],
+    };
+    const view = await render(true, "organization-a");
+    const text = view.container.textContent ?? "";
+    expect(text).not.toContain("OpenGeni credits");
+    expect(client.getBilling).not.toHaveBeenCalled();
+    await cleanup(view);
+  });
 });

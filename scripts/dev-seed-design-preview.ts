@@ -303,6 +303,8 @@ type WorkspaceSeed = {
   instructions: string[];
   knowledge: {
     group: string;
+    /** A parent collection seeded earlier in this list: collections nest. */
+    parent?: string;
     entries: { title: string; kind: string; content: string }[];
   }[];
   sessions: SessionSeed[];
@@ -730,6 +732,89 @@ const WORKSPACES: WorkspaceSeed[] = [
             kind: "note",
             content:
               "Promote the replica in the secondary region, update the DNS alias, then page the on-call database owner.",
+          },
+        ],
+      },
+      {
+        group: "Payments",
+        parent: "Runbooks",
+        entries: [
+          {
+            title: "Card processor is returning errors",
+            kind: "incident",
+            content:
+              "When the processor error rate passes 2%, switch checkout to the backup processor from the payments dashboard and post in #payments-oncall.",
+          },
+          {
+            title: "Retry failed payouts",
+            kind: "note",
+            content:
+              "Failed payouts are retried automatically for 3 days. After that, re-queue them from the payouts admin page with the original idempotency key.",
+          },
+          {
+            title: "Never replay a charge by hand",
+            kind: "requirement",
+            content:
+              "Charges are only retried through the payments service, which reuses the idempotency key. Replaying a request by hand can charge the customer twice.",
+          },
+          {
+            title: "Payment webhooks are processed in order per account",
+            kind: "decision",
+            content:
+              "We queue processor webhooks per merchant account so a refund can never be applied before its charge.",
+          },
+        ],
+      },
+      {
+        group: "Refunds",
+        parent: "Payments",
+        entries: [
+          {
+            title: "Issue a partial refund",
+            kind: "note",
+            content:
+              "Open the charge in the payments admin, choose Refund, enter the amount and a reason. The customer sees it in 5-10 business days.",
+          },
+          {
+            title: "Refunds over $5,000 need a second approver",
+            kind: "requirement",
+            content: "Finance must approve any single refund above $5,000 before it is issued.",
+          },
+          {
+            title: "Refund window is 90 days",
+            kind: "fact",
+            content:
+              "The card processor rejects refunds on charges older than 90 days; use a bank transfer instead.",
+          },
+        ],
+      },
+      {
+        group: "Deploys",
+        parent: "Runbooks",
+        entries: [
+          {
+            title: "Deploy freeze on Fridays after 14:00",
+            kind: "decision",
+            content:
+              "No production deploys after 14:00 on Fridays unless it fixes an active incident.",
+          },
+          {
+            title: "Canary before full rollout",
+            kind: "requirement",
+            content:
+              "Every production deploy runs on the canary pool for 15 minutes with error rates at baseline before it rolls out everywhere.",
+          },
+          {
+            title: "Deploy pipeline takes about 12 minutes",
+            kind: "fact",
+            content:
+              "Build 4 minutes, tests 5 minutes, canary and rollout 3 minutes on a normal day.",
+          },
+          {
+            title: "Stuck deploy lock",
+            kind: "incident",
+            content:
+              "A cancelled pipeline can leave the deploy lock held. Release it with `deployctl unlock` after checking no rollout is running.",
           },
         ],
       },
@@ -1355,11 +1440,25 @@ for (const seed of WORKSPACES) {
   }
 
   // Knowledge (deterministic local embeddings only; see .env)
-  const knowledge = await owner.get<any>(`${base}/knowledge/entries?limit=50`);
-  const entries: any[] = knowledge.entries ?? knowledge.items ?? [];
+  const entries: any[] = [];
+  for (let cursor: string | null = null; ;) {
+    const page: any = await owner.get<any>(
+      `${base}/knowledge/entries?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    );
+    entries.push(...(page.entries ?? page.items ?? []));
+    cursor = page.nextCursor ?? null;
+    if (!cursor) break;
+  }
+  const groupIds = new Map<string, string>();
   for (const group of seed.knowledge) {
-    let groupEntry = entries.find((e) => (e.revision?.title ?? e.title) === group.group);
+    let groupEntry = entries.find(
+      (e) =>
+        (e.revision?.title ?? e.title) === group.group && (e.revision?.kind ?? "group") === "group",
+    );
     let groupId: string = groupEntry?.id ?? groupEntry?.entryId;
+    const parentId = group.parent ? groupIds.get(group.parent) : undefined;
+    if (group.parent && !parentId)
+      fail(`Seed collection ${group.parent} must come before ${group.group}`);
     if (!groupEntry) {
       groupId = randomUUID();
       await owner.post(`${base}/knowledge/entries`, {
@@ -1371,9 +1470,11 @@ for (const seed of WORKSPACES) {
           title: group.group,
           kind: "group",
           content: `${group.group} for ${seed.name}.`,
+          ...(parentId ? { groupIds: [parentId] } : {}),
         },
       });
     }
+    groupIds.set(group.group, groupId);
     for (const entry of group.entries) {
       if (entries.some((e) => (e.revision?.title ?? e.title) === entry.title)) continue;
       await owner.post(`${base}/knowledge/entries`, {
