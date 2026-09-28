@@ -5,6 +5,10 @@ import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { loadSessionSchedules, scheduledLearningDestinationKey } from "@/lib/scheduled-tasks";
+import {
+  markScheduledTaskAttentionSeen,
+  notifyScheduledTaskAttentionUpdated,
+} from "@/components/rail/use-scheduled-task-attention";
 // Shared schedules for agent turns, including connected-source Knowledge tasks,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
@@ -21,6 +25,7 @@ import {
   PlayIcon,
   PlusIcon,
   RefreshCwIcon,
+  ShieldCheckIcon,
   Trash2Icon,
   WrenchIcon,
   ZapIcon,
@@ -79,6 +84,8 @@ import {
   scheduleFromFormState,
   scheduleLabel,
   scheduledTaskCadence,
+  scheduledTaskAccessFailuresText,
+  scheduledTaskPolicyDriftLines,
   scheduledTaskRunLabel,
   scheduledTaskRunSessionAccess,
   scheduledTaskRunTriggerIsRedundant,
@@ -93,7 +100,12 @@ import {
 import { cn } from "@/lib/utils";
 import { findPickerRow, payerSummaryForModel, type PickerModelRow } from "@/lib/model-policy";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import type { ScheduledTask, ScheduledTaskRun, Session } from "@/types";
+import type {
+  ScheduledTask,
+  ScheduledTaskAccessAttention,
+  ScheduledTaskRun,
+  Session,
+} from "@/types";
 import type { DefaultModelSelection } from "@opengeni/sdk";
 
 /**
@@ -130,9 +142,11 @@ type ScheduleListSnapshot = {
    * never run; an absent key means the probe failed and we do not know.
    */
   lastRuns: Record<string, ScheduledTaskRun | null>;
+  /** Schedules whose latest run could not use a connector (owner-only). */
+  attention: Record<string, ScheduledTaskAccessAttention>;
 };
 
-const EMPTY_LIST: ScheduleListSnapshot = { tasks: [], lastRuns: {} };
+const EMPTY_LIST: ScheduleListSnapshot = { tasks: [], lastRuns: {}, attention: {} };
 
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -294,7 +308,7 @@ export function SchedulesRoute({
     async (background = false) => {
       if (!background) setLoading(true);
       try {
-        const [next, targetSessions, exactSourceSession] = await Promise.all([
+        const [next, targetSessions, exactSourceSession, attention] = await Promise.all([
           targetSessionId
             ? loadSessionSchedules(client, workspaceId, targetSessionId)
             : client.listScheduledTasks(workspaceId),
@@ -304,6 +318,8 @@ export function SchedulesRoute({
           canTargetSessions && sourceSessionId
             ? client.getSession(workspaceId, sourceSessionId, { fresh: true }).catch(() => null)
             : Promise.resolve(null),
+          // Advisory: a failed read only hides the notices until the next poll.
+          client.listScheduledTaskAccessAttention(workspaceId).catch(() => null),
         ]);
         setSessions(
           [
@@ -351,7 +367,11 @@ export function SchedulesRoute({
           lastRuns: Object.fromEntries(
             probes.filter((entry): entry is LastRunProbe => entry !== null),
           ),
+          attention: Object.fromEntries((attention ?? []).map((item) => [item.taskId, item])),
         });
+        // Rendering the notices here is the owner seeing them: clear the
+        // navigation dot. Each card keeps its notice until a later run succeeds.
+        if (attention) markScheduledTaskAttentionSeen(workspaceId, attention);
 
         await Promise.all(openTaskIds.map((id) => loadRunHistory(id, { notify: false })));
       } catch (error) {
@@ -602,6 +622,28 @@ export function SchedulesRoute({
     }
   }
 
+  // One click re-freezes this schedule with the signed-in person's current
+  // access. The server recomputes the refresh and refuses a changed schedule.
+  async function refreshAccess(task: ScheduledTask) {
+    setBusyTaskId(task.id);
+    try {
+      await client.refreshScheduledTaskAccess(workspaceId, task.id, {
+        executionDigest: task.executionDigest,
+      });
+      toast.success("Access refreshed", {
+        description: "New runs of this schedule use it. Run it now to check.",
+      });
+      await refresh();
+      notifyScheduledTaskAttentionUpdated();
+    } catch (error) {
+      toast.error("Couldn't refresh this schedule's access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusyTaskId(null);
+    }
+  }
+
   const ACTION_ERROR: Record<"pause" | "resume" | "trigger" | "delete", string> = {
     pause: "Couldn't pause the task",
     resume: "Couldn't resume the task",
@@ -651,6 +693,8 @@ export function SchedulesRoute({
           busy={busyTaskId === task.id}
           history={runHistory[task.id]}
           probedLastRun={list.lastRuns[task.id]}
+          attention={list.attention[task.id] ?? null}
+          onRefreshAccess={() => void refreshAccess(task)}
           now={clock}
           canReadSessionIds={canReadSessionIds}
           onExpandedChange={(next) => setRunsExpanded(task, next)}
@@ -904,6 +948,9 @@ function ScheduledTaskCard(props: {
   busy: boolean;
   history: TaskRunHistory | undefined;
   probedLastRun: ScheduledTaskRun | null | undefined;
+  /** The latest run could not use a connector; only its owner receives this. */
+  attention: ScheduledTaskAccessAttention | null;
+  onRefreshAccess: () => void;
   now: Date;
   canReadSessionIds: boolean;
   onExpandedChange: (next: boolean) => void;
@@ -930,6 +977,7 @@ function ScheduledTaskCard(props: {
   // disclosure goes inert rather than silently discarding an in-progress edit.
   const expanded = props.expanded && !props.editing;
   const nextRun = state.active ? nextScheduledRunLabel(task.schedule, props.now) : null;
+  const attentionText = scheduledTaskAccessFailuresText(props.attention?.failures);
 
   return (
     <Collapsible open={expanded} onOpenChange={props.onExpandedChange} asChild>
@@ -976,6 +1024,11 @@ function ScheduledTaskCard(props: {
                   {!state.active ? (
                     <MetaChip dot="waiting" rounded="full">
                       {state.label}
+                    </MetaChip>
+                  ) : null}
+                  {attentionText ? (
+                    <MetaChip dot="failed" rounded="full" title={attentionText}>
+                      Needs attention
                     </MetaChip>
                   ) : null}
                   {lastRun ? (
@@ -1069,6 +1122,14 @@ function ScheduledTaskCard(props: {
           </div>
         </div>
 
+        <ScheduledTaskAccessNotices
+          policyDrift={task.policyDrift}
+          attention={props.attention}
+          ownsTask={ownsTask}
+          busy={props.busy}
+          onRefreshAccess={props.onRefreshAccess}
+        />
+
         {props.editing ? props.renderEditor() : null}
 
         <CollapsibleContent id={panelId}>
@@ -1113,6 +1174,68 @@ function ScheduledTaskCard(props: {
 }
 
 /**
+ * What the task's owner needs to know about its frozen access: the latest run
+ * could not use a connector, and what an access refresh would change. The
+ * refresh is offered only to a signed-in person who can manage schedules.
+ */
+export function ScheduledTaskAccessNotices(props: {
+  policyDrift: ScheduledTask["policyDrift"];
+  attention: ScheduledTaskAccessAttention | null;
+  ownsTask: boolean;
+  busy: boolean;
+  onRefreshAccess: () => void;
+}) {
+  const driftLines = scheduledTaskPolicyDriftLines(props.policyDrift);
+  const canRefreshAccess = Boolean(props.policyDrift?.canRefresh) && props.ownsTask;
+  const attentionText = scheduledTaskAccessFailuresText(props.attention?.failures);
+  if (!attentionText && driftLines.length === 0) return null;
+  return (
+    <div className="mt-2 grid gap-2" data-scheduled-task-access>
+      {attentionText ? (
+        <Notice tone="failed" title="The last run could not use a connector">
+          {attentionText}{" "}
+          {driftLines.length > 0 && canRefreshAccess
+            ? "Refreshing access below may fix it."
+            : "Check the connection in Capabilities, then run the schedule again."}
+        </Notice>
+      ) : null}
+      {driftLines.length > 0 ? (
+        <Notice
+          tone="waiting"
+          title="This schedule's access is out of date"
+          action={
+            canRefreshAccess ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="xs"
+                disabled={props.busy}
+                onClick={props.onRefreshAccess}
+                title="Save this schedule again with your current connectors, accounts and tools"
+              >
+                <ShieldCheckIcon className="size-3" />
+                Refresh access
+              </Button>
+            ) : null
+          }
+        >
+          <ul className="grid gap-0.5">
+            {driftLines.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+          {canRefreshAccess ? null : (
+            <p className="mt-1 text-fg-subtle">
+              Refreshing needs a signed-in person who can manage schedules.
+            </p>
+          )}
+        </Notice>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * One run, identified by when it fired and how it ended. Run ids and session
  * ids are never printed: a uuid tells the reader nothing, and the session it
  * points at is reached through a named link instead.
@@ -1124,6 +1247,7 @@ function ScheduledTaskRunRow(props: {
 }) {
   const { run } = props;
   const sessionId = run.sessionId;
+  const accessFailureText = scheduledTaskAccessFailuresText(run.accessFailures);
   const sessionAccess = scheduledTaskRunSessionAccess(run, {
     canReadSessionIds: props.canReadSessionIds,
   });
@@ -1141,6 +1265,11 @@ function ScheduledTaskRunRow(props: {
       <span className="flex min-w-0 items-center gap-2">
         {run.error ? (
           <span className="min-w-0 truncate text-status-failed">{run.error}</span>
+        ) : null}
+        {accessFailureText ? (
+          <span className="min-w-0 truncate text-status-failed" title={accessFailureText}>
+            {accessFailureText}
+          </span>
         ) : null}
         {run.knowledgeSummary ? (
           <span className="min-w-0 truncate text-fg-subtle">

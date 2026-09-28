@@ -9229,6 +9229,19 @@ export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
+// Declared ahead of the scheduled-task projections that name it; the
+// `tool.auth_needed` payload below uses the same enum.
+export const ToolAuthNeededReason = z.enum([
+  "missing_connection",
+  "expired",
+  "insufficient_scope",
+  "refresh_failed",
+  "personal_authority_unavailable",
+  "unsupported_auth",
+  "resource_scope_unavailable",
+]);
+export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
+
 export const ScheduledTaskStatus = /* @__PURE__ */ z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
@@ -9733,6 +9746,55 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
   });
 export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
+/** One connector named in a scheduled task's access report. */
+export const ScheduledTaskAccessConnector = /* @__PURE__ */ z
+  .object({
+    id: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+  })
+  .strict();
+export type ScheduledTaskAccessConnector = z.infer<typeof ScheduledTaskAccessConnector>;
+
+export const SCHEDULED_TASK_ACCESS_CONNECTORS_MAX = 64;
+
+/**
+ * What a scheduled task's frozen tools and connector accounts lack compared
+ * with what its owner would get by saving it again now. A task freezes its
+ * connectors, its connector accounts and (when an agent created it, migration
+ * 0428) its OpenGeni tool policy, so later workspace changes never reach its
+ * runs on their own. This read-only projection names exactly what
+ * `POST .../scheduled-tasks/:taskId/refresh-access` would change.
+ *
+ * Present only for a viewer who can act on it: the task owner, or anyone who
+ * manages schedules for a task without an owner. `null` or absent means there
+ * is nothing to refresh or the viewer cannot refresh it.
+ */
+export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
+  .object({
+    /** Workspace default connectors that new schedules get and this one lacks. */
+    missingConnectors: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
+    unavailableConnectors: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+    missingOpenGeniTools: z.array(FirstPartyMcpToolName).max(FIRST_PARTY_MCP_TOOL_NAMES.length),
+    /** Connectors whose chosen account can no longer be used by this schedule. */
+    unavailableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Connectors this schedule has no account for, although one is now available. */
+    attachableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
+    canRefresh: z.boolean(),
+  })
+  .strict();
+export type ScheduledTaskPolicyDrift = z.infer<typeof ScheduledTaskPolicyDrift>;
+
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -9766,6 +9828,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /** Read-only response projection; never stored and never execution authority. */
+  policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
@@ -9978,6 +10042,28 @@ export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
 });
 export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
 
+/**
+ * A connector a scheduled run could not use: its own scheduled turn recorded a
+ * `tool.auth_needed` fact (the run failed closed on a missing connection or
+ * personal authority). Derived at read time from durable session events;
+ * credential-free.
+ */
+export const ScheduledTaskRunAccessFailure = /* @__PURE__ */ z
+  .object({
+    /** Configured connector id (the account route is folded into its connector). */
+    serverId: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    providerDomain: z.string().min(1).max(512),
+    reason: ToolAuthNeededReason,
+    /** How many times the run hit this connector and reason. */
+    count: z.number().int().positive(),
+    firstOccurredAt: z.string(),
+  })
+  .strict();
+export type ScheduledTaskRunAccessFailure = z.infer<typeof ScheduledTaskRunAccessFailure>;
+
+export const SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX = 8;
+
 export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -10002,8 +10088,59 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   error: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /**
+   * Connectors this run could not use. Projected only for a viewer who can act
+   * on the task (see `ScheduledTaskPolicyDrift`); absent otherwise.
+   */
+  accessFailures: z
+    .array(ScheduledTaskRunAccessFailure)
+    .max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX)
+    .optional(),
 });
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
+
+/**
+ * A schedule whose latest run failed closed on connector access and that no
+ * later run has cleared: the in-app notice that a schedule needs attention.
+ * Listed for its owner; a task without an owner is listed only for a key or
+ * service that manages schedules.
+ */
+export const ScheduledTaskAccessAttention = /* @__PURE__ */ z
+  .object({
+    taskId: z.string().uuid(),
+    taskName: z.string(),
+    runId: z.string().uuid(),
+    firedAt: z.string(),
+    failures: z
+      .array(ScheduledTaskRunAccessFailure)
+      .min(1)
+      .max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
+  })
+  .strict();
+export type ScheduledTaskAccessAttention = z.infer<typeof ScheduledTaskAccessAttention>;
+
+export const SCHEDULED_TASK_ACCESS_ATTENTION_MAX = 100;
+
+export const ListScheduledTaskAccessAttentionResponse = /* @__PURE__ */ z
+  .object({
+    tasks: z.array(ScheduledTaskAccessAttention).max(SCHEDULED_TASK_ACCESS_ATTENTION_MAX),
+  })
+  .strict();
+export type ListScheduledTaskAccessAttentionResponse = z.infer<
+  typeof ListScheduledTaskAccessAttentionResponse
+>;
+
+/**
+ * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+ * with the calling person's current authority. `executionDigest` is the task
+ * head the person reviewed; a changed task is refused with 409.
+ */
+export const RefreshScheduledTaskAccessRequest = /* @__PURE__ */ z
+  .object({
+    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+  })
+  .strict();
+export type RefreshScheduledTaskAccessRequest = z.infer<typeof RefreshScheduledTaskAccessRequest>;
 
 const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
   {
@@ -13217,17 +13354,6 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
   for (const type of excluded) included.delete(type);
   return { includeTypes: [...included], excludeTypes: [...excluded] };
 }
-
-export const ToolAuthNeededReason = z.enum([
-  "missing_connection",
-  "expired",
-  "insufficient_scope",
-  "refresh_failed",
-  "personal_authority_unavailable",
-  "unsupported_auth",
-  "resource_scope_unavailable",
-]);
-export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
 
 export const ToolAuthNeededPayload = z
   .object({

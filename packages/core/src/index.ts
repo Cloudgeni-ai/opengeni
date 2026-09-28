@@ -98,6 +98,7 @@ export * from "./domain/github-repository-bindings";
 export * from "./domain/github-action-policies";
 export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
+export * from "./domain/scheduled-task-access";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/memory-slack-publication";

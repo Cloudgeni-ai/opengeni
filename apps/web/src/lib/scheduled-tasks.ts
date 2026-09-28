@@ -6,7 +6,9 @@ import type {
   SandboxBackend,
   ScheduledTask,
   ScheduledTaskAgentConfig,
+  ScheduledTaskPolicyDrift,
   ScheduledTaskRun,
+  ScheduledTaskRunAccessFailure,
   ScheduledTaskScheduleSpec,
 } from "@/types";
 
@@ -785,4 +787,84 @@ export function scheduledLearningDestinationKey(form: ScheduledTaskFormState): s
     form.targetSessionId,
     form.knowledgeSource?.destination ?? null,
   ]);
+}
+
+const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], string> = {
+  missing_connection: "no account is connected for it",
+  expired: "its connection expired",
+  insufficient_scope: "its connection is missing a permission it needs",
+  refresh_failed: "its connection could not be renewed",
+  personal_authority_unavailable: "your personal account is not available to this schedule",
+  unsupported_auth: "its sign-in is not supported for scheduled runs",
+  resource_scope_unavailable: "the resources it was allowed to use are no longer available",
+};
+
+/** "Couldn't use Slack: your personal account is not available to this schedule." */
+export function scheduledTaskAccessFailureText(failure: ScheduledTaskRunAccessFailure): string {
+  const reason = ACCESS_FAILURE_REASON[failure.reason] ?? "it could not be reached";
+  return `Couldn't use ${failure.name}: ${reason}.`;
+}
+
+/** One sentence per failing connector, in the order the run hit them. */
+export function scheduledTaskAccessFailuresText(
+  failures: readonly ScheduledTaskRunAccessFailure[] | undefined,
+): string | null {
+  if (!failures || failures.length === 0) return null;
+  return failures.map(scheduledTaskAccessFailureText).join(" ");
+}
+
+/** "Gmail", "Gmail and Linear", "Gmail, Linear, Notion and 2 more". */
+export function namedList(names: readonly string[], limit = 3): string {
+  const unique = [...new Set(names)];
+  if (unique.length <= 1) return unique[0] ?? "";
+  if (unique.length <= limit) {
+    return `${unique.slice(0, -1).join(", ")} and ${unique[unique.length - 1]}`;
+  }
+  return `${unique.slice(0, limit).join(", ")} and ${unique.length - limit} more`;
+}
+
+function openGeniToolLabel(tool: string): string {
+  return tool.replaceAll("_", " ");
+}
+
+/**
+ * Plain sentences naming what the access refresh would change. Empty when the
+ * task is up to date (or the viewer cannot act on it).
+ */
+export function scheduledTaskPolicyDriftLines(
+  drift: ScheduledTaskPolicyDrift | null | undefined,
+): string[] {
+  if (!drift) return [];
+  const lines: string[] = [];
+  const names = (items: readonly { name: string }[]) => namedList(items.map((item) => item.name));
+  if (drift.unavailableAccounts.length > 0) {
+    lines.push(
+      `The account chosen for ${names(drift.unavailableAccounts)} can no longer be used, so new runs cannot start.`,
+    );
+  }
+  if (drift.attachableAccounts.length > 0) {
+    lines.push(
+      `${names(drift.attachableAccounts)} ${drift.attachableAccounts.length === 1 ? "has" : "have"} no account on this schedule, although one is now connected.`,
+    );
+  }
+  if (drift.missingConnectors.length > 0) {
+    lines.push(
+      `New schedules in this workspace also get ${names(drift.missingConnectors)}; this one does not.`,
+    );
+  }
+  if (drift.missingOpenGeniTools.length > 0) {
+    const count = drift.missingOpenGeniTools.length;
+    lines.push(
+      `${count} newer OpenGeni ${count === 1 ? "tool is" : "tools are"} not available to it: ${namedList(
+        drift.missingOpenGeniTools.map(openGeniToolLabel),
+        4,
+      )}.`,
+    );
+  }
+  if (drift.unavailableConnectors.length > 0) {
+    lines.push(
+      `${names(drift.unavailableConnectors)} ${drift.unavailableConnectors.length === 1 ? "is" : "are"} no longer set up in this workspace and will be removed.`,
+    );
+  }
+  return lines;
 }

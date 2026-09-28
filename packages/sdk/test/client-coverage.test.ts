@@ -905,6 +905,46 @@ describe("OpenGeniClient scheduled tasks", () => {
       `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/runs?limit=5`,
     ]);
   });
+
+  test("refreshes access against the reviewed head and lists access attention", async () => {
+    const digest = "a".repeat(64);
+    const { client, requests } = makeClient((request) =>
+      new URL(request.url).pathname.endsWith("/attention")
+        ? jsonResponse({
+            tasks: [
+              {
+                taskId: TASK_ID,
+                taskName: "Post the daily summary",
+                runId: TASK_ID,
+                firedAt: "2026-09-17T08:00:00.000Z",
+                failures: [
+                  {
+                    serverId: "slack",
+                    name: "Slack",
+                    providerDomain: "slack.com",
+                    reason: "personal_authority_unavailable",
+                    count: 2,
+                    firstOccurredAt: "2026-09-17T08:00:05.000Z",
+                  },
+                ],
+              },
+            ],
+          })
+        : jsonResponse({ id: TASK_ID }),
+    );
+    await client.refreshScheduledTaskAccess(WORKSPACE_ID, TASK_ID, { executionDigest: digest });
+    const attention = await client.listScheduledTaskAccessAttention(WORKSPACE_ID);
+    expect(attention.map((item) => item.failures[0]?.reason)).toEqual([
+      "personal_authority_unavailable",
+    ]);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/refresh-access`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/attention`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ executionDigest: digest });
+  });
 });
 
 describe("OpenGeniClient variable sets", () => {

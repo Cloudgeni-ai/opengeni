@@ -15,7 +15,11 @@ import {
   scheduleLabel,
   scheduledTaskCadence,
   loadSessionSchedules,
+  namedList,
+  scheduledTaskAccessFailureText,
+  scheduledTaskAccessFailuresText,
   scheduledTaskDescription,
+  scheduledTaskPolicyDriftLines,
   scheduledTaskRunLabel,
   scheduledTaskRunSessionAccess,
   scheduledTaskRunTriggerIsRedundant,
@@ -811,5 +815,60 @@ test("editing an ordinary source task preserves its source binding and private l
   expect(scheduledTaskStateLabel(task)).toMatchObject({
     active: false,
     reason: "connection_paused",
+  });
+});
+
+describe("scheduled task access in plain words", () => {
+  test("names each failing connector and why the run could not use it", () => {
+    const failure = {
+      serverId: "slack",
+      name: "Slack",
+      providerDomain: "slack.com",
+      reason: "personal_authority_unavailable" as const,
+      count: 2,
+      firstOccurredAt: "2026-09-17T08:00:05.000Z",
+    };
+    expect(scheduledTaskAccessFailureText(failure)).toBe(
+      "Couldn't use Slack: your personal account is not available to this schedule.",
+    );
+    expect(
+      scheduledTaskAccessFailuresText([
+        failure,
+        { ...failure, serverId: "gmail", name: "Gmail", reason: "expired" },
+      ]),
+    ).toBe(
+      "Couldn't use Slack: your personal account is not available to this schedule. Couldn't use Gmail: its connection expired.",
+    );
+    expect(scheduledTaskAccessFailuresText([])).toBeNull();
+    expect(scheduledTaskAccessFailuresText(undefined)).toBeNull();
+  });
+
+  test("lists names without an unbounded run-on", () => {
+    expect(namedList(["Gmail"])).toBe("Gmail");
+    expect(namedList(["Gmail", "Linear"])).toBe("Gmail and Linear");
+    expect(namedList(["Gmail", "Linear", "Notion", "PostHog", "Grafana"])).toBe(
+      "Gmail, Linear, Notion and 2 more",
+    );
+  });
+
+  test("says what an access refresh would change, most urgent first", () => {
+    expect(
+      scheduledTaskPolicyDriftLines({
+        missingConnectors: [{ id: "gmail", name: "Gmail" }],
+        unavailableConnectors: [{ id: "old-crm", name: "old-crm" }],
+        missingOpenGeniTools: ["browser_read", "browser_screenshot"],
+        unavailableAccounts: [{ id: "slack", name: "Slack" }],
+        attachableAccounts: [{ id: "linear", name: "Linear" }],
+        canRefresh: true,
+      }),
+    ).toEqual([
+      "The account chosen for Slack can no longer be used, so new runs cannot start.",
+      "Linear has no account on this schedule, although one is now connected.",
+      "New schedules in this workspace also get Gmail; this one does not.",
+      "2 newer OpenGeni tools are not available to it: browser read and browser screenshot.",
+      "old-crm is no longer set up in this workspace and will be removed.",
+    ]);
+    expect(scheduledTaskPolicyDriftLines(null)).toEqual([]);
+    expect(scheduledTaskPolicyDriftLines(undefined)).toEqual([]);
   });
 });
