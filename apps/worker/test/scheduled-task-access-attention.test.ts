@@ -300,7 +300,8 @@ describe("the owner is told when a schedule cannot use a connector", () => {
     expect((await attentionFor(workspace, key)).items).toEqual([]);
 
     // 2. The owner revokes the account. The scheduler now refuses the next
-    //    occurrence before it creates a run, and the owner is told why.
+    //    occurrence without accepting execution, retains a diagnostic run,
+    //    and tells the owner why.
     await admin`update connections set status = 'revoked' where id = ${firstAccount}`;
     expect(
       await scheduler().dispatchScheduledTaskRun({
@@ -309,9 +310,18 @@ describe("the owner is told when a schedule cannot use a connector", () => {
         triggerType: "scheduled",
         producerKey: `scheduled-access-attention:${crypto.randomUUID()}`,
       }),
-    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    ).toEqual({
+      action: "blocked",
+      reason: "connection_account_unavailable",
+      runId: expect.any(String),
+      diagnostic: {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: [{ serverId: "mail", connectionId: firstAccount, reason: "account_not_visible" }],
+      },
+    });
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      1,
+      2,
     );
     const blocked = await attentionFor(workspace, person(workspace, workspace.owner));
     expect(blocked.items).toEqual([
@@ -391,7 +401,16 @@ describe("the owner is told when a schedule cannot use a connector", () => {
         triggerType: "scheduled",
         producerKey: `scheduled-access-attention:${crypto.randomUUID()}`,
       }),
-    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    ).toEqual({
+      action: "blocked",
+      reason: "connection_account_unavailable",
+      runId: expect.any(String),
+      diagnostic: {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: [{ serverId: "mail", connectionId: account, reason: "connector_unavailable" }],
+      },
+    });
     expect((await attentionFor(workspace, person(workspace, workspace.owner), [])).items).toEqual([
       {
         taskId: task.id,
