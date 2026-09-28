@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, type AnchorHTMLAttributes, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { Markdown } from "@opengeni/react";
@@ -39,6 +39,30 @@ mock.module("./pdf-file-preview", () => ({
     if (title === "Broken PDF") throw new Error("PDF renderer failed");
     return <span>{title} rendered PDF</span>;
   },
+}));
+// Render router links as marked anchors so the fixture can tell them from raw
+// `<a href>` full page loads.
+mock.module("@tanstack/react-router", () => ({
+  Link: ({
+    to,
+    params,
+    search: _search,
+    children,
+    ...rest
+  }: {
+    to: string;
+    params?: Record<string, string>;
+    search?: unknown;
+    children?: ReactNode;
+  } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a
+      {...rest}
+      data-router-link=""
+      href={to.replace(/\$(\w+)/g, (_, key: string) => params?.[key] ?? "")}
+    >
+      {children}
+    </a>
+  ),
 }));
 const { InlineChatArtifact, RetainedFilePreview, retainedPreviewKind } =
   await import("./retained-file-preview");
@@ -447,7 +471,10 @@ test("unavailable artifact retains an actionable link without requesting media",
   );
   await act(async () => container.querySelector("button")?.click());
   expect(container.textContent).toContain("Artifact unavailable");
-  expect(container.querySelector("a")?.getAttribute("href")).toContain(`/artifacts/files/${id}`);
+  const link = container.querySelector("a");
+  expect(link?.getAttribute("href")).toBe(`/workspaces/${workspaceId}/artifacts/files/${id}`);
+  // A router link, not a raw anchor that reloads the whole app.
+  expect(link?.hasAttribute("data-router-link")).toBe(true);
   expect(client.createRetainedArtifactDownloadUrl).not.toHaveBeenCalled();
 });
 

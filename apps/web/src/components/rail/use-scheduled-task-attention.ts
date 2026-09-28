@@ -105,6 +105,9 @@ export function useScheduledTaskAttentionIndicator(workspaceId: string, enabled 
       void client
         .listScheduledTaskAccessAttention(workspaceId)
         .then((items) => {
+          // The dot renders on every workspace page, so an unexpected answer
+          // is a failed read here, never a crash of the navigation.
+          if (!Array.isArray(items)) throw new TypeError("Schedule attention is not a list");
           if (current && request === generation) setResult({ workspaceId, items });
         })
         .catch(() => {

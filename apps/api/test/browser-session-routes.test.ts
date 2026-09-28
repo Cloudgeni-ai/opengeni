@@ -47,6 +47,17 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("existing managed browser control retains the durable provider instance across image upgrades", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(source.indexOf("async function withBrowserPlacement"));
+    expect(placement).toContain("retainedInstanceId: expectedPlacementInstanceId");
+    expect(placement).toContain('expectedPlacement?.kind === "sandbox_group"');
+    expect(placement).toContain(
+      "assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId)",
+    );
+    const channel = await readFile(new URL("../src/sandbox/channel-a.ts", import.meta.url), "utf8");
+    expect(channel).toContain("retainedInstanceId: ctx.retainedInstanceId");
+  });
   test("explicit Lightpanda preserves Connected Machine placement and semantic capabilities", () => {
     const grant: AccessGrant = {
       accountId: "11111111-1111-4111-8111-111111111111",

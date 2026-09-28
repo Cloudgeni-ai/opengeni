@@ -551,6 +551,29 @@ describe("ModelPolicyPicker", () => {
     expect(trigger?.className).toContain("max-sm:max-w-[7.5rem]");
   });
 
+  test("the field trigger shows the model and the payer, and leaves the effort to the menu", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={MODELS}
+        model="codex/gpt-5.6-sol"
+        effort="medium"
+        latencyMode="standard"
+        triggerStyle="field"
+        triggerMeta="Codex"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Model and effort"]',
+    );
+    expect(trigger?.dataset.triggerStyle).toBe("field");
+    expect(trigger?.textContent).toBe("GPT-5.6 SolCodex");
+    expect(trigger?.textContent).not.toContain("Medium");
+    expect(trigger?.className).not.toContain("rounded-full");
+  });
+
   test("selects immediately, coerces unsupported effort and speed, and closes", async () => {
     const calls: unknown[] = [];
     const container = await mount(

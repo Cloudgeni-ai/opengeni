@@ -1,46 +1,93 @@
-// A single rig: overview, setup/definition, version history, and the change
-// queue. Reads poll so verification and promotion move live. All writes go
-// through the rig hook; rigs:manage gates create/edit/promote/activate/delete,
+// One sandbox environment as its own page: Overview, Versions and Changes
+// tabs, a quiet aside, and Edit details / Edit setup as their own pages
+// (?view=edit, ?view=edit-setup). Reads poll so verification and promotion
+// move live. rigs:manage gates edit/promote/activate/default/delete;
 // rigs:use gates read + propose.
-import { useRig, useRigChanges, useRigVersions, useVariableSets } from "@opengeni/react";
-import { Link } from "@tanstack/react-router";
 import {
-  ArrowLeftIcon,
-  CheckIcon,
-  Loader2Icon,
+  useOpenGeni,
+  useRig,
+  useRigChanges,
+  useRigVersions,
+  useVariableSets,
+} from "@opengeni/react";
+import { useNavigate } from "@tanstack/react-router";
+import {
+  BoxIcon,
+  Building2Icon,
+  ContainerIcon,
   PencilIcon,
-  ServerCogIcon,
   StarIcon,
   StarOffIcon,
   Trash2Icon,
+  UserIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { useNavigate } from "@tanstack/react-router";
 
-import { PermissionDenied } from "@/routes/rigs";
+import { rigHealth } from "@/components/rigs/rig-health";
 import { RigChangesQueue } from "@/components/rigs/rig-changes-queue";
 import { RigOverview } from "@/components/rigs/rig-overview";
-import { RigSetupSection } from "@/components/rigs/rig-setup-section";
+import { RigSetupEditPage } from "@/components/rigs/rig-setup-section";
 import { RigVersionsTimeline } from "@/components/rigs/rig-versions-timeline";
-import { LoadErrorState } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
-import { Input } from "@/components/ui/input";
+import {
+  DetailAside,
+  DetailAsideItem,
+  DetailPage,
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
+import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { ErrorMessage } from "@/components/ui/error-message";
+import { Field, FieldStack, TextInput } from "@/components/ui/field";
+import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@/components/ui/flush-form-page";
+import {
+  LineTabs,
+  LineTabsContent,
+  LineTabsList,
+  LineTabsTrigger,
+} from "@/components/ui/line-tabs";
+import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
+import { RelativeTime } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { resourceScopeLabel } from "@/components/resource-scope-picker";
+import { errorParts, userFacingError } from "@/components/variable-sets/variable-set-model";
+import { LoadFailure } from "@/components/variable-sets/variable-set-pages";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { rigActorLabel } from "@/lib/rig-status";
+import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
+import type { Rig } from "@/types";
+import { MoreMenu } from "@/components/ui/page-actions";
 
 // Live cadence: fast enough that a verifying change resolves without a manual
 // refresh, slow enough to stay quiet.
 const POLL_MS = 5000;
 
-export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; rigId: string }) {
+type Tab = "overview" | "versions" | "changes";
+
+const SCOPE_ICON = {
+  workspace: <BoxIcon />,
+  organization: <Building2Icon />,
+  user: <UserIcon />,
+} as const;
+
+export function RigDetailRoute({
+  workspaceId,
+  rigId,
+  view,
+}: {
+  workspaceId: string;
+  rigId: string;
+  view?: "edit" | "edit-setup";
+}) {
   const context = useAppContext();
+  const navigate = useNavigate();
+  const { client } = useOpenGeni();
   const canView = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
 
@@ -48,15 +95,13 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
   const versions = useRigVersions(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const changes = useRigChanges(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const variableSets = useVariableSets();
-  const navigate = useNavigate();
 
-  const [tab, setTab] = useState("overview");
-  const [editing, setEditing] = useState(false);
+  const [tab, setTab] = useState<Tab>("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const variableSetName = useMemo(() => {
     const byId = new Map(variableSets.variableSets.map((set) => [set.id, set.name]));
-    return (id: string) => byId.get(id) ?? "Unknown variable set";
+    return (id: string) => byId.get(id) ?? "Variable set you can't see";
   }, [variableSets.variableSets]);
 
   const versionLabel = useMemo(() => {
@@ -67,40 +112,71 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
   const refreshAll = async () => {
     await Promise.all([rig.refresh(), versions.refresh(), changes.refresh()]);
   };
+  const openList = () =>
+    void navigate({ to: "/workspaces/$workspaceId/rigs", params: { workspaceId } });
+  const openRig = (search: { view?: "edit" | "edit-setup" } = {}) =>
+    void navigate({
+      to: "/workspaces/$workspaceId/rigs/$rigId",
+      params: { workspaceId, rigId },
+      search,
+    });
+
+  const root = useRef<HTMLDivElement>(null);
+  const firstView = useRef(true);
+  useEffect(() => {
+    if (firstView.current) {
+      firstView.current = false;
+      return;
+    }
+    const heading = root.current?.querySelector<HTMLElement>("h1");
+    if (heading && !heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+    heading?.focus({ preventScroll: true });
+    root.current?.scrollIntoView?.({ block: "start" });
+  }, [view]);
+
+  const back = { label: "Sandbox environments", onClick: openList };
+  const frame = (children: ReactNode) => (
+    <ContentPage width="standard">
+      <div ref={root} className="min-w-0 pb-7">
+        {children}
+      </div>
+    </ContentPage>
+  );
 
   if (!canView) {
-    return (
-      <Shell workspaceId={workspaceId}>
-        <div className="mt-6">
-          <PermissionDenied />
-        </div>
-      </Shell>
+    return frame(
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
+        <PermissionDenied />
+      </DetailPage>,
     );
   }
 
   if (rig.error && !rig.rig) {
-    return (
-      <Shell workspaceId={workspaceId}>
-        <div className="mt-6">
-          <LoadErrorState
-            title="Couldn't load this sandbox environment"
-            error={rig.error}
-            onRetry={() => void refreshAll()}
-          />
-        </div>
-      </Shell>
+    return frame(
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
+        <LoadFailure
+          title="Couldn't load this sandbox environment"
+          error={rig.error}
+          onRetry={() => void refreshAll()}
+        />
+      </DetailPage>,
     );
   }
 
   if (!rig.rig) {
-    return (
-      <Shell workspaceId={workspaceId}>
-        <div className="mt-6 grid gap-3">
-          <Skeleton className="h-7 w-56" />
-          <Skeleton className="h-4 w-80" />
-          <Skeleton className="mt-3 h-40 w-full rounded-lg" />
+    return frame(
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
+        <div role="status" aria-label="Loading sandbox environment" className="min-w-0">
+          <div aria-hidden="true" className="flex items-start gap-4">
+            <Skeleton className="size-10 shrink-0 rounded-[10px] bg-surface-2" />
+            <div className="min-w-0 flex-1 pt-1">
+              <Skeleton className="h-5 w-48 rounded-full bg-surface-3" />
+              <Skeleton className="mt-3 h-3.5 w-80 max-w-full rounded-full bg-surface-2" />
+            </div>
+          </div>
+          <Skeleton className="mt-8 h-40 w-full rounded-[14px] bg-surface-2" />
         </div>
-      </Shell>
+      </DetailPage>,
     );
   }
 
@@ -109,320 +185,356 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
   const pendingChanges = changes.changes.filter(
     (change) => change.status === "proposed" || change.status === "verifying",
   ).length;
-  const isDefaultRig =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.defaultRigId ===
-    current.id;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
+  const isDefaultRig = workspace?.defaultRigId === current.id;
+  const health = rigHealth(current);
 
-  return (
-    <Shell workspaceId={workspaceId}>
-      <div className="mt-4 flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0">
-          {editing ? (
-            <RenameForm
-              rig={current}
-              mutating={rig.mutating}
-              onCancel={() => setEditing(false)}
-              onSave={async (patch) => {
-                const result = await rig.update(patch);
-                if (result) {
-                  setEditing(false);
-                  toast.success("Sandbox Environment updated");
-                }
-                return result;
-              }}
-            />
-          ) : (
-            <>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-brand">
-                  <ServerCogIcon className="size-5" />
-                </span>
-                <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
-                  {current.name}
-                </h1>
-                {active ? (
-                  <MetaChip title="Active version">v{active.version}</MetaChip>
-                ) : (
-                  <MetaChip dot="queued">Draft</MetaChip>
-                )}
-                {isDefaultRig ? (
-                  <MetaChip
-                    title="Workspace default — new sessions use this sandbox environment unless another is picked"
-                    className="border-brand/30 text-brand"
-                  >
-                    <span className="inline-flex items-center gap-1">
-                      <StarIcon className="size-3 shrink-0 fill-current" />
-                      Default
-                    </span>
-                  </MetaChip>
-                ) : null}
-              </div>
-              <p className="mt-1 max-w-2xl text-sm leading-5 text-fg-muted">
-                {current.description ?? "No description"}
-              </p>
-            </>
-          )}
-        </div>
-        {!editing && canManage ? (
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-9"
-              disabled={rig.mutating}
-              onClick={async () => {
-                const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-                if (!acceptedTransition) return;
-                const updated = await context.setWorkspaceDefaultRig(
-                  workspaceId,
-                  isDefaultRig ? null : current.id,
-                );
-                if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-                  toast.success(
-                    isDefaultRig
-                      ? "Cleared the workspace default sandbox environment"
-                      : `“${current.name}” is now the workspace default`,
-                  );
-                }
-              }}
-            >
-              {isDefaultRig ? (
-                <StarOffIcon className="size-3.5" />
-              ) : (
-                <StarIcon className="size-3.5" />
-              )}
-              {isDefaultRig ? "Clear default" : "Set as default"}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-9"
-              onClick={() => setEditing(true)}
-            >
-              <PencilIcon className="size-3.5" />
-              Edit
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Delete sandbox environment"
-              className="hover:text-status-failed"
-              disabled={rig.mutating}
-              onClick={() => setConfirmDelete(true)}
-            >
-              <Trash2Icon className="size-4" />
-            </Button>
-          </div>
-        ) : null}
-      </div>
-
-      {rig.mutationError ? (
-        <Notice
-          tone="failed"
-          className="mt-4"
-          action={
-            <Button type="button" variant="ghost" size="xs" onClick={rig.clearMutationError}>
-              Dismiss
-            </Button>
+  if (view === "edit" && canManage) {
+    return frame(
+      <EditRigDetailsPage
+        rig={current}
+        onClose={() => openRig()}
+        onSave={async (patch) => {
+          try {
+            await client.updateRig(workspaceId, current.id, patch);
+          } catch (error) {
+            throw userFacingError(error);
           }
-        >
-          {rig.mutationError.message}
-        </Notice>
+          await rig.refresh();
+          toast.success("Saved");
+          openRig();
+        }}
+      />,
+    );
+  }
+
+  if (view === "edit-setup" && active) {
+    return frame(
+      <RigSetupEditPage
+        rigName={current.name}
+        activeVersion={active}
+        rigScope={current.scope}
+        variableSets={variableSets.variableSets}
+        onClose={() => openRig()}
+        onPropose={async (request) => {
+          try {
+            await client.proposeRigChange(workspaceId, current.id, request);
+          } catch (error) {
+            throw userFacingError(error);
+          }
+          await changes.refresh();
+          toast.success("Change proposed", {
+            description: "It's being checked in a clean sandbox before it can merge.",
+          });
+          setTab("changes");
+          openRig();
+        }}
+      />,
+    );
+  }
+
+  async function toggleDefault() {
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    const updated = await context.setWorkspaceDefaultRig(
+      workspaceId,
+      isDefaultRig ? null : current.id,
+    );
+    if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+      toast.success(
+        isDefaultRig
+          ? "New sessions no longer use a default environment"
+          : `New sessions now use ${current.name}`,
+      );
+    }
+  }
+
+  const aside = (
+    <DetailAside label={`About ${current.name}`}>
+      {current.description ? (
+        <DetailAsideItem label="Description">{current.description}</DetailAsideItem>
       ) : null}
+      <DetailAsideItem label="Available to" icon={SCOPE_ICON[current.scope]}>
+        {current.scope === "workspace" ? "This workspace" : resourceScopeLabel(current.scope)}
+      </DetailAsideItem>
+      <DetailAsideItem label="Workspace default">
+        {isDefaultRig ? "Yes. New sessions use it." : "No"}
+      </DetailAsideItem>
+      {active ? (
+        <DetailAsideItem label="Active version">
+          Version {active.version}
+          <span className="block text-xs leading-4.5 text-fg-muted">
+            {rigActorLabel(active.createdBy)} · <RelativeTime date={active.createdAt} inSentence />
+          </span>
+        </DetailAsideItem>
+      ) : null}
+      <DetailAsideItem label="Last changed">
+        <RelativeTime date={current.updatedAt} />
+      </DetailAsideItem>
+      {canManage ? (
+        <div className="border-t border-border pt-4">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setConfirmDelete(true)}
+            className="-ml-2.5 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+          >
+            <Trash2Icon aria-hidden="true" />
+            Delete environment
+          </Button>
+        </div>
+      ) : null}
+    </DetailAside>
+  );
 
-      <Tabs value={tab} onValueChange={setTab} className="mt-5 gap-0">
-        <TabsList variant="line" className="h-9 gap-1">
-          <TabsTrigger value="overview" className="px-3 text-xs">
-            Overview
-          </TabsTrigger>
-          <TabsTrigger value="setup" className="px-3 text-xs">
-            Setup
-          </TabsTrigger>
-          <TabsTrigger value="versions" className="px-3 text-xs">
-            Versions
-            <span className="ml-1.5 text-fg-subtle">{current.versionCount}</span>
-          </TabsTrigger>
-          <TabsTrigger value="changes" className="px-3 text-xs">
-            Changes
-            {pendingChanges > 0 ? (
-              <span className="ml-1.5 rounded-full bg-status-waiting/15 px-1.5 text-2xs font-medium text-status-waiting">
-                {pendingChanges}
-              </span>
-            ) : null}
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="overview" className="mt-5">
-          <RigOverview
-            rig={current}
-            changes={changes.changes}
-            variableSetName={variableSetName}
-            canUse={canView}
-            mutating={rig.mutating}
-            onVerify={rig.verify}
+  return frame(
+    <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
+      <LineTabs value={tab} onValueChange={(value) => setTab(value as Tab)}>
+        <DetailPageHeader
+          leading={<LogoTile icon={<ContainerIcon />} />}
+          title={current.name}
+          chips={
+            <>
+              {isDefaultRig ? (
+                <MetaChip title="New sessions in this workspace use it">Default</MetaChip>
+              ) : null}
+              {current.scope !== "workspace" ? <RigScopeChip scope={current.scope} /> : null}
+            </>
+          }
+          meta={[
+            <span key="version">{active ? `Version ${active.version}` : "No active version"}</span>,
+            active ? <span key="health">{health.label.toLocaleLowerCase()}</span> : null,
+            <span key="updated">
+              updated <RelativeTime date={current.updatedAt} inSentence />
+            </span>,
+          ]}
+          actions={
+            <>
+              {active ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => openRig({ view: "edit-setup" })}
+                  className="rounded-[10px] pointer-coarse:h-11"
+                >
+                  <PencilIcon aria-hidden="true" />
+                  Edit setup
+                </Button>
+              ) : null}
+              {canManage ? (
+                <MoreMenu label={`More actions for ${current.name}`} disabled={rig.mutating}>
+                  <DropdownMenuItem onSelect={() => void toggleDefault()}>
+                    {isDefaultRig ? (
+                      <StarOffIcon aria-hidden="true" />
+                    ) : (
+                      <StarIcon aria-hidden="true" />
+                    )}
+                    {isDefaultRig ? "Stop using as default" : "Use for new sessions"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => openRig({ view: "edit" })}>
+                    <PencilIcon aria-hidden="true" />
+                    Edit details
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
+                    <Trash2Icon aria-hidden="true" />
+                    Delete environment
+                  </DropdownMenuItem>
+                </MoreMenu>
+              ) : null}
+            </>
+          }
+          tabs={
+            <LineTabsList aria-label={`${current.name} sections`}>
+              <LineTabsTrigger value="overview">Overview</LineTabsTrigger>
+              <LineTabsTrigger value="versions" count={current.versionCount}>
+                Versions
+              </LineTabsTrigger>
+              <LineTabsTrigger
+                value="changes"
+                count={pendingChanges > 0 ? pendingChanges : undefined}
+                countTone="attention"
+                countLabel={pendingChanges > 0 ? `${pendingChanges} waiting for review` : undefined}
+              >
+                Changes
+              </LineTabsTrigger>
+            </LineTabsList>
+          }
+        />
+        {rig.mutationError ? (
+          <ErrorMessage
+            variant="inline"
+            announce
+            className="mt-6"
+            title={errorParts(rig.mutationError).message}
+            action={
+              <Button type="button" variant="ghost" size="xs" onClick={rig.clearMutationError}>
+                Dismiss
+              </Button>
+            }
           />
-        </TabsContent>
+        ) : null}
+        <DetailPageBody aside={aside}>
+          <div className="min-w-0">
+            <LineTabsContent value="overview">
+              <div className="flex min-w-0 flex-col [&>*+*]:border-t [&>*+*]:border-border">
+                <RigOverview
+                  rig={current}
+                  changes={changes.changes}
+                  variableSetName={variableSetName}
+                  canUse={canView}
+                  mutating={rig.mutating}
+                  onVerify={rig.verify}
+                  onOpenVariableSet={(id) =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/variable-sets/$variableSetId",
+                      params: { workspaceId, variableSetId: id },
+                    })
+                  }
+                />
+              </div>
+            </LineTabsContent>
+            <LineTabsContent value="versions">
+              <DetailSection>
+                <p className="mb-4 text-sm leading-5 text-fg-muted">
+                  Every promoted change becomes a version. New sessions start from the active one.
+                </p>
+                {versions.error && versions.versions.length === 0 ? (
+                  <LoadFailure
+                    title="Couldn't load versions"
+                    error={versions.error}
+                    onRetry={() => void versions.refresh()}
+                  />
+                ) : (
+                  <RigVersionsTimeline
+                    versions={versions.versions}
+                    activeVersionId={active?.id ?? null}
+                    variableSetName={variableSetName}
+                    canManage={canManage}
+                    mutating={rig.mutating}
+                    onActivate={async (versionId) => {
+                      const result = await rig.activateVersion(versionId);
+                      await versions.refresh();
+                      return result;
+                    }}
+                  />
+                )}
+              </DetailSection>
+            </LineTabsContent>
+            <LineTabsContent value="changes">
+              <DetailSection>
+                <p className="mb-4 text-sm leading-5 text-fg-muted">
+                  Proposed changes are checked in a clean sandbox before they merge.
+                </p>
+                {changes.error && changes.changes.length === 0 ? (
+                  <LoadFailure
+                    title="Couldn't load changes"
+                    error={changes.error}
+                    onRetry={() => void changes.refresh()}
+                  />
+                ) : (
+                  <RigChangesQueue
+                    changes={changes.changes}
+                    versionLabel={versionLabel}
+                    canManage={canManage}
+                    mutating={rig.mutating}
+                    onVerify={async (changeId) => {
+                      const result = await rig.verifyChange(changeId);
+                      await changes.refresh();
+                      return result;
+                    }}
+                    onPromote={async (changeId) => {
+                      const result = await rig.promoteChange(changeId);
+                      await Promise.all([versions.refresh(), changes.refresh()]);
+                      return result;
+                    }}
+                  />
+                )}
+              </DetailSection>
+            </LineTabsContent>
+          </div>
+        </DetailPageBody>
+      </LineTabs>
 
-        <TabsContent value="setup" className="mt-5">
-          <RigSetupSection
-            activeVersion={active}
-            rigScope={current.scope}
-            variableSets={variableSets.variableSets}
-            canPropose={canView}
-            mutating={rig.mutating}
-            onPropose={async (request) => {
-              const result = await rig.proposeChange(request);
-              await changes.refresh();
-              return result;
-            }}
-            onProposed={() => setTab("changes")}
-          />
-        </TabsContent>
-
-        <TabsContent value="versions" className="mt-5">
-          {versions.error && versions.versions.length === 0 ? (
-            <LoadErrorState
-              title="Couldn't load versions"
-              error={versions.error}
-              onRetry={() => void versions.refresh()}
-            />
-          ) : (
-            <RigVersionsTimeline
-              versions={versions.versions}
-              activeVersionId={active?.id ?? null}
-              variableSetName={variableSetName}
-              canManage={canManage}
-              mutating={rig.mutating}
-              onActivate={async (versionId) => {
-                const result = await rig.activateVersion(versionId);
-                await versions.refresh();
-                return result;
-              }}
-            />
-          )}
-        </TabsContent>
-
-        <TabsContent value="changes" className="mt-5">
-          {changes.error && changes.changes.length === 0 ? (
-            <LoadErrorState
-              title="Couldn't load changes"
-              error={changes.error}
-              onRetry={() => void changes.refresh()}
-            />
-          ) : (
-            <RigChangesQueue
-              changes={changes.changes}
-              versionLabel={versionLabel}
-              canManage={canManage}
-              mutating={rig.mutating}
-              onVerify={async (changeId) => {
-                const result = await rig.verifyChange(changeId);
-                await changes.refresh();
-                return result;
-              }}
-              onPromote={async (changeId) => {
-                const result = await rig.promoteChange(changeId);
-                await Promise.all([versions.refresh(), changes.refresh()]);
-                return result;
-              }}
-            />
-          )}
-        </TabsContent>
-      </Tabs>
-
-      <ConfirmDialog
+      <DestructiveConfirm
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
-        title={`Delete sandbox environment “${current.name}”?`}
-        description="Its versions and change history are removed. Sessions already running keep the version they materialized. This can't be undone."
-        confirmLabel="Delete sandbox environment"
+        title={`Delete ${current.name}?`}
+        consequences={[
+          `Its ${current.versionCount === 1 ? "version" : `${current.versionCount} versions`} and change history go with it.`,
+          ...(isDefaultRig
+            ? ["New sessions in this workspace stop using a default environment."]
+            : []),
+          "Sessions already running keep the version they started with.",
+          "This can't be undone.",
+        ]}
+        confirmLabel="Delete environment"
+        pendingLabel="Deleting…"
         onConfirm={async () => {
-          const removed = await rig.remove();
-          if (removed) {
-            toast.success("Sandbox Environment deleted");
-            void navigate({ to: "/workspaces/$workspaceId/rigs", params: { workspaceId } });
+          try {
+            await client.deleteRig(workspaceId, current.id);
+          } catch (error) {
+            throw userFacingError(error);
           }
-          return removed;
+          toast.success(`Deleted ${current.name}`);
+          openList();
         }}
       />
-    </Shell>
+    </DetailPage>,
   );
 }
 
-function Shell({ workspaceId, children }: { workspaceId: string; children: React.ReactNode }) {
-  return (
-    <ContentPage width="standard">
-      <Link
-        to="/workspaces/$workspaceId/rigs"
-        params={{ workspaceId }}
-        className="inline-flex w-fit items-center gap-1.5 text-xs font-medium text-fg-muted transition-colors hover:text-fg"
-      >
-        <ArrowLeftIcon className="size-3.5" />
-        Sandbox Environments
-      </Link>
-      {children}
-    </ContentPage>
-  );
-}
-
-function RenameForm({
+function EditRigDetailsPage({
   rig,
-  mutating,
+  onClose,
   onSave,
-  onCancel,
 }: {
-  rig: { name: string; description: string | null };
-  mutating: boolean;
-  onSave: (patch: { name?: string; description?: string | null }) => Promise<unknown>;
-  onCancel: () => void;
+  rig: Rig;
+  onClose: () => void;
+  onSave: (patch: { name: string; description: string | null }) => Promise<void>;
 }) {
   const [name, setName] = useState(rig.name);
   const [description, setDescription] = useState(rig.description ?? "");
+  const [tried, setTried] = useState(false);
+  const trimmed = name.trim();
+  const changed = trimmed !== rig.name || description.trim() !== (rig.description ?? "");
   return (
-    <div className="grid max-w-xl gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-      <div className="grid gap-2">
-        <Input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          aria-label="Sandbox Environment name"
-          className="h-9"
-          autoFocus
-        />
-        <Input
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          placeholder="Description"
-          aria-label="Sandbox Environment description"
-          className="h-9"
-        />
-      </div>
-      <div className="flex items-start gap-1.5">
-        <Button type="button" variant="ghost" size="sm" className="h-9" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          className="h-9"
-          disabled={mutating || !name.trim()}
-          onClick={() =>
-            void onSave({
-              name: name.trim() || rig.name,
-              description: description.trim() ? description.trim() : null,
-            })
-          }
-        >
-          {mutating ? (
-            <Loader2Icon className="size-3.5 animate-spin" />
-          ) : (
-            <CheckIcon className="size-3.5" />
-          )}
-          Save
-        </Button>
-      </div>
-    </div>
+    <FlushFormPage
+      backLabel={rig.name}
+      onClose={onClose}
+      title="Edit details"
+      description={`The name and description of ${rig.name}.`}
+      submitLabel="Save changes"
+      pendingLabel="Saving…"
+      submitDisabled={!changed}
+      onSubmit={async () => {
+        setTried(true);
+        if (!trimmed) return false;
+        await onSave({
+          name: trimmed,
+          description: description.trim() ? description.trim() : null,
+        });
+        return true;
+      }}
+    >
+      <FieldStack>
+        <Field label="Name" error={tried && !trimmed ? "Name the environment." : undefined}>
+          <TextInput
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            suppressAutofill
+            autoComplete="off"
+          />
+        </Field>
+        <Field label="Description" optional hint="One line on what it's for.">
+          <TextInput
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            autoComplete="off"
+          />
+        </Field>
+      </FieldStack>
+    </FlushFormPage>
   );
 }

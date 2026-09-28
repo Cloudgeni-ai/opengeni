@@ -545,6 +545,15 @@ export async function assertExactNewSessionDraftInTransaction(
   await lockExactNewSessionDraft(db, input);
 }
 
+async function workspaceHasDefaultRig(db: Database, workspaceId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ defaultRigId: schema.workspaces.defaultRigId })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  return Boolean(row?.defaultRigId);
+}
+
 /**
  * Replace one exact accepted draft with the next-create safe seed. The row is
  * identity-serialized before the revision check so even the absent-row
@@ -581,6 +590,15 @@ export async function seedNewSessionDraftInTransaction(
   const selectedProjectChannelId = input.acceptedSelection
     ? input.acceptedSelection.channelId
     : newSessionDraftSelectedProjectChannelId(current);
+  // A Sandbox Environment choice replaces the workspace default and the
+  // default Variable Sets it carries. When the workspace has a default, that
+  // choice covers only the session it was made for: the next form starts on
+  // the workspace default again. Without a default nothing is replaced, so the
+  // choice is remembered like any other selection.
+  const rememberRig =
+    typeof options.rigId === "string" &&
+    options.rigId.length > 0 &&
+    !(await workspaceHasDefaultRig(db, input.workspaceId));
   const safeOptions: NewSessionDraftOptionsValue = {
     ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
     ...(targetSandboxId ? { targetSandboxId } : {}),
@@ -593,7 +611,7 @@ export async function seedNewSessionDraftInTransaction(
           variableSetId: options.variableSetIds[options.variableSetIds.length - 1],
         }
       : {}),
-    ...(options.rigId ? { rigId: options.rigId } : {}),
+    ...(rememberRig ? { rigId: options.rigId } : {}),
   };
   const resources = (Array.isArray(current.resources) ? current.resources : []).flatMap((raw) => {
     if (!raw || typeof raw !== "object" || (raw as { kind?: unknown }).kind !== "repository") {

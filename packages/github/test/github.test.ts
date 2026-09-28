@@ -763,6 +763,49 @@ describe("GitHub App installation repository lookup", () => {
     }
   });
 
+  test("reports archived and size only when GitHub reported them", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json(
+          { token: "ghs_lookup", expires_at: "2026-07-14T11:00:00Z" },
+          { status: 201 },
+        );
+      }
+      const base = {
+        private: true,
+        default_branch: "main",
+        owner: { login: "acme", type: "Organization" },
+      };
+      if (url.endsWith("/repos/acme/empty")) {
+        return Response.json({
+          ...base,
+          id: 1,
+          full_name: "acme/empty",
+          name: "empty",
+          archived: true,
+          size: 0,
+        });
+      }
+      if (url.endsWith("/repos/acme/bare")) {
+        return Response.json({ ...base, id: 2, full_name: "acme/bare", name: "bare" });
+      }
+      return Response.json({ message: "Not Found" }, { status: 404 });
+    }) as typeof fetch;
+    try {
+      const lookup = createGitHubAppInstallationRepositoryLookup(signingSettings());
+      await expect(
+        lookup({ installationId: 123, owner: "acme", name: "empty" }),
+      ).resolves.toMatchObject({ archived: true, sizeKb: 0 });
+      const bare = await lookup({ installationId: 123, owner: "acme", name: "bare" });
+      expect(bare).not.toHaveProperty("archived");
+      expect(bare).not.toHaveProperty("sizeKb");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("lists a bounded branch page with one exact repository-scoped token", async () => {
     const requests: Array<{
       method: string;

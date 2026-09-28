@@ -15,15 +15,15 @@ afterAll(() => {
 });
 
 describe("Rigs access scope", () => {
-  test("uses Sandbox Environment terminology in the permission state", async () => {
+  test("uses sandbox environment terminology in the permission state", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
     try {
       await act(async () => root.render(<PermissionDenied />));
       expect(container.textContent).toContain("You don't have access to sandbox environments");
-      expect(container.textContent).toContain("Sandbox Environments");
-      expect(container.textContent).not.toMatch(/\brigs?\b/i);
+      expect(container.textContent).toContain("Sandbox environments permission");
+      expect(container.textContent).not.toMatch(/\b(rigs?|machines?)\b/i);
     } finally {
       await act(async () => root.unmount());
       container.remove();

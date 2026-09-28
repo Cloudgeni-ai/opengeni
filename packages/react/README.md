@@ -903,6 +903,12 @@ remaining built-ins in supplied order. Duplicate IDs keep their first
 definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
 
+`turnSummary={{ rolling: true }}` selects the compact progress presentation the
+web app uses: each stretch of work folds behind one live status row, and every
+answer stays a visible message, including an answer that later
+machine-triggered turns follow. See
+[`docs/design/genie-loading.md`](../../docs/design/genie-loading.md).
+
 ## Sandbox surfacing
 
 An opt-in workbench that surfaces a session's live sandbox — files, terminal,

@@ -17,14 +17,19 @@ export function shortAccountId(accountId: string): string {
   return accountId.length > 8 ? accountId.slice(0, 8) : accountId;
 }
 
-/** Human label for an organization: the grant's subjectLabel, else a short id. */
-export function orgLabel(accountId: string, grants: AccountGrant[]): string {
+/** The organization's real name, or null when the API sent none. */
+export function orgName(accountId: string, grants: AccountGrant[]): string | null {
   const grant = grants.find((candidate) => candidate.accountId === accountId);
   const label =
     grant?.metadata && typeof grant.metadata.accountName === "string"
       ? grant.metadata.accountName
       : undefined;
-  return label?.trim() || `Org ${shortAccountId(accountId)}`;
+  return label?.trim() || null;
+}
+
+/** Human label for an organization: the grant's subjectLabel, else a short id. */
+export function orgLabel(accountId: string, grants: AccountGrant[]): string {
+  return orgName(accountId, grants) ?? `Org ${shortAccountId(accountId)}`;
 }
 
 /**

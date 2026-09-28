@@ -60,6 +60,7 @@ import {
   type AttemptToolScope,
 } from "@opengeni/codemode";
 import {
+  ToolGatewayInputValidationError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -2555,21 +2556,32 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * `isError`, cross the SDK through `callToolResult` plus
  * `McpResultCustomDataBridge`; their complete exact result is retained
  * separately from this compatibility fallback.
+ *
+ * A gateway argument-validation rejection is not a transient failure: the
+ * identical call would be rejected again. It names the missing or mistyped
+ * properties and asks the model to correct them instead of "Please try again".
  */
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = exactErrorMessage(error);
-  return {
-    isError: true,
-    content: [
-      {
-        type: "text",
-        text: `An error occurred while running the tool. Please try again. Error: ${details}`,
-      },
-    ],
-  };
+  const text =
+    invalidToolArgumentsText(error) ??
+    `An error occurred while running the tool. Please try again. Error: ${exactErrorMessage(error)}`;
+  return { isError: true, content: [{ type: "text", text }] };
+}
+
+function invalidToolArgumentsText(error: unknown): string | null {
+  try {
+    if (!(error instanceof ToolGatewayInputValidationError)) return null;
+    // The gateway rejects before authorization or execution, so nothing ran.
+    const summary = error.summary;
+    return summary
+      ? `The tool was not called because its arguments do not match the tool's input schema: ${summary}. Correct the named properties and call the tool again.`
+      : "The tool was not called because its arguments do not match the tool's input schema. Correct the arguments to match the schema and call the tool again.";
+  } catch {
+    return null;
+  }
 }
 
 // Applied to EVERY MCP server via the agent's `mcpConfig.errorFunction`
@@ -9932,6 +9944,9 @@ export function repositoryUsesSandboxClone(
     return false;
   }
   return (
+    // A best-effort repository must go through the clone hook: the SDK's
+    // manifest materialization has no per-entry failure tolerance.
+    resource.optional === true ||
     settings.sandboxBackend === "modal" ||
     Boolean(resource.expectedCommitSha) ||
     Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
@@ -10856,6 +10871,8 @@ export async function refreshGitCredentialBindingTokenFiles(
   }
 }
 
+const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository resource ";
+
 export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
@@ -10984,6 +11001,23 @@ export function repositoryCloneCommand(
     '  clone_repository "$@" &',
     '  clone_pids="$clone_pids $!"',
     "}",
+    // A repository OpenGeni attached on the person's behalf is best effort: its
+    // clone runs in its own errexit subshell exactly like a required one, and a
+    // failure is reported as a warning while the job itself succeeds, so one
+    // empty, deleted or unreachable repository never fails the whole setup.
+    // The sixth argument is the workspace-relative mount path, for the report.
+    "start_optional_repository_clone() {",
+    "  (",
+    "    set +e",
+    '    ( set -e; clone_repository "$1" "$2" "$3" "$4" "$5" )',
+    "    clone_status=$?",
+    '    if [ "$clone_status" -ne 0 ]; then',
+    `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone exited with status $clone_status); the session continues without it" >&2`,
+    "    fi",
+    "    exit 0",
+    "  ) &",
+    '  clone_pids="$clone_pids $!"',
+    "}",
     "wait_repository_clone_batch() {",
     "  for clone_pid in $clone_pids; do",
     '    if ! wait "$clone_pid"; then',
@@ -10998,14 +11032,16 @@ export function repositoryCloneCommand(
   ];
   for (const [index, resource] of resources.entries()) {
     const mountPath = resourceMountPath(resource);
+    const optional = resource.optional === true;
     commands.push(
       [
-        "start_repository_clone",
+        optional ? "start_optional_repository_clone" : "start_repository_clone",
         shellQuote(posixPath.join("/workspace", mountPath)),
         shellQuote(resource.uri),
         shellQuote(resource.ref),
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
         shellQuote(resource.expectedCommitSha ?? ""),
+        ...(optional ? [shellQuote(mountPath)] : []),
       ].join(" "),
     );
     if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
@@ -11494,6 +11530,33 @@ export async function runRigSetupHook(
   });
 }
 
+/**
+ * The optional repositories the clone script reported as skipped, as their
+ * workspace-relative mount paths. Only this hook's own optional resources
+ * count, so repository output can never add an entry.
+ */
+function skippedOptionalRepositoryPaths(
+  output: string,
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+): string[] {
+  const optionalPaths = new Set(
+    resources
+      .filter((resource) => resource.optional === true)
+      .map((resource) => resourceMountPath(resource)),
+  );
+  if (optionalPaths.size === 0) return [];
+  const skipped = new Set<string>();
+  for (const line of output.split("\n")) {
+    const start = line.indexOf(SKIPPED_OPTIONAL_REPOSITORY_PREFIX);
+    if (start < 0) continue;
+    const rest = line.slice(start + SKIPPED_OPTIONAL_REPOSITORY_PREFIX.length);
+    for (const path of optionalPaths) {
+      if (rest.startsWith(`${path} (`)) skipped.add(path);
+    }
+  }
+  return [...skipped].sort();
+}
+
 export async function runRepositoryCloneHook(
   session: SandboxSessionLike,
   resources: Extract<ResourceRef, { kind: "repository" }>[],
@@ -11552,9 +11615,22 @@ export async function runRepositoryCloneHook(
       context.commandRunner,
     );
     assertSandboxCommandSucceeded(result, "Repository clone hook");
+    const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
+      sandboxCommandOutput(result),
+      resources,
+    );
+    if (skippedOptionalRepositories.length > 0) {
+      console.warn("[sandbox] optional repository resources were not cloned", {
+        skippedCount: skippedOptionalRepositories.length,
+        repositoryCount: resources.length,
+      });
+    }
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.completed",
-      payload,
+      payload: {
+        ...payload,
+        ...(skippedOptionalRepositories.length > 0 ? { skippedOptionalRepositories } : {}),
+      },
     });
   } catch (error) {
     await context.onRuntimeEvent?.({

@@ -120,6 +120,24 @@ function tokenRegistration(property: string) {
 }
 
 describe("compiled CSS contract", () => {
+  test("browser and computer surfaces only use shipped color utilities", async () => {
+    const shipped = new Set<string>();
+    parsed.walkRules((rule) => {
+      selectorParser((selectors) => {
+        selectors.walkClasses((node) => {
+          shipped.add(node.value);
+        });
+      }).processSync(rule.selector);
+    });
+    for (const name of ["browser-viewer", "computer-viewer"]) {
+      const source = await readFile(join(packageRoot, "src/components", name + ".tsx"), "utf8");
+      const colors =
+        source.match(
+          /(?:bg-og-(?:surface|bg)[\w-]*|text-og-(?:fg|muted|subtle|danger|status)[\w-]*)/g,
+        ) ?? [];
+      for (const utility of new Set(colors)) expect(shipped.has(utility), utility).toBe(true);
+    }
+  });
   test("keeps hidden SDK controls hidden despite display utilities", () => {
     let hidden = false;
     parsed.walkRules((rule) => {

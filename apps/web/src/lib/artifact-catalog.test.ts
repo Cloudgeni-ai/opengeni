@@ -2,12 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
   artifactKey,
+  artifactPath,
   artifactRoute,
   defaultArtifactFilters,
   filterArtifactCatalog,
-  readArtifactView,
-  rememberArtifactView,
 } from "./artifact-catalog";
+import { artifactExtension, readArtifactView, rememberArtifactView } from "./artifact-library-view";
 
 const item = (
   id: string,
@@ -66,25 +66,39 @@ describe("artifact catalog", () => {
       filterArtifactCatalog([older, items[1]!], { ...defaultArtifactFilters, sort: "newest" })[0],
     ).toBe(items[1]!);
   });
-  test("ignores unknown preferences and survives blocked browser storage", () => {
+  test("builds plain artifact URLs with the return-to-session search", () => {
+    expect(artifactPath("ws 1", { kind: "site", id: "a/b" })).toBe(
+      "/workspaces/ws%201/artifacts/a%2Fb",
+    );
+    expect(artifactPath("ws", { kind: "image", id: "i" }, "s1")).toBe(
+      "/workspaces/ws/artifacts/files/i?fromSession=s1",
+    );
+  });
+  test("defaults to the gallery, keeps List, and survives blocked browser storage", () => {
+    const saved = new Map<string, string>();
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
       value: {
-        getItem: () => "unsafe",
-        setItem: () => {
-          throw new Error("blocked");
-        },
+        getItem: (key: string) => saved.get(key) ?? null,
+        setItem: (key: string, value: string) => void saved.set(key, value),
       },
     });
-    expect(readArtifactView()).toBe("grid");
-    expect(() => rememberArtifactView("list")).not.toThrow();
+    expect(readArtifactView()).toBe("gallery");
+    rememberArtifactView("list");
+    expect(readArtifactView()).toBe("list");
+    saved.set("opengeni:artifact-library:view:v1", "unsafe");
+    expect(readArtifactView()).toBe("gallery");
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
       get: () => {
         throw new Error("blocked");
       },
     });
-    expect(readArtifactView()).toBe("grid");
-    expect(() => rememberArtifactView("grid")).not.toThrow();
+    expect(readArtifactView()).toBe("gallery");
+    expect(() => rememberArtifactView("list")).not.toThrow();
+  });
+  test("reads a file's extension for its placeholder", () => {
+    expect(artifactExtension({ title: "Export", filename: "Research export.CSV" })).toBe("csv");
+    expect(artifactExtension({ title: "Notes" })).toBeNull();
   });
 });

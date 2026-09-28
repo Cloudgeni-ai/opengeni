@@ -141,3 +141,15 @@ test("asks nothing of a viewer who cannot see schedules", async () => {
     await act(async () => root.unmount());
   }
 });
+
+test("an unexpected answer keeps the navigation rendering and shows no dot", async () => {
+  list.mockResolvedValueOnce(undefined as unknown as ScheduledTaskAccessAttention[]);
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Probe workspace="one" />));
+    expect(container.textContent).toBe("none");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

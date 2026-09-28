@@ -19,8 +19,9 @@ that a run could not use a connector.
 
 Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 `packages/db/src/scheduled-task-access.ts`, the routes in
-`apps/api/src/routes/scheduled-tasks.ts`, and the Schedules page
-(`apps/web/src/routes/schedules.tsx`).
+`apps/api/src/routes/scheduled-tasks.ts`, and the Schedules pages
+(`apps/web/src/components/schedules/`, with the notices in
+`schedule-access-notices.tsx`).
 
 ## One plan, two uses
 
@@ -110,10 +111,10 @@ the task already has, and an unknown tool name is refused (400).
 ## Keeping defaults off
 
 A person may deliberately leave a default connector or OpenGeni tool off a
-schedule, and drift would otherwise name it forever. The task card offers
+schedule, and drift would otherwise name it forever. The schedule's page offers
 "Keep without these" next to missing defaults. It records, in that browser, the
 missing connectors and OpenGeni tools for the task head the person looked at
-(its `executionDigest`); the card then hides them, and "Refresh access" sends
+(its `executionDigest`); the page then hides them, and "Refresh access" sends
 them as `leaveOut`, carrying the choice to the refreshed head. A new default
 that appears later is shown again, and editing the task any other way (a new
 head) is a fresh look. A chosen account that can no longer be used, a connector
@@ -170,11 +171,12 @@ in-app:
 - **Where the owner sees it.** A dot on the Schedules item in the navigation
   rail, shown until the owner opens Schedules (the "seen" marker is per
   browser; the durable truth stays on the server). A new failed run is a new
-  notice; so is a blocked account on a new task head. The task card shows a
-  "Needs attention" chip and a notice ("New runs of this schedule cannot start"
-  or "The last run could not use a connector"), and each run row shows its
-  failure text. The card offers "Refresh access" when the plan would change
-  something.
+  notice; so is a blocked account on a new task head. The schedule's row in
+  the list shows a "Needs attention" badge (or, for its owner, "Access out of
+  date" when only drift remains). The schedule's own page shows the notice
+  ("New runs of this schedule cannot start" or "The last run could not use a
+  connector"), and each run row shows its failure text. The page offers
+  "Refresh access" when the plan would change something.
 
 A proactive channel (email or a Slack message from the bot) would need its own
 durable delivery outbox and is not part of this change.

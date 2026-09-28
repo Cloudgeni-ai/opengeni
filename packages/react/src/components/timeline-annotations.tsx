@@ -118,6 +118,7 @@ export function TimelineAnnotationsChip({
   onRemove,
   onRevealSource,
   className,
+  onCommit,
 }: {
   annotations: readonly TimelineAnnotationLike[];
   editable?: boolean | undefined;
@@ -125,6 +126,8 @@ export function TimelineAnnotationsChip({
   onFocusConsumed?: (() => void) | undefined;
   onUpdate?: ((id: string, note: string) => void) | undefined;
   onRemove?: ((id: string) => void) | undefined;
+  /** Return focus to the owning input after all notes are completed with Enter. */
+  onCommit?: (() => void) | undefined;
   onRevealSource?: ((source: TimelineAnnotationSource) => boolean) | undefined;
   className?: string | undefined;
 }) {
@@ -206,6 +209,10 @@ export function TimelineAnnotationsChip({
               triggerRef={triggerRef}
               countLabel={countLabel}
               onDismiss={dismiss}
+              onCommit={() => {
+                dismiss(!onCommit);
+                onCommit?.();
+              }}
             />
           </Suspense>
         </AnnotationSourceRootBridge>

@@ -24,6 +24,7 @@ import {
 
 import { RailHeader } from "@/components/rail/rail-header";
 import { RailFooter } from "@/components/rail/rail-footer";
+import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { SessionHeader } from "@/components/rail/session-header";
 import {
   RAIL_DEFAULT_WIDTH,
@@ -345,6 +346,7 @@ export function RailShell({ children }: { children: ReactNode }) {
         {/* Main canvas. */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <CanvasTopStrip hamburgerRef={hamburgerRef} />
+          <WorkspacePausedBanner workspaceId={rail.workspaceId} />
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
         </div>
       </div>

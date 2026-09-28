@@ -973,7 +973,7 @@ export function FikenConnectorControls({
       className="mx-auto block text-xs font-medium text-brand hover:underline"
       onClick={() => setUsingToken(true)}
     >
-      Use a personal API token instead
+      Use an API token instead
     </button>
   );
 
@@ -1037,9 +1037,9 @@ export function FikenConnectorControls({
 
   return (
     <div className="space-y-3">
-      {oauthButton("Connect with Fiken", <PlugIcon />)}
+      {oauthButton("Connect Fiken", <PlugIcon />)}
       <p className="text-center text-xs text-fg-subtle">
-        Connect your own Fiken account. Workspace agents and automations can act through it.
+        Uses your Fiken account. Agents and automations in this workspace can use it.
       </p>
       {usingToken ? (
         <div className="space-y-3">
@@ -1132,7 +1132,7 @@ function humanizeSelection(value: string): string {
 // The labeled credential form, shared by first-time connect and reconnect. It
 // owns its own header state so it starts empty each time it mounts (a fresh
 // sheet, or the reveal on reconnect) — credentials are never prefilled.
-function CredentialForm({
+export function CredentialForm({
   fields,
   itemName,
   keyPageUrl,

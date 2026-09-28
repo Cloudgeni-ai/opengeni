@@ -220,6 +220,7 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
           ? { githubInstallationId: resource.githubInstallationId }
           : {}),
         ...(resource.githubRepositoryId ? { githubRepositoryId: resource.githubRepositoryId } : {}),
+        ...(resource.optional === true ? { optional: true } : {}),
       };
     }
     const key = stableJson(normalized);

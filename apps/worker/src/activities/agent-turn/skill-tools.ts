@@ -37,6 +37,7 @@ import {
   type SkillReadContent,
   type SkillReadObservation,
   type SkillReadOrigin,
+  unavailableSkillError,
 } from "./skill-read";
 import { createSkillSearchAttemptToolDefinition } from "./skill-search";
 import { createSkillSaveAttemptToolDefinition, type SkillSaveRequest } from "./skill-save";
@@ -101,7 +102,12 @@ export function createWorkspaceSkillTools(input: {
     if (!matches.length && selectedMatches.length === 1)
       return selectedSkillContent(selectedMatches[0]![0], selectedMatches[0]![1]);
     const match = matches[0];
-    if (!match) throw new Error("Skill is not available in this session.");
+    // skill_checkout resolves through this reader too, so both return the list.
+    if (!match)
+      throw unavailableSkillError(identifier, [
+        ...descriptors.map((entry) => ({ id: entry.id, name: entry.title })),
+        ...[...selected].map(([id, artifact]) => ({ id, name: artifact.name })),
+      ]);
     const record = await readSkill(input.db, context, match.id);
     if (
       !record ||
