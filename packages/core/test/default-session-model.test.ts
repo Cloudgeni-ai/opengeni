@@ -28,7 +28,7 @@ import {
 } from "@opengeni/testing";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import {
-  getActorNewSessionDefaults,
+  getActorNewSessionModelChoice,
   getActorNewSessionDraft,
   saveActorNewSessionDraft,
 } from "../src/application/new-session-drafts";
@@ -513,7 +513,7 @@ describe("server-side default model resolution", () => {
     });
     // Slack and other draft-reusing creates leave a followed model to the server.
     expect(
-      await getActorNewSessionDefaults(draftDeps, grant, grant.workspaceId),
+      await getActorNewSessionModelChoice(draftDeps, grant, grant.workspaceId),
     ).not.toHaveProperty("model");
 
     // A chosen model is never replaced.
@@ -535,7 +535,7 @@ describe("server-side default model resolution", () => {
       reasoningEffort: "medium",
       modelProvided: true,
     });
-    expect(await getActorNewSessionDefaults(draftDeps, grant, grant.workspaceId)).toMatchObject({
+    expect(await getActorNewSessionModelChoice(draftDeps, grant, grant.workspaceId)).toMatchObject({
       model: DEFAULT_OPENROUTER_MODEL_ID,
       reasoningEffort: "medium",
     });

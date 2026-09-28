@@ -20,7 +20,6 @@ import {
   publicNewSessionDraftOptions,
   requireFileForSubject,
   saveNewSessionDraftInTransaction,
-  reusableNewSessionRepositoryResource,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -408,49 +407,33 @@ export async function saveActorNewSessionDraft(
   return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
 }
 
-/** Reuse the website's actor/workspace selections without consuming its draft. */
-export async function getActorNewSessionDefaults(
+/**
+ * The model policy the person explicitly chose in the website composer, or an
+ * empty object when their draft follows the default.
+ *
+ * Only the model policy is reused. Connectors, repositories, Variable Sets,
+ * Sandbox Environment and compute target in the draft are the person's last
+ * explicit narrowing of one website chat, so surfaces that start work without
+ * the composer (Slack) resolve those from workspace defaults instead of
+ * silently inheriting that narrowing.
+ */
+export async function getActorNewSessionModelChoice(
   deps: Parameters<typeof getActorNewSessionDraft>[0],
   grant: AccessGrant,
   workspaceId: string,
-) {
-  // The model is reused only when the person chose it, so a draft that follows
-  // the default is not projected here; session creation resolves it once.
+): Promise<
+  Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode"> | Record<string, never>
+> {
+  // A draft that follows the default is not projected here; session creation
+  // resolves the default itself, once.
   const draft = await getActorNewSessionDraft(deps, grant, workspaceId, undefined, {
     projectDefaultModel: false,
   });
-  const options = draft.options;
-  return {
-    // Only a model the person chose is carried over. A draft that follows the
-    // default (including the synthetic revision-zero form) leaves the model
-    // out, so session creation resolves the same default itself.
-    ...(draft.revision > 0 && draft.modelProvided === true
-      ? {
-          model: draft.model,
-          reasoningEffort: draft.reasoningEffort,
-          latencyMode: draft.latencyMode,
-        }
-      : {}),
-    resources: draft.resources.flatMap((resource) =>
-      resource.kind === "repository" ? [reusableNewSessionRepositoryResource(resource)] : [],
-    ),
-    ...(draft.toolsProvided
-      ? { tools: draft.tools }
-      : options.excludedMcpServerIds
-        ? { excludedMcpServerIds: options.excludedMcpServerIds }
-        : {}),
-    ...(options.firstPartyMcpTools ? { firstPartyMcpTools: options.firstPartyMcpTools } : {}),
-    ...(options.firstPartyMcpPermissions
-      ? { firstPartyMcpPermissions: options.firstPartyMcpPermissions }
-      : {}),
-    ...(options.variableSetIds ? { variableSetIds: options.variableSetIds } : {}),
-    ...(options.rigId ? { rigId: options.rigId } : {}),
-    ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
-    ...(options.targetSandboxId
-      ? {
-          targetSandboxId: options.targetSandboxId,
-          ...(options.workingDir ? { workingDir: options.workingDir } : {}),
-        }
-      : {}),
-  };
+  return draft.revision > 0 && draft.modelProvided === true
+    ? {
+        model: draft.model,
+        reasoningEffort: draft.reasoningEffort,
+        latencyMode: draft.latencyMode,
+      }
+    : {};
 }

@@ -2986,6 +2986,12 @@ export const slackInteractions = pgTable(
     // byte-compare raise `post_reconciliation_mismatch`. NULL means no
     // per-message workspace line.
     routedWorkspaceLabel: text("routed_workspace_label"),
+    // What the bound session started with (connectors, repositories, Sandbox
+    // Environment), rendered once when the session binds and shown in the
+    // acknowledgement. Frozen for the same byte-compare reason as the label
+    // above: the session's tools and resources can change after creation.
+    // NULL means no line (bound by an older image, or never bound).
+    sessionDefaultsLine: text("session_defaults_line"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()

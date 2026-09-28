@@ -26,7 +26,7 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import { createSessionForRequest } from "../src/domain/sessions";
 import {
   getActorNewSessionDraft,
-  getActorNewSessionDefaults,
+  getActorNewSessionModelChoice,
   saveActorNewSessionDraft,
 } from "../src/application/new-session-drafts";
 
@@ -331,20 +331,21 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");
     expect(hydrated.latencyMode).toBe("fast");
-    const defaults = await getActorNewSessionDefaults({ db, settings }, grant, workspaceId);
-    expect(defaults).toEqual({
-      resources: [resources[0], resources[2]],
-      tools: [mcp("opengeni")],
+    // Only the chosen model policy is reused by surfaces that start work
+    // without the composer; the draft's resources and tools are its own
+    // narrowing and never leak into them.
+    const choice = await getActorNewSessionModelChoice({ db, settings }, grant, workspaceId);
+    expect(choice).toEqual({
       model: "scripted-model",
       reasoningEffort: "high",
       latencyMode: "fast",
     });
-    const other = await getActorNewSessionDefaults(
+    const other = await getActorNewSessionModelChoice(
       { db, settings },
       { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
       workspaceId,
     );
-    expect(other).toEqual({ resources: [] });
+    expect(other).toEqual({});
   }, 180_000);
 });
 

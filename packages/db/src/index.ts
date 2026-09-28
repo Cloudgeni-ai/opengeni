@@ -627,6 +627,7 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
+export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -11570,6 +11571,12 @@ export type SlackInteraction = {
    * make the ledger's byte comparison raise.
    */
   routedWorkspaceLabel: string | null;
+  /**
+   * One line naming what the bound session started with, frozen when the
+   * session bound so an acknowledgement repair renders the same bytes. Null
+   * means no line.
+   */
+  sessionDefaultsLine: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -12189,6 +12196,8 @@ export async function getOrCreateSlackInteraction(
     // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
     | "firstTaskHint"
     | "routedWorkspaceLabel"
+    // Owned by `bindSlackInteractionSession`, frozen with the bound session.
+    | "sessionDefaultsLine"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -12660,12 +12669,21 @@ export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
     sessionId: string;
+    /**
+     * Written only by the bind that wins; a replayed bind of the same session
+     * returns the line the first bind froze and never rewrites it.
+     */
+    sessionDefaultsLine?: string | null;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.slackInteractions)
-      .set({ sessionId: input.sessionId, updatedAt: sql`now()` })
+      .set({
+        sessionId: input.sessionId,
+        sessionDefaultsLine: input.sessionDefaultsLine ?? null,
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(schema.slackInteractions.id, input.id),
@@ -13197,6 +13215,11 @@ function mapSlackInteraction(
       row,
       "routedWorkspaceLabel",
       "routed_workspace_label",
+    ),
+    sessionDefaultsLine: slackRowNullableString(
+      row,
+      "sessionDefaultsLine",
+      "session_defaults_line",
     ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
@@ -34429,6 +34452,52 @@ export async function getSessionTurnMcpAccountBindings(
     async (scopedDb) =>
       await mcpAccountBindingsForTurnInTransaction(scopedDb, workspaceId, sessionId, turnId),
   );
+}
+
+/**
+ * The connector authority frozen on a session's first accepted turn: its exact
+ * MCP account bindings and personal connection delegations. For display only
+ * (Slack's "Using" line names just the connectors this snapshot can reach);
+ * runtime authority keeps reading the claimed turn itself. Null when the
+ * session has no turn yet.
+ */
+export async function getSessionFirstTurnConnectionAuthority(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        id: schema.sessionTurns.id,
+        bindings: schema.sessionTurns.mcpAccountBindings,
+        delegations: schema.sessionTurns.personalConnectionDelegations,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+        ),
+      )
+      .orderBy(
+        asc(schema.sessionTurns.position),
+        asc(schema.sessionTurns.createdAt),
+        asc(schema.sessionTurns.id),
+      )
+      .limit(1);
+    if (!row) return null;
+    return {
+      mcpAccountBindings: parseAcceptedMcpAccountBindings(row.bindings),
+      personalConnectionDelegations: parsedPersonalConnectionDelegations(
+        row.delegations,
+        `session_turns:${workspaceId}:${sessionId}:${row.id}`,
+      ),
+    };
+  });
 }
 
 export async function getSessionParentMcpAccountBindings(

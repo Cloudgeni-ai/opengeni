@@ -570,6 +570,12 @@ export type RepositoryResourceRef = {
   connectionId?: string | undefined;
   githubInstallationId?: number | undefined;
   githubRepositoryId?: number | undefined;
+  /**
+   * Best-effort materialization: a failed clone logs a warning and the
+   * session continues without this repository instead of failing sandbox
+   * setup. Omit it to keep a failed clone fatal.
+   */
+  optional?: boolean | undefined;
 };
 
 /** Value mirror of `@opengeni/contracts`; parity-tested without importing it from ordinary SDK entries. */
@@ -7358,6 +7364,10 @@ export type GitHubRepository = {
   defaultBranch: string;
   accountLogin: string;
   accountType: string | null;
+  /** GitHub's archived flag, when the provider reported it. */
+  archived?: boolean | undefined;
+  /** GitHub's reported size in kilobytes, when reported. Zero means empty. */
+  sizeKb?: number | undefined;
 };
 
 export type GitHubRepositoryScope = "all" | "selected";

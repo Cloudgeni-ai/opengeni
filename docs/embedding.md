@@ -534,6 +534,19 @@ provider therefore requires choosing its path semantics rather than silently
 inheriting GitHub behavior. Mount-path and display-name derivation are separate
 from the clone transport URI.
 
+A repository resource may carry `optional: true` to make its materialization
+best effort: when its clone fails (for example the repository is empty, the
+ref no longer exists, or an anonymous remote is unreachable), the clone hook logs a warning, reports the
+mount path in `skippedOptionalRepositories` on the `repository-clone`
+`sandbox.operation.completed` event, and the session continues without it.
+Without the flag a failed clone fails sandbox setup, as before. OpenGeni sets
+it only on repositories it attaches on a person's behalf (a Slack task's
+recently used repositories); it grants no access and changes no credential
+routing. The flag covers the clone step only: the per-turn GitHub App
+authorization and installation-token mint that run before it stay strict, so a
+GitHub App repository the workspace no longer authorizes, or one the
+installation can no longer reach, still fails the turn.
+
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
 an existing warm workspace path should persist the session's former effective

@@ -26,7 +26,6 @@ import {
   compactSessionMcpListRow,
   sessionMcpIncludesRelatedWork,
   FIRST_PARTY_MCP_TOOL_NAMES,
-  defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventLatestClass,
   SessionEventPayloadMode,
@@ -199,6 +198,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
+  githubRepositoryResourceRef,
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
@@ -6527,25 +6527,7 @@ function requireVariableSetsUseForMcpAttachments(
 export function repositoryWithScheduledTaskResource(
   repository: GitHubRepository,
 ): GitHubRepository & { resource: ResourceRef } {
-  const uri = normalizedRepositoryUri(repository.cloneUrl);
-  return {
-    ...repository,
-    resource: {
-      kind: "repository",
-      uri,
-      ref: repository.defaultBranch,
-      provider: "github",
-      mountPath: defaultRepositoryMountPath(uri, "github"),
-      githubInstallationId: repository.installationId,
-      githubRepositoryId: repository.id,
-    },
-  };
-}
-
-function normalizedRepositoryUri(value: string): string {
-  const url = new URL(value);
-  const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-  return `https://${url.host.toLowerCase()}/${path}.git`;
+  return { ...repository, resource: githubRepositoryResourceRef(repository) };
 }
 
 function boundedMcpLimit(limit: number | undefined): number {
