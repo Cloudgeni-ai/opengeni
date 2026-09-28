@@ -426,6 +426,10 @@ export function VariableSetsRoute({
               : undefined
         }
         dependencies={inUse && usage ? confirmDependencies(usage.entries) : undefined}
+        onOpenDependency={(dependency) => {
+          setDeletingSet(false);
+          void navigate({ href: dependency.href });
+        }}
         consequences={
           set
             ? [

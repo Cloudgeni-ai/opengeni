@@ -115,6 +115,44 @@ describe("DestructiveConfirmPanel", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  test("a dependency link opens in the app when the caller routes it", async () => {
+    const open = mock();
+    await act(async () =>
+      root.render(
+        <DestructiveConfirmPanel
+          variant="blocked"
+          title="AWS production is in use"
+          dependencies={[
+            {
+              id: "sched-aws-cost",
+              kind: "schedule",
+              kindLabel: "Schedule",
+              name: "Check AWS cost anomalies",
+              href: "/schedules?schedule=sched-aws-cost",
+            },
+          ]}
+          onOpenDependency={open}
+        />,
+      ),
+    );
+    const link = container.querySelector("a")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    await act(async () => link.dispatchEvent(click));
+    expect(click.defaultPrevented).toBe(true);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open.mock.calls[0]?.[0]).toMatchObject({ href: "/schedules?schedule=sched-aws-cost" });
+    // A modified click keeps the browser default (new tab).
+    const newTab = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      metaKey: true,
+    });
+    await act(async () => link.dispatchEvent(newTab));
+    expect(newTab.defaultPrevented).toBe(false);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
   test("consequences render as a list and the primary is destructive", async () => {
     await act(async () =>
       root.render(

@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquareIcon, RefreshCwIcon } from "lucide-react";
 import type { SessionListResponse } from "@opengeni/sdk";
@@ -157,8 +158,9 @@ export function SiteConversationsPanel({
           <ul className="space-y-1">
             {sessions.map((session) => (
               <li key={session.id}>
-                <a
-                  href={`/workspaces/${workspaceId}/sessions/${session.id}`}
+                <Link
+                  to="/workspaces/$workspaceId/sessions/$sessionId"
+                  params={{ workspaceId, sessionId: session.id }}
                   className="flex items-center justify-between gap-3 rounded-lg px-3 py-3 hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent"
                 >
                   <span className="min-w-0 truncate text-sm">{sessionDisplayTitle(session)}</span>
@@ -168,7 +170,7 @@ export function SiteConversationsPanel({
                   >
                     {sessionStateLabel(session)}
                   </span>
-                </a>
+                </Link>
               </li>
             ))}
           </ul>

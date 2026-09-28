@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { destructiveActionFocusTarget } from "@/components/ui/confirm-dialog";
 import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog, FormFrame, type FormFrameProps } from "@/components/ui/form-dialog";
+import { inAppClick } from "@/lib/in-app-click";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -78,6 +79,11 @@ export interface DestructiveConfirmContentProps {
   dependencies?: ConfirmDependency[];
   /** Heading over the dependencies. Default "Used by". */
   dependenciesTitle?: ReactNode;
+  /**
+   * Opens a dependency's page in the app (the router). Without it a plain
+   * click on a dependency link is a full page load.
+   */
+  onOpenDependency?: (dependency: ConfirmDependency & { href: string }) => void;
   /** The exact name to type ("type-to-confirm"). */
   confirmText?: string;
   /** Neutral placeholder for the typed name; never the name itself. */
@@ -109,9 +115,11 @@ export function confirmTextMatches(typed: string, expected: string): boolean {
 function DependencyList({
   title,
   dependencies,
+  onOpenDependency,
 }: {
   title: ReactNode;
   dependencies: ConfirmDependency[];
+  onOpenDependency?: DestructiveConfirmContentProps["onOpenDependency"];
 }) {
   const headingId = useId();
   return (
@@ -150,6 +158,13 @@ function DependencyList({
               {dependency.href ? (
                 <a
                   href={dependency.href}
+                  onClick={
+                    onOpenDependency
+                      ? inAppClick(() =>
+                          onOpenDependency({ ...dependency, href: dependency.href! }),
+                        )
+                      : undefined
+                  }
                   className="group flex min-w-0 items-center gap-3 rounded-md px-2 py-2 transition-colors duration-[120ms] hover:bg-surface-2 pointer-coarse:min-h-11"
                 >
                   {content}
@@ -173,6 +188,7 @@ function useDestructiveFrame({
   consequences = [],
   dependencies = [],
   dependenciesTitle = "Used by",
+  onOpenDependency,
   confirmText = "",
   confirmPlaceholder = "Type the name",
   confirmLabel = "Delete",
@@ -216,7 +232,11 @@ function useDestructiveFrame({
         </ul>
       ) : null}
       {dependencies.length > 0 ? (
-        <DependencyList title={dependenciesTitle} dependencies={dependencies} />
+        <DependencyList
+          title={dependenciesTitle}
+          dependencies={dependencies}
+          onOpenDependency={onOpenDependency}
+        />
       ) : null}
       {needsTyping ? (
         <Field

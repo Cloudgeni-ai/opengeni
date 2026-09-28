@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 /**
  * New schedule, Edit schedule and Duplicate: one full page with a back link
  * and a sticky footer. What (a composer-style field with chips) -> When (the
@@ -721,9 +722,9 @@ function AgentScheduleForm({
             actionLayout="responsive"
             action={
               <Button asChild variant="outline" size="sm" className="pointer-coarse:h-11">
-                <a href={`/workspaces/${encodeURIComponent(workspaceId)}/machines`}>
+                <Link to="/workspaces/$workspaceId/machines" params={{ workspaceId }}>
                   Connect a machine
-                </a>
+                </Link>
               </Button>
             }
           >
