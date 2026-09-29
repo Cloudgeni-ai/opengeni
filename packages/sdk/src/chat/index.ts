@@ -2,7 +2,14 @@
 // a product's own chat endpoint, and protocol adapters (native SSE, Vercel AI
 // SDK UI message stream, OpenAI Chat Completions and Responses).
 
-export { Chat, DEFAULT_CHAT_SOURCE, DEFAULT_OPENGENI_BASE_URL, OpenGeni } from "./opengeni";
+export {
+  Chat,
+  DEFAULT_CHAT_SOURCE,
+  DEFAULT_OPENGENI_BASE_URL,
+  IMPORTED_HISTORY_MAX_CHARS,
+  OpenGeni,
+  formatImportedHistory,
+} from "./opengeni";
 export {
   OpenGeniChatError,
   type ChatAgentAccess,

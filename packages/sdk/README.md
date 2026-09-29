@@ -13,6 +13,12 @@ ownership—start with the canonical
 Runtime dependencies are the published `@opengeni/contracts` wire schemas (which
 bring Zod) and `@opengeni/connect`; nothing else. It needs only WHATWG `fetch`
 and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
+The package is ESM-only (no `require` entry): use `import`, or `await import()`
+from CommonJS.
+
+Always pass `baseUrl` (for example `process.env.OPENGENI_API_BASE_URL`): the
+chat facade defaults to production `https://app.opengeni.ai`, so omitting it
+against a staging or self-hosted deployment silently talks to production.
 
 Browser clients may call the public API from any origin with an explicitly safe
 bearer design, but an organization API key belongs on the product server.
@@ -30,7 +36,10 @@ through a tenant/user-scoped same-origin proxy on your server.
 // Server: mount at /api/opengeni/* (Next.js route handler, Hono, Bun.serve, workers, ...).
 import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
 
-const og = new OpenGeniClient({ baseUrl, apiKey: process.env.OPENGENI_API_KEY! });
+const og = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
 
 export const handler = createSessionProxyHandler(og, {
   resolve: async (request) => {
@@ -93,7 +102,7 @@ of a client to resolve `{ tenant, user }` through `ensureWorkspace`.
 import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
-  baseUrl: "https://api.example.com",
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
 });
 
@@ -121,7 +130,7 @@ excluded.
 ```ts
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
 
 const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;
@@ -187,7 +196,7 @@ root and `@opengeni/sdk/core` clients, or through the focused
 import { OpenGeniDocumentAuthorityClient } from "@opengeni/sdk/document-authority";
 
 const operatorClient = new OpenGeniDocumentAuthorityClient({
-  baseUrl: "https://api.example.com",
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
 });
 ```
@@ -244,8 +253,9 @@ it creates an independent named account instead of overwriting a default instanc
 Use this only when your product already has its own chat UI speaking Vercel
 `useChat` or an OpenAI-shaped protocol and you want a compatible drop-in
 backend, or for server-side bots (`og.chat(...).send()`). It is a text-only
-projection: tool outputs are dropped (the Vercel adapter emits only
-`output: { status }`), there are no files, attachments, artifacts, or images,
+projection: tool outputs are dropped (the Vercel adapter emits no tool parts
+by default, and only `output: { status }` with `toolParts: true`), there are no
+files, attachments, artifacts, or images,
 no goals/queue/steer UI, and reopening restores only a text snapshot. For
 anything else, use [the default conversation embed](#embed-the-conversation-default).
 
@@ -257,9 +267,10 @@ sessions, and the organization API key never leaves your server.
 import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
 
 const og = new OpenGeni({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!, // omitted = production https://app.opengeni.ai
   apiKey: process.env.OPENGENI_API_KEY!,
   organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
-  // baseUrl defaults to https://app.opengeni.ai; source (default "app") labels your product.
+  source: "acme-app", // labels your product's tenants and users (default "app")
 });
 
 // Once per user, when your product admits them to the tenant. Chat requests
@@ -280,6 +291,13 @@ const chat = await og.chat({
 
 const reply = await chat.send("hello"); // creates the session on the first send
 console.log(reply.text); // or String(reply); the answer, without progress commentary
+
+// Per message: model policy and model-visible page context (not shown in the transcript).
+await chat.send("Why did revenue dip?", {
+  model: "gpt-5.5",
+  reasoningEffort: "low",
+  modelContext: "Viewing dashboard 42, range 2026-09-01..2026-09-28",
+});
 
 for await (const chunk of chat.stream("and then?")) {
   if (chunk.type === "text") process.stdout.write(chunk.text);
@@ -323,6 +341,37 @@ shares the customer's documents, instructions, and integrations:
 | One user's chats see each other, not other users' | `"user"`      | `"user"`      |
 | Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
 | Shared agent access, no memory                    | any           | `false`       |
+
+To keep an existing `useChat` route with its own request body, stream the chat
+into your AI SDK response yourself. The Vercel format speaks the v1 UI message
+stream used by AI SDK 5, 6, and 7 (tool approval requests need 6 or later):
+
+```ts
+import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
+import { uiMessageStreamParts } from "@opengeni/sdk/chat";
+
+export async function POST(request: Request) {
+  const { messages, dashboardId } = await request.json(); // your own body
+  const me = await authenticate(request);
+  const chat = await og.chat({ tenant: me.accountId, user: me.userId, conversation: me.chatId });
+  const text = lastUserText(messages);
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      const chunks = chat.stream(text, { modelContext: `Dashboard ${dashboardId}` });
+      for await (const part of uiMessageStreamParts(chunks, { framing: false })) {
+        writer.write(part as never);
+      }
+    },
+  });
+  return createUIMessageStreamResponse({ stream });
+}
+```
+
+OpenGeni's own tool activity is omitted by default because those tools are not
+in your typed tool set; pass `toolParts: true` (or `createChatHandler(og, {
+toolParts: true })`) to emit them as `dynamic`, provider-executed tool parts.
+Pending approvals are always emitted as dynamic tool parts with a
+`tool-approval-request`.
 
 The chat handler is backend-only: connect a custom or compatible frontend to
 its protocol. For the full React agent experience, use `SessionConversation`
@@ -559,7 +608,7 @@ import {
   createBrowserEditableArtifactSession,
 } from "@opengeni/sdk/editable-artifacts";
 
-const client = new OpenGeniClient({ baseUrl: "https://api.example.com" });
+const client = new OpenGeniClient({ baseUrl: process.env.OPENGENI_API_BASE_URL! });
 const artifact = await client.getEditableArtifact(workspaceId, artifactId, {
   replicaId,
 });
@@ -570,7 +619,7 @@ const kernels = {
 } as const;
 const { editableArtifactKernelRuntime } = await kernels[artifact.modality]();
 const session = createBrowserEditableArtifactSession({
-  baseUrl: "https://api.example.com",
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   workspaceId,
   artifact,
   storageAuthority,
@@ -1185,7 +1234,10 @@ stream, so the browser side can consume it with this same SDK (or a plain
 // Your server (Hono, Next.js route handler, Bun.serve, workers, ...):
 import { OpenGeniClient, proxySessionEventStream } from "@opengeni/sdk";
 
-const client = new OpenGeniClient({ baseUrl, apiKey });
+const client = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
 
 export function GET(request: Request): Response {
   // authenticate *your* user, resolve their session id, then:

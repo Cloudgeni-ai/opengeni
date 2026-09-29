@@ -398,7 +398,7 @@ async function readJsonBody(
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined);
         reject(413, "body_too_large", "Request body is too large.");
       }
       chunks.push(value);

@@ -27,6 +27,8 @@ export type ChatHandlerOptions = {
   resolve: ChatResolve;
   /** Default wire format; a request may override it with the format header. */
   format?: ChatHandlerFormat | undefined;
+  /** Vercel format only: also emit OpenGeni's own tool activity (see `UIMessageStreamOptions.toolParts`). */
+  toolParts?: boolean | undefined;
 };
 
 /** Per-request wire-format override header. */
@@ -75,7 +77,9 @@ export function createChatHandler(
     const format = (headerFormat as ChatHandlerFormat | null) ?? options.format ?? "native";
     switch (format) {
       case "vercel":
-        return await handleVercelChatRequest(og, request, options.resolve);
+        return await handleVercelChatRequest(og, request, options.resolve, {
+          toolParts: options.toolParts,
+        });
       case "openai-chat":
         return await handleChatCompletionsRequest(og, request, options.resolve);
       case "openai-responses":

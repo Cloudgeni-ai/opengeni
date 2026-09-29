@@ -229,8 +229,10 @@ export function withStreamInactivityTimeout(
         if (signal && abortListener) signal.removeEventListener("abort", abortListener);
       }
     },
-    cancel: async (reason) => {
-      await reader.cancel(reason);
+    cancel: (reason) => {
+      // Do not wait for the underlying body: it may settle cancel() only after
+      // its request aborts (see parseSseStream).
+      void reader.cancel(reason).catch(() => {});
     },
   });
 }
