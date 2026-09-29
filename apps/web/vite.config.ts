@@ -139,6 +139,28 @@ export default defineConfig({
               priority: 4,
             },
             {
+              // The router is startup code that every route reads through a
+              // few hooks. Entry-aware splitting otherwise scatters it over
+              // four or five startup requests by whichever lazy routes use
+              // which hook; keep it one runtime like React itself.
+              name: "router-runtime",
+              test: /(?:node_modules|\.bun)[\\/](?:@tanstack[\\/](?:react-router|router-core|history|store|react-store)|use-sync-external-store)[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 15,
+            },
+            {
+              // The app context, its startup helpers and the shared load-error
+              // state are always loaded. Entry-aware splitting otherwise cuts
+              // this one startup unit into several requests along whichever
+              // lazy routes happen to import part of it (a new import of the
+              // error helpers or a toast was enough to add a startup file).
+              // The icons are the ones the load-error state and toasts draw.
+              name: "startup-context",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|single-flight|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
               // The hierarchy rail is substantial and belongs to the lazy
               // workspace shell. Keep the component itself route-only: a
               // recursive entry-aware group can merge it into the direct
