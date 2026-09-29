@@ -779,12 +779,6 @@ export async function assertScheduledTaskMutationOwner(
     ...(writer.initiator ? { createdBy: writer.initiator } : {}),
     ...(writer.context ? { createdByContext: writer.context } : {}),
     createdByActor: writer.actor ?? null,
-    // A schedule written before keys were machine principals froze the key's
-    // own subject as its owner. That exact key may still pause, edit, or
-    // delete it (its runs are refused); no other principal gains anything.
-    ...(isScheduledTaskMachinePrincipal(grant) && !writer.actor
-      ? { legacyMachineOwnerSubjectId: grant.subjectId }
-      : {}),
   });
   if (!matches)
     throw new HTTPException(403, {

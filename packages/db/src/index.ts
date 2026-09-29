@@ -17217,12 +17217,6 @@ export async function scheduledTaskMutationOwnerMatches(
     createdBy?: TurnInitiator;
     createdByContext?: TurnInitiatorContext;
     createdByActor?: AgentSessionCreationActor | null;
-    /**
-     * The exact machine-principal subject (API key / configured key) whose
-     * pre-machine-principal schedule froze it as owner. Matches only that
-     * owner; never a person's schedule.
-     */
-    legacyMachineOwnerSubjectId?: string;
   },
 ): Promise<boolean> {
   return withWorkspaceRls(db, input.workspaceId, async (tx) => {
@@ -17242,12 +17236,7 @@ export async function scheduledTaskMutationOwnerMatches(
     const subject =
       actor.initiatingHumanSubjectId ??
       (actor.initiator.kind === "subject" ? actor.initiator.subjectId : null);
-    return (
-      task.owner === null ||
-      task.owner === subject ||
-      (input.legacyMachineOwnerSubjectId !== undefined &&
-        task.owner === input.legacyMachineOwnerSubjectId)
-    );
+    return task.owner === null || task.owner === subject;
   });
 }
 

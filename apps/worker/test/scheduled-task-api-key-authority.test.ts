@@ -262,47 +262,41 @@ describe("organization API key scheduled tasks", () => {
     ).toBe(false);
   }, 180_000);
 
-  test("a legacy schedule owned by a key is refused as a visible terminal run", async () => {
+  test("an occurrence whose frozen owner authority cannot be proven is a visible failed run", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const key = organizationKey(workspace);
-    // Reproduce a schedule written before keys were treated as machine
-    // principals: the key subject became its immutable owner, with no human
-    // revision authority behind it.
+    // An owner with no recorded human revision authority behind this task
+    // revision: the scheduler can never prove its authority.
+    const owner = `user:unproven-${crypto.randomUUID()}`;
     const [row] = await admin.begin(async (tx) => {
       await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true),
         set_config('opengeni.workspace_id', ${workspace.workspaceId}, true),
-        set_config('opengeni.subject_id', ${key.subjectId}, true),
-        set_config('opengeni.initiating_human_subject_id', ${key.subjectId}, true)`;
+        set_config('opengeni.subject_id', ${owner}, true),
+        set_config('opengeni.initiating_human_subject_id', ${owner}, true)`;
       return await tx<{ id: string }[]>`insert into scheduled_tasks
         (account_id, workspace_id, name, owner_subject_id, status, schedule,
          temporal_schedule_id, run_mode, overlap_policy, action, agent_config,
          created_by_kind, created_by_subject_id, metadata)
-        values (${workspace.accountId}, ${workspace.workspaceId}, 'Legacy key schedule',
-          ${key.subjectId}, 'active', ${admin.json({ type: "manual" })},
-          ${`legacy-${crypto.randomUUID()}`}, 'new_session_per_run', 'skip',
+        values (${workspace.accountId}, ${workspace.workspaceId}, 'Unproven owner',
+          ${owner}, 'active', ${admin.json({ type: "manual" })},
+          ${`unproven-${crypto.randomUUID()}`}, 'new_session_per_run', 'skip',
           ${admin.json({ kind: "agent_turn" })},
           ${admin.json({ prompt: "Summarize", resources: [], tools: [] })},
-          'subject', ${key.subjectId}, ${admin.json({})})
+          'subject', ${owner}, ${admin.json({})})
         returning id`;
     });
     const taskId = row!.id;
-    const producerKey = `legacy-key-schedule:${crypto.randomUUID()}`;
     const input = {
       workspaceId: workspace.workspaceId,
       taskId,
       triggerType: "scheduled" as const,
-      producerKey,
+      producerKey: `unproven-owner:${crypto.randomUUID()}`,
     };
     const expected = {
       action: "blocked",
       reason: "scheduled_authority_unavailable",
       runId: expect.any(String),
-      diagnostic: {
-        version: 1,
-        reason: "owner_access_unavailable",
-        accounts: [],
-      },
+      diagnostic: { version: 1, reason: "owner_access_unavailable", accounts: [] },
     };
     expect(await scheduler().dispatchScheduledTaskRun(input)).toEqual(expected);
     // A redelivered activity replays the recorded refusal instead of throwing.
@@ -313,17 +307,8 @@ describe("organization API key scheduled tasks", () => {
       status: "failed",
       error: "scheduled_authority_unavailable",
       sessionId: null,
-      admissionDiagnostic: {
-        version: 1,
-        reason: "owner_access_unavailable",
-        accounts: [],
-      },
+      admissionDiagnostic: { version: 1, reason: "owner_access_unavailable", accounts: [] },
     });
     expect(runs[0]!.completedAt).not.toBeNull();
-    // The key that owns the legacy schedule can still delete or pause it.
-    await assertScheduledTaskMutationOwner(client.db, key, taskId);
-    await expect(
-      assertScheduledTaskMutationOwner(client.db, organizationKey(workspace), taskId),
-    ).rejects.toMatchObject({ status: 403 });
   }, 180_000);
 });

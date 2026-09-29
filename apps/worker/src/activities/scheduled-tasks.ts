@@ -448,9 +448,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             (subject) => subject !== null && subject !== taskAuthoritySubjectId,
           ))
       ) {
-        // Includes a schedule written before API keys were machine principals:
-        // its immutable owner is the key subject, which is not a person and so
-        // has no human revision authority. It cannot run; recreate it.
         return await refuseAuthority(
           "scheduled authority differs from its immutable execution owner",
         );

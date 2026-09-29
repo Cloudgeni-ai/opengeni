@@ -34,7 +34,4 @@ human authorizer, a user-scoped personal resource or xAI authority without a
 causal human, or causal humans that disagree) instead of throwing, so the
 occurrence is a visible failed run rather than an activity retried to
 exhaustion with no run at all. The raw reason is logged by the worker, never
-stored. The typical case is a schedule written before API keys were machine
-principals: its owner is the key subject, which has no human revision
-authority, so it can never run; recreate it with the key (see
-[`scheduled-task-access.md`](scheduled-task-access.md)).
+stored.
