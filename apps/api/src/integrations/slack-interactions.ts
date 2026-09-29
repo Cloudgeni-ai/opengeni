@@ -136,9 +136,7 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   otherDeploymentLinkContext,
-  renderSlackSessionDefaultsLine,
   slackRecentRepositoryResources,
-  summarizeSlackSessionDefaults,
 } from "./slack-session-defaults";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -1698,14 +1696,12 @@ export function slackPostSeed(
 }
 
 /**
- * The acknowledgement seed once it carries the "Using" line.
+ * The acknowledgement seed for interactions that already carry a frozen
+ * "Using" line from before new acknowledgements stopped including it.
  *
- * Same reasoning as the label: the line is written once, when the session
- * binds, and never changes, so it is a stable discriminator. An interaction
- * without the line keeps its exact ledger identity. One bound by a newer
- * image but repaired by an older one during a rolling deploy renders
- * different bytes under a different id, so the worst case is a second
- * acknowledgement, never a post operation wedged on a digest conflict.
+ * The old line was written once at session bind and never changes, so a
+ * historical retry must keep the same ledger identity and bytes. New
+ * interactions bind no line and use the original acknowledgement seed.
  */
 export function slackDefaultsLinePostSeed(
   interaction: Pick<SlackInteraction, "sessionDefaultsLine">,
@@ -2120,12 +2116,6 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
             ...interaction,
             owningSubjectId: grant.subjectId,
             sessionId: eventSessionId,
-            sessionDefaultsLine: await slackSessionDefaultsLine(
-              deps,
-              grant,
-              interaction.workspaceId,
-              eventSessionId,
-            ),
           });
     if (!boundInteraction) {
       throw new Error("Durable Slack interaction could not bind its reserved session");
@@ -2293,12 +2283,6 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     ...interaction,
     owningSubjectId: grant.subjectId,
     sessionId: session.id,
-    sessionDefaultsLine: await slackSessionDefaultsLine(
-      deps,
-      grant,
-      interaction.workspaceId,
-      session.id,
-    ),
   });
   if (!bound) throw new Error("Slack route could not bind its durable session");
   await ensureSlackSharedTaskOrigin(deps, bound, entry, home, policyResolution);
@@ -2749,12 +2733,6 @@ async function processSlackReactionInboxEntry(
             ...interaction,
             owningSubjectId: grant.subjectId,
             sessionId: eventSessionId,
-            sessionDefaultsLine: await slackSessionDefaultsLine(
-              deps,
-              grant,
-              interaction.workspaceId,
-              eventSessionId,
-            ),
           });
     if (!boundInteraction) {
       throw new Error("Durable Slack reaction route could not bind its reserved session");
@@ -2937,12 +2915,6 @@ async function processSlackReactionInboxEntry(
     ...interaction,
     owningSubjectId: grant.subjectId,
     sessionId: session.id,
-    sessionDefaultsLine: await slackSessionDefaultsLine(
-      deps,
-      grant,
-      interaction.workspaceId,
-      session.id,
-    ),
   });
   if (!bound) throw new Error("Slack reaction route could not bind its durable session");
   await acknowledgeSlackReactionSession(deps, client, bound, settings.emoji);
@@ -2996,36 +2968,6 @@ function slackReactionPreparedEntry(
     slackThreadTs: context.threadTimestamp,
     text: slackReactionTaskText(context, prepared),
   };
-}
-
-/**
- * The acknowledgement line for a session this interaction is about to bind.
- * Rendered once from the durable session row and frozen by the bind.
- *
- * The line is informational. A failure to render it binds no line rather than
- * holding the task back, because the session already exists and the person is
- * waiting for the acknowledgement.
- */
-async function slackSessionDefaultsLine(
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  workspaceId: string,
-  sessionId: string,
-): Promise<string | null> {
-  try {
-    const session = await getSession(deps.db, workspaceId, sessionId);
-    if (!session) return null;
-    return renderSlackSessionDefaultsLine(
-      await summarizeSlackSessionDefaults(deps, grant, workspaceId, session),
-    );
-  } catch (error) {
-    console.error("[slack-interactions] session defaults line unavailable", {
-      workspaceId,
-      sessionId,
-      errorCode: safeErrorCode(error),
-    });
-    return null;
-  }
 }
 
 type SlackNewSessionDefaults = {
@@ -3666,7 +3608,7 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   // operation ids, so the hint still appears on exactly one message.
   const onAcknowledgement =
     handle.messageOperationId === slackAcknowledgementOperationId(interaction);
-  // The same holds for the line naming what the task started with.
+  // Older acknowledgements may still carry a frozen defaults line.
   const outcomeText =
     onAcknowledgement && interaction.sessionDefaultsLine
       ? `${outcome.text}\n${interaction.sessionDefaultsLine}`
@@ -3675,8 +3617,7 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     interaction.firstTaskHint === true && onAcknowledgement
       ? `${outcomeText}${slackFirstTaskHintText(deps)}`
       : outcomeText;
-  // A control click replaces a message that already carried the line, so the
-  // replacement carries it too rather than quietly stripping it.
+  // Preserve the bytes on those older acknowledgements for update retries.
   const rendered = withWorkspaceLine(interaction.routedWorkspaceLabel, updateText, [
     { type: "section", text: { type: "mrkdwn", text: updateText } },
   ]);

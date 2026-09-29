@@ -1414,18 +1414,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           ? { text: "CHANGED DRAFT", revision: "2" }
           : { text: "UNSENT PRIVATE DRAFT", revision: "1" },
       );
-      // The acknowledgement names what the task started with, in one line.
+      // Defaults are still applied, but the acknowledgement does not list them.
       const acknowledgement = value.slack.posts.find((post) =>
         post.text.includes("Open in OpenGeni"),
       );
-      expect(acknowledgement?.text).toContain(
-        "Using connectors: Example Tracker; repos: service, project.",
-      );
+      expect(acknowledgement?.text).not.toContain("Using connectors:");
       const [frozen] = await shared!.admin<{ session_defaults_line: string | null }[]>`
         select session_defaults_line from slack_interactions where id = ${interaction!.id}`;
-      expect(frozen!.session_defaults_line).toBe(
-        "Using connectors: Example Tracker; repos: service, project.",
-      );
+      expect(frozen!.session_defaults_line).toBeNull();
     });
   }
 
@@ -2902,6 +2898,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       threadTimestamp: rootTimestamp,
     });
     expect(value.slack.posts[0]!.text).toContain("started from the :genie: reaction");
+    expect(value.slack.posts[0]!.text).not.toContain("Using connectors:");
     expect(value.slack.posts[0]!.text).toMatch(
       /<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>/u,
     );
@@ -4463,10 +4460,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(value.slack.posts[0]!.text.match(/Open in OpenGeni/gu) ?? []).toHaveLength(1);
     // The acknowledgement itself carries no how-to prose. This Slack identity's
     // very first accepted task also carries the one-time onboarding hint.
-    // The second line names what the task started with.
     expect(value.slack.posts[0]!.text.split("\n\n")[0]).toMatch(
-      /^OpenGeni started this task\. <https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>\nUsing connectors: none; repos: none\.$/u,
+      /^OpenGeni started this task\. <https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>$/u,
     );
+    expect(value.slack.posts[0]!.text).not.toContain("Using connectors:");
     expect(value.slack.posts[0]!.text).toContain("First time here:");
     const firstAckPostCount = value.slack.posts.length;
     const [sessionPolicy] = await shared!.admin<{ first_party_mcp_tools: string[] }[]>`
@@ -5890,13 +5887,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const acknowledgement = value.slack.posts.find((post) =>
       post.text.includes("Open in OpenGeni"),
     );
-    expect(acknowledgement?.text).toContain("\nUsing connectors: none; repos: none.");
+    expect(acknowledgement?.text).not.toContain("Using connectors:");
     expect(
       errors.some((args) => args[0] === "[slack-interactions] workspace repositories unavailable"),
     ).toBe(true);
   });
 
-  test("a Slack task freezes only the caller's own personal connection and names only connectors the caller has", async () => {
+  test("a Slack task freezes only the caller's own personal connection without listing connectors", async () => {
     if (!available) return;
     const value = await fixture();
     const { accountId, workspaceId } = value.owner;
@@ -5983,7 +5980,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(before.tools.map((tool) => tool.id)).toContain("example-mail");
     expect(before.turn.personal_connection_delegations).toEqual([]);
     expect(JSON.stringify(before.turn)).not.toContain(others.id);
-    expect(before.line).toBe("Using connectors: none; repos: none.");
+    expect(before.line).toBeNull();
 
     const own = await personalConnection(value.owner.subjectId);
     const after = await startTask("D_PERSONAL_AFTER", "1764200000.000002");
@@ -5998,10 +5995,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       expect.objectContaining({ canonicalServerId: "example-mail", connectionId: own.id }),
     ]);
     expect(JSON.stringify(after.turn)).not.toContain(others.id);
-    expect(after.line).toBe("Using connectors: Example Mail; repos: none.");
+    expect(after.line).toBeNull();
+    expect(value.slack.posts.every((post) => !post.text.includes("Using connectors:"))).toBe(true);
   });
 
-  test("a Slack task rides the workspace default Sandbox Environment and names it", async () => {
+  test("a Slack task rides the workspace default Sandbox Environment without listing it", async () => {
     if (!available) return;
     const value = await fixture();
     const rig = await createRig(client.db, {
@@ -6037,9 +6035,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const acknowledgement = value.slack.posts.find((post) =>
       post.text.includes("Open in OpenGeni"),
     );
-    expect(acknowledgement?.text).toContain(
-      "\nUsing connectors: none; repos: none; environment: Build box.",
-    );
+    expect(acknowledgement?.text).not.toContain("Using connectors:");
   });
 
   test("acknowledgements carry one session link and native controls without how-to prose", async () => {
@@ -6066,8 +6062,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const ack = value.slack.posts.at(-1)!;
     const [headline, ...rest] = ack.text.split("\n\n");
     expect(headline).toMatch(
-      /^OpenGeni started this task\. <https:\/\/app\.example\.test\/workspaces\/[^|]+\/sessions\/[^|]+\|Open in OpenGeni>\nUsing connectors: none; repos: none\.$/u,
+      /^OpenGeni started this task\. <https:\/\/app\.example\.test\/workspaces\/[^|]+\/sessions\/[^|]+\|Open in OpenGeni>$/u,
     );
+    expect(ack.text).not.toContain("Using connectors:");
     expect(ack.text.match(/Open in OpenGeni/gu) ?? []).toHaveLength(1);
     // The prose the buttons already say is gone for good.
     expect(ack.text).not.toContain("Reply in this thread to continue, or reply");
@@ -6148,6 +6145,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
     const ack = value.slack.posts.at(-1)!;
     expect(ack.text).toContain("First time here:");
+    expect(ack.text).not.toContain("Using connectors:");
     const [route] = await interactions(value.owner.workspaceId);
     const [frozen] = await shared!.admin<{ first_task_hint: boolean | null }[]>`
       select first_task_hint from slack_interactions where id = ${route!.id}`;
@@ -6388,8 +6386,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await pressStatus(acknowledgement, "1768000000.000002");
     expect(acknowledgement.text).toContain("OpenGeni task status:");
     expect(acknowledgement.text).toContain("First time here:");
-    // The frozen line naming what the task started with survives the same way.
-    expect(acknowledgement.text).toContain("\nUsing connectors: none; repos: none.");
+    expect(acknowledgement.text).not.toContain("Using connectors:");
 
     // The control card posted afterwards is not the acknowledgement, so the
     // hint still appears exactly once.
