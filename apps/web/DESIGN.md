@@ -271,11 +271,15 @@ Main column: DetailSection ...        | Quiet aside card:
 **Settings is a mode of the rail.** Entering settings (the rail footer's Settings, any workspace,
 organization or personal settings URL, and the Agents, Insights and runtime pages listed in the
 settings rail) swaps the main rail for the settings rail, drawn by `SettingsShell`
-(`components/settings/settings-sidebar.tsx`): a back link that leaves settings ("Back to sessions";
-organization settings go back to workspace settings, personal settings to OpenGeni), the scope
-switcher, the grouped settings pages and an out link (workspace settings -> Organization). Leaving
-restores the main rail. Below 1024px the settings rail folds into a header with the back link, the
-current page and a Menu button that opens it in a drawer. Settings pages render full width beside
+(`components/settings/settings-sidebar.tsx`, sections from `settings-rail.tsx`): a back link that
+leaves settings ("Back to sessions"), then every settings page the person can use in one rail, in
+labeled sections: **Workspace** (a switcher naming the workspace, then its pages, Activity and
+Runtime), **Organization** (a switcher naming the organization, then only the organization pages
+this person can use) and **Your account**. Workspace, organization and personal settings all draw
+this same rail, so the scope of every page is visible and nothing jumps to a second rail. Each
+switcher changes only its own scope and keeps the same kind of page. Leaving restores the main
+rail. Below 1024px the settings rail folds into a header with the back link, the current page and
+its scope ("Organization · Acme Robotics"), and a Menu button that opens it in a drawer. Settings pages render full width beside
 the rail in the standard 960px column, with the section's page header; a sub-page (an account, a
 key, a person, a form) hides that header and declares its own back link and title. Pages that own
 their layout (Agents, Insights, Variable sets) render their own `ContentPage`. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
@@ -313,6 +317,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | --- | --- |
 | Page header | Icon on main-rail pages only; settings pages drop the icon because the settings rail gives context. |
 | Navigation | Settings swaps the rail for the settings rail (240px, grouped, icons) with a back link that restores the main rail. No settings sub-nav inside the content. |
+| Workspace picker | The trigger names the workspace and, under it, its organization. The menu shows the current organization as a header with its workspaces and "New workspace in <organization>" (disabled with the reason when the person can't create there; never created in another organization), then Organization settings, then the other organizations under "Switch organization" and New organization. Switching organization opens a workspace there. |
 | Section | Open section: 16px title (one step above the 14px row titles), 12px description, rows below, one hairline between sections, no box. |
 | Tabs and toolbar | Underline tabs; search, filter and the primary action in a toolbar that keeps its shape. Status filters are not a second tab row. |
 | List row | Divided resource row (56-64px, 32px tile, one meta line) for things you own; the catalog row (76px, 40px tile, 2 columns) for discovery. Same tile, type and hover. |
