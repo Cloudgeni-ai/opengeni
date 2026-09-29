@@ -1022,7 +1022,9 @@ Two operator-visible consequences follow the commit. `POST /v1/organizations`
 becomes the one-time setup entry point rather than an organization factory: a
 human who already holds an organization membership can no longer create a
 second organization through it. And `OPENGENI_API_CONTRACT_REVISION` advances,
-so every mutating client must be on the new bundle before admission reopens.
+so every cookie-authenticated browser tab must reload onto the new bundle before
+its next mutation; bearer-authenticated integrations stay admitted (see
+`docs/architecture.md` §3.10).
 
 No backfill is required. A human left holding a legacy `better-auth:user`
 fallback organization whose organization membership was never anchored is

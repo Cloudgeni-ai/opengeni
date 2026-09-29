@@ -4007,7 +4007,12 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export type ClientConfig = {
   deploymentRevision: string;
-  apiContractRevision: typeof OPENGENI_API_CONTRACT_REVISION;
+  /**
+   * The API's contract revision. Equals `OPENGENI_API_CONTRACT_REVISION` for a
+   * `"strict"` client (it throws otherwise); a `"compatible"` client may
+   * receive a newer revision from an additive deployment within its major.
+   */
+  apiContractRevision: string;
   serverVersion?: string | undefined;
   defaultModel: string;
   allowedModels: string[];

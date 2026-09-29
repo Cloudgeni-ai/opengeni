@@ -529,6 +529,10 @@ Official server builds expose `serverVersion` through health and client-config
 responses. There is no runtime negotiation protocol: tolerant reading and a
 shared major version are the compatibility mechanism.
 
+`x-opengeni-api-contract` fences only cookie-authenticated browser mutations
+(stale tabs); bearer integrations stay admitted across revisions. See
+[`product-integration.md`](product-integration.md#api-contract-revision).
+
 An optional field that changes execution authority is not an ordinary additive
 response field. Its readers must ship first, new external writes stay behind a
 default-off admission switch until every shared-queue consumer is compatible,

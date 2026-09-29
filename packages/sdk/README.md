@@ -204,9 +204,8 @@ workspace with `created: false`. An organization API key may omit `accountId`:
 the workspace is created in the key's own organization. Every other caller must
 send it (a human may belong to several organizations) and receives
 `400 validation_failed` naming `accountId` otherwise. For an organization key,
-`getAccessContext()`
-does not enumerate every workspace grant; call `listWorkspaces()` for the
-complete organization-workspace inventory.
+`getAccessContext()` does not enumerate every workspace grant; call
+`listWorkspaces()` for the complete organization-workspace inventory.
 
 Organization key administration uses `listOrganizationApiKeys`,
 `createOrganizationApiKey`, and `deleteOrganizationApiKey`. The key token from a
@@ -1137,6 +1136,23 @@ of breaking older SDK consumers.
 
 Hosts, test doubles, and same-origin proxies must import
 `OPENGENI_API_CONTRACT_REVISION` from `@opengeni/sdk` when constructing a client
-configuration or contract header. Do not copy its string value: the revision is
-an executable compatibility boundary, and `getClientConfig()` intentionally
-fails closed when server and SDK revisions differ.
+configuration or contract header. Do not copy its string value.
+
+The client sends that revision in `x-opengeni-api-contract` on every request.
+How it reacts when the API serves a different revision is the `apiContract`
+option:
+
+- `"compatible"` (default for server-side clients and any client with an
+  `apiKey`): keep working. Within a major release train the API is additive, and
+  it admits bearer-authenticated mutations (API keys, delegated tokens) from
+  older SDK revisions, so a backend pinned to an older `@opengeni/sdk` is not
+  broken by each deployment.
+- `"strict"` (default for a browser client without an `apiKey`): throw
+  `OpenGeniApiContractMismatchError` from `getClientConfig()` and on any response
+  advertising another revision, so a page served alongside the API reloads onto
+  the matching bundle. The API applies the same exact check to cookie-authenticated
+  browser mutations (`409 API_CONTRACT_CHANGED`).
+
+A server-side caller that authenticates with `x-opengeni-access-key` instead of
+a bearer credential is treated like a browser; send the key as
+`Authorization: Bearer` (the `apiKey` option) to be admitted across revisions.

@@ -753,8 +753,12 @@ export function createAppComposition(deps: AppDependencies): {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (
       deps.settings.environment !== "test" &&
-      isApiContractProtectedMutation(c.req.method, new URL(c.req.url).pathname) &&
-      c.req.header(OPENGENI_API_CONTRACT_HEADER) !== OPENGENI_API_CONTRACT_REVISION
+      apiContractAdmission({
+        method: c.req.method,
+        pathname: new URL(c.req.url).pathname,
+        authorization: c.req.header("authorization"),
+        claimedRevision: c.req.header(OPENGENI_API_CONTRACT_HEADER),
+      }) === "reject"
     ) {
       return c.json(
         {
@@ -2809,6 +2813,54 @@ export function routeLabel(pathname: string, registeredRoutePath?: string | null
   const registered = boundedRegisteredRouteLabel(registeredRoutePath);
   if (registered) return registered;
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
+}
+
+/**
+ * API contract revisions no longer admitted from ANY caller, including bearer
+ * integrations that would otherwise be accepted across revisions. Add a
+ * revision here only for a truly breaking wire change (which also requires a
+ * major release-train change); ordinary revision bumps stay additive.
+ */
+export const REFUSED_API_CONTRACT_REVISIONS: ReadonlySet<string> = new Set<string>([]);
+
+const BEARER_AUTHORIZATION = /^bearer\s+\S/i;
+
+/**
+ * The rollout fence for state-changing product calls.
+ *
+ * The exact-revision check exists to stop a stale first-party browser tab
+ * (cookie session, or unauthenticated local mode) from writing with an old
+ * request shape after a deployment; it answers 409 so the page reloads onto
+ * the matching bundle. That tab never sends `Authorization`, so this is not a
+ * header a stale bundle can choose to bypass it with.
+ *
+ * Bearer-authenticated callers (organization/workspace API keys, delegated
+ * tokens, the deployment key sent as a bearer) are integrations pinned to an
+ * SDK version: reloading cannot upgrade them, and the API is additive within a
+ * major release train. They are admitted with an older revision or with no
+ * revision claim at all. Only a revision listed in
+ * `REFUSED_API_CONTRACT_REVISIONS` is refused for them.
+ *
+ * This is a compatibility fence, not an authorization boundary: every route
+ * still authenticates and authorizes the request independently.
+ */
+export function apiContractAdmission(
+  input: {
+    method: string;
+    pathname: string;
+    authorization: string | undefined;
+    claimedRevision: string | undefined;
+  },
+  refusedRevisions: ReadonlySet<string> = REFUSED_API_CONTRACT_REVISIONS,
+): "admit" | "reject" {
+  if (!isApiContractProtectedMutation(input.method, input.pathname)) return "admit";
+  if (input.claimedRevision === OPENGENI_API_CONTRACT_REVISION) return "admit";
+  if (input.claimedRevision !== undefined && refusedRevisions.has(input.claimedRevision)) {
+    return "reject";
+  }
+  return input.authorization !== undefined && BEARER_AUTHORIZATION.test(input.authorization)
+    ? "admit"
+    : "reject";
 }
 
 /**

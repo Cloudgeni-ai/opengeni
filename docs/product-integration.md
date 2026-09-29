@@ -669,6 +669,29 @@ obsolete. Account choices narrow the owner's accounts without granting access;
 sharing a conversation does not share its participants' credentials. Creation
 replay never restores a revoked connection.
 
+### API contract revision
+
+Every `/v1` response carries `x-opengeni-api-contract`
+(`OPENGENI_API_CONTRACT_REVISION`), and the SDK sends its own revision on every
+request. The exact match is a stale-tab guard for first-party browser bundles:
+a mutation without an `Authorization: Bearer` credential (cookie session or
+unauthenticated local mode) that claims another revision, or none, receives
+`409 API_CONTRACT_CHANGED` so the page reloads. A bearer-authenticated caller -
+organization or workspace API key, delegated token, or the deployment key sent
+as a bearer - is admitted with an older revision or with no claim, because the
+API is additive within a major release train and reloading cannot upgrade a
+pinned SDK. A genuinely breaking change is refused for bearer callers too by
+listing the old revision in `REFUSED_API_CONTRACT_REVISIONS`
+(`apps/api/src/app.ts`, `apiContractAdmission`), and requires a major
+release-train change. A server-side caller that sends the deployment key as
+`x-opengeni-access-key` is treated like a browser; send it as a bearer instead.
+
+The SDK's `apiContract` option mirrors this. `"compatible"` (the default for a
+client with an `apiKey` or outside a browser) keeps working when the API
+advertises a newer revision; `"strict"` (the default for a browser client
+without an `apiKey`) throws `OpenGeniApiContractMismatchError` so the page can
+reload.
+
 ## Delivery checklist
 
 Before calling a product integration complete, verify:
