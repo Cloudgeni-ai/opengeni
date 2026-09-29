@@ -21,6 +21,7 @@ import {
   SparklesIcon,
   UsersIcon,
   VariableIcon,
+  WebhookIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -61,6 +62,10 @@ export const WORKSPACE_SETTINGS_COPY: Record<
     title: "API keys",
     description: () => "Keys that let your own tools start work in this workspace.",
   },
+  developer: {
+    title: "Developer",
+    description: () => "Webhooks and a credential provider for products built on this workspace.",
+  },
   learning: {
     title: "Agent learning",
     description: () => "How agents save knowledge, instructions and skills.",
@@ -73,6 +78,7 @@ const SECTION_ICONS = {
   models: SparklesIcon,
   learning: GraduationCapIcon,
   "api-keys": KeyRoundIcon,
+  developer: WebhookIcon,
 } as const;
 
 // Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
@@ -81,6 +87,7 @@ const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "access",
   "models",
   "api-keys",
+  "developer",
 ];
 
 // Workspace dashboards in the settings rail. They open as their own pages.
