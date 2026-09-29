@@ -3878,6 +3878,19 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push("organization model usage aggregate has unsafe owner or runtime privileges");
   }
+  const scopedFactRowsRoutine = posture.privateRoutines.find(
+    (routine) =>
+      routine.name ===
+      "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+  );
+  if (
+    scopedFactRowsRoutine &&
+    (!scopedFactRowsRoutine.securityDefiner ||
+      scopedFactRowsRoutine.publicExecute ||
+      scopedFactRowsRoutine.owner !== tableByName.get("model_call_facts")?.owner)
+  ) {
+    violations.push("Insights scoped fact projection has unsafe owner or runtime privileges");
+  }
 
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
