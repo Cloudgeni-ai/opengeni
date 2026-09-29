@@ -25,7 +25,8 @@ describe("model call fact reconciler", () => {
     const visited: string[] = [];
     const now = Date.parse("2026-09-25T12:00:00.000Z");
     const info = mock(() => undefined);
-    const activity = createModelCallFactReconcilerActivities(services(info), {
+    const warn = mock(() => undefined);
+    const activity = createModelCallFactReconcilerActivities(services(info, warn), {
       now: () => now,
       startAfterWorkspaceId: () => WORKSPACES[300]!,
       listWorkspaces: listWorkspaces as never,
@@ -41,7 +42,7 @@ describe("model call fact reconciler", () => {
           missing,
           repaired: missing ? 2 : 0,
           unrepaired: missing ? 1 : 0,
-          truncated: false,
+          truncated: input.workspaceId === WORKSPACES[7],
         };
       },
     });
@@ -55,10 +56,15 @@ describe("model call fact reconciler", () => {
       missing: 3,
       repaired: 2,
       unrepaired: 1,
+      truncatedWorkspaces: 1,
       failedWorkspaces: 0,
       budgetExhausted: false,
     });
-    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "model call fact reconciliation incomplete",
+      expect.objectContaining({ truncatedWorkspaces: 1 }),
+    );
   });
 
   test("isolates a failing workspace and stops at the run budget", async () => {
@@ -77,6 +83,10 @@ describe("model call fact reconciler", () => {
     });
     const result = await activity.reconcileRecentModelCallFacts();
     expect(result).toMatchObject({ workspaces: 10, failedWorkspaces: 1, budgetExhausted: true });
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls.map((call) => (call as unknown[])[0])).toEqual([
+      "model call fact reconciliation failed for a workspace",
+      "model call fact reconciliation incomplete",
+    ]);
+    expect((warn.mock.calls[0] as unknown[])[1]).toMatchObject({ workspaceId: WORKSPACES[1] });
   });
 });

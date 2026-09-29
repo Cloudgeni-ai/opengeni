@@ -821,7 +821,9 @@ describe("Workspace Insights model bundle", () => {
       turnId: crypto.randomUUID(),
       sourceKey: `reconcile-${label}-${crypto.randomUUID()}`,
       costMicros: [1200, 800, 500][index]!,
-      position: index + 1,
+      // The unrepairable call is the oldest, so a bounded pass must still reach
+      // the repairable one behind it.
+      position: [2, 1, 3][index]!,
     }));
     for (const call of calls) {
       await shared.admin`

@@ -1422,7 +1422,21 @@ export async function reconcileModelCallFacts(
             and fact.turn_id = usage_row.turn_id
             and fact.source_key = substr(usage_row.source_resource_id, 38)
         )
-      order by usage_row.occurred_at, usage_row.id
+      -- Rows with no usage event stay missing on every pass; rank them last so
+      -- they cannot starve repairable rows out of the bounded page.
+      order by
+        not exists (
+          select 1
+          from ${schema.sessionEvents} event
+          where event.workspace_id = usage_row.workspace_id
+            and event.session_id = usage_row.session_id
+            and event.turn_id = usage_row.turn_id
+            and event.type = 'agent.model.usage'
+            and event.turn_association = 'current'
+            and event.payload->>'sourceKey' = substr(usage_row.source_resource_id, 38)
+        ),
+        usage_row.occurred_at,
+        usage_row.id
       limit ${limit + 1}
     `);
     const truncated = missingRows.length > limit;

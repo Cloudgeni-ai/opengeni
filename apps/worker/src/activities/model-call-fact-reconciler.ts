@@ -15,6 +15,8 @@ export type ReconcileRecentModelCallFactsResult = {
   missing: number;
   repaired: number;
   unrepaired: number;
+  /** Workspaces with more missing facts than one bounded pass examines. */
+  truncatedWorkspaces: number;
   failedWorkspaces: number;
   budgetExhausted: boolean;
 };
@@ -53,6 +55,7 @@ export function createModelCallFactReconcilerActivities(
       missing: 0,
       repaired: 0,
       unrepaired: 0,
+      truncatedWorkspaces: 0,
       failedWorkspaces: 0,
       budgetExhausted: false,
     };
@@ -78,9 +81,11 @@ export function createModelCallFactReconcilerActivities(
           result.missing += outcome.missing;
           result.repaired += outcome.repaired;
           result.unrepaired += outcome.unrepaired;
+          if (outcome.truncated) result.truncatedWorkspaces += 1;
         } catch (error) {
           result.failedWorkspaces += 1;
           observability.warn("model call fact reconciliation failed for a workspace", {
+            workspaceId,
             errorName: error instanceof Error ? error.name : "unknown",
           });
         }
@@ -95,7 +100,9 @@ export function createModelCallFactReconcilerActivities(
       }
       cursor = page[page.length - 1]!;
     }
-    if (result.missing > 0 || result.failedWorkspaces > 0 || result.budgetExhausted) {
+    if (result.failedWorkspaces > 0 || result.truncatedWorkspaces > 0 || result.budgetExhausted) {
+      observability.warn("model call fact reconciliation incomplete", { ...result });
+    } else if (result.missing > 0) {
       observability.info("model call fact reconciliation", { ...result });
     }
     return result;
