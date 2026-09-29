@@ -516,7 +516,7 @@ Integration lifecycle:
    stable instance key, Connection, and selected operations. Operations the
    preview marks `approvalMode: "ask"` pause for human approval on every call;
    for unattended or scheduled work, list the ones policy permits in
-   `autoApprovedTools` (custom Integrations only; `capabilities:manage`;
+   `autoApprovedTools` (`capabilities:manage`; curated definitions may keep specific operations human-approved;
    re-checked against organization integration policy; declarative, so an
    update that omits it restores approval). Connector Block, session approval
    policy, and action policies still apply.
