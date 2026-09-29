@@ -1533,23 +1533,15 @@ function SessionChatPane(props: {
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
-  const [findFromSessionSearch, setFindFromSessionSearch] = useState(
-    props.searchTarget.searchOrigin === "session-search",
-  );
   const [activeSearchTarget, setActiveSearchTarget] = useState<TimelineSearchTarget | null>(null);
   const findButton = useRef<HTMLButtonElement>(null);
-  const openFind = useCallback((fromSessionSearch: boolean) => {
+  const openFind = useCallback(() => {
     setFindMounted(true);
     setFindOpen(true);
-    setFindFromSessionSearch(fromSessionSearch);
     setFindFocusRevision((value) => value + 1);
   }, []);
-  // Ctrl/Cmd+F and the Find button open a plain bar, but only refocus one that
-  // is already open, keeping its way back to session search.
-  const openFindManually = useCallback(() => {
-    if (findOpen) setFindFocusRevision((value) => value + 1);
-    else openFind(false);
-  }, [findOpen, openFind]);
+  // The back link follows the URL's session-search origin, which closing the
+  // bar removes, so Ctrl/Cmd+F and the Find button then open a plain bar.
   const { onSearchOriginConsumed } = props;
   const closeFind = useCallback(() => {
     setFindOpen(false);
@@ -1557,21 +1549,14 @@ function SessionChatPane(props: {
     onSearchOriginConsumed();
     requestAnimationFrame(() => findButton.current?.focus({ preventScroll: true }));
   }, [onSearchOriginConsumed]);
-  const { find, matchSequence, matchOffset, searchOrigin } = props.searchTarget;
-  const handledSearchTarget = useRef<SessionSearchRoute | null>(null);
   useEffect(() => {
-    const previous = handledSearchTarget.current;
-    handledSearchTarget.current = { find, matchSequence, matchOffset, searchOrigin };
-    if (!find) return;
-    // Removing the origin after close is not a new search request.
-    const originConsumed =
-      previous?.searchOrigin === "session-search" &&
-      searchOrigin === undefined &&
-      previous.find === find &&
-      previous.matchSequence === matchSequence &&
-      previous.matchOffset === matchOffset;
-    if (!originConsumed) openFind(searchOrigin === "session-search");
-  }, [find, matchSequence, matchOffset, searchOrigin, openFind]);
+    if (props.searchTarget.find) openFind();
+  }, [
+    props.searchTarget.find,
+    props.searchTarget.matchSequence,
+    props.searchTarget.matchOffset,
+    openFind,
+  ]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -1589,11 +1574,11 @@ function SessionChatPane(props: {
       )
         return;
       event.preventDefault();
-      openFindManually();
+      openFind();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openFindManually]);
+  }, [openFind]);
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
@@ -2570,7 +2555,7 @@ function SessionChatPane(props: {
           type="button"
           variant="ghost"
           size="sm"
-          onClick={openFindManually}
+          onClick={openFind}
           aria-label="Find in conversation"
           title="Find in conversation (Ctrl/Cmd+F)"
           className="text-xs text-fg-muted"
@@ -2587,7 +2572,7 @@ function SessionChatPane(props: {
             open={findOpen}
             focusRevision={findFocusRevision}
             initial={props.searchTarget}
-            showBackToSessionSearch={findFromSessionSearch}
+            showBackToSessionSearch={props.searchTarget.searchOrigin === "session-search"}
             onClose={closeFind}
             onTarget={setActiveSearchTarget}
             onJump={props.onJumpToSequence}
