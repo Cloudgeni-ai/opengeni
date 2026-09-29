@@ -35,7 +35,8 @@ code disagree, this file wins; bring the code in line when you touch it.
 9. **One frame.** One page header, two content widths, a small type scale, radii 10 / 14 / 16, a
    4px grid. Every destination appears once, with one name and one icon.
 10. **Destructive means explicit.** Confirm with the real name, the real consequences and what
-    depends on it. When something can't be deleted, say what blocks it before the click.
+    depends on it. When something can't be deleted, say what blocks it before the click, in
+    place of the action: no ghosted Delete button next to the reason.
     Reversible actions (remove access, archive, restore from history) use an Undo toast instead
     of a dialog.
 
@@ -55,8 +56,9 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 | `selection` | The selected row (open session in the rail), secondary button fill |
 | `border` | Every hairline |
 | `border-strong` | Outline hover |
-| `fg` | Titles, labels |
-| `fg-muted` | Descriptions, meta lines, secondary button text |
+| `fg` | Titles, labels, the active nav item |
+| `fg-label` | Things you act on in navigation and lists: rail and settings-rail items, session titles, their icons. A hair under `fg`, never muted |
+| `fg-muted` | Descriptions, meta lines, secondary button text, section labels in a rail |
 | `fg-subtle` | Quiet meta, placeholders, separators |
 | `brand` | Neutral grey: icon, link, focus, active tab bar, selected ring. Never blue |
 | `primary` | The filled primary button only ("teal wash": `primary` fill, `primary-foreground` ink, `primary-border` edge, `primary-hover`) |
@@ -76,7 +78,7 @@ primary button's teal wash, the soft teal/peach glow and the status hues.
 | `surface` / `surface-2` / `surface-3` | `#ffffff` / `#eeeeee` / `#e5e5e5` | `#333333` / `#383838` / `#404040` |
 | `selection` | `#e9e9e9` | `#424242` |
 | `border` / `border-strong` | `#dedede` / `#bdbdbd` | `#454545` / `#555555` |
-| `fg` / `fg-muted` / `fg-subtle` | `#242424` / `#5f5f5f` / `#696969` | `#e6e6e6` / `#b0b0b0` / `#a3a3a3` |
+| `fg` / `fg-label` / `fg-muted` / `fg-subtle` | `#242424` / `#3a3a3a` / `#5f5f5f` / `#696969` | `#e6e6e6` / `#d4d4d4` / `#b0b0b0` / `#a3a3a3` |
 | `brand` (accent) / accent-deep / accent-fg | `#545454` / `#383838` / `#ffffff` | `#c4c4c4` / `#d5d5d5` / `#242424` |
 | `primary` fill / ink / edge | `#ebf2f0` / `#292929` / `#c4d5d0` | `#2b3432` / `#eeeeee` / `#4e5e59` |
 | `status-waiting` / `running` / `idle` | `#915826` / `#766623` / `#237058` | `#e9ab77` / `#d5bd72` / `#83cbb0` |
@@ -88,8 +90,25 @@ Light `fg-muted`, `fg-subtle` and the light status hues are a step darker than t
 selected row.
 
 **Buttons.** Primary: the teal wash, no shadow, hover mixes 15% ink into the fill. Secondary:
-`selection` fill, `fg-muted` text. Outline: `surface` fill, `border`, `fg` text. Disabled: 40%
-opacity for every variant.
+`selection` fill, `fg-muted` text. Outline: `surface` fill, `border`, `fg` text. Disabled: 50%
+opacity for every variant, and only with a visible reason nearby (section 6).
+
+**One primary per region.** The single most important action in a region is the teal-wash
+primary; everything else there is the white outline, and tertiary actions are ghost or links. A
+region is a page header, a section, an empty state, a dialog footer, a banner or notice, a form
+page footer, or a menu.
+
+- Primary: the page header's create or connect action ("New schedule", "Create API key", "Invite
+  people"); a section's add action when the header has none for it ("Connect account" on
+  Settings > Models); the action in an empty state ("Connect account", "Create schedule", "Start
+  your first session"); the confirm of a non-destructive dialog or form page ("Create schedule",
+  "Save"); the unblocking action in a notice, banner or menu ("Connect a model", "Open Models",
+  "Reconnect", "Reload now").
+- Outline: row actions (Rename, Resume on a row, Make primary, Replace value), a second action
+  next to a primary, Cancel and Back. Destructive confirms use the destructive variant; a delete
+  entry point is outline with danger text.
+- Never two teal buttons in one region, and never an inverted (`fg`-filled) or near-black button.
+  Selected chips and filters use `selection` with `fg` text, not an inverted fill.
 
 **Rail glow.** The main rail and the settings rail use `.og-rail-glow`: a teal wash from the
 top-left and a peach wash from the bottom-right over `bg`. The signed-out pages use
@@ -148,9 +167,11 @@ opacity-muted text.
 - Focus: 2px ring in brand (neutral grey) at 55%, 2px offset. Motion: 120ms, color and opacity
   only.
 - Rail: 240px in every mode, on the rail glow. Nav item 32px, radius 10, 16px icon, 14/500
-  muted; active = `surface-2` + `fg` + a 2x16px brand bar. The open session row is a selected
-  row: `selection` fill, `fg` text and a 1px `brand/20` edge, radius 10; row hover is
-  `surface-2`.
+  `fg-label` (icon and text alike); active = `surface-2` + `fg` + a 2x16px brand bar. Session
+  titles and the "Sessions" heading are `fg-label` too; only true meta (timestamps, counts, "Show
+  2 more", the empty note) is `fg-muted` or `fg-subtle`. The open session row is a selected row:
+  `selection` fill, `fg` text and a 1px `brand/20` edge, radius 10; row hover is `surface-2`. The
+  settings rail follows the same rule, with its group labels in `fg-muted`.
 - Every page works at 390px wide with no horizontal scroll and 44px touch targets on coarse
   pointers.
 
