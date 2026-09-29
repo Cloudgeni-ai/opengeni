@@ -7302,8 +7302,36 @@ export type IntegrationSource =
   | { kind: "graphql"; endpoint: string; name?: string | undefined }
   | { kind: "auto"; url: string; baseUrl?: string | undefined };
 
+/**
+ * OpenAPI 3.x text (JSON or YAML, at most 8 MiB) sent in the request instead
+ * of a URL. `sourceKey` is your stable identity for the Integration: reuse it
+ * to update the same installation. Server URLs must be absolute or `baseUrl`
+ * given. Calls still obey the deployment network policy, so an API on
+ * localhost or a private address needs a public tunnel unless the operator
+ * enables private targets. Send the same document again on install.
+ */
+export type InlineOpenApiDocumentSource = {
+  kind: "openapi_document";
+  sourceKey: string;
+  document: string;
+  baseUrl?: string | undefined;
+};
+
+/** Preview/install input sources. */
+export type IntegrationSourceInput = IntegrationSource | InlineOpenApiDocumentSource;
+
+/** Preview echo: an inline document is reported by digest, never its text. */
+export type IntegrationSourceProjection =
+  | IntegrationSource
+  | {
+      kind: "openapi_document";
+      sourceKey: string;
+      documentSha256: string;
+      baseUrl?: string | undefined;
+    };
+
 export type PreviewApiIntegrationRequest = {
-  source: IntegrationSource;
+  source: IntegrationSourceInput;
   connectionId?: string | undefined;
   ownership?: ConnectionOwnership | undefined;
 };
@@ -7337,7 +7365,7 @@ export type ApiIntegrationToolPreview = {
 };
 
 export type ApiIntegrationPreview = {
-  source: IntegrationSource;
+  source: IntegrationSourceProjection;
   definitionId: string;
   definitionProvenance: IntegrationDefinitionProvenance;
   protocol: ApiIntegrationProtocol;
@@ -7360,7 +7388,7 @@ export type ApiIntegrationPreview = {
 };
 
 export type InstallApiIntegrationRequest = {
-  source: IntegrationSource;
+  source: IntegrationSourceInput;
   expectedRevisionId: string;
   expectedContentSha256: string;
   connectionId?: string | undefined;
