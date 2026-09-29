@@ -127,7 +127,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     >
       {rows.some((row) => row.selectable) ? (
         <div className="border-b border-og-border py-1">
-          <label className="og-model-policy-search flex items-center gap-2 rounded-og-sm px-2 py-1 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-og-accent/40">
+          <label className="og-model-policy-search flex items-center gap-2 px-2.5 py-0.5">
             <SearchIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
             <input
               aria-label={messages.searchLabel}

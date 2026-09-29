@@ -54,6 +54,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "./dropdown-menu";
+import { MENU_CHECK_CLASS } from "../lib/menu-styles";
 
 export type RealtimeModelOption = {
   id: SessionRealtimeModel;
@@ -1028,7 +1029,13 @@ export function RealtimeVoiceControl(props: {
                 />
               </div>
 
-              {status.phase !== "idle" ? (
+              {status.phase !== "idle" &&
+              // Say it once: the selected model's row already carries its reason.
+              !(
+                status.phase === "unavailable" &&
+                pickerProvider === selectedModel.provider &&
+                selectedModel.unavailableReason === status.detail
+              ) ? (
                 <>
                   <DropdownMenuSeparator />
                   <div className="px-2.5 py-2" role="status" aria-live="polite">
@@ -1221,7 +1228,9 @@ export function RealtimeModelPickerMenu(props: {
                 title={model.unavailableReason ?? model.description}
                 active={selected}
                 showChevron={false}
-                trailing={selected ? <CheckIcon className="size-3.5" aria-hidden /> : undefined}
+                trailing={
+                  selected ? <CheckIcon className={MENU_CHECK_CLASS} aria-hidden /> : undefined
+                }
                 testId={`realtime-model-choice-${model.id}`}
                 onClick={() => props.onSelect(model.id)}
               />

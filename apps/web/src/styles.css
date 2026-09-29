@@ -233,12 +233,16 @@ body {
    - the composer textarea (`.og-root textarea`) already shows a whole-composer
      focus affordance (focus-within border + soft glow), so a second outline
      bounded to the textarea box would double it;
-   - model search inputs use a whole-field focus outline including the icon;
+   - the model search input sits in its menu's search header, like the
+     combobox search, where the caret shows focus;
    - shadcn buttons (`[data-slot="button"]`) carry their own offset ring in
      button.tsx — excluding them here avoids stacking two rings on one control;
    - `[tabindex="-1"]` is for programmatic focus only (timeline scroller, etc.).
      Mouse-click + any key (e.g. Shift) flips keyboard modality and would paint
-     a huge ring around the whole pane — skip those; real tab stops use 0+. */
+     a huge ring around the whole pane — skip those; real tab stops use 0+.
+   - menu items take roving, programmatic focus even under the mouse; their
+     focus is the menu highlight (the surface-2 fill), the same for pointer
+     and keyboard (DESIGN.md "Menus and popovers"). */
 :where(
   button,
   a,
@@ -246,7 +250,7 @@ body {
   textarea,
   [role="button"],
   [tabindex]:not([tabindex="-1"])
-):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
+):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
 }
@@ -261,7 +265,7 @@ body {
     textarea,
     [role="button"],
     [tabindex]:not([tabindex="-1"])
-  ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
+  ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]) {
     border-radius: var(--radius-sm);
   }
 }

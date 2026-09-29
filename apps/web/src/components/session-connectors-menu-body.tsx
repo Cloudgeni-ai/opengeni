@@ -13,7 +13,7 @@ import {
   ComposerMenuSwitchIndicator,
   MenuBackButton,
 } from "@/components/ui/composer-menu";
-import { MENU_LABEL_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
+import { MENU_CHECK_CLASS, MENU_LABEL_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 import type { SessionToolSelection } from "@/components/pickers";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
@@ -156,7 +156,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           return (
             <div
               key={server.id}
-              className="flex min-h-16 items-center gap-1 border-b border-border px-2 py-2 last:border-b-0"
+              className="flex min-h-14 items-center gap-1 rounded-[10px] py-1.5 pl-2.5"
             >
               <div className="flex min-w-0 flex-1 items-center gap-3 pr-2">
                 <CapabilityLogo
@@ -242,7 +242,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   aria-label={`${server.name}, ${selected ? "on" : "off"} for this session`}
                   className="flex size-11 shrink-0 items-center justify-center"
                 >
-                  {selected ? <CheckIcon className="size-4 text-fg-muted" aria-hidden /> : null}
+                  {selected ? <CheckIcon className={MENU_CHECK_CLASS} aria-hidden /> : null}
                 </span>
               )}
             </div>
