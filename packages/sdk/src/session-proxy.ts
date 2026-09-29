@@ -1,7 +1,7 @@
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError } from "./errors";
 import { proxySessionEventStream } from "./proxy";
-import type { CreateSessionRequest, SessionEventListOptions } from "./types";
+import type { CreateSessionRequest } from "./types";
 
 /**
  * Packaged same-origin backend for the React conversation surfaces.
@@ -107,21 +107,6 @@ const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const QUEUE_OPERATIONS: ReadonlySet<string> = new Set(["move", "edit", "steer", "delete"]);
 const CREATE_FIELDS: ReadonlySet<string> = new Set(["initialMessage", "idempotencyKey"]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
-const EVENT_LIST_PARAMS: ReadonlySet<string> = new Set([
-  "after",
-  "before",
-  "limit",
-  "compact",
-  "mode",
-  "direction",
-  "payloadMode",
-  "resultMode",
-  "includeTypes",
-  "excludeTypes",
-  "includeClasses",
-  "excludeClasses",
-  "latest",
-]);
 
 class ProxyRejection extends Error {
   constructor(
@@ -216,24 +201,44 @@ export function createSessionProxyHandler(
       }
 
       const call = { signal: request.signal };
+      // Unknown additive query parameters on allowlisted reads pass through, so a
+      // newer browser SDK keeps working; the route and method allowlist is exact.
+      const query = Object.fromEntries(url.searchParams);
+      const read = async (path: string) =>
+        json(await client.requestJson("GET", path, undefined, query, call));
       const [root, ...rest] = segments;
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
-          return json(await client.requestJson("GET", "/v1/config/client", undefined, {}, call));
+          return await read("/v1/config/client");
         }
         return errorJson(404, "route_not_allowed", "Not found.");
       }
-      if (root !== "workspaces" || rest.length < 2) {
+      if (root !== "workspaces" || rest.length < 1) {
         return errorJson(404, "route_not_allowed", "Not found.");
       }
-      const [pathWorkspaceId, area, ...tail] = rest as [string, string, ...string[]];
+      const [pathWorkspaceId, area, ...tail] = rest as [string, string | undefined, ...string[]];
       if (pathWorkspaceId !== workspaceId) {
         return errorJson(403, "workspace_not_allowed", "This workspace is not available.");
       }
       const base = `/v1/workspaces/${workspaceId}`;
 
+      // Workspace reads and the live control stream used by <OpenGeniProvider>.
+      if (area === undefined && method === "GET") return await read(base);
       if (area === "model-catalog" && tail.length === 0 && method === "GET") {
-        return json(await client.requestJson("GET", `${base}/model-catalog`, undefined, {}, call));
+        return await read(`${base}/model-catalog`);
+      }
+      if (area === "live-events" && tail.length === 1 && tail[0] === "stream" && method === "GET") {
+        // Surface authorization failures as HTTP status before streaming.
+        await client.requestJson("GET", base, undefined, {}, call);
+        return workspaceLiveStream(client, workspaceId, url.searchParams, request, heartbeatMs);
+      }
+      if (area === "inference-control" && tail.length === 0 && method === "POST") {
+        // The conversation's paused-state UI only offers workspace Resume.
+        const body = await readJsonBody(request, maxBodyBytes);
+        if (body?.action !== "resume") {
+          reject(403, "control_not_allowed", "Only workspace resume is available.");
+        }
+        return json(await client.requestJson("POST", `${base}/inference-control`, body));
       }
 
       if (area === "files" && filesEnabled && method === "POST") {
@@ -249,12 +254,15 @@ export function createSessionProxyHandler(
           );
         }
         if (tail.length === 2 && tail[1] === "download-url") {
-          const sessionId = url.searchParams.get("sessionId");
-          if (sessionId !== null && !SEGMENT.test(sessionId)) {
-            reject(400, "invalid_session_id", "Invalid sessionId.");
-          }
-          const path = `${base}/files/${tail[0]}/download-url${sessionId ? `?sessionId=${sessionId}` : ""}`;
-          return json(await client.requestJson("POST", path, undefined, {}, call));
+          return json(
+            await client.requestJson(
+              "POST",
+              `${base}/files/${tail[0]}/download-url`,
+              undefined,
+              query,
+              call,
+            ),
+          );
         }
         return errorJson(404, "route_not_allowed", "Not found.");
       }
@@ -282,7 +290,7 @@ export function createSessionProxyHandler(
 
       switch (route) {
         case "GET ":
-          return json(await client.requestJson("GET", session, undefined, {}, call));
+          return await read(session);
         case "PATCH ": {
           const title = body?.title;
           if (typeof title !== "string" || Object.keys(body ?? {}).length !== 1) {
@@ -291,7 +299,7 @@ export function createSessionProxyHandler(
           return json(await client.requestJson("PATCH", session, { title }));
         }
         case "GET events":
-          return await listEvents(client, workspaceId, sessionId, url.searchParams);
+          return await listEvents(client, `${session}/events`, query, call);
         case "GET events/stream":
           // Surface authorization failures as HTTP status before streaming.
           await client.getSession(workspaceId, sessionId, call);
@@ -307,11 +315,9 @@ export function createSessionProxyHandler(
         case "POST steer":
           return json(await client.requestJson("POST", `${session}/steer`, sanitize(body)));
         case "GET queue":
-          return json(await client.requestJson("GET", `${session}/queue`, undefined, {}, call));
+          return await read(`${session}/queue`);
         case "GET composer-draft":
-          return json(
-            await client.requestJson("GET", `${session}/composer-draft`, undefined, {}, call),
-          );
+          return await read(`${session}/composer-draft`);
         case "PUT composer-draft":
           return json(await client.requestJson("PUT", `${session}/composer-draft`, sanitize(body)));
         case "POST composer-draft/submit":
@@ -324,29 +330,11 @@ export function createSessionProxyHandler(
           }
           return json(await client.requestJson("POST", `${session}/control`, body));
         }
-        case "GET human-input-requests": {
-          const status = url.searchParams.get("status");
-          return json(
-            await client.requestJson(
-              "GET",
-              `${session}/human-input-requests`,
-              undefined,
-              status ? { status } : {},
-              call,
-            ),
-          );
-        }
+        case "GET human-input-requests":
+          return await read(`${session}/human-input-requests`);
       }
       if (op.length === 2 && op[0] === "human-input-requests" && method === "GET") {
-        return json(
-          await client.requestJson(
-            "GET",
-            `${session}/human-input-requests/${op[1]}`,
-            undefined,
-            {},
-            call,
-          ),
-        );
+        return await read(`${session}/human-input-requests/${op[1]}`);
       }
       if (
         op.length === 3 &&
@@ -517,66 +505,97 @@ function clientEvent(
   }
 }
 
+/** Event pages keep OpenGeni's paging headers; forensic reads are not proxied. */
 async function listEvents(
   client: ProxyClient,
-  workspaceId: string,
-  sessionId: string,
-  params: URLSearchParams,
+  path: string,
+  query: Record<string, string>,
+  call: { signal: AbortSignal },
 ): Promise<Response> {
-  const options: Record<string, unknown> = {};
-  for (const [name, value] of params) {
-    if (!EVENT_LIST_PARAMS.has(name)) {
-      reject(400, "query_not_allowed", `Unsupported event query parameter: ${name}.`);
-    }
-    if (name === "after" || name === "before" || name === "limit") {
-      const number = Number(value);
-      if (!Number.isSafeInteger(number) || number < 0) {
-        reject(400, "invalid_query", `${name} must be a non-negative integer.`);
-      }
-      options[name] = number;
-    } else if (name === "compact") {
-      options.compact = value === "1" || value === "true";
-    } else if (
-      name === "includeTypes" ||
-      name === "excludeTypes" ||
-      name === "includeClasses" ||
-      name === "excludeClasses"
-    ) {
-      options[name] = value.split(",").filter(Boolean);
-    } else {
-      options[name] = value;
-    }
-  }
-  if (options.mode === "forensic") {
+  if (query.mode === "forensic") {
     reject(403, "forensic_events_not_allowed", "Forensic event reads are not proxied.");
   }
-  if (options.resultMode === "compact") {
-    const result = await client.listEventPage(workspaceId, sessionId, options as never);
-    return json(result);
-  }
-  const page = await client.listEventPage(
-    workspaceId,
-    sessionId,
-    options as SessionEventListOptions,
-  );
-  const headers: Record<string, string> = {
-    "X-OpenGeni-Event-Mode": page.mode,
-    "X-OpenGeni-Event-Direction": page.direction,
-    "X-OpenGeni-Payload-Mode": page.payloadMode,
-    "X-OpenGeni-Page-Bytes": String(page.bytes),
-    "X-OpenGeni-Page-Max-Bytes": String(page.maxBytes),
-    "X-OpenGeni-Page-Truncated": String(page.truncated),
-    "X-OpenGeni-Has-More": String(page.hasMore),
-    "X-OpenGeni-Forensic-Exact": String(page.forensicExact),
+  const upstream = await client.requestJsonResponse(path, query, call);
+  const headers: Record<string, string> = {};
+  upstream.headers.forEach((value, name) => {
+    if (name.toLowerCase().startsWith("x-opengeni-")) headers[name] = value;
+  });
+  return new Response(await upstream.text(), {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...headers,
+    },
+  });
+}
+
+/** Re-emit the workspace control/interaction stream the React provider subscribes to. */
+function workspaceLiveStream(
+  client: ProxyClient,
+  workspaceId: string,
+  params: URLSearchParams,
+  request: Request,
+  heartbeatMs: number,
+): Response {
+  const cursor = (name: string): number => {
+    const value = Number(params.get(name) ?? "0");
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
   };
-  if (page.truncatedBy) headers["X-OpenGeni-Truncated-By"] = page.truncatedBy;
-  if (page.coveredSequence) {
-    headers["X-OpenGeni-Covered-First"] = String(page.coveredSequence.first);
-    headers["X-OpenGeni-Covered-Last"] = String(page.coveredSequence.last);
-  }
-  if (page.nextAfter !== null) headers["X-OpenGeni-Next-After"] = String(page.nextAfter);
-  if (page.nextBefore !== null) headers["X-OpenGeni-Next-Before"] = String(page.nextBefore);
-  return json(page.events, 200, headers);
+  const upstream = new AbortController();
+  if (request.signal.aborted) upstream.abort();
+  else request.signal.addEventListener("abort", () => upstream.abort(), { once: true });
+  const events = client.streamWorkspaceLiveEvents(workspaceId, {
+    controlAfter: cursor("controlAfter"),
+    interactionAfter: cursor("interactionAfter"),
+    signal: upstream.signal,
+  });
+  const iterator = events[Symbol.asyncIterator]();
+  const encoder = new TextEncoder();
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+    heartbeat = undefined;
+  };
+  const body = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          stop();
+        }
+      }, heartbeatMs);
+    },
+    pull: async (controller) => {
+      const next = await iterator.next().catch((error: unknown) => {
+        stop();
+        throw error;
+      });
+      if (next.done) {
+        stop();
+        controller.close();
+        return;
+      }
+      const event = next.value;
+      controller.enqueue(
+        encoder.encode(
+          `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+        ),
+      );
+    },
+    cancel: () => {
+      stop();
+      upstream.abort();
+      void Promise.resolve(iterator.return?.(undefined)).catch(() => undefined);
+    },
+  });
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
 }
 
 /** Preserve OpenGeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */

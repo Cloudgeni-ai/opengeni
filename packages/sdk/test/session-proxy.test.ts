@@ -27,6 +27,21 @@ function upstreamServer() {
       body: text ? JSON.parse(text) : undefined,
     });
     const path = url.pathname;
+    if (path.endsWith("/live-events/stream")) {
+      const control = {
+        id: "33333333-3333-4333-8333-333333333333",
+        type: "workspace.control.changed",
+        workspaceId: WORKSPACE_ID,
+        sequence: 4,
+      };
+      return new Response(
+        hangingBytesStream(
+          [`event: ${control.type}\ndata: ${JSON.stringify(control)}\n\n`],
+          request.signal,
+        ),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    }
     if (path.endsWith("/events/stream")) {
       return new Response(
         hangingBytesStream([sseBlock(makeEvent(6)), sseBlock(makeEvent(7))], request.signal),
@@ -270,6 +285,62 @@ describe("createSessionProxyHandler", () => {
     const query = upstream.requests[0]!.url.searchParams;
     expect(query.get("before")).toBe("5");
     expect(query.get("payloadMode")).toBe("full");
+  });
+
+  test("passes unknown additive query parameters through on allowlisted reads", async () => {
+    const { upstream, handler } = setup();
+    const response = await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=3&futureOption=yes`,
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-OpenGeni-Has-More")).toBe("true");
+    const query = upstream.requests[0]!.url.searchParams;
+    expect(query.get("after")).toBe("3");
+    expect(query.get("futureOption")).toBe("yes");
+    await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/queue?view=next`,
+      ),
+    );
+    expect(upstream.requests[1]!.url.searchParams.get("view")).toBe("next");
+  });
+
+  test("serves the provider's workspace read, live stream, and workspace resume only", async () => {
+    const { upstream, browser } = setup();
+    await browser.getWorkspace(WORKSPACE_ID);
+    expect(upstream.requests[0]!.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}`);
+
+    const controller = new AbortController();
+    const live = browser.streamWorkspaceLiveEvents(WORKSPACE_ID, {
+      controlAfter: 2,
+      signal: controller.signal,
+    });
+    const first = await live[Symbol.asyncIterator]().next();
+    controller.abort();
+    expect(first.value).toMatchObject({ type: "workspace.control.changed", sequence: 4 });
+    const stream = upstream.requests.find((request) =>
+      request.url.pathname.endsWith("/live-events/stream"),
+    )!;
+    expect(stream.url.searchParams.get("controlAfter")).toBe("2");
+    expect(stream.headers.get("x-opengeni-external-actor")).not.toBeNull();
+
+    const before = upstream.requests.length;
+    const pause = await rejection(
+      browser.setWorkspaceInferenceState(WORKSPACE_ID, { action: "pause", clientEventId: "c1" }),
+    );
+    expect(pause.status).toBe(403);
+    const cancel = await rejection(browser.cancelSession(WORKSPACE_ID, SESSION_ID));
+    expect(cancel.status).toBe(403);
+    expect(upstream.requests).toHaveLength(before);
+    await browser.setWorkspaceInferenceState(WORKSPACE_ID, {
+      action: "resume",
+      clientEventId: "c2",
+    });
+    expect(upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/inference-control`,
+    );
   });
 
   test("re-streams session SSE and honors the browser resume cursor", async () => {

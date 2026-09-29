@@ -13,3 +13,6 @@ works against it. Session creation is server-controlled through a
 `createSession` hook (the browser supplies only the message and a retry key);
 message bodies are bounded, cannot rotate MCP credentials or attach non-file
 resources, and mutations go through an optional `authorizeMutation` CSRF hook.
+It also serves the workspace read, live control stream, and workspace Resume
+that `<OpenGeniProvider>` uses, and passes unknown query parameters through on
+served reads so newer browser SDKs keep working.
