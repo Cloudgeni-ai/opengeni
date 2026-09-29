@@ -206,6 +206,24 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
+  /** Replace an existing external member's permissions in one shared
+   * workspace. Keyed by `operationId`: reuse the exact body after response
+   * loss. Narrowing makes live authority re-check; nothing is cancelled. */
+  async updateExternalWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    request: import("@opengeni/contracts/external-identities").UpdateExternalWorkspaceMemberRequest,
+  ): Promise<
+    import("@opengeni/contracts/external-identities").UpdateExternalWorkspaceMemberResponse
+  > {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/external-members/${encodeURIComponent(membershipId)}`,
+      request,
+    );
+  }
+
   async listConnectProviders(
     workspaceId: string,
   ): Promise<import("@opengeni/contracts/connect").ConnectProvider[]> {

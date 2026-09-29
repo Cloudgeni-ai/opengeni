@@ -92,6 +92,32 @@ export type CancelExternalWorkspaceMemberGrantResponse = z.infer<
   typeof CancelExternalWorkspaceMemberGrantResponse
 >;
 
+/** Replace an existing external member's permissions in one shared workspace.
+ * Keyed and idempotent like a grant; narrowing forces live authority to
+ * re-check but never cancels or tears down work. */
+export const UpdateExternalWorkspaceMemberRequest = z
+  .object({
+    permissions: z.array(Permission).min(1).max(Permission.options.length),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type UpdateExternalWorkspaceMemberRequest = z.infer<
+  typeof UpdateExternalWorkspaceMemberRequest
+>;
+export const UpdateExternalWorkspaceMemberResponse = z
+  .object({
+    subjectId: z.string(),
+    organizationMembershipId: z.string().uuid(),
+    permissions: z.array(Permission),
+    /** True when a previously held permission was removed. */
+    narrowed: z.boolean(),
+    replay: z.boolean(),
+  })
+  .strict();
+export type UpdateExternalWorkspaceMemberResponse = z.infer<
+  typeof UpdateExternalWorkspaceMemberResponse
+>;
+
 /** Uses the organization membership ID returned by lazy identity admission.
  * Reactivation restores admission only, not revoked work or workspace grants. */
 export const UpdateExternalIdentityMembershipRequest = z

@@ -30,9 +30,44 @@ await service.addExternalWorkspaceMember(workspaceId, {
 ```
 
 The key's live permission ceiling applies. Existing different permissions conflict
-rather than being overwritten. An exact operation replay returns its historical
+rather than being overwritten; change them with a keyed update instead. An exact operation replay returns its historical
 identity receipt without adding or updating membership. That historical response
 is not proof of current access. A cancelled operation returns a conflict instead.
+
+## Change an existing member's permissions
+
+Do not revoke and re-grant to change access: revocation tears down the member's
+work. Persist a new UUID operation ID and replace the complete permission set:
+
+```ts
+await service.updateExternalWorkspaceMember(
+  organizationId, workspaceId, organizationMembershipId,
+  { operationId: updateOperationId, permissions: ["workspace:read"] },
+);
+```
+
+`PATCH /v1/organizations/:organizationId/workspaces/:workspaceId/external-members/:membershipId`
+requires the organization's service key with `members:manage` (or
+`workspace:admin`) and the same live permission ceiling as a grant. It updates an
+existing membership only: an absent member or workspace membership is `404`, and a
+suspended or offboarded identity conflicts (`409`). The response is
+`{ subjectId, organizationMembershipId, permissions, narrowed, replay }`.
+
+Widening only rewrites the set. When any previously held permission is removed
+(`narrowed: true`), the same transaction also advances the member's organization
+authorization revision - the lifecycle signal an organization role change uses.
+Direct requests already re-read workspace permissions on every call; the revision
+advance makes frozen authority that recorded the old revision re-check on its next
+use: personal connections frozen on an accepted turn are omitted with a visible
+warning until the next turn re-freezes them, and an active identity link for that
+member must be confirmed again. Nothing is cancelled, interrupted, or torn down:
+sessions, turns, attempts, schedules, and processes keep running.
+
+The receipt ledger, organization lock, and replay contract are those of a grant
+(migration 0537 adds the `update` action). Retain the exact body and retry it
+unchanged after response loss; a replay returns the original receipt even after a
+later change, which is not proof of current access. Reusing an operation ID with a
+different body conflicts.
 
 ## Withdraw access, including a grant still in flight
 

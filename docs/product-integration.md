@@ -72,7 +72,9 @@ export const POST = createChatHandler(og, {
 The four permissions cover the chat routes: open and create conversations,
 read and stream them, and send follow-ups or answer pending decisions. Grant
 more only for features your product exposes. Pass an `operationId` you store
-first to make onboarding retries safe; see
+first to make onboarding retries safe. To change a member's permissions later,
+call `updateExternalWorkspaceMember` with a new `operationId` instead of removing
+and re-adding them; see
 [external membership operations](external-membership-operations.md).
 
 Or drive it from any server code:

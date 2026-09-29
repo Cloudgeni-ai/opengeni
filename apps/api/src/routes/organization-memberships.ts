@@ -1,6 +1,7 @@
 import {
   lookupExternalIdentityForRequest,
   cancelExternalWorkspaceMemberGrantForRequest,
+  updateExternalWorkspaceMemberForRequest,
 } from "@opengeni/core";
 import {
   AcceptOrganizationInvitationRequest,
@@ -86,6 +87,7 @@ import {
   assertOrganizationUserSetupDeliveryConfigured,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
+import { readRequestJson } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
@@ -542,6 +544,23 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         rethrowMembershipError(error);
       }
     },
+  );
+
+  // Organization service key: replace an existing external member's
+  // permissions in one shared workspace (keyed, idempotent, non-destructive).
+  app.patch(
+    "/v1/organizations/:organizationId/workspaces/:workspaceId/external-members/:membershipId",
+    async (context) =>
+      context.json(
+        await updateExternalWorkspaceMemberForRequest(
+          context,
+          deps,
+          parseId(OrganizationId, context.req.param("organizationId"), "organization id"),
+          parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id"),
+          parseId(MembershipId, context.req.param("membershipId"), "membership id"),
+          await readRequestJson(context),
+        ),
+      ),
   );
 
   app.post(
