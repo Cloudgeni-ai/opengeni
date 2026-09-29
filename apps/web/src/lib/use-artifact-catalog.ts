@@ -2,101 +2,187 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { artifactKey, type ArtifactCatalogFilters } from "./artifact-catalog";
+import {
+  artifactCatalogs,
+  invalidateArtifactCatalog,
+  type CachedArtifactCatalog,
+} from "./artifact-catalog-cache";
 import { retainArtifactsAfterRefreshFailure } from "./artifact-refresh";
 
-/** Metadata-only query lifecycle, independent of app context and content runtimes. */
+export { invalidateArtifactCatalog } from "./artifact-catalog-cache";
+
+const FRESH_FOR_MS = 30_000;
+const MAX_CACHED_QUERIES = 40;
+type CatalogClient = Pick<OpenGeniBrowserClient, "listArtifactCatalog">;
+type CatalogPages = Pick<CachedArtifactCatalog, "items" | "nextCursor" | "pages">;
+
+function saveCatalog(client: CatalogClient, key: string, entry: CachedArtifactCatalog) {
+  let cache = artifactCatalogs.get(client);
+  if (!cache) {
+    cache = new Map();
+    artifactCatalogs.set(client, cache);
+  }
+  cache.delete(key);
+  cache.set(key, entry);
+  if (cache.size > MAX_CACHED_QUERIES) cache.delete(cache.keys().next().value!);
+}
+
+const isFresh = (entry: CachedArtifactCatalog | undefined) =>
+  !!entry && Date.now() - entry.updatedAt < FRESH_FOR_MS;
+
+function isAccessFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("status" in error)) return false;
+  return error.status === 401 || error.status === 403 || error.status === 404;
+}
+
+const uniqueItems = (items: ArtifactCatalogItem[]) => [
+  ...new Map(items.map((item) => [artifactKey(item), item])).values(),
+];
+
+/**
+ * Metadata-only query lifecycle, independent of app context and content runtimes.
+ * Views are cached per client, workspace and filters, so tab switches and revisits
+ * render immediately; a view older than FRESH_FOR_MS refetches on revisit or focus.
+ */
 export function useArtifactCatalog(
-  client: Pick<OpenGeniBrowserClient, "listArtifactCatalog">,
+  client: CatalogClient,
   workspaceId: string,
   filters: ArtifactCatalogFilters,
   accessKeyVersion: number,
 ) {
-  const key = JSON.stringify([workspaceId, accessKeyVersion, filters]);
-  const [retry, setRetry] = useState(0);
-  const [state, setState] = useState<{
-    key: string;
-    client: typeof client;
-    items: ArtifactCatalogItem[];
-    nextCursor: string | null;
-    loading: boolean;
-    error: Error | null;
-  } | null>(null);
+  const q = filters.q.trim();
+  const { kind, sort, status } = filters;
+  const key = JSON.stringify([workspaceId, accessKeyVersion, q, kind, sort, status]);
+  const [state, setState] = useState<
+    | (CatalogPages & {
+        key: string;
+        client: CatalogClient;
+        loading: boolean;
+        error: Error | null;
+      })
+    | null
+  >(null);
   // This stable controller is not a DOM ref. Cleanup invalidates pagination too.
-  const requests = useRef({ generation: 0, active: false }).current;
+  const requests = useRef({
+    generation: 0,
+    active: false,
+    shown: null as (CatalogPages & { key: string; client: CatalogClient }) | null,
+  }).current;
   const load = useCallback(
-    async (cursor?: string) => {
-      if (cursor && requests.active) return;
+    async (more = false) => {
+      const shown =
+        requests.shown?.key === key && requests.shown.client === client ? requests.shown : null;
+      if (more && (requests.active || !shown?.nextCursor)) return;
       const request = ++requests.generation;
       requests.active = true;
-      setState((previous) => ({
+      setState({
         key,
         client,
-        items: previous?.key === key && previous.client === client ? previous.items : [],
-        nextCursor: cursor ?? null,
+        items: shown?.items ?? [],
+        nextCursor: shown?.nextCursor ?? null,
+        pages: shown?.pages ?? 0,
         loading: true,
         error: null,
-      }));
-      try {
-        const result = await client.listArtifactCatalog(workspaceId, {
-          q: filters.q.trim() || undefined,
-          kind: filters.kind === "all" ? undefined : filters.kind,
-          sort: filters.sort,
-          status: filters.status,
+      });
+      const fetchPage = (cursor?: string) =>
+        client.listArtifactCatalog(workspaceId, {
+          q: q || undefined,
+          kind: kind === "all" ? undefined : kind,
+          sort,
+          status,
           limit: 60,
           cursor,
         });
-        if (requests.generation !== request) return;
-        setState((previous) => {
-          const items =
-            cursor && previous?.key === key && previous.client === client
-              ? [...previous.items, ...result.items]
-              : result.items;
-          return {
-            key,
-            client,
-            items: [...new Map(items.map((item) => [artifactKey(item), item])).values()],
-            nextCursor: result.nextCursor,
-            loading: false,
-            error: null,
+      try {
+        let next: CatalogPages;
+        if (more && shown) {
+          const page = await fetchPage(shown.nextCursor!);
+          next = {
+            items: uniqueItems([...shown.items, ...page.items]),
+            nextCursor: page.nextCursor,
+            pages: shown.pages + 1,
           };
+        } else {
+          // Refetch every page already shown, so a refresh after "Load more"
+          // updates the whole list instead of collapsing it to the first page.
+          const items: ArtifactCatalogItem[] = [];
+          let nextCursor: string | null = null;
+          let pages = 0;
+          do {
+            const page = await fetchPage(nextCursor ?? undefined);
+            if (requests.generation !== request) return;
+            items.push(...page.items);
+            nextCursor = page.nextCursor;
+            pages++;
+          } while (nextCursor && pages < (shown?.pages ?? 1));
+          next = { items: uniqueItems(items), nextCursor, pages };
+        }
+        if (requests.generation !== request) return;
+        const cached = artifactCatalogs.get(client)?.get(key);
+        saveCatalog(client, key, {
+          workspaceId,
+          ...next,
+          // Appending a page does not refresh the pages already shown.
+          updatedAt: more ? (cached?.updatedAt ?? 0) : Date.now(),
         });
+        requests.shown = { key, client, ...next };
+        setState({ key, client, ...next, loading: false, error: null });
       } catch (error) {
         if (requests.generation !== request) return;
-        setState((previous) => ({
+        const retain = retainArtifactsAfterRefreshFailure(error);
+        if (isAccessFailure(error)) invalidateArtifactCatalog(client, workspaceId);
+        else if (!retain) artifactCatalogs.get(client)?.delete(key);
+        if (!retain) requests.shown = null;
+        setState({
           key,
           client,
-          items:
-            previous?.key === key &&
-            previous.client === client &&
-            retainArtifactsAfterRefreshFailure(error)
-              ? previous.items
-              : [],
-          nextCursor: cursor ?? null,
+          items: retain ? (shown?.items ?? []) : [],
+          nextCursor: retain ? (shown?.nextCursor ?? null) : null,
+          pages: retain ? (shown?.pages ?? 0) : 0,
           loading: false,
           error: error instanceof Error ? error : new Error("Artifacts could not be loaded."),
-        }));
+        });
       } finally {
         if (requests.generation === request) requests.active = false;
       }
     },
-    [client, workspaceId, key, requests, filters.kind, filters.status, filters.q, filters.sort],
+    [client, workspaceId, key, requests, q, kind, sort, status],
   );
   useEffect(() => {
-    void load();
+    const cached = artifactCatalogs.get(client)?.get(key);
+    requests.shown = cached ? { key, client, ...cached } : null;
+    if (cached && isFresh(cached)) {
+      setState({ key, client, ...cached, loading: false, error: null });
+    } else {
+      void load();
+    }
+    const refreshIfStale = () => {
+      if (document.visibilityState === "hidden" || requests.active) return;
+      if (!isFresh(artifactCatalogs.get(client)?.get(key))) void load();
+    };
+    window.addEventListener("focus", refreshIfStale);
+    document.addEventListener("visibilitychange", refreshIfStale);
     return () => {
+      window.removeEventListener("focus", refreshIfStale);
+      document.removeEventListener("visibilitychange", refreshIfStale);
       requests.generation++;
       requests.active = false;
     };
-  }, [load, retry, requests]);
-  const current = state?.key === key && state.client === client ? state : null;
+  }, [client, key, load, requests]);
+  // Before the effect runs for a new view, show its cached rows instead of a spinner.
+  const cached = artifactCatalogs.get(client)?.get(key);
+  const current =
+    state?.key === key && state.client === client
+      ? state
+      : cached
+        ? { ...cached, loading: false, error: null }
+        : null;
   return {
     items: current?.items ?? [],
     loading: current?.loading ?? true,
     error: current?.error ?? null,
     nextCursor: current?.nextCursor ?? null,
-    retry: () => setRetry((value) => value + 1),
-    loadMore: () => {
-      if (current?.nextCursor) void load(current.nextCursor);
-    },
+    retry: () => void load(),
+    loadMore: () => void load(true),
   };
 }

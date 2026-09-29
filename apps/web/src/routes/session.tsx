@@ -39,6 +39,7 @@ import {
   type TimelineSearchTarget,
 } from "@opengeni/react/session-ui";
 import type { SessionSearchRoute } from "@/lib/session-search-route";
+import { expireArtifactCatalog } from "@/lib/artifact-catalog-cache";
 import {
   creditExhaustedFromEvents,
   conversationTimeline,
@@ -1237,6 +1238,11 @@ function SessionDock(props: {
     }
     return 0;
   }, [props.events]);
+  // Tool output may have published a file or Site: let the Artifacts page show
+  // its cached rows on the next visit but refetch them.
+  useEffect(() => {
+    if (artifactRefreshSequence) expireArtifactCatalog(context.client, props.workspaceId);
+  }, [artifactRefreshSequence, context.client, props.workspaceId]);
   const artifactState = useSessionEditableArtifactSummaries({
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
