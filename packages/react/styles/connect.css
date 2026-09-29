@@ -33,7 +33,8 @@
   max-width: 100%;
 }
 .og-connect button { cursor: pointer; width: fit-content; text-align: start; }
-.og-identity-link { display: grid; gap: 1rem; }
+/* In settings the block spans the page like the sections around it. */
+.og-identity-link { display: grid; gap: 1rem; max-width: none; }
 /* Heading and description follow the host's section heading (16/24/600) and
    description (12/18, muted) so the block reads like its neighbours. */
 .og-identity-link > h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: -0.2px; color: var(--og-color-fg); }
