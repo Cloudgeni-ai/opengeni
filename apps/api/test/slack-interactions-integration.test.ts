@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
@@ -906,6 +906,160 @@ async function drainAll(deps: ApiRouteDeps, limit = 50) {
   return count;
 }
 
+/**
+ * A compact first message: its opening sentence is itself the session link, so
+ * this matches every variant (plain, private, reaction) and nothing else.
+ */
+const START_MESSAGE_LINK =
+  /<https:\/\/app\.example\.test\/workspaces\/[^|>]+\/sessions\/[^|>]+\|OpenGeni started (?:this|a private) task>/u;
+
+function isStartMessage(post: { text: string }) {
+  return START_MESSAGE_LINK.test(post.text);
+}
+
+/** The API's deterministic operation-id derivation, for asserting ledger ids. */
+function deterministicUuidForTest(value: string) {
+  const bytes = createHash("sha256").update(value).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+type SlackFixture = Awaited<ReturnType<typeof fixture>>;
+
+/** Press one button on one exact Slack message, as Slack would deliver it. */
+async function pressSlackButton(
+  value: SlackFixture,
+  input: {
+    post: { channel: string; timestamp: string };
+    rootTimestamp: string;
+    actionId: string;
+    handleId: string;
+    actionTs: string;
+    userId?: string;
+  },
+) {
+  const response = await value.app.request(
+    signedRequest(
+      "/v1/integrations/slack/interactions",
+      new URLSearchParams({
+        payload: JSON.stringify({
+          type: "block_actions",
+          team: { id: value.teamId },
+          user: { id: input.userId ?? value.ownerSlackUserId },
+          channel: { id: input.post.channel },
+          message: { ts: input.post.timestamp, thread_ts: input.rootTimestamp },
+          actions: [
+            { action_id: input.actionId, action_ts: input.actionTs, value: input.handleId },
+          ],
+        }),
+      }).toString(),
+      "application/x-www-form-urlencoded",
+    ),
+  );
+  expect(response.status).toBe(200);
+  await drainAll(value.deps);
+}
+
+/** The one handle of a kind that is still pending on one exact message. */
+async function pendingHandle(post: { clientMessageId: string | null }, actionKind: string) {
+  const [handle] = await shared!.admin<{ id: string }[]>`
+    select id from slack_interaction_action_handles
+    where message_operation_id = ${post.clientMessageId}::uuid
+      and action_kind = ${actionKind}
+      and status = 'pending'`;
+  expect(handle?.id).toBeTruthy();
+  return handle!.id;
+}
+
+/**
+ * Start a top-level DM task whose interaction is bound the way an image from
+ * before compact messages bound it: with no frozen start line. The first
+ * attempt binds the session and then fails to post its first message; the
+ * start line is cleared exactly as if an older image had bound it; the retry
+ * repairs the acknowledgement through the ordinary already-durable path.
+ */
+async function startLegacyDmTask(
+  value: SlackFixture,
+  input: { channelId: string; rootTimestamp: string; text: string },
+) {
+  const eventId = `E_LEGACY_${crypto.randomUUID()}`;
+  value.slack.postFailuresByChannel.set(input.channelId, { status: 500 });
+  expect(
+    (
+      await postEvent(value.app, {
+        teamId: value.teamId,
+        eventId,
+        event: {
+          type: "message",
+          channel_type: "im",
+          user: value.ownerSlackUserId,
+          channel: input.channelId,
+          ts: input.rootTimestamp,
+          text: input.text,
+        },
+      })
+    ).status,
+  ).toBe(200);
+  await drainAll(value.deps);
+  value.slack.postFailuresByChannel.delete(input.channelId);
+  const [route] = await shared!.admin<{ id: string; session_id: string }[]>`
+    select id, session_id from slack_interactions
+    where slack_channel_id = ${input.channelId} and session_id is not null`;
+  expect(route).toBeDefined();
+  await shared!.admin`
+    update slack_interactions set start_message_line = null where id = ${route!.id}`;
+  await shared!.admin`
+    delete from slack_interaction_action_handles where interaction_id = ${route!.id}`;
+  await shared!.admin`
+    update slack_interaction_inbox
+    set status = 'pending', retry_at = null, claim_holder_id = null, claim_expires_at = null
+    where provider_event_id = ${eventId}`;
+  await drainAll(value.deps);
+  const acknowledgement = value.slack.posts.filter((post) => post.channel === input.channelId);
+  expect(acknowledgement).toHaveLength(1);
+  return {
+    eventId,
+    interactionId: route!.id,
+    sessionId: route!.session_id,
+    ack: acknowledgement[0]!,
+  };
+}
+
+/** The post ledger's request digest, recomputed for exact expected bytes. */
+function slackPostDigest(
+  value: SlackFixture,
+  input: {
+    operationId: string;
+    targetId: string;
+    threadTimestamp: string | null;
+    text: string;
+    blocks: unknown[] | null;
+  },
+) {
+  return createHmac("sha256", environmentsEncryptionKeyBytes(value.deps.settings)!)
+    .update(
+      JSON.stringify({
+        operationId: input.operationId,
+        connectionId: value.connectionId,
+        targetKind: "channel",
+        targetId: input.targetId,
+        threadTimestamp: input.threadTimestamp,
+        text: input.text,
+        blocks: input.blocks,
+      }),
+    )
+    .digest("hex");
+}
+
+async function lastSequence(workspaceId: string, sessionId: string, type: string) {
+  const [row] = await shared!.admin<{ sequence: number }[]>`
+    select max(sequence)::int as sequence from session_events
+    where workspace_id = ${workspaceId} and session_id = ${sessionId} and type = ${type}`;
+  return row!.sequence;
+}
+
 function reactionObjectStorage() {
   const objects = new Map<string, { bytes: Uint8Array; head: ObjectHead }>();
   const storage = {
@@ -1414,11 +1568,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           ? { text: "CHANGED DRAFT", revision: "2" }
           : { text: "UNSENT PRIVATE DRAFT", revision: "1" },
       );
-      // Defaults are still applied, but the acknowledgement does not list them.
-      const acknowledgement = value.slack.posts.find((post) =>
-        post.text.includes("Open in OpenGeni"),
-      );
-      expect(acknowledgement?.text).not.toContain("Using connectors:");
+      // Defaults are still applied, but the first message does not list them.
+      const acknowledgement = value.slack.posts.find(isStartMessage);
+      expect(acknowledgement).toBeDefined();
+      expect(acknowledgement!.text).not.toContain("Using connectors:");
+      expect(acknowledgement!.text).not.toContain("repos:");
       const [frozen] = await shared!.admin<{ session_defaults_line: string | null }[]>`
         select session_defaults_line from slack_interactions where id = ${interaction!.id}`;
       expect(frozen!.session_defaults_line).toBeNull();
@@ -2171,13 +2325,38 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ).toBe(200);
     await drainAll(value.deps);
 
+    // The workspace is named once, inline, in the first message's linked
+    // sentence, and never as a separate line.
     const routedAck = value.slack.posts.at(-1)!;
-    expect(routedAck.text).toContain("-> Platform");
-    expect(JSON.stringify(routedAck.blocks)).toContain("-> Platform");
-    const [label] = await shared!.admin<{ routed_workspace_label: string | null }[]>`
-      select routed_workspace_label from slack_interactions
+    expect(routedAck.text.split("\n")[0]).toMatch(
+      /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|OpenGeni started this task> in \*Platform\*\.$/u,
+    );
+    expect(routedAck.text).not.toContain("->");
+    expect(JSON.stringify(routedAck.blocks)).not.toContain("->");
+    const [label] = await shared!.admin<
+      { id: string; routed_workspace_label: string | null; session_id: string }[]
+    >`
+      select id, routed_workspace_label, session_id from slack_interactions
       where workspace_id = ${routed.workspaceId}`;
     expect(label?.routed_workspace_label).toBe("Platform");
+    // Every later message sits in the first message's thread, so none repeats
+    // the workspace. Its ids move to `:v3`, away from the bytes an older image
+    // would render with the line for the same message.
+    const beforeResult = value.slack.posts.length;
+    await appendSessionEvents(client.db, routed.workspaceId, label!.session_id, [
+      { type: "turn.completed", payload: { output: "Routed result." } },
+    ]);
+    await drainAll(value.deps);
+    const [result] = value.slack.posts.slice(beforeResult);
+    expect(result).toMatchObject({ text: "Routed result.", blocks: null });
+    const resultSequence = await lastSequence(
+      routed.workspaceId,
+      label!.session_id,
+      "turn.completed",
+    );
+    expect(result!.clientMessageId).toBe(
+      deterministicUuidForTest(`slack-delivery:${label!.id}:${resultSequence}:final:v3`),
+    );
 
     // An install where the person has exactly one workspace made no choice, so
     // a constant footer on every message would be noise rather than
@@ -2897,12 +3076,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       channel: channelId,
       threadTimestamp: rootTimestamp,
     });
-    expect(value.slack.posts[0]!.text).toContain("started from the :genie: reaction");
-    expect(value.slack.posts[0]!.text).not.toContain("Using connectors:");
+    // The reaction first message is one linked sentence plus its how-to: no
+    // button, no separate link, no list of what the task started with.
     expect(value.slack.posts[0]!.text).toMatch(
-      /<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>/u,
+      /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|OpenGeni started this task> from the :genie: reaction\. If the request is unclear, OpenGeni will ask in this thread\. Reply here to continue, or reply `stop` to stop\.$/u,
     );
-    expect(value.slack.posts[0]!.text.match(/Open in OpenGeni/gu) ?? []).toHaveLength(1);
+    expect(value.slack.posts[0]!.blocks).toBeNull();
+    expect(value.slack.posts[0]!.text).not.toContain("Open in OpenGeni");
 
     const postsBeforeCompletion = value.slack.posts.length;
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
@@ -4454,15 +4634,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       channel: "D_PRIVATE",
       threadTimestamp: "1710000000.000001",
     });
-    expect(value.slack.posts[0]!.text).toMatch(
-      /<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>/u,
-    );
-    expect(value.slack.posts[0]!.text.match(/Open in OpenGeni/gu) ?? []).toHaveLength(1);
-    // The acknowledgement itself carries no how-to prose. This Slack identity's
-    // very first accepted task also carries the one-time onboarding hint.
+    // The first message is one linked sentence. This Slack identity's very
+    // first accepted task also carries the one-time onboarding hint.
     expect(value.slack.posts[0]!.text.split("\n\n")[0]).toMatch(
-      /^OpenGeni started this task\. <https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>$/u,
+      /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|OpenGeni started this task>\.$/u,
     );
+    expect(value.slack.posts[0]!.text).not.toContain("Open in OpenGeni");
     expect(value.slack.posts[0]!.text).not.toContain("Using connectors:");
     expect(value.slack.posts[0]!.text).toContain("First time here:");
     const firstAckPostCount = value.slack.posts.length;
@@ -5633,16 +5810,104 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(2);
   });
 
-  test("requester-bound native controls update the exact Slack message and settle sibling handles", async () => {
+  test("an interaction bound before compact messages keeps its exact first message, Status, and controls card", async () => {
     if (!available) return;
     const value = await fixture();
     const channelId = "D_NATIVE_ACTION";
     const rootTimestamp = "1760000000.000001";
+    const { eventId, interactionId, sessionId, ack } = await startLegacyDmTask(value, {
+      channelId,
+      rootTimestamp,
+      text: "Start a task with native Slack controls",
+    });
+
+    // Byte for byte what the previous release posted: a separate session link,
+    // the previous one-time hint, and the Status and Stop buttons.
+    const legacyText = `OpenGeni started this task. <https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${sessionId}|Open in OpenGeni>\n\nFirst time here: reply in this thread to continue this task, or reply \`stop\` to stop it. Start a new top-level DM or run \`/opengeni\` again for a new task. Run \`/opengeni info\` any time for the full summary.`;
+    expect(ack.text).toBe(legacyText);
+    expect(ack.clientMessageId).toBe(deterministicUuidForTest(`slack-ack:${interactionId}`));
+    const statusHandle = await pendingHandle(ack, "session_status");
+    const stopHandle = await pendingHandle(ack, "session_pause");
+    const legacyBlocks = [
+      { type: "section", text: { type: "mrkdwn", text: legacyText } },
+      {
+        type: "actions",
+        block_id: `opengeni_controls_${ack.clientMessageId}`,
+        elements: [
+          {
+            type: "button",
+            action_id: "opengeni.session.status",
+            value: statusHandle,
+            text: { type: "plain_text", text: "Status", emoji: true },
+          },
+          {
+            type: "button",
+            action_id: "opengeni.session.pause",
+            value: stopHandle,
+            text: { type: "plain_text", text: "Stop", emoji: true },
+            style: "danger",
+          },
+        ],
+      },
+    ];
+    expect(ack.blocks).toEqual(legacyBlocks);
+    const ackDigest = async () => {
+      const [row] = await shared!.admin<{ request_digest: string; status: string }[]>`
+        select request_digest, status from slack_bot_post_operations
+        where connection_id = ${value.connectionId} and operation_id = ${ack.clientMessageId}`;
+      return row;
+    };
+    expect(await ackDigest()).toEqual({
+      request_digest: slackPostDigest(value, {
+        operationId: ack.clientMessageId!,
+        targetId: channelId,
+        threadTimestamp: rootTimestamp,
+        text: legacyText,
+        blocks: legacyBlocks,
+      }),
+      status: "completed",
+    });
+
+    // An old Status button still works: the message it was pressed on is
+    // replaced by the status, and a new controls card is posted.
+    await pressSlackButton(value, {
+      post: ack,
+      rootTimestamp,
+      actionId: "opengeni.session.status",
+      handleId: statusHandle,
+      actionTs: "1760000000.000002",
+    });
+    expect(ack.text).toContain("OpenGeni task status:");
+    expect(ack.text).toContain("First time here: reply in this thread to continue this task");
+    expect(value.slack.posts).toHaveLength(2);
+    expect(value.slack.posts[1]).toMatchObject({
+      channel: channelId,
+      threadTimestamp: rootTimestamp,
+      text: "OpenGeni task controls.",
+    });
+    const handles = await shared!.admin<
+      { action_kind: string; status: string; result: string | null }[]
+    >`
+      select action_kind, status, result
+      from slack_interaction_action_handles
+      where workspace_id = ${value.owner.workspaceId}
+        and message_operation_id = ${ack.clientMessageId}::uuid
+      order by action_kind`;
+    expect(handles).toEqual([
+      { action_kind: "session_pause", status: "stale", result: "superseded" },
+      { action_kind: "session_status", status: "completed", result: "status" },
+    ]);
+
+    // An acknowledgement repair re-renders the same bytes under the same
+    // operation, so the ledger reports it completed instead of conflicting.
+    await shared!.admin`
+      delete from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId} and provider_event_id = ${eventId}`;
     expect(
       (
         await postEvent(value.app, {
           teamId: value.teamId,
-          eventId: `E_NATIVE_ACTION_${crypto.randomUUID()}`,
+          eventId,
           event: {
             type: "message",
             channel_type: "im",
@@ -5655,64 +5920,198 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       ).status,
     ).toBe(200);
     await drainAll(value.deps);
+    const [inbox] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
+      select status, last_error_code from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId} and provider_event_id = ${eventId}`;
+    expect(inbox).toEqual({ status: "processed", last_error_code: null });
+    expect(value.slack.posts).toHaveLength(2);
+    expect((await ackDigest())!.status).toBe("completed");
 
-    const acknowledgement = value.slack.posts.at(-1)!;
-    expect(acknowledgement.blocks).not.toBeNull();
-    const [statusHandle] = await shared!.admin<{ id: string }[]>`
-      select id
-      from slack_interaction_action_handles
-      where workspace_id = ${value.owner.workspaceId}
-        and action_kind = 'session_status'
-        and status = 'pending'`;
-    expect(statusHandle?.id).toBeTruthy();
-
-    const payload = JSON.stringify({
-      type: "block_actions",
-      team: { id: value.teamId },
-      user: { id: value.ownerSlackUserId },
-      channel: { id: channelId },
-      message: { ts: acknowledgement.timestamp, thread_ts: rootTimestamp },
-      actions: [
-        {
-          action_id: "opengeni.session.status",
-          action_ts: "1760000000.000002",
-          value: statusHandle!.id,
-        },
-      ],
-    });
-    const response = await value.app.request(
-      signedRequest(
-        "/v1/integrations/slack/interactions",
-        new URLSearchParams({ payload }).toString(),
-        "application/x-www-form-urlencoded",
-      ),
-    );
-    expect(response.status).toBe(200);
+    // A result keeps the previous format too: nothing touches the first
+    // message when the task settles.
+    const updatesBefore = value.slack.calls.filter((call) => call.method === "chat.update").length;
+    await appendSessionEvents(client.db, value.owner.workspaceId, sessionId, [
+      { type: "turn.completed", payload: { output: "Legacy result." } },
+    ]);
     await drainAll(value.deps);
+    expect(value.slack.posts.at(-1)!.text).toBe("Legacy result.");
+    expect(value.slack.calls.filter((call) => call.method === "chat.update")).toHaveLength(
+      updatesBefore,
+    );
+  }, 60_000);
 
-    expect(acknowledgement.text).toContain("OpenGeni task status:");
+  test("Stop swaps to Resume on the first message in place and the button leaves when the task settles", async () => {
+    if (!available) return;
+    const value = await fixture({ linkOther: true });
+    const channelId = "D_COMPACT_STOP";
+    const rootTimestamp = "1760100000.000001";
+    const eventId = `E_COMPACT_STOP_${crypto.randomUUID()}`;
+    const start = {
+      teamId: value.teamId,
+      eventId,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: channelId,
+        ts: rootTimestamp,
+        text: "Start a task and stop it",
+      },
+    };
+    expect((await postEvent(value.app, start)).status).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const sessionUrl = `https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}`;
+    const line = `<${sessionUrl}|OpenGeni started this task>.`;
+    const hint =
+      "\n\nFirst time here: reply in this thread to continue, or reply `stop` to stop. Run `/opengeni info` for more.";
+    const first = value.slack.posts.at(-1)!;
+    expect(first.text).toBe(`${line}${hint}`);
+    const buttonOf = (post: SlackPost) =>
+      (post.blocks as Array<{ type: string; elements?: Array<Record<string, unknown>> }>)
+        .filter((block) => block.type === "actions")
+        .flatMap((block) => block.elements ?? []);
+    const controlEvents = async () =>
+      (
+        await shared!.admin<{ type: string }[]>`
+          select type from session_events
+          where workspace_id = ${value.owner.workspaceId}
+            and session_id = ${route!.session_id}
+            and type in ('session.control.paused', 'session.control.resumed')
+          order by sequence`
+      ).map((row) => row.type);
+    const stop = await pendingHandle(first, "session_pause");
+
+    // Only the requester who started the task can press its Stop.
+    await pressSlackButton(value, {
+      post: first,
+      rootTimestamp,
+      actionId: "opengeni.session.pause",
+      handleId: stop,
+      actionTs: "1760100000.000002",
+      userId: value.otherSlackUserId,
+    });
+    expect(await controlEvents()).toEqual([]);
+    expect(first.text).toBe(`${line}${hint}`);
+
+    await pressSlackButton(value, {
+      post: first,
+      rootTimestamp,
+      actionId: "opengeni.session.pause",
+      handleId: stop,
+      actionTs: "1760100000.000003",
+    });
+    expect(await controlEvents()).toEqual(["session.control.paused"]);
+    // The same message now says it stopped and offers Resume. No new post.
+    expect(value.slack.posts).toHaveLength(1);
+    expect(first.text).toBe(`${line}\nStopped.${hint}`);
+    const resume = await pendingHandle(first, "session_resume");
+    expect(buttonOf(first)).toEqual([
+      {
+        type: "button",
+        action_id: "opengeni.session.resume",
+        value: resume,
+        text: { type: "plain_text", text: "Resume", emoji: true },
+      },
+    ]);
+    // A second press of the old Stop is stale and changes nothing.
+    await pressSlackButton(value, {
+      post: first,
+      rootTimestamp,
+      actionId: "opengeni.session.pause",
+      handleId: stop,
+      actionTs: "1760100000.000004",
+    });
+    expect(await controlEvents()).toEqual(["session.control.paused"]);
+    expect(first.text).toBe(`${line}\nStopped.${hint}`);
+
+    await pressSlackButton(value, {
+      post: first,
+      rootTimestamp,
+      actionId: "opengeni.session.resume",
+      handleId: resume,
+      actionTs: "1760100000.000005",
+    });
+    expect(await controlEvents()).toEqual(["session.control.paused", "session.control.resumed"]);
+    expect(value.slack.posts).toHaveLength(1);
+    expect(first.text).toBe(`${line}${hint}`);
+    const stopAgain = await pendingHandle(first, "session_pause");
+    expect(buttonOf(first)).toEqual([
+      {
+        type: "button",
+        action_id: "opengeni.session.pause",
+        value: stopAgain,
+        text: { type: "plain_text", text: "Stop", emoji: true },
+        style: "danger",
+      },
+    ]);
+
+    // A repair after the clicks re-renders the original first message under its
+    // original operation: the ledger holds those bytes, so nothing is posted
+    // and nothing conflicts.
+    await shared!.admin`
+      delete from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId} and provider_event_id = ${eventId}`;
+    expect((await postEvent(value.app, start)).status).toBe(200);
+    await drainAll(value.deps);
+    const [inbox] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
+      select status, last_error_code from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId} and provider_event_id = ${eventId}`;
+    expect(inbox).toEqual({ status: "processed", last_error_code: null });
+    expect(value.slack.posts).toHaveLength(1);
+
+    // The result settles the task: it is posted without any workspace line and
+    // the first message keeps its sentence and hint but loses its button.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Stopped and resumed result." } },
+    ]);
+    await drainAll(value.deps);
     expect(value.slack.posts).toHaveLength(2);
     expect(value.slack.posts[1]).toMatchObject({
-      channel: channelId,
-      threadTimestamp: rootTimestamp,
-      text: expect.stringContaining("OpenGeni task controls"),
+      text: "Stopped and resumed result.",
+      blocks: null,
     });
-    const handles = await shared!.admin<
+    expect(first.text).toBe(`${line}${hint}`);
+    expect(first.blocks).toEqual([
+      { type: "section", text: { type: "mrkdwn", text: `${line}${hint}` } },
+    ]);
+    const settled = await shared!.admin<
       { action_kind: string; status: string; result: string | null }[]
     >`
-      select action_kind, status, result
-      from slack_interaction_action_handles
-      where workspace_id = ${value.owner.workspaceId}
-        and message_operation_id = (
-          select message_operation_id
-          from slack_interaction_action_handles
-          where id = ${statusHandle!.id}::uuid
-        )
-      order by action_kind`;
-    expect(handles).toEqual([
-      { action_kind: "session_pause", status: "stale", result: "superseded" },
-      { action_kind: "session_status", status: "completed", result: "status" },
+      select action_kind, status, result from slack_interaction_action_handles
+      where interaction_id = ${route!.id}
+      order by created_at, id`;
+    expect(settled).toEqual([
+      { action_kind: "session_pause", status: "completed", result: "paused" },
+      { action_kind: "session_resume", status: "completed", result: "resumed" },
+      { action_kind: "session_pause", status: "stale", result: "task_settled" },
     ]);
+    // A follow-up in the thread settles again with nothing left to retire, so
+    // it posts only its result.
+    const updates = value.slack.calls.filter((call) => call.method === "chat.update").length;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_COMPACT_STOP_FOLLOW_UP_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1760100000.000006",
+            thread_ts: rootTimestamp,
+            text: "One more thing",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Follow-up result." } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.at(-1)!.text).toBe("Follow-up result.");
+    expect(value.slack.calls.filter((call) => call.method === "chat.update")).toHaveLength(updates);
   }, 60_000);
 
   test("a session link from another deployment is named as such instead of looked up here", async () => {
@@ -5884,10 +6283,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(session!.resources).toEqual([]);
     // The recent repository was found and GitHub was asked, once, and failed.
     expect(catalog.calls).toBe(1);
-    const acknowledgement = value.slack.posts.find((post) =>
-      post.text.includes("Open in OpenGeni"),
-    );
-    expect(acknowledgement?.text).not.toContain("Using connectors:");
+    const acknowledgement = value.slack.posts.find(isStartMessage);
+    expect(acknowledgement).toBeDefined();
+    expect(acknowledgement!.text).not.toContain("Using connectors:");
     expect(
       errors.some((args) => args[0] === "[slack-interactions] workspace repositories unavailable"),
     ).toBe(true);
@@ -6032,13 +6430,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       { rig_id: string | null; rig_version_id: string | null }[]
     >`select rig_id, rig_version_id from sessions where id = ${interaction!.session_id}`;
     expect(session).toEqual({ rig_id: rig.id, rig_version_id: rig.activeVersion!.id });
-    const acknowledgement = value.slack.posts.find((post) =>
-      post.text.includes("Open in OpenGeni"),
-    );
-    expect(acknowledgement?.text).not.toContain("Using connectors:");
+    const acknowledgement = value.slack.posts.find(isStartMessage);
+    expect(acknowledgement).toBeDefined();
+    expect(acknowledgement!.text).not.toContain("Using connectors:");
   });
 
-  test("acknowledgements carry one session link and native controls without how-to prose", async () => {
+  test("a new task's first message is one linked sentence, a short hint, and a Stop button", async () => {
     if (!available) return;
     const value = await fixture();
     expect(
@@ -6059,24 +6456,36 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ).toBe(200);
     await drainAll(value.deps);
 
+    const [route] = await interactions(value.owner.workspaceId);
+    const sessionUrl = `https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}`;
     const ack = value.slack.posts.at(-1)!;
-    const [headline, ...rest] = ack.text.split("\n\n");
-    expect(headline).toMatch(
-      /^OpenGeni started this task\. <https:\/\/app\.example\.test\/workspaces\/[^|]+\/sessions\/[^|]+\|Open in OpenGeni>$/u,
-    );
-    expect(ack.text).not.toContain("Using connectors:");
-    expect(ack.text.match(/Open in OpenGeni/gu) ?? []).toHaveLength(1);
-    // The prose the buttons already say is gone for good.
-    expect(ack.text).not.toContain("Reply in this thread to continue, or reply");
-    expect(ack.text).not.toContain("invoke /opengeni again for a new session");
-    expect(rest.join("\n\n")).toContain("First time here:");
-
-    const blocks = ack.blocks as Array<{
-      type: string;
-      elements?: Array<{ type: string; text: { text: string } }>;
-    }>;
-    expect(blocks.map((block) => block.type)).toEqual(["section", "actions"]);
-    expect(blocks[1]!.elements!.map((element) => element.text.text)).toEqual(["Status", "Stop"]);
+    const text = `<${sessionUrl}|OpenGeni started this task>.\n\nFirst time here: reply in this thread to continue, or reply \`stop\` to stop. Run \`/opengeni info\` for more.`;
+    expect(ack.text).toBe(text);
+    const [stop] = await shared!.admin<{ id: string; message_operation_id: string }[]>`
+      select id, message_operation_id from slack_interaction_action_handles
+      where interaction_id = ${route!.id}`;
+    expect(ack.clientMessageId).toBe(deterministicUuidForTest(`slack-ack:${route!.id}:start`));
+    expect(stop!.message_operation_id).toBe(ack.clientMessageId);
+    expect(ack.blocks).toEqual([
+      { type: "section", text: { type: "mrkdwn", text } },
+      {
+        type: "actions",
+        block_id: `opengeni_start_${ack.clientMessageId}`,
+        elements: [
+          {
+            type: "button",
+            action_id: "opengeni.session.pause",
+            value: stop!.id,
+            text: { type: "plain_text", text: "Stop", emoji: true },
+            style: "danger",
+          },
+        ],
+      },
+    ]);
+    // Frozen at bind, so every later render of this message is byte-identical.
+    const [frozen] = await shared!.admin<{ start_message_line: string | null }[]>`
+      select start_message_line from slack_interactions where id = ${route!.id}`;
+    expect(frozen!.start_message_line).toBe(`<${sessionUrl}|OpenGeni started this task>.`);
   });
 
   test("the first-task hint is claimed once per Slack identity per installation", async () => {
@@ -6098,7 +6507,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
     const ownerFirst = await start(value.ownerSlackUserId, "D_HINT_OWNER", "1763000000.000001");
     expect(ownerFirst).toContain("First time here:");
-    expect(ownerFirst).toContain("Start a new top-level DM");
+    expect(ownerFirst).toContain("reply `stop` to stop");
     expect(ownerFirst).toContain("/opengeni info");
 
     // The same Slack identity in the same installation never sees it again.
@@ -6313,29 +6722,16 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(settled).toEqual({ status: "processed", last_error_code: null });
   }, 60_000);
 
-  test("pressing Status on the acknowledgement preserves the one-time hint", async () => {
+  test("pressing an old Status on the acknowledgement preserves the one-time hint", async () => {
     if (!available) return;
     const value = await fixture();
     const channelId = "D_HINT_STATUS";
     const rootTimestamp = "1768000000.000001";
-    expect(
-      (
-        await postEvent(value.app, {
-          teamId: value.teamId,
-          eventId: `E_HINT_STATUS_${crypto.randomUUID()}`,
-          event: {
-            type: "message",
-            channel_type: "im",
-            user: value.ownerSlackUserId,
-            channel: channelId,
-            ts: rootTimestamp,
-            text: "Start a task and then press Status",
-          },
-        })
-      ).status,
-    ).toBe(200);
-    await drainAll(value.deps);
-    const acknowledgement = value.slack.posts.at(-1)!;
+    const { ack: acknowledgement } = await startLegacyDmTask(value, {
+      channelId,
+      rootTimestamp,
+      text: "Start a task and then press Status",
+    });
     expect(acknowledgement.text).toContain("First time here:");
 
     // Select the handle by the exact message it was rendered on. The Slack post
@@ -6456,7 +6852,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(messages[0]!.count).toBe(1);
   });
 
-  test("the Status card carries Make recurring only for a requester with schedule authority", async () => {
+  test("an old Status card carries Make recurring only for a requester with schedule authority", async () => {
     if (!available) return;
     const value = await fixture({
       ownerPermissions: [
@@ -6468,25 +6864,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     const channelId = "D_STATUS_RECURRING";
     const rootTimestamp = "1765000000.000001";
-    expect(
-      (
-        await postEvent(value.app, {
-          teamId: value.teamId,
-          eventId: `E_STATUS_RECURRING_${crypto.randomUUID()}`,
-          event: {
-            type: "message",
-            channel_type: "im",
-            user: value.ownerSlackUserId,
-            channel: channelId,
-            ts: rootTimestamp,
-            text: "Start a task whose Status card offers recurrence",
-          },
-        })
-      ).status,
-    ).toBe(200);
-    await drainAll(value.deps);
-
-    const acknowledgement = value.slack.posts.at(-1)!;
+    // Only interactions bound before compact messages have a Status button.
+    const { ack: acknowledgement } = await startLegacyDmTask(value, {
+      channelId,
+      rootTimestamp,
+      text: "Start a task whose Status card offers recurrence",
+    });
     expect(acknowledgement.text).not.toContain("Make recurring");
     const [statusHandle] = await shared!.admin<{ id: string }[]>`
       select id
@@ -6564,8 +6947,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(body.text).toContain(
       `<https://app.example.test/workspaces/${value.owner.workspaceId}|open OpenGeni>`,
     );
-    // No schedule authority in this fixture, so recurrence is not advertised.
+    expect(body.text).toContain("press *Stop* on its first message");
+    expect(body.text).not.toContain("*Status*");
+    // No schedule authority in this fixture, so scheduling is not advertised.
     expect(body.text).not.toContain("Make recurring");
+    expect(body.text).not.toContain("on a schedule");
 
     // The card is a projection, not work: nothing was accepted or posted.
     expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
@@ -6602,10 +6988,41 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       ),
     );
     const scheduledBody = (await scheduled.json()) as { text: string };
-    expect(scheduledBody.text).toContain("*Make a result recurring:*");
+    // New Slack tasks get the scheduling tool by default, and this requester
+    // may use it, so both routes are named. No Status button is.
     expect(scheduledBody.text).toContain(
-      `<https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/schedules|Schedules>`,
+      `• *Repeat a task on a schedule:* ask OpenGeni in its thread, or open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/schedules|Schedules>.`,
     );
+    expect(scheduledBody.text).not.toContain("Make recurring");
+
+    // A workspace whose default tools leave scheduling out only links to it.
+    await shared!.admin`
+      update workspaces
+      set settings = jsonb_set(
+        coalesce(settings, '{}'::jsonb),
+        '{sessionToolDefaults}',
+        ${shared!.admin.json({ firstPartyMcpTools: ["sessions_list"] })}::jsonb
+      )
+      where id = ${withSchedules.owner.workspaceId}`;
+    const withoutTool = await withSchedules.app.request(
+      signedRequest(
+        "/v1/integrations/slack/commands",
+        new URLSearchParams({
+          command: "/opengeni",
+          team_id: withSchedules.teamId,
+          user_id: withSchedules.ownerSlackUserId,
+          channel_id: "C_INFO",
+          trigger_id: `info-${crypto.randomUUID()}`,
+          text: "info",
+        }).toString(),
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    const withoutToolBody = (await withoutTool.json()) as { text: string };
+    expect(withoutToolBody.text).toContain(
+      `• *Repeat a task on a schedule:* open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/schedules|Schedules>.`,
+    );
+    expect(withoutToolBody.text).not.toContain("ask OpenGeni in its thread");
   }, 60_000);
 
   test("`/opengeni info` lists only what the caller's grants authorize", async () => {
@@ -6884,8 +7301,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       channel: `D_${value.ownerSlackUserId}`,
       threadTimestamp: null,
     });
-    expect(ownerAck.text).toContain("started a private task from the selected DM message");
-    expect(ownerAck.text).toContain("source DM was not opened to the bot");
+    expect(ownerAck.text).toMatch(
+      /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|OpenGeni started a private task> from the selected DM message\. The source DM was not opened to the bot or made workspace-visible\./u,
+    );
     expect(
       value.slack.calls.some(
         (call) => call.method === "conversations.info" && call.channel === sourceDm,
@@ -7313,7 +7731,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     value.slack.postFailuresByChannel.set(sourceDm, { error: "channel_not_found" });
     const acknowledgementPause = value.slack.pauseBeforePost(
-      "started a private task from the selected DM message",
+      "OpenGeni started a private task> from the selected DM message",
     );
     const triggerId = `shortcut-bound-before-rekey-${crypto.randomUUID()}`;
     const payload = JSON.stringify({
@@ -8818,17 +9236,25 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ]);
     await drainAll(value.deps);
     expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([formatted]);
+    const progressPost = value.slack.posts.at(-1)!;
+    const updatesOf = (timestamp: string) =>
+      value.slack.calls.filter(
+        (call) => call.method === "chat.update" && call.timestamp === timestamp,
+      ).length;
 
     // The progress reconciliation renders the same formatted bytes under the
     // progress operation, so the ledger finds the completed post instead of
-    // conflicting, and the terminal update rewrites that one message.
+    // conflicting, and the terminal update rewrites that one message. The only
+    // other update is the first message losing its Stop button.
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
       { type: "turn.completed", payload: { output: answer } },
     ]);
     await drainAll(value.deps);
     expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([formatted]);
+    expect(updatesOf(progressPost.timestamp)).toBe(1);
+    expect(updatesOf(value.slack.posts[0]!.timestamp)).toBe(1);
     expect(value.slack.calls.filter((call) => call.method === "chat.update").length).toBe(
-      updatesBefore + 1,
+      updatesBefore + 2,
     );
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",

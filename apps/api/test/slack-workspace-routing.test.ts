@@ -4,7 +4,12 @@
 // failed override that falls through as if it were a suggestion, and any path
 // that quietly serves a request from a workspace the person did not name.
 import { describe, expect, test } from "bun:test";
-import { slackPostSeed, withWorkspaceLine } from "../src/integrations/slack-interactions";
+import {
+  renderSlackStartMessageLine,
+  slackAcknowledgementOperationId,
+  slackPostSeed,
+  withWorkspaceLine,
+} from "../src/integrations/slack-interactions";
 import {
   isSlackDirectMessageConversation,
   splitSlackLeadingMention,
@@ -435,10 +440,116 @@ describe("the post-ledger seed", () => {
     // moving its id would orphan its row and turn a repair into a duplicate
     // post. The label is written once at insert and never updated, which is
     // what makes it a safe discriminator.
-    expect(slackPostSeed({ routedWorkspaceLabel: null }, "slack-ack:abc")).toBe("slack-ack:abc");
-    expect(slackPostSeed({ routedWorkspaceLabel: "Platform" }, "slack-ack:abc")).toBe(
-      "slack-ack:abc:v2",
+    expect(
+      slackPostSeed({ routedWorkspaceLabel: null, startMessageLine: null }, "slack-ack:abc"),
+    ).toBe("slack-ack:abc");
+    expect(
+      slackPostSeed({ routedWorkspaceLabel: "Platform", startMessageLine: null }, "slack-ack:abc"),
+    ).toBe("slack-ack:abc:v2");
+  });
+
+  test("moves once more for a labelled compact interaction, which drops the line", () => {
+    // A compact task names its workspace only on its first message, so every
+    // later message of a labelled one renders different bytes from what an
+    // older image renders for it. An unlabelled one renders the same bytes in
+    // both formats and keeps its id.
+    const line = "<https://app.example.test/w/s|OpenGeni started this task>.";
+    expect(
+      slackPostSeed({ routedWorkspaceLabel: null, startMessageLine: line }, "slack-delivery:abc"),
+    ).toBe("slack-delivery:abc");
+    expect(
+      slackPostSeed(
+        { routedWorkspaceLabel: "Platform", startMessageLine: line },
+        "slack-delivery:abc",
+      ),
+    ).toBe("slack-delivery:abc:v3");
+  });
+
+  test("gives a compact first message an id no older render shares", () => {
+    const interaction = {
+      id: "abc",
+      routedWorkspaceLabel: "Platform",
+      sessionDefaultsLine: "Using connectors: none; repos: none.",
+    };
+    const legacy = slackAcknowledgementOperationId({ ...interaction, startMessageLine: null });
+    const compact = slackAcknowledgementOperationId({
+      ...interaction,
+      startMessageLine: "<https://app.example.test/w/s|OpenGeni started this task>.",
+    });
+    expect(compact).not.toBe(legacy);
+    // Nor with the unlabelled, line-less id an older image would also compute.
+    expect(compact).not.toBe(
+      slackAcknowledgementOperationId({
+        id: "abc",
+        routedWorkspaceLabel: null,
+        sessionDefaultsLine: null,
+        startMessageLine: null,
+      }),
     );
+  });
+});
+
+describe("the first message's opening sentence", () => {
+  const sessionUrl = "https://app.example.test/workspaces/w/sessions/s";
+
+  test("is itself the session link, with the routed workspace inline", () => {
+    expect(
+      renderSlackStartMessageLine({
+        sessionUrl,
+        routedWorkspaceLabel: null,
+        origin: { kind: "task" },
+      }),
+    ).toBe(`<${sessionUrl}|OpenGeni started this task>.`);
+    expect(
+      renderSlackStartMessageLine({
+        sessionUrl,
+        routedWorkspaceLabel: "Platform",
+        origin: { kind: "task" },
+      }),
+    ).toBe(`<${sessionUrl}|OpenGeni started this task> in *Platform*.`);
+  });
+
+  test("keeps the privacy sentence on private tasks", () => {
+    expect(
+      renderSlackStartMessageLine({
+        sessionUrl,
+        routedWorkspaceLabel: "Platform",
+        origin: { kind: "private_dm_message" },
+      }),
+    ).toBe(
+      `<${sessionUrl}|OpenGeni started a private task> in *Platform* from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`,
+    );
+    expect(
+      renderSlackStartMessageLine({
+        sessionUrl,
+        routedWorkspaceLabel: null,
+        origin: { kind: "private_conversation" },
+      }),
+    ).toBe(
+      `<${sessionUrl}|OpenGeni started a private task> from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`,
+    );
+  });
+
+  test("names the reaction and keeps its how-to", () => {
+    expect(
+      renderSlackStartMessageLine({
+        sessionUrl,
+        routedWorkspaceLabel: null,
+        origin: { kind: "reaction", emoji: "genie" },
+      }),
+    ).toBe(
+      `<${sessionUrl}|OpenGeni started this task> from the :genie: reaction. If the request is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`,
+    );
+  });
+
+  test("escapes a workspace name so it cannot inject Slack markup", () => {
+    expect(
+      renderSlackStartMessageLine({
+        sessionUrl,
+        routedWorkspaceLabel: "R&D <!channel>",
+        origin: { kind: "task" },
+      }),
+    ).toBe(`<${sessionUrl}|OpenGeni started this task> in *R&amp;D &lt;!channel&gt;*.`);
   });
 });
 

@@ -11712,9 +11712,20 @@ export type SlackInteraction = {
   /**
    * One line naming what the bound session started with, frozen when the
    * session bound so an acknowledgement repair renders the same bytes. Null
-   * means no line.
+   * means no line. No longer written; kept so interactions that already posted
+   * it re-render identically.
    */
   sessionDefaultsLine: string | null;
+  /**
+   * The opening sentence of the task's first Slack message, frozen when the
+   * session binds so every re-render (repair, Stop/Resume, settle) produces the
+   * same bytes for the digest-bound post and update ledgers.
+   *
+   * Also the message-format discriminator: null means the interaction keeps the
+   * format it had before this field existed (Status button, task controls card,
+   * and a workspace line on every message).
+   */
+  startMessageLine: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -12336,6 +12347,7 @@ export async function getOrCreateSlackInteraction(
     | "routedWorkspaceLabel"
     // Owned by `bindSlackInteractionSession`, frozen with the bound session.
     | "sessionDefaultsLine"
+    | "startMessageLine"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -12623,6 +12635,41 @@ export async function getSlackInteractionActionHandle(
   });
 }
 
+/**
+ * The still-pending handles one interaction rendered on one exact message,
+ * oldest first. The message is identified by the post operation that created
+ * it, which is what every handle on it carries as `messageOperationId`.
+ */
+export async function listPendingSlackInteractionMessageActionHandles(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    interactionId: string;
+    messageOperationId: string;
+  },
+): Promise<SlackInteractionActionHandle[]> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.slackInteractionActionHandles)
+      .where(
+        and(
+          eq(schema.slackInteractionActionHandles.accountId, input.accountId),
+          eq(schema.slackInteractionActionHandles.workspaceId, input.workspaceId),
+          eq(schema.slackInteractionActionHandles.interactionId, input.interactionId),
+          eq(schema.slackInteractionActionHandles.messageOperationId, input.messageOperationId),
+          eq(schema.slackInteractionActionHandles.status, "pending"),
+        ),
+      )
+      .orderBy(
+        asc(schema.slackInteractionActionHandles.createdAt),
+        asc(schema.slackInteractionActionHandles.id),
+      );
+    return rows.map(mapSlackInteractionActionHandle);
+  });
+}
+
 export async function settleSlackInteractionActionHandles(
   db: Database,
   input: {
@@ -12631,6 +12678,13 @@ export async function settleSlackInteractionActionHandles(
     handleId: string;
     result: string;
     stale?: boolean;
+    /**
+     * Settle every other pending handle rendered on the same message as
+     * superseded (the default: one card, one decision). A message whose single
+     * button is replaced in place by a freshly reserved one (Stop becoming
+     * Resume) passes false, so the replacement stays pending.
+     */
+    supersedeSiblings?: boolean;
   },
 ): Promise<SlackInteractionActionHandle | null> {
   return await withRlsContext(
@@ -12653,23 +12707,25 @@ export async function settleSlackInteractionActionHandles(
           .limit(1);
         if (!current) return null;
         if (current.status === "pending") {
-          await tx
-            .update(schema.slackInteractionActionHandles)
-            .set({
-              status: "stale",
-              result: "superseded",
-              completedAt: sql`now()`,
-              updatedAt: sql`now()`,
-            })
-            .where(
-              and(
-                eq(
-                  schema.slackInteractionActionHandles.messageOperationId,
-                  current.messageOperationId,
+          if (input.supersedeSiblings !== false) {
+            await tx
+              .update(schema.slackInteractionActionHandles)
+              .set({
+                status: "stale",
+                result: "superseded",
+                completedAt: sql`now()`,
+                updatedAt: sql`now()`,
+              })
+              .where(
+                and(
+                  eq(
+                    schema.slackInteractionActionHandles.messageOperationId,
+                    current.messageOperationId,
+                  ),
+                  eq(schema.slackInteractionActionHandles.status, "pending"),
                 ),
-                eq(schema.slackInteractionActionHandles.status, "pending"),
-              ),
-            );
+              );
+          }
           const [settled] = await tx
             .update(schema.slackInteractionActionHandles)
             .set({
@@ -12846,7 +12902,7 @@ export async function bindSlackInteractionSession(
      * Written only by the bind that wins; a replayed bind of the same session
      * returns the line the first bind froze and never rewrites it.
      */
-    sessionDefaultsLine?: string | null;
+    startMessageLine?: string | null;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -12854,7 +12910,7 @@ export async function bindSlackInteractionSession(
       .update(schema.slackInteractions)
       .set({
         sessionId: input.sessionId,
-        sessionDefaultsLine: input.sessionDefaultsLine ?? null,
+        startMessageLine: input.startMessageLine ?? null,
         updatedAt: sql`now()`,
       })
       .where(
@@ -13394,6 +13450,7 @@ function mapSlackInteraction(
       "sessionDefaultsLine",
       "session_defaults_line",
     ),
+    startMessageLine: slackRowNullableString(row, "startMessageLine", "start_message_line"),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,

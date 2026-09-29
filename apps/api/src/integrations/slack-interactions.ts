@@ -90,6 +90,7 @@ import {
   listSlackInteractionProgressDeliveryEvidence,
   listSessionEventPage,
   listSessionHumanInputRequests,
+  listPendingSlackInteractionMessageActionHandles,
   listPendingSlackUserLinkAccessRequests,
   listSlackInstallationBindings,
   slackUserLinkAccessRequestTeam,
@@ -1687,12 +1688,32 @@ export function withWorkspaceLine(
  * id on the label rather than on the release: a labelled interaction can only
  * have been created by an image that already renders the line, and every
  * pre-existing and unlabelled interaction keeps its exact ledger identity.
+ *
+ * A compact interaction (one with a frozen `startMessageLine`) names its
+ * workspace once, on its first message, and nowhere else. For a labelled one
+ * that is again different bytes from what an older image renders for the same
+ * message, so its ids move once more, to `:v3`. Unlabelled interactions render
+ * the same bytes in both formats and keep their ids.
  */
 export function slackPostSeed(
-  interaction: Pick<SlackInteraction, "routedWorkspaceLabel">,
+  interaction: Pick<SlackInteraction, "routedWorkspaceLabel" | "startMessageLine">,
   seed: string,
 ): string {
-  return interaction.routedWorkspaceLabel ? `${seed}:v2` : seed;
+  if (!interaction.routedWorkspaceLabel) return seed;
+  return interaction.startMessageLine === null ? `${seed}:v2` : `${seed}:v3`;
+}
+
+/**
+ * The workspace line a message other than the first one carries.
+ *
+ * Only the previous format repeats it. A compact task states its workspace in
+ * the first message's opening sentence, and every later task message is posted
+ * in that message's thread, so repeating it would be noise.
+ */
+function slackMessageWorkspaceLabel(
+  interaction: Pick<SlackInteraction, "routedWorkspaceLabel" | "startMessageLine">,
+): string | null {
+  return interaction.startMessageLine === null ? interaction.routedWorkspaceLabel : null;
 }
 
 /**
@@ -1710,15 +1731,162 @@ export function slackDefaultsLinePostSeed(
   return interaction.sessionDefaultsLine ? `${seed}:defaults` : seed;
 }
 
-function slackAcknowledgementOperationId(
-  interaction: Pick<SlackInteraction, "id" | "routedWorkspaceLabel" | "sessionDefaultsLine">,
+/**
+ * The post operation of an interaction's first message.
+ *
+ * A compact first message shares no bytes with anything an older image renders
+ * for the same interaction, so it has its own seed: an older image repairing it
+ * during a rolling deploy posts a second message rather than wedging on a digest
+ * conflict. Every handle on the first message carries this id.
+ */
+export function slackAcknowledgementOperationId(
+  interaction: Pick<
+    SlackInteraction,
+    "id" | "routedWorkspaceLabel" | "sessionDefaultsLine" | "startMessageLine"
+  >,
 ): string {
+  if (interaction.startMessageLine !== null) {
+    return deterministicUuid(`slack-ack:${interaction.id}:start`);
+  }
   return deterministicUuid(
     slackDefaultsLinePostSeed(
       interaction,
       slackPostSeed(interaction, `slack-ack:${interaction.id}`),
     ),
   );
+}
+
+/** Where a compact task's first message says the task came from. */
+export type SlackStartMessageOrigin =
+  | { kind: "task" }
+  | { kind: "private_dm_message" }
+  | { kind: "private_conversation" }
+  | { kind: "reaction"; emoji: string };
+
+/**
+ * The opening sentence of a new task's first Slack message.
+ *
+ * The sentence itself links to the session, and a routed workspace is named
+ * inline, here and on no other message. The private variants keep their privacy
+ * sentence, and the reaction variant keeps its how-to, because a reaction-started
+ * task has no button and never shows the one-time hint.
+ *
+ * Rendered once when the session binds and frozen as `startMessageLine`, so a
+ * later change to the web base URL or the workspace name cannot change the bytes
+ * of a message the post and update ledgers already hold.
+ */
+export function renderSlackStartMessageLine(input: {
+  sessionUrl: string;
+  routedWorkspaceLabel: string | null;
+  origin: SlackStartMessageOrigin;
+}): string {
+  const where = input.routedWorkspaceLabel
+    ? ` in *${escapeSlackMrkdwn(input.routedWorkspaceLabel)}*`
+    : "";
+  switch (input.origin.kind) {
+    case "private_dm_message":
+      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`;
+    case "private_conversation":
+      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`;
+    case "reaction":
+      return `<${input.sessionUrl}|OpenGeni started this task>${where} from the :${input.origin.emoji}: reaction. If the request is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
+    case "task":
+      return `<${input.sessionUrl}|OpenGeni started this task>${where}.`;
+  }
+}
+
+/**
+ * The start line to freeze for a mention, command, DM, or shortcut task, or
+ * null to keep the previous format. Null only when the deployment has no
+ * absolute web base URL, which the acknowledgement then reports exactly as it
+ * always did.
+ */
+function slackStartMessageLineForEntry(
+  deps: ApiRouteDeps,
+  interaction: Pick<SlackInteraction, "workspaceId" | "visibility" | "routedWorkspaceLabel">,
+  sessionId: string,
+  entry: Pick<SlackInteractionInboxEntry, "triggerKind" | "slackChannelId">,
+): string | null {
+  const sessionUrl = slackAcknowledgementSessionUrl(deps, interaction.workspaceId, sessionId);
+  if (!sessionUrl) return null;
+  const directMessageShortcut = isDirectMessageShortcut(entry);
+  return renderSlackStartMessageLine({
+    sessionUrl,
+    routedWorkspaceLabel: interaction.routedWorkspaceLabel,
+    origin: directMessageShortcut
+      ? { kind: "private_dm_message" }
+      : interaction.visibility === "private" && entry.triggerKind !== "dm"
+        ? { kind: "private_conversation" }
+        : { kind: "task" },
+  });
+}
+
+/** The start line to freeze for a reaction-started task, or null (see above). */
+function slackStartMessageLineForReaction(
+  deps: ApiRouteDeps,
+  interaction: Pick<SlackInteraction, "workspaceId" | "routedWorkspaceLabel">,
+  sessionId: string,
+  emoji: string,
+): string | null {
+  const sessionUrl = slackAcknowledgementSessionUrl(deps, interaction.workspaceId, sessionId);
+  if (!sessionUrl) return null;
+  return renderSlackStartMessageLine({
+    sessionUrl,
+    routedWorkspaceLabel: interaction.routedWorkspaceLabel,
+    origin: { kind: "reaction", emoji },
+  });
+}
+
+/**
+ * A compact task's first message: the frozen opening sentence, a note once the
+ * requester stopped it, the one-time hint when this interaction won it, and at
+ * most one button (Stop while running, Resume once stopped, none once settled).
+ *
+ * A pure function of frozen facts and the handle it is given, so a repair, a
+ * retried click, and the settle update each reproduce their exact bytes. The
+ * button is rendered from the handle whatever its status: a repair after the
+ * button was pressed must still match the bytes the post ledger holds.
+ */
+function slackStartMessage(
+  deps: ApiRouteDeps,
+  startMessageLine: string,
+  options: {
+    hint: boolean;
+    stopped: boolean;
+    button: SlackInteractionActionHandle | null;
+  },
+): { text: string; blocks: SlackMessageBlock[] } {
+  const text = `${startMessageLine}${options.stopped ? "\nStopped." : ""}${
+    options.hint ? slackStartMessageFirstTaskHintText(deps) : ""
+  }`;
+  const button = options.button;
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      ...(button
+        ? [
+            {
+              type: "actions" as const,
+              block_id: `opengeni_start_${button.messageOperationId}`,
+              elements: [
+                {
+                  type: "button" as const,
+                  action_id: SLACK_ACTION_ID_BY_KIND[button.actionKind],
+                  value: button.id,
+                  text: {
+                    type: "plain_text" as const,
+                    text: button.actionKind === "session_resume" ? "Resume" : "Stop",
+                    emoji: true,
+                  },
+                  ...(button.actionKind === "session_pause" ? { style: "danger" as const } : {}),
+                },
+              ],
+            },
+          ]
+        : []),
+    ] as SlackMessageBlock[],
+  };
 }
 
 /** Sources that mean somebody, or something, actually chose this workspace. */
@@ -2116,6 +2284,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
             ...interaction,
             owningSubjectId: grant.subjectId,
             sessionId: eventSessionId,
+            startMessageLine: slackStartMessageLineForEntry(
+              deps,
+              interaction,
+              eventSessionId,
+              entry,
+            ),
           });
     if (!boundInteraction) {
       throw new Error("Durable Slack interaction could not bind its reserved session");
@@ -2283,6 +2457,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     ...interaction,
     owningSubjectId: grant.subjectId,
     sessionId: session.id,
+    startMessageLine: slackStartMessageLineForEntry(deps, interaction, session.id, entry),
   });
   if (!bound) throw new Error("Slack route could not bind its durable session");
   await ensureSlackSharedTaskOrigin(deps, bound, entry, home, policyResolution);
@@ -2550,17 +2725,6 @@ async function acknowledgeSlackSession(
     !directMessageShortcut && interaction.visibility === "private" && entry.triggerKind !== "dm";
   const privateBotDm = directMessageShortcut || privateHandoff;
   const operationId = slackAcknowledgementOperationId(interaction);
-  // The acknowledgement carries exactly one session link plus the Status/Stop
-  // buttons. The how-to prose it used to repeat forever now rides along once,
-  // on this Slack identity's first accepted task in this installation.
-  const started = directMessageShortcut
-    ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} The source DM was not opened to the bot or made workspace-visible.`
-    : privateHandoff
-      ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} Results stay private unless a separate authorized publication is approved.`
-      : `OpenGeni started this task. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)}`;
-  const startedWithDefaults = interaction.sessionDefaultsLine
-    ? `${started}\n${interaction.sessionDefaultsLine}`
-    : started;
   // The post ledger binds this fixed operation id to a digest over the message
   // text, and this function re-runs on every acknowledgement repair. Resolving
   // the hint freezes it durably before the post, so a repair renders identical
@@ -2574,21 +2738,23 @@ async function acknowledgeSlackSession(
     slackUserId: entry.slackUserId,
     interactionId: interaction.id,
   });
-  const text = `${startedWithDefaults}${showHint ? slackFirstTaskHintText(deps) : ""}`;
-  const controls = await controlActionBlocks(deps, interaction, {
-    messageOperationId: operationId,
-    sessionEventSequence: 0,
-    state: "active",
-  });
-  // The approval and control cards let `text` and `blocks[0]` diverge, so the
-  // line is appended to each independently rather than assuming they match.
-  const acknowledgement = withWorkspaceLine(
-    interaction.routedWorkspaceLabel,
-    text,
-    controls.length > 0
-      ? ([{ type: "section", text: { type: "mrkdwn", text } }, ...controls] as SlackMessageBlock[])
-      : undefined,
-  );
+  const acknowledgement =
+    interaction.startMessageLine !== null
+      ? slackStartMessage(deps, interaction.startMessageLine, {
+          hint: showHint,
+          stopped: false,
+          button: await reserveSlackStartMessageButton(deps, interaction, operationId, {
+            actionKind: "session_pause",
+            actionKey: `${operationId}:session_pause`,
+          }),
+        })
+      : await legacySlackAcknowledgement(deps, interaction, {
+          sessionId: interaction.sessionId,
+          operationId,
+          showHint,
+          directMessageShortcut,
+          privateHandoff,
+        });
   const ack = await client.postMessage({
     operationId,
     ...(privateBotDm
@@ -2616,8 +2782,88 @@ async function acknowledgeSlackSession(
 }
 
 /**
+ * Reserve the one button a compact first message carries. The action key is
+ * deterministic, so a repair or a retried click finds the same handle and
+ * renders the same bytes. Null when the task has no Slack requester to bind it
+ * to, in which case the message has no button at all.
+ */
+async function reserveSlackStartMessageButton(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  messageOperationId: string,
+  action: { actionKind: "session_pause" | "session_resume"; actionKey: string },
+): Promise<SlackInteractionActionHandle | null> {
+  if (!interaction.sessionId || !interaction.initiatingSlackUserId) return null;
+  const [handle] = await reserveSlackInteractionActionHandles(deps.db, {
+    interaction,
+    sessionEventSequence: 0,
+    messageOperationId,
+    expiresAt: new Date(Date.now() + SLACK_ACTION_TTL_MS),
+    actions: [action],
+  });
+  return handle ?? null;
+}
+
+/**
+ * The acknowledgement exactly as interactions bound before compact messages
+ * render it: a separate session link, any frozen defaults line, the Status and
+ * Stop buttons, and the workspace line. Kept byte for byte because a repair of
+ * an acknowledgement that is already in the post ledger must reproduce it.
+ */
+async function legacySlackAcknowledgement(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  input: {
+    sessionId: string;
+    operationId: string;
+    showHint: boolean;
+    directMessageShortcut: boolean;
+    privateHandoff: boolean;
+  },
+): Promise<{ text: string; blocks?: SlackMessageBlock[] }> {
+  const started = input.directMessageShortcut
+    ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, interaction.workspaceId, input.sessionId)} The source DM was not opened to the bot or made workspace-visible.`
+    : input.privateHandoff
+      ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, interaction.workspaceId, input.sessionId)} Results stay private unless a separate authorized publication is approved.`
+      : `OpenGeni started this task. ${openSessionText(deps, interaction.workspaceId, input.sessionId)}`;
+  const startedWithDefaults = interaction.sessionDefaultsLine
+    ? `${started}\n${interaction.sessionDefaultsLine}`
+    : started;
+  const text = `${startedWithDefaults}${input.showHint ? slackFirstTaskHintText(deps) : ""}`;
+  const controls = await controlActionBlocks(deps, interaction, {
+    messageOperationId: input.operationId,
+    sessionEventSequence: 0,
+    state: "active",
+  });
+  // The approval and control cards let `text` and `blocks[0]` diverge, so the
+  // line is appended to each independently rather than assuming they match.
+  return withWorkspaceLine(
+    interaction.routedWorkspaceLabel,
+    text,
+    controls.length > 0
+      ? ([{ type: "section", text: { type: "mrkdwn", text } }, ...controls] as SlackMessageBlock[])
+      : undefined,
+  );
+}
+
+/**
+ * The one-time onboarding sentence on a compact task's first message: how to
+ * continue and stop it, and where to find the rest. Scheduling is deliberately
+ * not named here. Whether the agent can create a schedule depends on the
+ * session's tools and the person's `scheduled_tasks:manage`, neither of which
+ * is frozen with this text, so the live-gated `<command> info` card names it.
+ *
+ * Same determinism note as `slackFirstTaskHintText`: the configured command is
+ * the only input that is not frozen.
+ */
+function slackStartMessageFirstTaskHintText(deps: ApiRouteDeps): string {
+  const command = deps.settings.slackCommand;
+  return `\n\nFirst time here: reply in this thread to continue, or reply \`stop\` to stop. Run \`${command} info\` for more.`;
+}
+
+/**
  * The one-time onboarding sentence shown on a Slack identity's first
- * acknowledged task in one installation.
+ * acknowledged task in one installation, in the previous message format.
  *
  * Rendering is a pure function of the configured command plus the frozen
  * `firstTaskHint` fact, so every re-render of the same acknowledgement produces
@@ -2733,6 +2979,12 @@ async function processSlackReactionInboxEntry(
             ...interaction,
             owningSubjectId: grant.subjectId,
             sessionId: eventSessionId,
+            startMessageLine: slackStartMessageLineForReaction(
+              deps,
+              interaction,
+              eventSessionId,
+              settings.emoji,
+            ),
           });
     if (!boundInteraction) {
       throw new Error("Durable Slack reaction route could not bind its reserved session");
@@ -2915,6 +3167,12 @@ async function processSlackReactionInboxEntry(
     ...interaction,
     owningSubjectId: grant.subjectId,
     sessionId: session.id,
+    startMessageLine: slackStartMessageLineForReaction(
+      deps,
+      interaction,
+      session.id,
+      settings.emoji,
+    ),
   });
   if (!bound) throw new Error("Slack reaction route could not bind its durable session");
   await acknowledgeSlackReactionSession(deps, client, bound, settings.emoji);
@@ -2928,6 +3186,17 @@ async function acknowledgeSlackReactionSession(
 ) {
   if (!interaction.sessionId) {
     throw new Error("Slack reaction acknowledgement requires a bound session");
+  }
+  if (interaction.startMessageLine !== null) {
+    // The frozen line already names the emoji and the workspace; a reaction
+    // task has no button, so the message is the line alone.
+    await client.postMessage({
+      operationId: deterministicUuid(`slack-reaction-ack:${interaction.id}:start`),
+      channelId: interaction.slackChannelId,
+      threadTimestamp: interaction.slackThreadTs,
+      text: interaction.startMessageLine,
+    });
+    return;
   }
   const started = `OpenGeni started from the :${emoji}: reaction. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} If the intended action is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
   const rendered = withWorkspaceLine(
@@ -3599,6 +3868,17 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     sessionId: handle.sessionId,
   });
   const outcome = await executeSlackAction(deps, grant, interaction, handle);
+  if (interaction.startMessageLine !== null) {
+    await applyCompactSlackActionOutcome(
+      deps,
+      client,
+      { ...interaction, startMessageLine: interaction.startMessageLine },
+      handle,
+      outcome,
+      entry,
+    );
+    return;
+  }
   // A control click replaces the message it was pressed on. When that message
   // is this interaction's acknowledgement and this interaction won the one-time
   // onboarding hint, the update carries the hint forward: otherwise pressing
@@ -3645,6 +3925,158 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
       entry.providerEventId,
     );
   }
+}
+
+/**
+ * Show a compact task's click outcome. Nothing here posts a new message.
+ *
+ * Stop and Resume live on the first message and swap in place: the click's own
+ * lifecycle action has already run, the replacement button is reserved under a
+ * key derived from the pressed handle (so a retry finds the same one), the
+ * message is re-rendered from its frozen line, and only then is the pressed
+ * handle settled, without superseding the replacement it now sits next to.
+ *
+ * Any other card (an approval, a question, a publication) is replaced by the
+ * outcome sentence, with no workspace line. Its update id keeps the
+ * `slackPostSeed` identity, so an unlabelled interaction renders exactly the
+ * bytes an older image would for the same click.
+ */
+async function applyCompactSlackActionOutcome(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  interaction: SlackInteraction & { startMessageLine: string },
+  handle: SlackInteractionActionHandle,
+  outcome: Awaited<ReturnType<typeof executeSlackAction>>,
+  entry: SlackInteractionInboxEntry,
+) {
+  const target = { accountId: handle.accountId, workspaceId: handle.workspaceId } as const;
+  const startOperationId = slackAcknowledgementOperationId(interaction);
+  if (
+    (handle.actionKind === "session_pause" || handle.actionKind === "session_resume") &&
+    handle.messageOperationId === startOperationId
+  ) {
+    const stopped = handle.actionKind === "session_pause";
+    const nextKind = stopped ? "session_resume" : "session_pause";
+    const next = await reserveSlackStartMessageButton(deps, interaction, startOperationId, {
+      actionKind: nextKind,
+      actionKey: `${startOperationId}:${nextKind}:${handle.id}`,
+    });
+    const message = slackStartMessage(deps, interaction.startMessageLine, {
+      hint: interaction.firstTaskHint === true,
+      stopped,
+      button: next,
+    });
+    await client.updateMessage({
+      // Its own seed: an older image renders the previous format for this click.
+      operationId: deterministicUuid(`slack-start-update:${handle.id}:${outcome.result}`),
+      channelId: entry.slackChannelId,
+      timestamp: entry.slackMessageTs,
+      text: message.text,
+      blocks: message.blocks,
+    });
+    await settleSlackInteractionActionHandles(deps.db, {
+      ...target,
+      handleId: handle.id,
+      result: outcome.result,
+      supersedeSiblings: false,
+    });
+    return;
+  }
+  const text = boundedOutput(outcome.text);
+  await client.updateMessage({
+    operationId: deterministicUuid(
+      slackPostSeed(interaction, `slack-action-update:${handle.id}:${outcome.result}`),
+    ),
+    channelId: entry.slackChannelId,
+    timestamp: entry.slackMessageTs,
+    text,
+    blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+  });
+  await settleSlackInteractionActionHandles(deps.db, {
+    ...target,
+    handleId: handle.id,
+    result: outcome.result,
+    ...(outcome.stale ? { stale: true } : {}),
+  });
+}
+
+/**
+ * Take the button off a compact task's first message once the task settles.
+ *
+ * Called from the delivery pump when an interaction reaches a terminal
+ * delivery state, before that state commits, so a transient failure retries
+ * with the delivery. The update id is derived from the pending handle it
+ * retires, so a retry reproduces the same operation and a later settle (after a
+ * follow-up turn put nothing back) finds no pending handle and does nothing.
+ *
+ * A first message Slack no longer has, or that can no longer be updated, is not
+ * worth failing a delivery over: the handle is retired anyway, so a leftover
+ * button can no longer act on a finished task.
+ */
+async function retireSlackStartMessageButton(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  interaction: SlackInteraction,
+  home: { accountId: string; workspaceId: string },
+) {
+  if (interaction.startMessageLine === null) return;
+  const operationId = slackAcknowledgementOperationId(interaction);
+  const pending = await listPendingSlackInteractionMessageActionHandles(deps.db, {
+    accountId: interaction.accountId,
+    workspaceId: interaction.workspaceId,
+    interactionId: interaction.id,
+    messageOperationId: operationId,
+  });
+  const first = pending[0];
+  if (!first) return;
+  // The first message is written by the bot credential, so its ledger row is HOME.
+  const post = await getSlackBotPostOperation(
+    deps.db,
+    home.workspaceId,
+    interaction.connectionId,
+    operationId,
+  );
+  // Not posted yet: leave the button alone rather than retire it under a
+  // message that may still appear with it.
+  if (post?.status !== "completed" || !post.slackChannelId || !post.slackMessageTimestamp) {
+    return;
+  }
+  const message = slackStartMessage(deps, interaction.startMessageLine, {
+    hint: interaction.firstTaskHint === true,
+    stopped: false,
+    button: null,
+  });
+  try {
+    await client.updateMessage({
+      operationId: deterministicUuid(`slack-start-settled:${first.id}`),
+      channelId: post.slackChannelId,
+      timestamp: post.slackMessageTimestamp,
+      text: message.text,
+      blocks: message.blocks,
+    });
+  } catch (error) {
+    if (!permanentSlackStartMessageUpdateError(error)) throw error;
+    console.warn("[slack-interactions] first message button not retired", {
+      code: slackDeliveryErrorCode(error),
+    });
+  }
+  for (const handle of pending) {
+    await settleSlackInteractionActionHandles(deps.db, {
+      accountId: handle.accountId,
+      workspaceId: handle.workspaceId,
+      handleId: handle.id,
+      result: "task_settled",
+      stale: true,
+    });
+  }
+}
+
+function permanentSlackStartMessageUpdateError(error: unknown): boolean {
+  return (
+    permanentSlackDeliveryError(error) ||
+    (error instanceof SlackBotProviderError &&
+      (error.code === "cant_update_message" || error.code === "edit_window_closed"))
+  );
 }
 
 async function executeSlackAction(
@@ -3816,10 +4248,12 @@ async function executeSlackAction(
   }
   const session = await getSession(deps.db, grant.workspaceId, handle.sessionId);
   if (!session) throw new SlackInteractionPermanentError("slack_action_session_missing");
-  // The result post no longer advertises recurrence. The Status card is where
-  // the requester finds it, and only while this exact requester still holds
-  // schedule authority in this workspace. The deep link and the schedules
-  // authority behind it are unchanged: the browser rechecks both.
+  // Status exists only on interactions bound before compact messages; new tasks
+  // have no Status button. Its reply is kept byte for byte so a click an older
+  // image started re-renders identically, including Make recurring, and only
+  // while this exact requester still holds schedule authority in this
+  // workspace. The deep link and the schedules authority behind it are
+  // unchanged: the browser rechecks both.
   const recurring =
     hasPermission(grant.permissions, "sessions:read") &&
     hasPermission(grant.permissions, "scheduled_tasks:manage")
@@ -4012,13 +4446,17 @@ async function controlActionBlocks(
       actionKey: `${input.messageOperationId}:${actionKind}`,
     })),
   });
-  const pending = handles.filter((handle) => handle.status === "pending");
-  if (pending.length === 0) return [];
+  // Render every reserved handle, whatever its status. These handles are
+  // reserved fresh for the message's first post, so they are all pending then;
+  // a repair of that post after one was pressed must render the same buttons,
+  // or its bytes differ from the ledger's digest and the repair conflicts. A
+  // pressed or stale handle is refused when clicked, never re-executed.
+  if (handles.length === 0) return [];
   return [
     {
       type: "actions",
       block_id: `opengeni_controls_${input.messageOperationId}`,
-      elements: pending.map((handle) => ({
+      elements: handles.map((handle) => ({
         type: "button" as const,
         action_id: SLACK_ACTION_ID_BY_KIND[handle.actionKind],
         value: handle.id,
@@ -4764,15 +5202,16 @@ async function deliverSlackSessionEvents(
             slackPostSeed(interaction, `slack-terminal-update:${interaction.id}:${event.sequence}`),
           );
           await deliverSlackModelText(async (format) => {
-            // The result is the result. Continuation prose and the recurring
-            // action live on the control/Status card and `<command> info`.
+            // The result is the result. Continuation prose lives in the
+            // one-time hint and `<command> info`.
             const text = boundedOutput(
               `${requester.mention}${format(boundedOutput(existingProgress.text))}`,
             );
-            // This rewrites a message that already carried the line, so it has to
-            // carry it too, or the update would quietly strip it.
+            // In the previous format this rewrites a message that already
+            // carried the workspace line, so it has to carry it too, or the
+            // update would quietly strip it. A compact task has no such line.
             const rendered = withWorkspaceLine(
-              interaction.routedWorkspaceLabel,
+              slackMessageWorkspaceLabel(interaction),
               text,
               publicationBlocks.length > 0
                 ? ([
@@ -4844,6 +5283,8 @@ async function deliverSlackSessionEvents(
     }
   }
   if (terminal) {
+    // The task settled: its first message stops offering Stop (or Resume).
+    await retireSlackStartMessageButton(deps, client, interaction, home);
     await closeSlackInteractionDelivery(deps.db, {
       ...interaction,
       claimHolderId,
@@ -4902,14 +5343,34 @@ async function postDelivery(
   ),
   blocks?: SlackMessageBlock[],
 ) {
-  const rendered = withWorkspaceLine(interaction.routedWorkspaceLabel, boundedOutput(text), blocks);
-  await client.postMessage({
-    operationId,
-    channelId: interaction.slackChannelId,
-    threadTimestamp: interaction.slackThreadTs,
-    text: rendered.text,
-    ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
-  });
+  const post = async (label: string | null) => {
+    const rendered = withWorkspaceLine(label, boundedOutput(text), blocks);
+    await client.postMessage({
+      operationId,
+      channelId: interaction.slackChannelId,
+      threadTimestamp: interaction.slackThreadTs,
+      text: rendered.text,
+      ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
+    });
+  };
+  const label = slackMessageWorkspaceLabel(interaction);
+  try {
+    await post(label);
+  } catch (error) {
+    // Progress posts keep a durable random operation id that `slackPostSeed`
+    // does not version. During a rolling deploy an older image may already have
+    // bound one to the bytes with the workspace line. The ledger reports that
+    // from its claim, before any Slack write, so one retry with those bytes
+    // under the same id is safe and keeps the delivery from wedging.
+    if (
+      label !== null ||
+      !interaction.routedWorkspaceLabel ||
+      !(error instanceof SlackBotOperationConflictError)
+    ) {
+      throw error;
+    }
+    await post(interaction.routedWorkspaceLabel);
+  }
 }
 
 /**
@@ -5179,9 +5640,15 @@ async function slackInfoCommandResponse(
   // stays a projection of what this caller can do rather than a generic manual.
   const canControl = hasPermission(grant.permissions, "sessions:control");
   const canCreate = hasPermission(grant.permissions, "sessions:create");
-  const schedules = hasPermission(grant.permissions, "scheduled_tasks:manage")
-    ? slackSchedulesUrl(deps, installation.workspaceId)
-    : null;
+  const canSchedule = hasPermission(grant.permissions, "scheduled_tasks:manage");
+  const schedules = canSchedule ? slackSchedulesUrl(deps, installation.workspaceId) : null;
+  // The agent can set up a schedule itself only when new Slack tasks here get
+  // the scheduling tool; it is permission-gated on the same grant.
+  const agentSchedules =
+    canSchedule &&
+    slackTaskFirstPartyMcpTools(deps.settings, workspace?.settings).includes(
+      "scheduled_tasks_create",
+    );
   const workspaceUrl = slackWorkspaceUrl(deps, installation.workspaceId);
   const workspaceName = (workspace?.name ?? "").trim().slice(0, 120);
   const destination = workspaceName
@@ -5193,7 +5660,7 @@ async function slackInfoCommandResponse(
     ...(canControl
       ? [
           "• *Continue a task:* reply in its Slack thread.",
-          "• *Stop a task:* press *Stop* on its card, or reply `stop` in its thread.",
+          "• *Stop a task:* press *Stop* on its first message, or reply `stop` in its thread.",
         ]
       : []),
     ...(canCreate
@@ -5201,9 +5668,12 @@ async function slackInfoCommandResponse(
           `• *Start a new task:* mention ${botMention} in a channel, run \`${command} <task>\`, or send a new top-level direct message.`,
         ]
       : []),
-    ...(schedules
+    ...(agentSchedules || schedules
       ? [
-          `• *Make a result recurring:* press *Status* on the task card and open *Make recurring*, or open <${schedules}|Schedules>.`,
+          `• *Repeat a task on a schedule:* ${[
+            ...(agentSchedules ? ["ask OpenGeni in its thread"] : []),
+            ...(schedules ? [`open <${schedules}|Schedules>`] : []),
+          ].join(", or ")}.`,
         ]
       : []),
     `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open OpenGeni>)` : ""}.`,
@@ -5229,10 +5699,20 @@ function slackBotMention(botUserId: string | null): string {
 }
 
 function openSessionText(deps: ApiRouteDeps, workspaceId: string, sessionId: string) {
-  const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
-  if (!base) throw new Error("Slack session acknowledgement requires an absolute web base URL");
-  const url = new URL(`/workspaces/${workspaceId}/sessions/${sessionId}`, base).toString();
+  const url = slackAcknowledgementSessionUrl(deps, workspaceId, sessionId);
+  if (!url) throw new Error("Slack session acknowledgement requires an absolute web base URL");
   return `<${url}|Open in OpenGeni>`;
+}
+
+/** The session link an acknowledgement carries, or null without a base URL. */
+function slackAcknowledgementSessionUrl(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+): string | null {
+  const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
+  if (!base) return null;
+  return new URL(`/workspaces/${workspaceId}/sessions/${sessionId}`, base).toString();
 }
 
 function slackWorkspaceUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
