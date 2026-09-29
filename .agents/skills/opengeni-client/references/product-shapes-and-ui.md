@@ -4,7 +4,7 @@
 
 | Need | Surface | Product owns |
 | --- | --- | --- |
-| Agent conversation in a React product (default) | `SessionConversation` + `compiled.css` behind `createSessionProxyHandler` | Shell, placement, and `--og-*` theme |
+| Agent conversation in a React product (default) | `OpenGeniChat` (or `SessionConversation` for one record) + `compiled.css` behind `createSessionProxyHandler` | Shell, placement, and `--og-*` theme |
 | Materially different interaction model in React | Headless `@opengeni/react/session` hooks and projections | Components, layout, and styling |
 | Non-React frontend, mobile app, CLI, or automation | OpenGeni SDK or public API behind the product backend | All user-facing presentation |
 | Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |

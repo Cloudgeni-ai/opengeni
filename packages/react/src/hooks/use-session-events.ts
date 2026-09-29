@@ -11,6 +11,7 @@ import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeli
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { usePageLiveActivity } from "./internal";
+import type { LatestQuestionOptions } from "./latest-question";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -26,7 +27,7 @@ export type UseSessionEventsOptions = EmbeddedSessionClientOverride & {
 export type UseSessionEventsResult = {
   /** Replayed + live events, ordered by sequence, no gaps, no duplicates. */
   events: SessionEvent[];
-  /** Projected, renderable timeline (memoized over `events`). */
+  /** Renderable timeline, including the bounded navigation witness for a distant queued prompt. */
   timeline: TimelineItem[];
   /** Latest session status observed in the event log, if any. */
   sessionStatus: SessionStatus | null;
@@ -41,6 +42,10 @@ export type UseSessionEventsResult = {
   windowTruncated: boolean;
   /** True until the initial tail window has been applied (windowed mode). */
   initialLoading: boolean;
+  /** A history window (including an empty tail) succeeded for this session/replay
+   * identity. Stays true through later stream errors and navigation/reloads.
+   * Full replay has no snapshot-completion watermark and does not set this by itself. */
+  initialHistoryReady: boolean;
   /** Whether older durable events are available before the current window. */
   hasOlder: boolean;
   /** True while an older window is being fetched. */
@@ -73,6 +78,10 @@ export type UseSessionEventsResult = {
    * "Jump to latest" when the tip is not in memory (history view).
    */
   jumpToLatest: () => Promise<void>;
+  /** Resolve the newest eligible durable human question. Pending prompts use the
+   * optional queue destination and return null; started prompts load their actual
+   * turn context (pass `timeline` to MessageTimeline as `items`). */
+  jumpToLatestQuestion: (options?: LatestQuestionOptions) => Promise<number | null>;
   /** Replace history with a bounded window containing this exact durable event. */
   jumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   loadingTarget: boolean;
@@ -143,6 +152,13 @@ export function useSessionEvents(
   navigationIdentityRef.current = { client, streamKey, enabled };
 
   const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
+  // One navigation witness, not a second history cache. Raw events stay contiguous.
+  const [questionEvidence, setQuestionEvidence] = useState<{
+    client: EmbeddedSessionClientLike;
+    streamKey: string;
+    anchor: number;
+    events: SessionEvent[];
+  } | null>(null);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
   const [newerError, setNewerError] = useState<Error | null>(null);
@@ -152,6 +168,7 @@ export function useSessionEvents(
     null,
   );
   const [initialLoading, setInitialLoading] = useState(true);
+  const [initialHistoryReady, setInitialHistoryReady] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [loadingOldest, setLoadingOldest] = useState(false);
@@ -199,6 +216,7 @@ export function useSessionEvents(
     loadingNewerRef.current = false;
     loadingOldestRef.current = false;
     loadingTargetRef.current = false;
+    setQuestionEvidence(null);
     setLoadingTarget(false);
     setLoadingOlder(false);
     setLoadingNewer(false);
@@ -226,6 +244,7 @@ export function useSessionEvents(
       setLoadingOldest(false);
       setLoadingLatest(false);
       setInitialLoading(true);
+      setInitialHistoryReady(false);
       lastSequenceRef.current = after;
       streamResumeSequenceRef.current = after;
       oldestSequenceRef.current = null;
@@ -277,7 +296,12 @@ export function useSessionEvents(
     const reconcileForegroundResume = reconcileAfterPageResumeRef.current && !fullReplay;
     reconcileAfterPageResumeRef.current = false;
     const controller = new AbortController();
-    const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
+    const isCurrent = () =>
+      generationRef.current === generation &&
+      !controller.signal.aborted &&
+      navigationIdentityRef.current.client === client &&
+      navigationIdentityRef.current.streamKey === streamKey &&
+      navigationIdentityRef.current.enabled === enabled;
     streamAbortRef.current = controller;
     // Batch yielded events into one React update per flush window so a long
     // replay (thousands of events) does not render per event. Project every
@@ -433,6 +457,8 @@ export function useSessionEvents(
           lastSequenceRef.current = window.newestSequence;
           streamResumeSequenceRef.current = window.newestSequence;
           initialWindowLoadedRef.current = true;
+          setInitialHistoryReady(true);
+          setError(null);
           if (status !== undefined) {
             setSessionStatusProjection(status);
           }
@@ -664,7 +690,9 @@ export function useSessionEvents(
     if (!sessionId || navigationBusy() || !hasOlderRef.current) {
       return false;
     }
-    const generation = navigationGenerationRef.current;
+    // Explicit window replacement supersedes unresolved question destinations.
+    const generation = ++navigationGenerationRef.current;
+    setQuestionEvidence(null);
     loadingOldestRef.current = true;
     setLoadingOldest(true);
     let published = false;
@@ -701,6 +729,8 @@ export function useSessionEvents(
         (retainedNewest !== null && retainedNewest < highWater);
       hasNewerRef.current = newer;
       initialWindowLoadedRef.current = true;
+      setInitialHistoryReady(true);
+      setError(null);
       viewModeRef.current = "history";
       loadingOldestRef.current = false;
       setNewerError(null);
@@ -843,6 +873,7 @@ export function useSessionEvents(
       if (signal?.aborted) return false;
       // Explicit targets supersede both other targets and adjacent-page requests.
       const generation = ++navigationGenerationRef.current;
+      setQuestionEvidence(null);
       const current = () =>
         generation === navigationGenerationRef.current &&
         navigationIdentityRef.current.client === client &&
@@ -896,6 +927,8 @@ export function useSessionEvents(
           retained.truncated ||
           (newestSequenceRef.current ?? 0) < lastSequenceRef.current;
         initialWindowLoadedRef.current = true;
+        setInitialHistoryReady(true);
+        setError(null);
         viewModeRef.current = "history";
         setEventWindow(retained);
         setHasOlder(hasOlderRef.current);
@@ -924,7 +957,65 @@ export function useSessionEvents(
     [client, workspaceId, sessionId, streamKey, enabled],
   );
 
+  const jumpToLatestQuestion = useCallback(
+    async (questionOptions?: LatestQuestionOptions): Promise<number | null> => {
+      if (
+        !sessionId ||
+        navigationIdentityRef.current.client !== client ||
+        navigationIdentityRef.current.streamKey !== streamKey ||
+        navigationIdentityRef.current.enabled !== enabled
+      )
+        return null;
+      const identity = navigationIdentityRef.current;
+      let generation = navigationGenerationRef.current;
+      const current = () =>
+        identity.client === navigationIdentityRef.current.client &&
+        identity.streamKey === navigationIdentityRef.current.streamKey &&
+        identity.enabled === navigationIdentityRef.current.enabled &&
+        generation === navigationGenerationRef.current;
+      try {
+        // Optional action code stays off the session-open path. Capture identity
+        // before the import and fence its completion just like network reads.
+        const { resolveLatestQuestion } = await import("./latest-question");
+        if (!current()) return null;
+        const destination = await resolveLatestQuestion({
+          client,
+          workspaceId,
+          sessionId,
+          isCurrent: current,
+          resumeSequence: maxResumeSequence,
+          options: questionOptions,
+        });
+        if (!destination || !current()) return null;
+        if (!eventWindowRef.current.events.some((event) => event.sequence === destination.anchor)) {
+          const navigation = jumpToSequence(destination.anchor);
+          generation = navigationGenerationRef.current;
+          if (!(await navigation) || !current()) return null;
+        }
+        setQuestionEvidence({
+          client,
+          streamKey,
+          anchor: destination.anchor,
+          events: destination.events,
+        });
+        return destination.questionSequence;
+      } catch (reason) {
+        if (!current()) return null;
+        throw reason;
+      }
+    },
+    [client, workspaceId, sessionId, streamKey, enabled, jumpToSequence],
+  );
+
   const jumpToLatest = useCallback(async (): Promise<void> => {
+    // An old host retry closure must not clear a replacement session's error
+    // or abort its live feed before the passive effect cleanup has run.
+    if (
+      navigationIdentityRef.current.client !== client ||
+      navigationIdentityRef.current.streamKey !== streamKey ||
+      navigationIdentityRef.current.enabled !== enabled
+    )
+      return;
     if (loadingTargetRef.current) {
       navigationGenerationRef.current += 1;
       loadingTargetRef.current = false;
@@ -933,9 +1024,12 @@ export function useSessionEvents(
     if (!sessionId || navigationBusy()) {
       return;
     }
+    navigationGenerationRef.current += 1;
+    setQuestionEvidence(null);
     loadingLatestRef.current = true;
     setLoadingLatest(true);
     setNewerError(null);
+    setError(null);
     let published = false;
     try {
       streamAbortRef.current?.abort();
@@ -966,17 +1060,22 @@ export function useSessionEvents(
         setLoadingLatest(false);
       }
     }
-  }, [after, sessionId]);
+  }, [after, sessionId, client, streamKey, enabled]);
 
   const identityMatches = stateStreamKey === streamKey;
   const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
-  const timeline = useMemo(
-    () =>
-      buildTimeline(visibleEvents, {
-        partialStart: hasOlder || eventWindow.truncated || after > 0,
-      }),
-    [visibleEvents, hasOlder, eventWindow.truncated, after],
-  );
+  const timeline = useMemo(() => {
+    const witness =
+      questionEvidence?.client === client &&
+      questionEvidence.streamKey === streamKey &&
+      visibleEvents.some((event) => event.sequence === questionEvidence.anchor)
+        ? questionEvidence.events
+        : EMPTY_EVENTS;
+    const ids = new Set(visibleEvents.map((event) => event.id));
+    return buildTimeline([...visibleEvents, ...witness.filter((event) => !ids.has(event.id))], {
+      partialStart: hasOlder || eventWindow.truncated || after > 0,
+    });
+  }, [visibleEvents, hasOlder, eventWindow.truncated, after, questionEvidence, client, streamKey]);
 
   return {
     events: visibleEvents,
@@ -988,6 +1087,7 @@ export function useSessionEvents(
     windowBytes: identityMatches ? eventWindow.bytes : 2,
     windowTruncated: identityMatches ? eventWindow.truncated : false,
     initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
+    initialHistoryReady: identityMatches && initialHistoryReady,
     hasOlder: !identityMatches ? false : hasOlder,
     loadingOlder: !identityMatches ? false : loadingOlder,
     loadOlder,
@@ -998,6 +1098,7 @@ export function useSessionEvents(
     loadOldest,
     loadingLatest: !identityMatches ? false : loadingLatest,
     jumpToLatest,
+    jumpToLatestQuestion,
     jumpToSequence,
     loadingTarget: identityMatches && loadingTarget,
     error: identityMatches ? (newerError ?? error) : null,

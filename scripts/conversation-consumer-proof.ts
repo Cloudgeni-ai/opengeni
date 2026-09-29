@@ -1,7 +1,7 @@
 /**
  * Prove that a product importing only the default conversation surfaces
- * (`OpenGeniProvider`, `SessionConversation`, `compiled.css`, and the SDK's
- * `createSessionProxyHandler`) builds with Next.js (Turbopack) and Vite while
+ * (`OpenGeniProvider`, `OpenGeniChat`, `SessionConversation`, `compiled.css`, and the SDK's
+ * `createSessionProxyRoute` Next adapter) builds with Next.js (Turbopack) and Vite while
  * NONE of @opengeni/react's optional peers are installed. Bundlers resolve
  * every reachable `import()` at build time, so an optional peer reachable from
  * these entrypoints breaks the host's build.
@@ -26,32 +26,36 @@ const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 const conversationSource = `import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniChat, OpenGeniProvider, SessionConversation } from "@opengeni/react";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
-export function Assistant() {
+export function Assistant({ single }: { single?: boolean }) {
   return (
     <OpenGeniProvider client={client} workspaceId="${WORKSPACE_ID}">
-      <SessionConversation sessionId="${SESSION_ID}" />
+      {single ? <SessionConversation sessionId="${SESSION_ID}" /> : <OpenGeniChat />}
     </OpenGeniProvider>
   );
 }
 `;
 
-const proxySource = `import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
+const proxySource = `import { OpenGeniClient } from "@opengeni/sdk";
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
 const og = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL ?? "http://127.0.0.1:1",
   apiKey: process.env.OPENGENI_API_KEY ?? "unused",
 });
-const handler = createSessionProxyHandler(og, {
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: () => ({ workspaceId: "${WORKSPACE_ID}", user: "proof-user" }),
+  createSession: ({ initialMessage, idempotencyKey }) => ({
+    initialMessage,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+    tools: [],
+    firstPartyMcpTools: [],
+  }),
 });
-export const GET = handler;
-export const POST = handler;
-export const PUT = handler;
-export const PATCH = handler;
 `;
 
 export async function proveConversationConsumer(input: ConversationConsumerInput): Promise<void> {

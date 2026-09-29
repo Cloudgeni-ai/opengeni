@@ -13,6 +13,10 @@ import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
 import {
+  WorkspaceDeveloperSettings,
+  WorkspaceSandboxImageRow,
+} from "@/components/workspace-developer-settings";
+import {
   WorkspaceSettingsContent,
   type WorkspaceSettingsSection,
 } from "@/components/settings/workspace-settings-shell";
@@ -149,6 +153,11 @@ function OperationalWorkspaceSettingsRoute({
     workspaceId,
     "connections:write",
   );
+  const canAdministerWorkspace = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
+  );
   // canManageOrganizationModels (above) is the same rule as Organization settings >
   // Models: owners and admins in an organization administrator session (or the single
   // local user).
@@ -198,6 +207,14 @@ function OperationalWorkspaceSettingsRoute({
 
       {section === "api-keys" ? (
         <WorkspaceApiKeysPage key={workspaceId} workspaceId={workspaceId} keyParam={apiKey} />
+      ) : null}
+
+      {section === "developer" ? (
+        <WorkspaceDeveloperSettings
+          client={context.client}
+          workspaceId={workspaceId}
+          canManage={canAdministerWorkspace}
+        />
       ) : null}
     </WorkspaceSettingsContent>
   );
@@ -379,6 +396,11 @@ function WorkspaceGeneralSettings({
               search: { section: "models", view: "connect:vercel" },
             })
           }
+        />
+        <WorkspaceSandboxImageRow
+          client={context.client}
+          workspaceId={workspaceId}
+          canManage={canRename}
         />
         <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />

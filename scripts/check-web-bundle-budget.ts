@@ -569,6 +569,12 @@ const effectiveBudgets = {
     // matched Linux/x64 CI to the byte for this graph today). Keep the
     // established 1.5 KiB headroom; gzip and every other cap stay fixed.
     wholeKibEnvelope(2_527_533, 1.5 * kib),
+    // Workspace webhook, credential provider, and sandbox image SDK methods on
+    // the shared client (the Developer settings page stays lazy). Merged with
+    // main 57f030caa the graph measures 2,529,339 raw / 705,801 gzip across 36
+    // files (Bun 1.4 Linux/x64). Keep the established 1.5 KiB headroom; gzip
+    // and every other cap stay fixed.
+    wholeKibEnvelope(2_529_339, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

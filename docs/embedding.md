@@ -2,8 +2,9 @@
 
 > Most customer products do **not** need this integration shape. When OpenGeni
 > remains a standalone service and the product presents an OpenGeni-backed agent
-> in its own UI, mount `SessionConversation` from `@opengeni/react` behind the
-> packaged `createSessionProxyHandler` from `@opengeni/sdk`. See
+> in its own UI, mount `OpenGeniChat` or `SessionConversation` from
+> `@opengeni/react` behind the packaged `createSessionProxyHandler` from
+> `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
 > [product integration](product-integration.md) and the `opengeni-client` skill. This guide is for the rarer case where the
 > host mounts OpenGeni's router or calls its core domain packages in-process.
 
@@ -631,6 +632,11 @@ a pure service initiator; user-scoped sets must reject a null causal human and
 revalidate the exact admitted personal-resource grant. The provider returns
 plaintext values plus exact scope/resource/attempt echoes, which the worker
 checks before applying any value.
+
+A standalone product can supply the same material without embedding: a
+workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
+is a signed HTTP endpoint that OpenGeni uses as that workspace's `runCredentials`
+resolver, in place of the injected port.
 
 `runCredentials` is the session-aware seam for credentials that programs inside
 the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,

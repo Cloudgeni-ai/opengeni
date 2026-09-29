@@ -67,7 +67,7 @@ use Only-me visibility as a substitute for the mapping above.
 
 | Need | Recommended surface | Product renders | OpenGeni package |
 | --- | --- | --- | --- |
-| Agent conversation in a React product (default) | `SessionConversation` behind the packaged proxy | Product shell and domain UI | `@opengeni/react`, `createSessionProxyHandler` from `@opengeni/sdk` |
+| Agent conversation in a React product (default) | `OpenGeniChat` / `SessionConversation` behind the packaged proxy | Product shell and domain UI | `@opengeni/react`, `createSessionProxyHandler` from `@opengeni/sdk` |
 | Materially different interaction model in React | Headless React session hooks | Product timeline/composer/layout | `@opengeni/react/session` |
 | Non-React frontend, mobile, CLI, or automation | Headless SDK | Everything user-facing | `@opengeni/sdk` |
 | Agent workspace with files, changes, terminal, or desktop | Workbench | Product shell plus chosen tabs | `@opengeni/react` |

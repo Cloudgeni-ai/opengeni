@@ -100,6 +100,15 @@ Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
 the product needs a materially different interaction model. These components do
 not consume the text-only `@opengeni/sdk/chat` fallback protocol.
 
+`OpenGeniChat` adds the user's chat list to the conversation: a sidebar when
+the component is wide and a drawer behind a menu button when narrow (measured on
+its own container, so it works inside panels), a new-chat composer that creates
+the session from its first message, and inline rename and archive. It is
+composed from `SessionList` and `SessionConversation`, which you can also mount
+separately. Pass `conversationProps` for message rendering and tool renderers,
+`createSession` to create chats through your own endpoint, or `sessionId` /
+`onSessionChange` to control the selection (for example from the URL).
+
 `SessionConversation` hides its model picker when the client config reports
 `modelSelection: false` (a proxy that fixes the model policy); pass
 `modelPicker={false}` or `modelPicker` to override. Attachments appear when the
@@ -123,6 +132,14 @@ stale-tab protection with `reloadOnApiContractChange`; embedded products
 should leave it off.
 
 ### Exact conversation search navigation
+
+`useSessionEvents().initialHistoryReady` becomes true when a history window has
+loaded successfully, including an empty tail. It stays true through later stream
+errors, history navigation, and tip reloads, and resets for a new session/replay
+identity. Use it rather than inferring initial success from `initialLoading` or
+the combined `error`. A failed first load stays unready until recovery;
+`jumpToLatest()` clears its stale error and retries. Full replay has no history
+snapshot-completion watermark, so SSE alone does not set this flag.
 
 `useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
 window with at most two bounded cursor reads around an exact durable event.
@@ -937,10 +954,74 @@ remaining built-ins in supplied order. Duplicate IDs keep their first
 definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
 
-`turnSummary={{ rolling: true }}` selects the compact progress presentation the
-web app uses: each stretch of work folds behind one live status row, and every
-answer stays a visible message, including an answer that later
-machine-triggered turns follow. See
+`turnSummary={{ rolling: true }}` selects the readable per-turn presentation:
+every assistant progress message and answer stays fully formatted and visible.
+Each turn has its own Working / Worked disclosure and rolling latest step;
+routine machine inputs get one compact reason per resumed turn. Normal tip-follow
+continues through long answers, and manual scrolling never auto-repins on new work.
+Expanded outer work headers stay reachable at the top of the timeline (below
+Latest question when shown) until their own details end; nested headers never stick.
+
+Wire the newest-question resolver when history can be unloaded:
+
+`SessionConversation` includes the readable-turn presentation and this wiring automatically.
+
+```tsx
+const events = useSessionEvents(sessionId);
+<MessageTimeline
+  events={events.events}
+  items={events.timeline}
+  turnSummary={{ rolling: true }}
+  hasNewer={events.hasNewer}
+  onJumpToLatest={events.jumpToLatest}
+  onJumpToLatestQuestion={events.jumpToLatestQuestion}
+/>;
+```
+
+The single **Latest question** button targets the newest durable user message,
+not the viewport-relative question or the newest message in an older loaded page.
+The resolver checks the authoritative queue and normally uses one filtered forensic
+lookup plus, if needed, two bounded context reads. It pages past legacy worker
+completions and withdrawn/cancelled-before-start prompts, never substituting an
+arbitrary question from a loaded old page. Queued/legacy admission uses filtered
+lifecycle evidence to locate its real turn start. A distant prompt is retained as
+one projection-only witness in `events.timeline`; `events.events` remains the
+bounded contiguous raw window, so pass `items` as above.
+The optional resolver loads on the first click, not when opening a session.
+Identity and navigation guards also cover that module-loading delay.
+
+`SessionConversation` also opens and focuses the newest pending prompt in
+`SessionChrome`. Custom hosts can provide the same destination without changing
+the existing `Promise<number | null>` timeline callback:
+
+```tsx
+onJumpToLatestQuestion={() => events.jumpToLatestQuestion({
+  onQueuedQuestion: async (turn, navigation) => {
+    await queue.refresh();
+    if (!navigation.isCurrent()) return;
+    // Check the host's latest queue/error state before applying its focus request.
+    setQueueFocusTarget((previous) => ({
+      turnId: turn.id,
+      requestId: (previous?.requestId ?? 0) + 1,
+    }));
+  },
+})}
+// Pass queueFocusTarget to SessionChrome; each new request opens/focuses once.
+```
+
+A queue destination returns `null`, not an invisible transcript sequence. Without
+`onQueuedQuestion`, a pending prompt produces explicit queue guidance in the
+timeline; transitional queue state can be retried rather than silently no-oping.
+Check `navigation.isCurrent()` after awaits and immediately before queue UI effects:
+an explicit history jump can supersede a queued lookup without changing the session.
+The shared projection predicate supplies execution evidence for older queued turns
+without `turn.started`, including tools, agent/sandbox activity, startup, recovery,
+and capacity events. Compact cursor coverage skips coalesced delta runs.
+Without `onJumpToLatestQuestion`, local navigation is available only at the live history
+window; the component never guesses from an older page. `onJumpToLatest` retains
+its separate bottom-follow behavior. `groupTimeline(items)` retains classic
+grouping; `{ readableTurns: true }` selects the new projection. The deprecated
+`foldExchanges` option aliases readable turns, not the removed cross-turn fold. See
 [`docs/design/genie-loading.md`](../../docs/design/genie-loading.md).
 
 ## Sandbox surfacing

@@ -5,8 +5,117 @@ import { conversationTimeline } from "../src/conversation-timeline";
 import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { latestQuestionClient } from "./fixtures/latest-question-client";
 
 registerDom();
+
+for (const mode of [
+  "pending",
+  "started",
+  "withdrawn",
+  "legacy-running",
+  "legacy-settled",
+] as const) {
+  test(`Latest question reaches the real ${mode} destination through SessionConversation`, async () => {
+    const { client, turn, reads } = latestQuestionClient(mode);
+    const view = await renderComponent(
+      <SessionConversation client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    try {
+      await flush(100);
+      if (mode === "pending") {
+        const queueButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.textContent?.includes("1 queued"),
+        );
+        if (queueButton?.getAttribute("aria-expanded") === "true")
+          await actRun(() => queueButton.click());
+      }
+      const latest = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
+      expect(latest).not.toBeNull();
+      await actRun(() => latest!.click());
+      await flush(120);
+      expect(reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(true);
+      if (mode === "pending") {
+        expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(turn.id);
+        expect(
+          view.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+        ).not.toBeNull();
+        expect(
+          view.container.querySelector("[data-og-timeline-scroller]")?.textContent,
+        ).not.toContain("Newest queued question");
+      } else {
+        const prompts = [...view.container.querySelectorAll("[data-og-prompt]")].map(
+          (item) => item.textContent,
+        );
+        expect(
+          prompts.some((text) =>
+            text?.includes(
+              mode === "withdrawn" ? "Previous valid question" : "Newest queued question",
+            ),
+          ),
+        ).toBe(true);
+        if (mode === "withdrawn")
+          expect(prompts.some((text) => text?.includes("Newest queued question"))).toBe(false);
+      }
+    } finally {
+      await view.unmount();
+    }
+  });
+}
+
+test("deferred queued refresh cannot reopen or focus the queue after Jump to start", async () => {
+  const fixture = latestQuestionClient("pending");
+  let release!: (snapshot: SessionQueueSnapshot) => void;
+  const deferred = new Promise<SessionQueueSnapshot>((resolve) => {
+    release = resolve;
+  });
+  let deferRefresh = false;
+  let reads = 0;
+  fixture.client.getQueue = async () => {
+    if (deferRefresh && ++reads === 2) return deferred;
+    return fixture.snapshot;
+  };
+  const view = await renderComponent(
+    <SessionConversation
+      client={fixture.client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+    />,
+  );
+  try {
+    await flush(100);
+    const queueButton = view.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    )!;
+    if (queueButton.getAttribute("aria-expanded") === "true")
+      await actRun(() => queueButton.click());
+    const scroller = view.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+    await actRun(() =>
+      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })),
+    );
+    await flush(20);
+    const start = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-start]");
+    expect(start).not.toBeNull();
+    deferRefresh = true;
+    await actRun(() =>
+      view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]")!.click(),
+    );
+    await flush(30);
+    expect(reads).toBe(2);
+    await actRun(() => start!.click());
+    await flush(40);
+    release(fixture.snapshot);
+    await flush(80);
+    expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).not.toBe(fixture.turn.id);
+    expect(view.container.querySelector('[data-og-session-chrome-open="true"]')).toBeNull();
+    expect(view.container.querySelector("[data-og-prompt]")?.textContent).toContain(
+      "Previous valid question",
+    );
+  } finally {
+    release(fixture.snapshot);
+    await view.unmount();
+  }
+});
 
 test("queued delivery failures remain visible and retryable; acknowledged queue items are not duplicated", () => {
   const turn = fakeTurn();
@@ -59,6 +168,7 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
 
 test("complete conversation loads queue and provides queue actions beside composer", async () => {
   let streams = 0;
+  let latestQuestionLookups = 0;
   let snapshot: SessionQueueSnapshot = {
     version: 1,
     effectiveControl: {
@@ -83,8 +193,12 @@ test("complete conversation loads queue and provides queue actions beside compos
     pendingInputAttachment: null,
   };
   const client = fakeClient({
-    listEvents: async () =>
-      [
+    listEvents: async (_workspace, _session, options) => {
+      if (options?.includeTypes?.includes("user.message")) {
+        latestQuestionLookups++;
+        expect(options.mode).toBe("forensic");
+      }
+      return [
         {
           id: "33333333-3333-4333-8333-333333333333",
           sessionId: SESSION_ID,
@@ -94,7 +208,8 @@ test("complete conversation loads queue and provides queue actions beside compos
           occurredAt: "2026-09-07T00:00:00Z",
           payload: { text: "A complete long message. ".repeat(80) },
         },
-      ] as never,
+      ] as never;
+    },
     getSession: async () =>
       ({
         id: SESSION_ID,
@@ -131,6 +246,14 @@ test("complete conversation loads queue and provides queue actions beside compos
   );
   try {
     await flush(100);
+    const latestQuestion = view.container.querySelector<HTMLButtonElement>(
+      "[data-og-jump-to-question]",
+    );
+    expect(latestQuestion).not.toBeNull();
+    expect(view.container.querySelectorAll("[data-og-jump-to-question]")).toHaveLength(1);
+    await actRun(() => latestQuestion!.click());
+    await flush(30);
+    expect(latestQuestionLookups).toBe(1);
     const disclosure = view.container.querySelector<HTMLButtonElement>(
       "[data-og-user-message-disclosure]",
     )!;

@@ -33,7 +33,7 @@ through a tenant/user-scoped same-origin proxy on your server.
 `createSessionProxyHandler` is that proxy, packaged:
 
 ```ts
-// Server: mount at /api/opengeni/* (Next.js route handler, Hono, Bun.serve, workers, ...).
+// Server: mount at /api/opengeni/* (see the framework adapters below).
 import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
 
 const og = new OpenGeniClient({
@@ -61,14 +61,46 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at your mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 <OpenGeniProvider client={client} workspaceId={workspaceId}>
-  <SessionConversation sessionId={sessionId} />
+  {/* The user's chat list plus the conversation; or <SessionConversation sessionId={id} />. */}
+  <OpenGeniChat />
 </OpenGeniProvider>;
 ```
+
+Framework adapters are thin wrappers over the same web-standard handler (they
+also accept `createChatHandler` or any `(Request) => Promise<Response>`):
+
+```ts
+// Next.js App Router: app/api/opengeni/[...path]/route.ts
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, { resolve });
+
+// Express / Connect / node:http (mount before body parsers, or they are re-serialized)
+import { toNodeMiddleware } from "@opengeni/sdk/express";
+app.use("/api/opengeni", toNodeMiddleware(handler));
+
+// Hono
+import { toHonoHandler } from "@opengeni/sdk/hono";
+app.all("/api/opengeni/*", toHonoHandler(handler));
+```
+
+The Next adapter passes the full URL, including any `basePath`; the Node
+middleware rebuilds it from `originalUrl`, streams bodies and SSE, and aborts
+the request when the client disconnects.
+
+The chat list (`SessionList` / `OpenGeniChat`) uses `listSessionPage`. By
+default (`sessionList: "mine"`) the proxy adds a creator filter for the
+resolved user server-side, so each user sees only the chats they started;
+`sessionList: "visible"` lists every chat OpenGeni lets the user read in the
+workspace, and `false` disables listing. Archive and restore go through
+`updateSessionArchive` unless `archive: false`. A "New chat" in `OpenGeniChat`
+sends only `{ initialMessage, idempotencyKey }`, so it needs the
+`createSession` hook.
 
 Every request calls `resolve`, then runs through `asUser(user, { source })`
 (there is no service-authority fallback) against exactly the resolved
@@ -529,6 +561,33 @@ const selection = { serverId: "mail", connectionId: accounts[0]!.id };
 General personal-resource grants for documents, variable sets and other resource
 kinds remain available through the root/core SDK. They do not authorize native
 connected accounts.
+
+## Workspace credentials, webhooks, and sandbox image
+
+Configure these with an organization key or workspace admin session. Secrets are
+returned once; store them when you create the resource. Protocol and payloads:
+[`docs/workspace-integrations.md`](../../docs/workspace-integrations.md).
+
+```ts
+const { secret: providerSecret } = await client.putWorkspaceCredentialProvider(workspaceId, {
+  url: "https://product.example/opengeni/credentials",
+});
+const { secret: webhookSecret } = await client.createWorkspaceWebhook(workspaceId, {
+  url: "https://product.example/opengeni/events",
+  eventTypes: ["turn.completed", "turn.failed"],
+});
+
+// In your HTTP handlers, verify the raw body before parsing it:
+const { event } = await verifyWebhookEvent({ body: rawBody, headers, secret: webhookSecret });
+const request = await verifyCredentialProviderRequest({
+  body: rawBody,
+  headers,
+  secret: providerSecret,
+});
+```
+
+`listWorkspaceSandboxImages` returns the deployment's allowlisted images; set one
+with `updateWorkspaceSettings(workspaceId, { defaultSandboxImage })`.
 
 ## Personal schedules
 

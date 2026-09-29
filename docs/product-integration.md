@@ -97,14 +97,21 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at the mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 <OpenGeniProvider client={client} workspaceId={workspaceId}>
-  <SessionConversation sessionId={session.id} />
+  <OpenGeniChat /> {/* chat list + conversation; or <SessionConversation sessionId={session.id} /> */}
 </OpenGeniProvider>;
 ```
+
+Mount the handler with a framework adapter: `createSessionProxyRoute` from
+`@opengeni/sdk/next` (App Router catch-all route), `toNodeMiddleware` from
+`@opengeni/sdk/express`, or `toHonoHandler` from `@opengeni/sdk/hono`.
+`OpenGeniChat` lists the chats the resolved user created (`sessionList:
+"mine"`, the proxy default) and starts new ones through the `createSession`
+hook.
 
 The proxy calls `resolve` on every request and acts only through
 `asUser(user, { source })`; there is no fallback to the key's service
@@ -605,6 +612,16 @@ can decrypt a stored credential to construct the authorized provider request.
 The model and sandbox receive the tool schema and bounded result, not the
 credential itself. The customer API must still enforce tenant/user scope on
 every call and must not trust a model-supplied tenant id.
+
+### Credentials, completion events, and the sandbox image
+
+A standalone product does not need an in-process host port to give the agent
+short-lived cloud or Git credentials, to learn when a turn finishes, to know
+which turn called its MCP server, or to choose the sandbox image. Configure a
+workspace credential provider, workspace webhooks, and an allowlisted
+`defaultSandboxImage`, and read `_meta.opengeni` on MCP calls. See
+[`docs/workspace-integrations.md`](workspace-integrations.md) for the protocol,
+signature scheme, and SDK helpers.
 
 ### Model and runtime behavior
 
