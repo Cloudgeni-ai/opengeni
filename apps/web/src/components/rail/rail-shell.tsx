@@ -116,7 +116,7 @@ function RailBody() {
                     "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
                     mobileSection === "sessions"
                       ? "bg-surface-3 text-fg shadow-sm"
-                      : "text-fg-muted hover:text-fg",
+                      : "text-fg-label hover:text-fg",
                   )}
                 >
                   <MessagesSquareIcon className="size-4" />
@@ -135,7 +135,7 @@ function RailBody() {
                     "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
                     mobileSection === "workspace"
                       ? "bg-surface-3 text-fg shadow-sm"
-                      : "text-fg-muted hover:text-fg",
+                      : "text-fg-label hover:text-fg",
                   )}
                 >
                   <Settings2Icon className="size-4" />

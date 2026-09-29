@@ -129,6 +129,7 @@
   --color-og-border: var(--og-color-border);
   --color-og-border-strong: var(--og-color-border-strong);
   --color-og-fg: var(--og-color-fg);
+  --color-og-fg-label: var(--og-color-fg-label);
   --color-og-fg-muted: var(--og-color-fg-muted);
   --color-og-fg-subtle: var(--og-color-fg-subtle);
 
@@ -164,6 +165,7 @@
   --color-border: var(--og-color-border);
   --color-border-strong: var(--og-color-border-strong);
   --color-fg: var(--og-color-fg);
+  --color-fg-label: var(--og-color-fg-label);
   --color-fg-muted: var(--og-color-fg-muted);
   --color-fg-subtle: var(--og-color-fg-subtle);
   --color-brand: var(--og-color-accent);

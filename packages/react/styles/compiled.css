@@ -243,6 +243,11 @@
   inherits: true;
   initial-value: #e6e6e6;
 }
+@property --og-color-fg-label {
+  syntax: "*";
+  inherits: true;
+  initial-value: #d4d4d4;
+}
 @property --og-color-fg-muted {
   syntax: "*";
   inherits: true;
@@ -614,6 +619,7 @@
   --og-color-border: #dedede;
   --og-color-border-strong: #bdbdbd;
   --og-color-fg: #242424;
+  --og-color-fg-label: #3a3a3a;
   --og-color-fg-muted: #5f5f5f;
   --og-color-fg-subtle: #696969;
   --og-color-accent: #545454;
@@ -3093,9 +3099,6 @@
       background-color: color-mix(in oklab, var(--og-color-danger) 8%, transparent);
     }
   }
-:where(.og-root).bg-og-fg,:where(.og-root) .bg-og-fg {
-    background-color: var(--og-color-fg);
-  }
 :where(.og-root).bg-og-fg-muted,:where(.og-root) .bg-og-fg-muted {
     background-color: var(--og-color-fg-muted);
   }
@@ -3842,9 +3845,6 @@
 :where(.og-root).text-og-accent-strong,:where(.og-root) .text-og-accent-strong {
     color: var(--og-color-accent-strong);
   }
-:where(.og-root).text-og-bg,:where(.og-root) .text-og-bg {
-    color: var(--og-color-bg);
-  }
 :where(.og-root).text-og-danger,:where(.og-root) .text-og-danger {
     color: var(--og-color-danger);
   }
@@ -3886,9 +3886,6 @@
   }
 :where(.og-root).text-og-status-waiting,:where(.og-root) .text-og-status-waiting {
     color: var(--og-color-status-waiting);
-  }
-:where(.og-root).text-og-surface-1,:where(.og-root) .text-og-surface-1 {
-    color: var(--og-color-surface-1);
   }
 :where(.og-root).text-popover-foreground,:where(.og-root) .text-popover-foreground {
     color: var(--color-fg);
@@ -4819,13 +4816,6 @@
         @supports (color: color-mix(in lab, red, red)) {
           background-color: color-mix(in oklab, var(--og-color-accent) 10%, transparent);
         }
-      }
-    }
-  }
-:where(.og-root).hover\:bg-og-fg-muted,:where(.og-root) .hover\:bg-og-fg-muted {
-    &:hover {
-      @media (hover: hover) {
-        background-color: var(--og-color-fg-muted);
       }
     }
   }

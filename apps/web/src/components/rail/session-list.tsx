@@ -2790,7 +2790,7 @@ export function SessionList() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-muted">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg-label">
           {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
         </span>
         <Tooltip>
@@ -2802,7 +2802,7 @@ export function SessionList() {
               onClick={openSearchDialog}
               aria-label="Search sessions"
               aria-haspopup="dialog"
-              className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+              className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
             >
               <SearchIcon aria-hidden="true" className="size-3.5" />
             </Button>
@@ -2818,7 +2818,7 @@ export function SessionList() {
                 size="icon-xs"
                 aria-label="New project"
                 onClick={() => setChannelDialogOpen(true)}
-                className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
               >
                 <FolderPlusIcon className="size-3.5" />
               </Button>
@@ -2833,7 +2833,7 @@ export function SessionList() {
               variant="ghost"
               size="icon-xs"
               aria-label={browseControlsActive ? "Session view, customized" : "Session view"}
-              className="relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+              className="relative shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
             >
               <ListFilterIcon className="size-3.5" />
               {browseControlsActive ? (
@@ -3359,7 +3359,7 @@ function SessionGroupPaginationControl(
             : `${action} older sessions in ${group.label}`
         }
         onClick={() => void loadWithFocus()}
-        className="min-h-8 rounded-md px-2 text-xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
+        className="min-h-8 rounded-md px-2 text-xs font-medium text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
       >
         {revealCount !== undefined
           ? loading
@@ -3826,7 +3826,7 @@ function TreeLoadRow({
         type="button"
         onClick={onClick}
         style={style}
-        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
+        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-muted hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
       >
         {text}
       </button>
@@ -3898,7 +3898,7 @@ function SessionRow(props: {
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
     props.active
       ? "border-brand/20 bg-selection font-medium text-fg"
-      : "border-transparent text-fg-muted hover:bg-surface-2",
+      : "border-transparent text-fg-label hover:bg-surface-2 hover:text-fg",
     props.focused && !props.active ? "bg-surface-2/60" : "",
   );
 
@@ -3913,7 +3913,7 @@ function SessionRow(props: {
             event.stopPropagation();
             props.onToggleExpand();
           }}
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-subtle outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-muted outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
         >
           <ChevronRightIcon
             className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-90")}
@@ -4452,7 +4452,7 @@ function RowActionsMenu({
 function EmptySessions({ archived = false }: { archived?: boolean }) {
   return (
     <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-border px-3 py-4 text-center">
-      <p className="text-xs text-fg-subtle">
+      <p className="text-xs text-fg-muted">
         {archived ? "No archived sessions" : "No sessions yet"}
       </p>
       {!archived ? (
@@ -4494,7 +4494,7 @@ export function CollapsedSessionsButton() {
             size="icon-sm"
             aria-label="Search sessions"
             onClick={() => requestSessionSearch(rail.workspaceId)}
-            className="text-fg-muted hover:text-fg"
+            className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
           </Button>
@@ -4513,7 +4513,7 @@ export function CollapsedSessionsButton() {
                 : `Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`
             }
             onClick={() => rail.setCollapsed(false)}
-            className="relative text-fg-muted hover:text-fg"
+            className="relative text-fg-label hover:text-fg"
           >
             <MessagesSquareIcon
               className={cn("size-4", firstLoad && "motion-safe:animate-pulse")}

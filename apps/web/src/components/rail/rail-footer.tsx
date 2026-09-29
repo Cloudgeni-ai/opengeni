@@ -226,7 +226,7 @@ export function RailFooter() {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                className="shrink-0 text-fg-muted pointer-coarse:size-10"
+                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
                 aria-label="Send feedback"
                 onClick={() => setFeedbackOpen(true)}
               >
@@ -246,7 +246,7 @@ export function RailFooter() {
                 size="icon-sm"
                 aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
                 onClick={rail.toggleCollapsed}
-                className="shrink-0 text-fg-subtle hover:text-fg pointer-coarse:size-10"
+                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
               >
                 {rail.collapsed ? (
                   <ChevronsRightIcon className="size-4" />

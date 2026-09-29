@@ -94,6 +94,10 @@
   --og-color-border: #454545;
   --og-color-border-strong: #555555;
   --og-color-fg: #e6e6e6;
+  /* Labels you act on: rail and settings navigation, session titles, menu
+     rows. A hair under fg so the active item (fg) still stands out, never
+     muted like meta text. */
+  --og-color-fg-label: #d4d4d4;
   --og-color-fg-muted: #b0b0b0;
   /* Lifted from the studio's #949494 so quiet meta keeps 4.5:1 on the rail,
      Surface 1-2 and the canvas. */
@@ -241,6 +245,7 @@
   --og-color-border: #dedede;
   --og-color-border-strong: #bdbdbd;
   --og-color-fg: #242424;
+  --og-color-fg-label: #3a3a3a;
   /* Muted and subtle are a step darker than the studio's #686868 / #767676
      so both keep 4.5:1 as small text on the rail, Surface 2 (row hover) and
      the selected-row fill, with a visible step between them. */
