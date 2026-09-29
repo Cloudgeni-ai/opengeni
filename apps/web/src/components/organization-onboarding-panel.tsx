@@ -281,10 +281,10 @@ export function OrganizationOnboardingPanel({
 
   if (state === null && statusError) {
     return frame(
-      <section className="flex flex-1 items-center justify-center px-4">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
         <div
           role="alert"
-          className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+          className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         >
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-status-failed/15 text-status-failed">
             <CircleAlertIcon className="size-4" />
@@ -321,8 +321,8 @@ export function OrganizationOnboardingPanel({
     const unavailable = invitationResolution === "unavailable";
     const focusedInvitation = invitationResolution === "matched" ? invitations[0] : null;
     return frame(
-      <section className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-lg rounded-lg border border-border bg-surface p-5 shadow-sm">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
+        <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6">
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <MailIcon className="size-4" />
           </span>
@@ -451,8 +451,8 @@ export function OrganizationOnboardingPanel({
 
   if (state === "unavailable") {
     return frame(
-      <section className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <LockKeyholeIcon className="size-4" />
           </span>
@@ -467,9 +467,9 @@ export function OrganizationOnboardingPanel({
   }
 
   return frame(
-    <section className="flex flex-1 items-center justify-center px-4">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
       <form
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         onSubmit={(event) => {
           event.preventDefault();
           void submit();

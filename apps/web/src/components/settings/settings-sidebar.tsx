@@ -146,7 +146,7 @@ function SettingsRail({
       aria-label={label}
       data-settings-rail
       className={cn(
-        "h-full w-full overflow-x-hidden overflow-y-auto overscroll-y-contain bg-surface/40 px-2",
+        "og-rail-glow h-full w-full overflow-x-hidden overflow-y-auto overscroll-y-contain px-2",
         className,
       )}
       onClick={(event) => {
@@ -249,7 +249,7 @@ export function SettingsShell({
   const railProps = { label, back, home, scope, groups, activeId, footer };
 
   const navigation = narrow ? (
-    <header className="flex min-w-0 items-center gap-2 border-b border-border bg-surface/40 px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
+    <header className="flex min-w-0 items-center gap-2 border-b border-border bg-bg px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
       <LinkShell
         link={back.link}
         aria-label={back.label}
@@ -314,6 +314,7 @@ export function SettingsShell({
       {/* A labelled region: the app shell already provides the one <main>. */}
       <section
         aria-label={page?.title ?? currentPage}
+        data-canvas
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
         {notice}

@@ -211,14 +211,14 @@ export function AnalyticsManager({
           ) : null}
           <button
             type="button"
-            className={`${BUTTON_CLASS} bg-secondary text-secondary-foreground hover:bg-secondary/80`}
+            className={`${BUTTON_CLASS} bg-secondary text-secondary-foreground hover:bg-surface-3 hover:text-fg`}
             onClick={() => choose("denied")}
           >
             Decline
           </button>
           <button
             type="button"
-            className={`${BUTTON_CLASS} bg-primary text-primary-foreground hover:bg-primary/90`}
+            className={`${BUTTON_CLASS} border border-primary-border bg-primary text-primary-foreground hover:bg-primary-hover`}
             onClick={() => choose("granted")}
           >
             Allow analytics

@@ -78,8 +78,8 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
   }
 
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
-      <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
         <div className="mb-4 flex items-center gap-3">
           <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <KeyRoundIcon className="size-4" />

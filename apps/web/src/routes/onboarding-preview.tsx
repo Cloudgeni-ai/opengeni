@@ -212,10 +212,10 @@ function AdditionalOrganizationPreview() {
 
   return (
     <main className="min-h-screen bg-bg p-5 text-fg">
-      <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-6xl overflow-hidden rounded-xl border border-border bg-surface-1 shadow-2xl">
+      <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-6xl overflow-hidden rounded-xl border border-border bg-surface shadow-2xl">
         <aside className="w-64 shrink-0 border-r border-border bg-surface-2/35 p-3">
           <div className="mb-6 flex items-center gap-2 px-1 py-2 text-sm font-semibold">
-            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-xs font-bold text-white">
+            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-xs font-bold text-brand-fg">
               O
             </span>
             Opengeni

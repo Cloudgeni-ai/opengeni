@@ -359,7 +359,7 @@ export function ModelContextInspectorPane(props: {
                       key={row.index}
                       type="button"
                       data-context-row
-                      className="group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-bg-muted focus-visible:outline focus-visible:outline-2"
+                      className="group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-surface-2 focus-visible:outline focus-visible:outline-2"
                       onClick={() => {
                         setSelected(row.index);
                         setRawItem(false);

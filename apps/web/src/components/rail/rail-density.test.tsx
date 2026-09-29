@@ -57,15 +57,17 @@ const railHeader = await Bun.file(new URL("./rail-header.tsx", import.meta.url))
 const railShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
 
 describe("rail overflow boundaries", () => {
-  test("contains scrolling session controls below an opaque, non-shrinking footer", () => {
+  test("contains scrolling session controls above a non-shrinking footer on the rail glow", () => {
     expect(railShell).toContain(
-      "isolate flex h-full min-h-0 flex-col overflow-hidden bg-surface/40",
+      "og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden",
     );
     expect(railShell).toMatch(
       /data-rail-scroll-viewport\s+className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"/,
     );
+    // The footer sits outside the clipped scroll viewport, so it stays
+    // transparent and the glow runs to the rail's bottom edge.
     expect(railShell).toMatch(
-      /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border bg-surface"/,
+      /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border"/,
     );
   });
 });

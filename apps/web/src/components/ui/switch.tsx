@@ -12,8 +12,9 @@ import { cn } from "@/lib/utils";
 import { DisabledReasonTooltip, joinIds, useSettingRowControl } from "./setting-row";
 
 /**
- * - `brand` (default): brand track when on, a solid border-strong track when off,
- *   so the off state is visible in both themes.
+ * - `brand` (default): the primary fill and edge when on, with a primary-ink
+ *   thumb; a solid switch-track when off, so the off state is visible in both
+ *   themes.
  * - `neutral`: foreground track when on. Quieter, for dense admin pages.
  */
 export type SwitchVariant = "brand" | "neutral";
@@ -103,14 +104,16 @@ export function Switch({
       aria-describedby={joinIds(ariaDescribedByProp, field?.describedBy, hasReason && reasonId)}
       className={cn(
         // `rounded-full!` keeps the pill shape under the app-wide focus outline.
-        "group/switch relative inline-flex shrink-0 cursor-pointer items-center rounded-full! p-0.5 transition-colors duration-[120ms] ease-out",
+        "group/switch relative inline-flex shrink-0 cursor-pointer items-center rounded-full! border p-px transition-colors duration-[120ms] ease-out",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand/55",
         // Touch: an invisible 44px hit area without changing layout.
         "pointer-coarse:after:absolute pointer-coarse:after:top-1/2 pointer-coarse:after:left-1/2 pointer-coarse:after:size-11 pointer-coarse:after:-translate-x-1/2 pointer-coarse:after:-translate-y-1/2",
         size === "md" ? "h-5 w-9" : "h-4 w-7",
-        "bg-border-strong",
+        "border-transparent bg-switch-track",
         // Keyed on aria-checked: a disabled-reason tooltip trigger replaces data-state.
-        variant === "brand" ? "aria-checked:bg-brand" : "aria-checked:bg-fg",
+        variant === "brand"
+          ? "aria-checked:border-primary-border aria-checked:bg-primary"
+          : "aria-checked:bg-fg",
         "disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
         pending && "cursor-progress",
         className,
@@ -124,9 +127,12 @@ export function Switch({
           size === "md"
             ? "size-4 data-[state=checked]:translate-x-4"
             : "size-3 data-[state=checked]:translate-x-3",
-          // Near-white on the off track in both themes; the neutral thumb flips to the
-          // surface colour on the foreground track so it reads in light and dark.
-          variant === "brand" ? "bg-brand-fg" : "bg-brand-fg data-[state=checked]:bg-surface",
+          // The off thumb is the switch-thumb token; on, the brand thumb takes the
+          // primary ink and the neutral thumb the surface colour, so both read in
+          // light and dark.
+          variant === "brand"
+            ? "bg-switch-thumb data-[state=checked]:bg-primary-foreground"
+            : "bg-switch-thumb data-[state=checked]:bg-surface",
         )}
       >
         {pending ? (
@@ -135,7 +141,7 @@ export function Switch({
             className={cn(
               "animate-spin",
               size === "md" ? "size-3" : "size-2.5",
-              variant === "brand" ? "text-brand" : "text-fg-muted",
+              variant === "brand" ? "text-primary-border" : "text-fg-muted",
             )}
           />
         ) : null}

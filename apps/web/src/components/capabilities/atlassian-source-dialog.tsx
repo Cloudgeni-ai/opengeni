@@ -233,9 +233,9 @@ function AtlassianSourceDialogBody({
                         }
                       />
                       {item.kind === "jira_project" ? (
-                        <PanelsTopLeftIcon className="size-4 shrink-0 text-blue-500" />
+                        <PanelsTopLeftIcon className="size-4 shrink-0 text-brand" />
                       ) : (
-                        <BookOpenIcon className="size-4 shrink-0 text-blue-500" />
+                        <BookOpenIcon className="size-4 shrink-0 text-brand" />
                       )}
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-xs font-medium text-fg">

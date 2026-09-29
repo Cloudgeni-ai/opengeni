@@ -206,7 +206,7 @@ export function AccountAuthRoute({
 
   if (!validTransactionId) {
     return (
-      <section className="flex flex-1 items-center justify-center px-4">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
         <div
           role="alert"
           className="w-full max-w-sm rounded-lg border border-status-failed/50 bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
@@ -222,7 +222,7 @@ export function AccountAuthRoute({
 
   if (socialOutcome === "complete") {
     return (
-      <section className="flex flex-1 items-center justify-center px-4">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
         <div role="status" className="flex items-center gap-2 text-sm text-fg-subtle">
           <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
           Finishing sign in…
@@ -232,10 +232,10 @@ export function AccountAuthRoute({
   }
 
   return (
-    <section className="flex flex-1 items-center justify-center px-4 py-8">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4 py-8">
       <form
         noValidate
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
+        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6 forced-colors:border-[CanvasText]"
         onSubmit={(event) => {
           event.preventDefault();
           void submit();

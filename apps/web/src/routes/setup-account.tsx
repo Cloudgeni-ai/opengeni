@@ -175,8 +175,8 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
     normalizeEmail(authSession.user.email) === normalizeEmail(preview.targetEmail);
 
   return (
-    <section className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4 sm:items-center">
-      <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
+    <section className="og-page-glow flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4 sm:items-center">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
         <div className="mb-4 flex items-center gap-3">
           <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <KeyRoundIcon className="size-4" />

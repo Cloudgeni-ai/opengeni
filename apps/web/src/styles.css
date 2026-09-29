@@ -31,6 +31,8 @@
   --radius-xl: 20px;
 
   --color-bg: var(--og-color-bg);
+  --color-canvas: var(--og-color-canvas);
+  --color-selection: var(--og-color-selection);
   --color-surface: var(--og-color-surface-1);
   --color-surface-2: var(--og-color-surface-2);
   --color-surface-3: var(--og-color-surface-3);
@@ -43,6 +45,18 @@
   --color-brand: var(--og-color-accent);
   --color-brand-strong: var(--og-color-accent-deep);
   --color-brand-fg: var(--og-color-accent-fg);
+
+  /* The filled primary action ("teal wash"). `primary` is the button only;
+     brand stays the neutral mark for icons, links, focus and selection. */
+  --color-primary: var(--og-color-primary);
+  --color-primary-foreground: var(--og-color-primary-fg);
+  --color-primary-border: var(--og-color-primary-border);
+  --color-primary-hover: var(--og-color-primary-hover);
+  --color-switch-track: var(--og-color-switch-track);
+  --color-switch-thumb: var(--og-color-switch-thumb);
+
+  --color-glow-teal: var(--og-glow-teal);
+  --color-glow-peach: var(--og-glow-peach);
 
   --color-status-queued: var(--og-color-status-queued);
   --color-status-running: var(--og-color-status-running);
@@ -63,11 +77,8 @@
   --color-popover: var(--color-surface-3);
   --color-popover-foreground: var(--color-fg);
 
-  --color-primary: var(--color-brand-strong);
-  --color-primary-foreground: var(--color-brand-fg);
-
-  --color-secondary: var(--color-surface-2);
-  --color-secondary-foreground: var(--color-fg);
+  --color-secondary: var(--color-selection);
+  --color-secondary-foreground: var(--color-fg-muted);
 
   --color-muted: var(--color-surface-2);
   --color-muted-foreground: var(--color-fg-muted);
@@ -77,18 +88,18 @@
 
   --color-destructive: var(--og-color-danger);
   /* Danger is tuned as a readable foreground token. Filled destructive
-     controls need a darker opaque surface to preserve AA white-text contrast
+     controls use the darker danger fill to preserve AA white-text contrast
      in both themes. */
-  --color-destructive-filled: color-mix(in oklch, var(--og-color-danger) 70%, black);
-  --color-destructive-foreground: var(--og-color-accent-fg);
+  --color-destructive-filled: var(--og-color-danger-fill);
+  --color-destructive-foreground: var(--og-color-danger-fg);
 
   --color-input: var(--color-surface-2);
   --color-ring: var(--color-brand);
 
   --color-sidebar: var(--color-surface);
   --color-sidebar-foreground: var(--color-fg);
-  --color-sidebar-primary: var(--color-brand-strong);
-  --color-sidebar-primary-foreground: var(--color-brand-fg);
+  --color-sidebar-primary: var(--color-primary);
+  --color-sidebar-primary-foreground: var(--color-primary-foreground);
   --color-sidebar-accent: var(--color-surface-2);
   --color-sidebar-accent-foreground: var(--color-fg);
   --color-sidebar-border: var(--color-border);
@@ -102,8 +113,8 @@
   --muted-foreground: var(--color-fg-muted);
   --border: var(--color-border);
   --input: var(--color-surface-2);
-  --primary: var(--color-brand);
-  --primary-foreground: var(--color-brand-fg);
+  --primary: var(--color-primary);
+  --primary-foreground: var(--color-primary-foreground);
   --radius: var(--radius-md);
 }
 
@@ -131,6 +142,45 @@ body {
   font-feature-settings: "cv11", "ss01", "ss03";
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* The main content pane (next to the rail or the settings rail). It paints
+   the canvas, and inside it the page background *is* the canvas: sticky
+   footers, page-variant forms and inset wells that use `bg-bg` keep matching
+   the pane they sit on, while the rail and page chrome outside keep `bg`.
+   Portalled menus and dialogs copy the effective tokens from their trigger. */
+[data-canvas] {
+  --og-color-bg: var(--og-color-canvas);
+  --color-bg: var(--og-color-canvas);
+  background-color: var(--og-color-canvas);
+}
+
+/* Rail glow: a soft teal wash from the top-left and a peach wash from the
+   bottom-right over the rail color. Used by the main rail and the settings
+   rail; layered so a rail's own background utilities can still override it. */
+@layer components {
+  .og-rail-glow {
+    background:
+      radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal), transparent 85%),
+      radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach), transparent 85%),
+      var(--og-color-bg);
+  }
+
+  /* The signed-out pages: the same two washes along the left edge of the
+     canvas. */
+  .og-page-glow {
+    background:
+      radial-gradient(ellipse 42% 70% at 0 20%, var(--og-glow-teal), transparent 95%),
+      radial-gradient(ellipse 42% 65% at 0 100%, var(--og-glow-peach), transparent 95%),
+      var(--og-color-canvas);
+  }
+}
+
+@media (forced-colors: active) {
+  .og-rail-glow,
+  .og-page-glow {
+    background: Canvas;
+  }
 }
 
 /* Layered so Tailwind border-color utilities (border-brand, border-danger...)
@@ -233,6 +283,14 @@ body {
    remains readable. */
 .toaster [data-sonner-toast] > * {
   transition: none;
+}
+
+/* A theme flip swaps every token at once; no control animates through the
+   mix of the two palettes (see lib/appearance.tsx). */
+:root[data-og-theme-switching] *,
+:root[data-og-theme-switching] *::before,
+:root[data-og-theme-switching] *::after {
+  transition: none !important;
 }
 
 /* Respect reduced motion */

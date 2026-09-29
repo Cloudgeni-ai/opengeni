@@ -452,7 +452,7 @@ function PublicationRow({
           <div className="flex items-center gap-2">
             {stateIcon(publication.state)}
             <p className="text-xs font-semibold text-fg">{publication.sourceLabel}</p>
-            <span className="rounded bg-bg-muted px-1.5 py-0.5 text-2xs capitalize text-fg-muted">
+            <span className="rounded bg-surface-2 px-1.5 py-0.5 text-2xs capitalize text-fg-muted">
               {publication.importance}
             </span>
           </div>

@@ -3890,11 +3890,15 @@ function SessionRow(props: {
   const indentStyle =
     props.depth > 0 ? { marginLeft: visualTreeDepth(props.depth) * 12 } : undefined;
 
+  // The open session is a selected row: the selection fill, full-strength
+  // text and a faint accent edge. The border is always present (transparent
+  // otherwise) so selecting a row never shifts its contents.
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
+    "group relative flex h-8 w-full items-center gap-1.5 rounded-md border py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
-    "hover:bg-surface-2",
-    props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
+    props.active
+      ? "border-brand/20 bg-selection font-medium text-fg"
+      : "border-transparent text-fg-muted hover:bg-surface-2",
     props.focused && !props.active ? "bg-surface-2/60" : "",
   );
 
@@ -3924,7 +3928,6 @@ function SessionRow(props: {
   if (rename.editing) {
     return (
       <div className={rowClassName}>
-        <ActiveAccent active={props.active} />
         {lead}
         <input
           ref={rename.inputRef}
@@ -3965,8 +3968,7 @@ function SessionRow(props: {
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
-          <ActiveAccent active={props.active} />
-          {lead}
+            {lead}
           <SiteOriginLink session={props.session} compact />
           <HoverCard openDelay={100} closeDelay={80}>
             <HoverCardTrigger asChild>
@@ -4215,18 +4217,6 @@ function sessionDescendantLabel(session: Session): string | null {
   }
   if (live > 0) return `${live} active · ${total} total`;
   return `${total} session${stats.totalDescendants === 1 && !stats.truncated ? "" : "s"}`;
-}
-
-/** The active-session accent bar shared by the row's display and edit modes. */
-function ActiveAccent({ active }: { active: boolean }) {
-  return (
-    <span
-      className={cn(
-        "absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-brand transition-opacity",
-        active ? "opacity-100" : "opacity-0",
-      )}
-    />
-  );
 }
 
 /**

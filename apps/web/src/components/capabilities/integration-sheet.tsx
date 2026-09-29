@@ -448,13 +448,13 @@ function OptionRow({ option }: { option: IntegrationOption }) {
           className={cn(
             "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
-            option.checked ? "border-brand bg-brand" : "border-border bg-surface-2",
+            option.checked ? "border-primary-border bg-primary" : "border-transparent bg-switch-track",
           )}
         >
           <span
             className={cn(
-              "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
-              option.checked ? "translate-x-4" : "translate-x-0.5",
+              "inline-block size-3.5 rounded-full shadow-sm transition-transform",
+              option.checked ? "translate-x-4 bg-primary-foreground" : "translate-x-0.5 bg-switch-thumb",
             )}
           />
         </button>

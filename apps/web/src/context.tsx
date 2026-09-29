@@ -3059,9 +3059,9 @@ function AccessKeyPanel(props: {
   onSubmit: () => void;
 }) {
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
       <form
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         onSubmit={(event) => {
           event.preventDefault();
           props.onSubmit();

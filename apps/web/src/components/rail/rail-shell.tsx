@@ -74,7 +74,10 @@ function RailBody() {
     );
   };
   return (
-    <div className="isolate flex h-full min-h-0 flex-col overflow-hidden bg-surface/40 pt-[env(safe-area-inset-top)]">
+    <div
+      data-rail
+      className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
+    >
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
@@ -173,9 +176,11 @@ function RailBody() {
           )}
         </div>
       </div>
-      {/* Keep the persistent controls opaque and above the scroll viewport,
-          including session-row actions with their own stacking levels. */}
-      <div data-rail-footer className="relative z-10 shrink-0 border-t border-border bg-surface">
+      {/* Keep the persistent controls above the scroll viewport, including
+          session-row actions with their own stacking levels. The footer is a
+          sibling of the clipped viewport, so it can stay transparent and let
+          the rail glow run to the bottom edge. */}
+      <div data-rail-footer className="relative z-10 shrink-0 border-t border-border">
         <RailFooter />
       </div>
     </div>
@@ -346,7 +351,7 @@ export function RailShell({ children }: { children: ReactNode }) {
         ) : null}
 
         {/* Main canvas. */}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <SessionStartupProvider session={context.session}>
             <CanvasTopStrip hamburgerRef={hamburgerRef} />
             <WorkspacePausedBanner workspaceId={rail.workspaceId} />
@@ -432,7 +437,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
 
   // Mobile, off a session route: the slim brand strip.
   return (
-    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-bg/75 px-3 backdrop-blur sm:px-4">
+    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-canvas/75 px-3 backdrop-blur sm:px-4">
       {hamburger}
       <Link
         to="/workspaces/$workspaceId/sessions"

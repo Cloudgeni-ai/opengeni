@@ -166,14 +166,14 @@ export function BrowserAccountsSignedOutPanel(props: {
       className={
         props.presentation === "embedded"
           ? "w-full"
-          : "flex flex-1 items-center justify-center px-4"
+          : "og-page-glow flex flex-1 items-center justify-center px-4"
       }
     >
       <div
         className={
           props.presentation === "embedded"
             ? "w-full"
-            : "w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
+            : "w-full max-w-sm rounded-xl border border-border bg-surface p-6 forced-colors:border-[CanvasText]"
         }
       >
         <div className="mb-4 flex items-start gap-3">

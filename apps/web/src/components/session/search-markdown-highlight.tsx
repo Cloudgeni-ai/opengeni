@@ -141,7 +141,7 @@ export function SearchMarkdown({
     );
   return (
     <>
-      <style>{`::highlight(${name.current}) { background: var(--og-accent, #236faf); color: var(--og-accent-fg, white); text-decoration: underline; }`}</style>
+      <style>{`::highlight(${name.current}) { background: var(--og-color-accent-deep); color: var(--og-color-accent-fg); text-decoration: underline; }`}</style>
       {sourceOnly ? (
         <p className="mb-3 text-xs text-fg-muted">
           Match in message source: <SearchText text={snippet} query={query} />

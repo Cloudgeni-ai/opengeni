@@ -28,14 +28,14 @@ export function ComposerMenuSwitchIndicator({ checked }: { checked: boolean }) {
     <span
       aria-hidden
       className={cn(
-        "inline-flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors",
-        checked ? "bg-brand" : "bg-fg-subtle/35",
+        "inline-flex h-4 w-7 shrink-0 items-center rounded-full border p-px transition-colors",
+        checked ? "border-primary-border bg-primary" : "border-transparent bg-switch-track",
       )}
     >
       <span
         className={cn(
-          "size-3 rounded-full bg-white shadow-sm transition-transform",
-          checked && "translate-x-3",
+          "size-3 rounded-full shadow-sm transition-transform",
+          checked ? "translate-x-3 bg-primary-foreground" : "bg-switch-thumb",
         )}
       />
     </span>
