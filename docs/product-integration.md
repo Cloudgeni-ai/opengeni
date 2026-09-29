@@ -575,7 +575,13 @@ Integration lifecycle:
 4. Apply the customer's policy to the compiled operations, safety metadata,
    warnings, and approval modes.
 5. Call `installApiIntegration` with the exact preview revision and digest,
-   stable instance key, Connection, and selected operations.
+   stable instance key, Connection, and selected operations. Operations the
+   preview marks `approvalMode: "ask"` pause for human approval on every call;
+   for unattended or scheduled work, list the ones policy permits in
+   `autoApprovedTools` (custom Integrations only; `capabilities:manage`;
+   re-checked against organization integration policy; declarative, so an
+   update that omits it restores approval). Connector Block, session approval
+   policy, and action policies still apply.
 6. Persist the returned non-secret instance/server identifiers and select that
    server in sessions.
 
