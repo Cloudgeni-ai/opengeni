@@ -60,6 +60,14 @@ export function connectorToolGroup(tool: ListedTool): "read" | "write" | "other"
 }
 
 async function resolveTarget(input: Input) {
+  if (input.capabilityId.startsWith("api:")) {
+    // API Integrations are not MCP connectors: their per-tool approval is part
+    // of the reviewed installation, not this connector policy surface.
+    throw new HTTPException(404, {
+      message:
+        "Connected MCP connector not found; API Integration tool approval is set with installApiIntegration autoApprovedTools",
+    });
+  }
   const catalog = await buildCapabilityCatalog(input);
   const item = catalog.items.find((candidate) => candidate.id === input.capabilityId);
   if (

@@ -88,6 +88,18 @@ export function validatedIntegrationInstallInput(
     throw new HTTPException(422, {
       message: "Choose a Personal Connection before installing for yourself.",
     });
+  if (payload.autoApprovedTools?.length) {
+    if (resolved.preview.definitionProvenance !== "workspace")
+      throw new HTTPException(422, {
+        message: "Approval requirements of a curated Integration cannot be removed.",
+      });
+    const selected = new Set(payload.allowedTools ?? resolved.preview.tools.map((tool) => tool.id));
+    const outside = payload.autoApprovedTools.find((tool) => !selected.has(tool));
+    if (outside)
+      throw new HTTPException(422, {
+        message: `autoApprovedTools must name selected Integration tools: ${outside.slice(0, 200)}`,
+      });
+  }
   return {
     accountId: grant.accountId,
     workspaceId,
@@ -116,6 +128,7 @@ export function validatedIntegrationInstallInput(
     requiredScopes: resolved.requiredScopes,
     ownership: resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
     ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
+    ...(payload.autoApprovedTools ? { autoApprovedTools: payload.autoApprovedTools } : {}),
     facetDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
     revision: resolved.revision,
   };

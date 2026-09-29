@@ -2563,7 +2563,11 @@ async function createSessionForRequestInFileScope(
       const inherited = inheritedServers.find((server) => server.id === id);
       if (!inherited || sessionMcpServers.runtimeServers.some((server) => server.id === id)) {
         throw new HTTPException(422, {
-          message: `MCP approval policy must name an enabled inherited capability: ${id}`,
+          message: `MCP approval policy must name an enabled inherited capability: ${id}${
+            /^api_(openapi|graphql)_/.test(id)
+              ? "; API Integration tool approval is set at install with autoApprovedTools"
+              : ""
+          }`,
         });
       }
       mcpApprovalPolicies[id] =
