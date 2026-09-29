@@ -68,6 +68,7 @@ import {
   type ApiKeyPresetId,
   type ApiKeyStatus,
 } from "@/lib/api-key-presets";
+import { apiErrorDetails, userErrorText } from "@/lib/api-error";
 import { NEW_API_KEY } from "@/lib/api-keys-route";
 import { delegableApiKeyPermissions, hasWorkspacePermission } from "@/lib/permissions";
 import type { ApiKey } from "@/types";
@@ -81,8 +82,9 @@ const COLUMNS: RowListColumn[] = [
   { id: "expires", label: "Expires", width: 116 },
 ];
 
-function errorText(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+/** What happened, then what to do. Never the raw API error string. */
+function failureText(what: string, error: unknown): string {
+  return `${what} ${userErrorText(error, "Try again.")}`;
 }
 
 /* ----------------------------------------------------------------------------
@@ -187,7 +189,7 @@ function useWorkspaceApiKeys(workspaceId: string): Keys {
       revoked = await client.deleteApiKey(workspaceId, key.id);
     } catch (caught) {
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
-      throw new Error(errorText(caught, `Couldn't revoke ${key.name}. Try again.`), {
+      throw new Error(failureText(`Couldn't revoke ${key.name}.`, caught), {
         cause: caught,
       });
     }
@@ -351,14 +353,14 @@ function KeyList({
         align="center"
         title="Couldn't load API keys."
         announce
-        details={[{ label: "Error", value: errorText(data.error, "Unknown error") }]}
+        {...apiErrorDetails(data.error)}
         action={
           <Button type="button" variant="outline" size="sm" onClick={() => void data.refresh()}>
             Try again
           </Button>
         }
       >
-        Check your connection and try again. Your keys keep working.
+        {userErrorText(data.error)} Your keys keep working.
       </ErrorMessage>
     );
   } else if (empty) {
@@ -873,7 +875,7 @@ function CreateKeyPage({
           try {
             return await submit();
           } catch (caught) {
-            throw new Error(errorText(caught, "Couldn't create the key. Try again."), {
+            throw new Error(failureText("Couldn't create the key.", caught), {
               cause: caught,
             });
           }

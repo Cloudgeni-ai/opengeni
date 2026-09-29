@@ -10,6 +10,7 @@ import { AccessList, type AccessMember } from "@/components/ui/access-list";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { TechnicalDetails } from "@/components/ui/error-message";
 import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { ListRow, RowList } from "@/components/ui/list-row";
@@ -24,6 +25,7 @@ import {
 import { Section, SectionStack } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { apiErrorTechnicalFacts, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { permissionLabel } from "@/lib/api-key-presets";
 import { orgLabel } from "@/lib/org";
 import {
@@ -245,7 +247,13 @@ export function AddPeoplePage({
   );
 
   let body: ReactNode;
-  if (loadError) {
+  if (loadError && isPermissionDenied(loadError)) {
+    body = (
+      <Notice title={`You can't add people from ${organizationName} here.`}>
+        Ask a workspace or organization admin to add them.
+      </Notice>
+    );
+  } else if (loadError) {
     body = (
       <Notice
         tone="failed"
@@ -258,7 +266,7 @@ export function AddPeoplePage({
           ) : undefined
         }
       >
-        {loadErrorText(loadError)}
+        <FailureText error={loadError} />
       </Notice>
     );
   } else if (candidates === null) {
@@ -709,10 +717,10 @@ function MembersSectionContent({
       }
     } catch (caught) {
       if (added.length > 0) void refresh();
-      const reason =
-        caught instanceof Error && caught.message
-          ? caught.message
-          : "They must still be an active member of the organization.";
+      const reason = userErrorText(
+        caught,
+        "They must still be an active member of the organization.",
+      );
       throw new Error(
         added.length > 0
           ? `Added ${added.join(", ")}, but couldn't add the rest. ${reason}`
@@ -743,7 +751,7 @@ function MembersSectionContent({
       toast.success(`${memberLabel(member)} is now ${asRole(level.label)}`);
     } catch (caught) {
       toast.error(`Couldn't change ${memberLabel(member)}'s role`, {
-        description: caught instanceof Error ? caught.message : String(caught),
+        description: userErrorText(caught),
       });
     } finally {
       setSavingIds((ids) => ids.filter((id) => id !== member.subjectId));
@@ -765,10 +773,9 @@ function MembersSectionContent({
       );
       toast.success(`Saved custom permissions for ${memberLabel(member)}`);
     } catch (caught) {
-      throw new Error(
-        `Couldn't save the permissions. ${caught instanceof Error ? caught.message : String(caught)}`,
-        { cause: caught },
-      );
+      throw new Error(`Couldn't save the permissions. ${userErrorText(caught)}`, {
+        cause: caught,
+      });
     }
   }
 
@@ -777,12 +784,9 @@ function MembersSectionContent({
     try {
       await client.removeWorkspaceMember(workspaceId, removeTarget.subjectId);
     } catch (caught) {
-      throw new Error(
-        `Couldn't remove ${memberLabel(removeTarget)}. ${
-          caught instanceof Error ? caught.message : String(caught)
-        }`,
-        { cause: caught },
-      );
+      throw new Error(`Couldn't remove ${memberLabel(removeTarget)}. ${userErrorText(caught)}`, {
+        cause: caught,
+      });
     }
     const removed = removeTarget;
     setMembers((current) => current.filter((member) => member.subjectId !== removed.subjectId));
@@ -805,10 +809,7 @@ function MembersSectionContent({
         permissions: [...level.permissions],
       });
     } catch (caught) {
-      throw new Error(
-        `Couldn't give access. ${caught instanceof Error ? caught.message : String(caught)}`,
-        { cause: caught },
-      );
+      throw new Error(`Couldn't give access. ${userErrorText(caught)}`, { cause: caught });
     }
     await refresh();
     toast.success(`${requestName(request)} can now use ${workspaceName}`, {
@@ -826,7 +827,7 @@ function MembersSectionContent({
       toast.success(`Declined ${requestName(request)}'s request`);
     } catch (caught) {
       toast.error("Couldn't decline the request", {
-        description: caught instanceof Error ? caught.message : String(caught),
+        description: userErrorText(caught),
       });
       throw caught;
     }
@@ -960,7 +961,7 @@ function MembersSectionContent({
               </Button>
             }
           >
-            {slackAccessRequestsError.message}
+            <FailureText error={slackAccessRequestsError} />
           </Notice>
         ) : null}
         <Section
@@ -987,7 +988,7 @@ function MembersSectionContent({
               membersError
                 ? {
                     message: `Couldn't load who has access to ${workspaceName}.`,
-                    detail: membersError.message,
+                    cause: membersError,
                     onRetry: () => void refresh(),
                   }
                 : undefined
@@ -1065,11 +1066,17 @@ export function workspaceRoleLabel(member: Pick<WorkspaceMember, "role" | "permi
   return roleLabel(WORKSPACE_ROLE_OPTIONS, workspaceRoleOf(member).role);
 }
 
-/** What went wrong and what to do, without API codes or references. */
-function loadErrorText(error: Error): string {
-  const status = (error as { status?: unknown }).status;
-  if (status === 403) {
-    return "You don't have permission to add people here. A workspace admin can add them.";
-  }
-  return "Check your connection and try again.";
+/** What to do next, with an API error's status and reference behind Technical details. */
+function FailureText({ error }: { error: unknown }) {
+  const facts = apiErrorTechnicalFacts(error);
+  return (
+    <>
+      {userErrorText(error)}
+      {facts.length > 0 ? (
+        <div className="mt-1">
+          <TechnicalDetails facts={facts} />
+        </div>
+      ) : null}
+    </>
+  );
 }

@@ -48,6 +48,7 @@ import {
   canRevokeOrganizationInvitation,
   organizationMemberCapabilities,
 } from "@/lib/organization-admin";
+import { apiErrorDetails, userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import type {
   OrganizationInvitation,
@@ -138,10 +139,6 @@ interface PeopleActions {
   resend: (invitation: OrganizationInvitation) => Promise<void>;
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function usePeopleActions(
   directory: OrganizationDirectory,
   setConfirm: (confirm: Confirm) => void,
@@ -158,7 +155,9 @@ function usePeopleActions(
             description: "Give them workspace access again from their page.",
           });
         } catch (error) {
-          toast.error(`Couldn't restore ${memberName(member)}`, { description: errorText(error) });
+          toast.error(`Couldn't restore ${memberName(member)}`, {
+            description: userErrorText(error),
+          });
         }
       },
       resend: async (invitation) => {
@@ -172,7 +171,7 @@ function usePeopleActions(
             });
           }
         } catch (error) {
-          toast.error("Couldn't resend the invitation", { description: errorText(error) });
+          toast.error("Couldn't resend the invitation", { description: userErrorText(error) });
         }
       },
     }),
@@ -454,8 +453,9 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
         variant="inline"
         title="Couldn't load the people in this organization."
         action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(directory.members.error)}
       >
-        {directory.members.error.message}
+        {userErrorText(directory.members.error)}
       </ErrorMessage>
     );
   }
@@ -704,7 +704,7 @@ function WorkspaceAccessRows({
                     }
                   } catch (error) {
                     toast.error(`Couldn't change ${name}'s access to ${workspace.name}`, {
-                      description: errorText(error),
+                      description: userErrorText(error),
                     });
                   } finally {
                     setSaving(null);
@@ -743,8 +743,9 @@ function PersonPage({
             variant="inline"
             title="Couldn't load this person."
             action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+            {...apiErrorDetails(directory.members.error)}
           >
-            {directory.members.error.message}
+            {userErrorText(directory.members.error)}
           </ErrorMessage>
         ) : (
           <EmptyState
@@ -864,7 +865,9 @@ function PersonPage({
                 await directory.changeOrganizationRole(member, role);
                 toast.success(`${name} is now ${withArticle(ORGANIZATION_ROLE_LABELS[role])}`);
               } catch (error) {
-                toast.error(`Couldn't change ${name}'s role`, { description: errorText(error) });
+                toast.error(`Couldn't change ${name}'s role`, {
+                  description: userErrorText(error),
+                });
                 throw error;
               }
             }}
@@ -1097,7 +1100,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
           setEmails(result.failed.map((each) => each.email));
           throw new Error(
             result.failed.length === 1
-              ? `Couldn't invite ${result.failed[0]!.email}: ${result.failed[0]!.message}`
+              ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
               : `Couldn't invite ${joinNames(result.failed.map((each) => each.email))}. ${result.failed[0]!.message}`,
           );
         }

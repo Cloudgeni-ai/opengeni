@@ -11,11 +11,13 @@ import { OrganizationRecoverySection } from "@/components/organization-recovery"
 import { ErrorMessage } from "@/components/ui/error-message";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SelectMenu } from "@/components/ui/select-menu";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
+import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,
@@ -129,8 +131,32 @@ function useOwnedOperations(
   return { claim, owns };
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/**
+ * A setting that didn't load: calm and without Try again when the viewer lacks
+ * the permission, otherwise what happened and what to do.
+ */
+function RowLoadFailure({
+  title,
+  error,
+  onRetry,
+}: {
+  title: string;
+  error: Error;
+  onRetry: () => void;
+}) {
+  if (isPermissionDenied(error)) {
+    return <Notice title="You can't see this setting.">Ask an organization owner.</Notice>;
+  }
+  return (
+    <ErrorMessage
+      variant="inline"
+      title={title}
+      action={<RowButton onClick={onRetry}>Try again</RowButton>}
+      {...apiErrorDetails(error)}
+    >
+      {userErrorText(error)}
+    </ErrorMessage>
+  );
 }
 
 /* ------------------------------------------------------------ Only me chats */
@@ -165,13 +191,11 @@ function PrivateChatsRow({
 
   if (error && !settings) {
     return (
-      <ErrorMessage
-        variant="inline"
+      <RowLoadFailure
         title="Couldn't load the Only me chats setting."
-        action={<RowButton onClick={() => void load()}>Try again</RowButton>}
-      >
-        {error.message}
-      </ErrorMessage>
+        error={error}
+        onRetry={() => void load()}
+      />
     );
   }
   if (!settings) return <SettingRowSkeleton />;
@@ -212,7 +236,9 @@ function PrivateChatsRow({
               } catch (saveError) {
                 if (!owns(operation)) return;
                 if (isOrganizationConflict(saveError)) await load();
-                toast.error("Couldn't change Only me chats", { description: errorText(saveError) });
+                toast.error("Couldn't change Only me chats", {
+                  description: userErrorText(saveError),
+                });
               } finally {
                 if (owns(operation)) setPending(null);
               }
@@ -270,13 +296,11 @@ function RetentionRow({
 
   if (error && !policy) {
     return (
-      <ErrorMessage
-        variant="inline"
+      <RowLoadFailure
         title="Couldn't load the retention policy."
-        action={<RowButton onClick={() => void load()}>Try again</RowButton>}
-      >
-        {error.message}
-      </ErrorMessage>
+        error={error}
+        onRetry={() => void load()}
+      />
     );
   }
   if (!policy) return <SettingRowSkeleton />;

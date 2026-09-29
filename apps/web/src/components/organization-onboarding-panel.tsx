@@ -23,8 +23,10 @@ import {
   type IncludedOnboardingModel,
 } from "@/components/model-access-onboarding";
 import { Button } from "@/components/ui/button";
+import { TechnicalDetails } from "@/components/ui/error-message";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import {
   loadModelAccessOnboarding,
@@ -78,7 +80,7 @@ export function OrganizationOnboardingPanel({
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(
     previewState ?? null,
   );
-  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<{ error: unknown } | null>(null);
   const [statusRequest, setStatusRequest] = useState(0);
   const [organizationName, setOrganizationName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -136,7 +138,7 @@ export function OrganizationOnboardingPanel({
       })
       .catch((error) => {
         if (!active) return;
-        setStatusError(error instanceof Error ? error.message : String(error));
+        setStatusError({ error });
       });
     return () => {
       active = false;
@@ -204,7 +206,7 @@ export function OrganizationOnboardingPanel({
       })
       .catch((error) => {
         if (!active) return;
-        setInvitationError(error instanceof Error ? error.message : String(error));
+        setInvitationError(userErrorText(error));
       })
       .finally(() => {
         if (active) setInvitationLoading(false);
@@ -230,7 +232,7 @@ export function OrganizationOnboardingPanel({
       clearOrganizationInvitationContinuation();
       onComplete();
     } catch (error) {
-      setInvitationError(error instanceof Error ? error.message : String(error));
+      setInvitationError(userErrorText(error));
     } finally {
       setAcceptingInvitationId(null);
     }
@@ -260,8 +262,8 @@ export function OrganizationOnboardingPanel({
         personalWorkspaceId: "preview-workspace",
       });
     } catch (error) {
-      toast.error("Organization setup failed", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't set up the organization", {
+        description: userErrorText(error),
       });
     } finally {
       setBusy(false);
@@ -292,8 +294,13 @@ export function OrganizationOnboardingPanel({
           <h1 className="text-base font-semibold">We couldn't load your account setup</h1>
           <p className="mt-2 text-sm leading-5 text-fg-subtle">
             Your account is signed in, but checking its organization setup failed. This is usually
-            temporary. {statusError}
+            temporary. {userErrorText(statusError.error)}
           </p>
+          {apiErrorTechnicalFacts(statusError.error).length > 0 ? (
+            <div className="mt-2">
+              <TechnicalDetails facts={apiErrorTechnicalFacts(statusError.error)} />
+            </div>
+          ) : null}
           <Button
             type="button"
             className="mt-4 w-full"
@@ -544,8 +551,8 @@ export function OnboardingAccountHeader({
             void Promise.resolve()
               .then(onSignOut)
               .catch((error) =>
-                toast.error("Sign out failed", {
-                  description: error instanceof Error ? error.message : String(error),
+                toast.error("Couldn't sign out", {
+                  description: userErrorText(error),
                 }),
               )
               .finally(() => setSigningOut(false));

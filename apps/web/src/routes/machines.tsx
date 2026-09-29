@@ -41,6 +41,7 @@ import { apiBaseUrl } from "@/api";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
+import { TechnicalDetails } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
 import { PageHeader } from "@/components/ui/page-header";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
@@ -52,6 +53,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
+import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** Copy to the clipboard and toast the outcome. The shared helper falls back to
@@ -300,7 +302,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
       {machines.mutationError && !removeTarget ? (
         <Notice tone="failed" title="Machine action failed">
-          {machines.mutationError.message}
+          <FailureText error={machines.mutationError} />
         </Notice>
       ) : null}
 
@@ -404,20 +406,35 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             ) : null}
             {removeMoveError ? (
               <Notice tone="failed" title="Couldn't move every session">
-                {removeMoveError.message}
+                <FailureText error={removeMoveError} />
               </Notice>
             ) : null}
             {removeBlocked ? (
               <MachineRemovalBlockNotice workspaceId={workspaceId} result={removeBlocked} />
             ) : machines.mutationError ? (
               <Notice tone="failed" title="Removal failed">
-                {machines.mutationError.message}
+                <FailureText error={machines.mutationError} />
               </Notice>
             ) : null}
           </div>
         ) : null}
       </ConfirmDialog>
     </ContentPage>
+  );
+}
+
+/** What to do next, with an API error's status and reference behind Technical details. */
+function FailureText({ error }: { error: unknown }) {
+  const facts = apiErrorTechnicalFacts(error);
+  return (
+    <>
+      {userErrorText(error)}
+      {facts.length > 0 ? (
+        <div className="mt-1">
+          <TechnicalDetails facts={facts} />
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -526,7 +543,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         if (seq !== mintSeq.current) {
           return;
         }
-        const message = err instanceof Error ? err.message : String(err);
+        const message = userErrorText(err);
         setError(message);
         setToken(null);
         toast.error("Could not create a connect command", { description: message });

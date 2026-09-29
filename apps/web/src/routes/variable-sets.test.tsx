@@ -5,7 +5,11 @@ import { createRoot } from "react-dom/client";
 
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
-import { errorParts, usageSummary } from "@/components/variable-sets/variable-set-model";
+import {
+  errorParts,
+  usageSummary,
+  userFacingError,
+} from "@/components/variable-sets/variable-set-model";
 import {
   VariableSetDetailPage,
   type VariableSetPageActions,
@@ -167,6 +171,16 @@ describe("Variable sets", () => {
       status: 409,
       reference: "req_123",
     });
+  });
+
+  test("a form error says what to do, never the raw API string", () => {
+    const error = userFacingError(
+      Object.assign(
+        new Error("OpenGeni API 403: missing permission: variable_sets:manage Reference: req_403."),
+        { status: 403 },
+      ),
+    );
+    expect(error.message).toBe("You don't have permission to do this. Ask an admin for access.");
   });
 
   test("shows variables write-only, with no version, dots or reveal", async () => {

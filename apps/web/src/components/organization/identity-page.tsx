@@ -9,6 +9,7 @@ import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
+import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { OrganizationKnowledgePrompt } from "@/routes/organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "@/routes/workspace-state-loader";
 import type { CompanyProfileAgentPolicy, CompanyProfileAgentPolicyMode } from "@/types";
@@ -104,8 +105,9 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
             title="Couldn't load whether agents can change the identity."
             announce
             action={<RowButton onClick={() => void load()}>Try again</RowButton>}
+            {...apiErrorDetails(error)}
           >
-            {error.message}
+            {userErrorText(error)}
           </ErrorMessage>
         ) : loading || !policy ? (
           <div role="status" aria-label="Loading agent changes…">
@@ -136,8 +138,13 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
               </Notice>
             ) : null}
             {error ? (
-              <ErrorMessage variant="inline" title="Couldn't save that." announce>
-                {error.message}
+              <ErrorMessage
+                variant="inline"
+                title="Couldn't save that."
+                announce
+                {...apiErrorDetails(error)}
+              >
+                {userErrorText(error)}
               </ErrorMessage>
             ) : null}
             <p role="status" className="text-xs leading-[18px] text-fg-muted empty:hidden">
@@ -175,6 +182,12 @@ function CurrentIdentitySection({
         <SettingRowSkeleton />
       </div>
     );
+  } else if (inventory.error && !inventory.response && isPermissionDenied(inventory.error)) {
+    body = (
+      <Notice title="You can't see the organization identity.">
+        Ask an organization owner or admin for access.
+      </Notice>
+    );
   } else if (inventory.error && !inventory.response) {
     body = (
       <ErrorMessage
@@ -182,8 +195,9 @@ function CurrentIdentitySection({
         title="Couldn't load the organization identity."
         announce
         action={<RowButton onClick={() => void inventory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(inventory.error)}
       >
-        {inventory.error.message}
+        {userErrorText(inventory.error)}
       </ErrorMessage>
     );
   } else if (!profile) {
@@ -234,8 +248,13 @@ function CurrentIdentitySection({
           </Notice>
         ) : null}
         {inventory.error && inventory.response ? (
-          <ErrorMessage variant="inline" title="Couldn't refresh the identity." announce>
-            {inventory.error.message}
+          <ErrorMessage
+            variant="inline"
+            title="Couldn't refresh the identity."
+            announce
+            {...apiErrorDetails(inventory.error)}
+          >
+            {userErrorText(inventory.error)}
           </ErrorMessage>
         ) : null}
       </div>

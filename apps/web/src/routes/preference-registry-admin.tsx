@@ -29,6 +29,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { EmptyState, LoadErrorState } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
 import {
@@ -129,11 +130,9 @@ function registryErrorMessage(error: unknown): string {
     if (error.code === "PREFERENCE_REGISTRY_CONFLICT") {
       return "The preference changed in another request. Refresh the registry and selected detail before trying again.";
     }
-    if (error.status === 422) {
-      return error.message;
-    }
   }
-  return error instanceof Error ? error.message : String(error);
+  // A short validation sentence is kept; anything else becomes what to do next.
+  return userErrorText(error);
 }
 
 function ScopeOption({ scope, enabled }: { scope: PreferenceRegistryScope; enabled: boolean }) {
@@ -1544,7 +1543,7 @@ export function PreferenceRegistryAdministration({
           ) : null}
           {inventory.error && inventory.response ? (
             <p className="mt-2 text-xs text-status-error">
-              Refresh failed: {inventory.error.message}
+              Couldn't refresh the registry. {userErrorText(inventory.error)}
             </p>
           ) : null}
         </div>
@@ -1580,7 +1579,7 @@ export function PreferenceRegistryAdministration({
             ) : null}
             {detail.error && detail.response ? (
               <p className="mt-2 text-xs text-status-error">
-                Refresh failed: {detail.error.message}
+                Couldn't refresh this preference. {userErrorText(detail.error)}
               </p>
             ) : null}
           </div>

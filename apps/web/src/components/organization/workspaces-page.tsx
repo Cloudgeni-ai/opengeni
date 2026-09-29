@@ -39,6 +39,7 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { apiErrorDetails, userErrorText } from "@/lib/api-error";
 import type {
   OrganizationMember,
   OrganizationWorkspaceAccess,
@@ -237,8 +238,9 @@ function WorkspacesList({
         variant="inline"
         title="Couldn't load the workspaces."
         action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(overview.error)}
       >
-        {overview.error.message}
+        {userErrorText(overview.error)}
       </ErrorMessage>
     );
   }
@@ -401,7 +403,7 @@ function AddPeople({
             () => toast.success(`Added ${memberName(member)} to ${workspace.name} as a member`),
             (error: unknown) =>
               toast.error(`Couldn't add ${memberName(member)}`, {
-                description: error instanceof Error ? error.message : String(error),
+                description: userErrorText(error),
               }),
           )
           .finally(() => {
@@ -432,8 +434,9 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
             variant="inline"
             title="Couldn't load this workspace."
             action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+            {...apiErrorDetails(directory.overview.error)}
           >
-            {directory.overview.error.message}
+            {userErrorText(directory.overview.error)}
           </ErrorMessage>
         ) : (
           <DetailSkeleton />
@@ -476,7 +479,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
       );
     } catch (error) {
       toast.error(`Couldn't change ${member.name}'s role`, {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       throw error;
     }
@@ -491,7 +494,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
       await directory.removeWorkspaceAccess({ workspaceId: workspace.id, member: current });
     } catch (error) {
       toast.error(`Couldn't remove ${member.name}`, {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return;
     }
@@ -509,7 +512,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
             })
             .catch((error: unknown) =>
               toast.error(`Couldn't give ${member.name} access again`, {
-                description: error instanceof Error ? error.message : String(error),
+                description: userErrorText(error),
               }),
             ),
       });

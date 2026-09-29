@@ -18,8 +18,48 @@ import { ChevronsUpDownIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
+import { ErrorMessage, type ErrorDetail } from "@/components/ui/error-message";
 import { Skeleton } from "@/components/ui/skeleton";
+import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
+
+/* ============================================================================
+   Failed loads
+   ========================================================================== */
+
+/** A load that failed: what happened, what to do next, and an optional retry. */
+export interface FailedLoad {
+  /** What happened: "Couldn't load the history". */
+  message: string;
+  /** What to do next. A raw "OpenGeni API 404: ..." string is replaced with advice. */
+  detail?: ReactNode;
+  /** The error itself: its advice stands in for a missing detail, its facts go behind Technical details. */
+  cause?: unknown;
+  onRetry?: () => void;
+}
+
+const RAW_API_ERROR = /^(?:OpenGeni|Opengeni) API (\d{3})\b/u;
+
+/**
+ * The line under a failed load's title and its Technical details. An API
+ * error never shows as its raw string: the status and reference go behind
+ * Technical details (DESIGN.md section 6).
+ */
+export function failedLoadParts(failure: Pick<FailedLoad, "detail" | "cause">): {
+  detail: ReactNode;
+  details: ErrorDetail[];
+} {
+  const raw = typeof failure.detail === "string" ? RAW_API_ERROR.exec(failure.detail) : null;
+  const cause =
+    failure.cause ??
+    (raw
+      ? Object.assign(new Error(String(failure.detail)), { status: Number(raw[1]) })
+      : undefined);
+  if (cause === undefined) return { detail: failure.detail, details: [] };
+  return {
+    detail: failure.detail && !raw ? failure.detail : userErrorText(cause),
+    details: apiErrorTechnicalFacts(cause),
+  };
+}
 
 /* ============================================================================
    Diff logic (pure)
@@ -255,7 +295,7 @@ export interface DiffViewProps {
   label?: string;
   loading?: boolean;
   /** What happened, what to do next, and an optional retry. */
-  error?: { message: string; detail?: ReactNode; onRetry?: () => void };
+  error?: FailedLoad;
   /** Shown when nothing changed. */
   emptyMessage?: ReactNode;
   /** No frame: for use inside a sheet section or a review pane that has its own. */
@@ -715,6 +755,7 @@ export function DiffView({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const expand = (id: string) => setExpanded((current) => new Set(current).add(id));
   const stats = diffStats(lines);
+  const failure = error ? failedLoadParts(error) : undefined;
   const unchanged = !loading && !error && stats.added === 0 && stats.removed === 0;
   const hasHeader = Boolean(
     title || meta || actions || (!hideStats && !loading && !error && !unchanged),
@@ -766,6 +807,7 @@ export function DiffView({
       ) : error ? (
         <ErrorMessage
           title={error.message}
+          details={failure?.details}
           action={
             error.onRetry ? (
               <Button
@@ -781,7 +823,7 @@ export function DiffView({
           }
           className="px-4 py-4"
         >
-          {error.detail}
+          {failure?.detail}
         </ErrorMessage>
       ) : unchanged ? (
         <p className="px-4 py-4 text-sm text-fg-muted">{emptyMessage}</p>

@@ -19,6 +19,7 @@ import { RelativeTime } from "@/components/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { apiKeyStatus } from "@/lib/api-key-status";
 import type { ApiKey } from "@/types";
 
@@ -131,10 +132,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
       });
     } catch (error) {
       if (!mountedRef.current || mutationSequenceRef.current !== sequence) return;
-      throw new Error(
-        `Couldn't revoke ${apiKey.name}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
+      throw new Error(`Couldn't revoke ${apiKey.name}. ${userErrorText(error)}`, { cause: error });
     } finally {
       if (mountedRef.current && mutationSequenceRef.current === sequence) setBusyKeyId(null);
     }
@@ -166,7 +164,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
   const listed = canManage && apiKeysLoaded && !(apiKeysError && apiKeys.length === 0);
 
   let body;
-  if (!canManage) {
+  // A permission refusal reads the same as not having it: say who can, no Try again.
+  if (!canManage || (apiKeysError && apiKeys.length === 0 && isPermissionDenied(apiKeysError))) {
     body = (
       <Notice tone="muted" title="You can't manage organization API keys">
         Ask an organization owner to create or revoke them.
@@ -179,8 +178,9 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         title="Couldn't load organization API keys."
         announce
         action={<RowButton onClick={() => void refreshApiKeys()}>Try again</RowButton>}
+        {...apiErrorDetails(apiKeysError)}
       >
-        {apiKeysError.message}
+        {userErrorText(apiKeysError)}
       </ErrorMessage>
     );
   } else if (!apiKeysLoaded) {
@@ -214,8 +214,9 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
             title="Couldn't refresh organization API keys."
             announce
             action={<RowButton onClick={() => void refreshApiKeys()}>Try again</RowButton>}
+            {...apiErrorDetails(apiKeysError)}
           >
-            {apiKeysError.message}
+            {userErrorText(apiKeysError)}
           </ErrorMessage>
         ) : null}
         <RowList label="Organization API keys" columns={COLUMNS} nameLabel="Key" flush>
@@ -384,7 +385,7 @@ function CreateApiKeyPage({
             return false;
           } catch (error) {
             throw new Error(
-              `The key wasn't created: ${error instanceof Error ? error.message : String(error)} Check your permission and plan limit, then try again.`,
+              `The key wasn't created. ${userErrorText(error, "Check your permission and plan limit, then try again.")}`,
               { cause: error },
             );
           }

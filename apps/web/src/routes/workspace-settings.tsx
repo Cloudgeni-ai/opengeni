@@ -35,6 +35,7 @@ import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import type { ModelsView } from "@/lib/models-route";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
 import { orgLabel } from "@/lib/org";
@@ -611,12 +612,9 @@ export function DangerZone(props: {
       }
       return ok;
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? `Couldn't delete the workspace: ${error.message}`
-          : "Couldn't delete the workspace. Try again.",
-        { cause: error },
-      );
+      throw new Error(`Couldn't delete the workspace. ${userErrorText(error, "Try again.")}`, {
+        cause: error,
+      });
     } finally {
       deleteInFlight.current = false;
     }
@@ -703,12 +701,9 @@ function OrganizationManagedWorkspaceSettings({
       refresh();
       return true;
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? `Couldn't rename the workspace: ${error.message}`
-          : "Couldn't rename the workspace. Try again.",
-        { cause: error },
-      );
+      throw new Error(`Couldn't rename the workspace. ${userErrorText(error, "Try again.")}`, {
+        cause: error,
+      });
     }
   }
 
@@ -738,15 +733,13 @@ function OrganizationManagedWorkspaceSettings({
       });
       if (followUp.status === "failed") {
         toast.warning("Workspace deleted, but the page may be out of date", {
-          description: `${
-            followUp.error instanceof Error ? followUp.error.message : String(followUp.error)
-          }. Reload to refresh your workspace access.`,
+          description: "Reload to refresh your workspace access.",
         });
       }
       return true;
     } catch (error) {
-      toast.error("Couldn't delete workspace", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't delete the workspace", {
+        description: userErrorText(error),
       });
       return false;
     }

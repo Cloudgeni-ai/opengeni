@@ -27,6 +27,7 @@ import {
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
 } from "@/lib/organization-admin";
+import { apiErrorDetails, userErrorText } from "@/lib/api-error";
 import type { OrganizationRecoveryOverview } from "@/types";
 
 type RecoveryState = {
@@ -255,9 +256,7 @@ export function OrganizationRecoverySection(props: {
       toast.error(conflict ? "Recovery state changed" : "Recovery action failed", {
         description: conflict
           ? "The authoritative recovery state was refreshed. Review it and submit a new action."
-          : error instanceof Error
-            ? error.message
-            : String(error),
+          : userErrorText(error),
       });
       return false;
     } finally {
@@ -303,8 +302,9 @@ export function OrganizationRecoverySection(props: {
         variant="inline"
         title="Couldn't load organization recovery."
         action={<RowButton onClick={() => void load()}>Try again</RowButton>}
+        {...apiErrorDetails(visible.error)}
       >
-        {visible.error.message}
+        {userErrorText(visible.error)}
       </ErrorMessage>
     );
   }
