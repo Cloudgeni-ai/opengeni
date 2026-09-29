@@ -132,6 +132,15 @@ export type SessionProxyHandlerOptions = {
   /** Expose composer file attachments (upload begin/complete, download URL). Defaults to true. */
   files?: boolean | undefined;
   /**
+   * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
+   * `"mine"` (default) lists sessions the resolved user created; `"visible"`
+   * lists every session OpenGeni lets that user read in the workspace (shared
+   * chats included); `false` disables listing.
+   */
+  sessionList?: "mine" | "visible" | false | undefined;
+  /** Let the user archive or restore their own chats. Defaults to true. */
+  archive?: boolean | undefined;
+  /**
    * Let the browser choose model, reasoning effort, and latency per message
    * or draft (still limited by the workspace model catalog). When false those
    * fields are removed; hide the composer's model picker to match. Defaults to true.
@@ -195,6 +204,20 @@ export function createSessionProxyHandler(
   const filesEnabled = options.files ?? true;
   const modelSelection = options.modelSelection ?? true;
   const heartbeatMs = options.heartbeatMs ?? 15_000;
+  const sessionList = options.sessionList ?? "mine";
+  const archiveEnabled = options.archive ?? true;
+  // Canonical subject per external user, for the "mine" list filter.
+  const subjects = new Map<string, Promise<string>>();
+  const subjectOf = (client: ProxyClient, key: string): Promise<string> => {
+    let subject = subjects.get(key);
+    if (!subject) {
+      subject = client.getAccessContext().then((access) => access.subjectId);
+      subject.catch(() => subjects.delete(key));
+      if (subjects.size >= 1_000) subjects.delete(subjects.keys().next().value!);
+      subjects.set(key, subject);
+    }
+    return subject;
+  };
 
   return async (request) => {
     try {
@@ -346,6 +369,27 @@ export function createSessionProxyHandler(
 
       if (area !== "sessions") return errorJson(404, "route_not_allowed", "Not found.");
 
+      if (tail.length === 0 && method === "GET") {
+        if (!sessionList) return errorJson(404, "route_not_allowed", "Not found.");
+        if (query.view !== "page") {
+          reject(400, "page_view_required", "List sessions with listSessionPage.");
+        }
+        const listQuery: Record<string, string> = { ...query };
+        if (sessionList === "mine") {
+          // Server-enforced creator filter; the browser cannot widen it.
+          listQuery.createdByKind = "subject";
+          listQuery.createdBySubjectId = await subjectOf(client, `${source}\u0000${resolved.user}`);
+        }
+        const page = await client.requestJson<Record<string, unknown>>(
+          "GET",
+          `${base}/sessions`,
+          undefined,
+          listQuery,
+          call,
+        );
+        // Pins are a separate personal projection this proxy does not manage.
+        return json(sessionList === "mine" ? { ...page, pinned: [] } : page);
+      }
       if (tail.length === 0) {
         if (method !== "POST" || !options.createSession) {
           return errorJson(404, "route_not_allowed", "Not found.");
@@ -380,6 +424,18 @@ export function createSessionProxyHandler(
       switch (route) {
         case "GET ":
           return await read(session);
+        case "PUT archive": {
+          if (!archiveEnabled) return errorJson(404, "route_not_allowed", "Not found.");
+          const archived = body?.archived;
+          const expectedVersion = body?.expectedVersion;
+          if (typeof archived !== "boolean") reject(400, "invalid_body", "archived is required.");
+          return json(
+            await client.requestJson("PUT", `${session}/archive`, {
+              archived,
+              ...(typeof expectedVersion === "number" ? { expectedVersion } : {}),
+            }),
+          );
+        }
         case "PATCH ": {
           const title = body?.title;
           if (typeof title !== "string" || Object.keys(body ?? {}).length !== 1) {

@@ -59,6 +59,17 @@ function upstreamServer() {
         },
       });
     }
+    if (path === "/v1/access/me") {
+      return Response.json({ subjectId: "subject-u42", accountGrants: [], workspaceGrants: [] });
+    }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "GET") {
+      return Response.json({
+        ...(url.searchParams.get("createdByKind") ? { filtersApplied: true } : {}),
+        pinned: [{ id: "pinned-other" }],
+        sessions: [{ id: SESSION_ID }],
+        nextCursor: null,
+      });
+    }
     if (path === "/v1/config/client") {
       return Response.json({ apiContractRevision: "upstream-deployed-later", defaultModel: "m" });
     }
@@ -455,5 +466,53 @@ describe("createSessionProxyHandler", () => {
     expect((await locked.browser.getClientConfig()).modelSelection).toBe(false);
     const open = setup();
     expect((await open.browser.getClientConfig()).modelSelection).toBeUndefined();
+  });
+
+  test("lists only the resolved user's chats by default, filtered server-side", async () => {
+    const { upstream, browser } = setup();
+    const page = await browser.listSessionPage(WORKSPACE_ID, {
+      parentSessionId: null,
+      createdBy: { kind: "subject", subjectId: "someone-else" },
+    });
+    expect(page.sessions.map((session) => session.id)).toEqual([SESSION_ID]);
+    expect(page.pinned).toEqual([]);
+    await browser.listSessionPage(WORKSPACE_ID, { cursor: "c2" });
+    const lists = upstream.requests.filter((request) => request.url.pathname.endsWith("/sessions"));
+    for (const list of lists) {
+      expect(list.url.searchParams.get("createdByKind")).toBe("subject");
+      expect(list.url.searchParams.get("createdBySubjectId")).toBe("subject-u42");
+      expect(list.headers.get("x-opengeni-external-actor")).not.toBeNull();
+    }
+    expect(lists[1]!.url.searchParams.get("cursor")).toBe("c2");
+    // The acting subject is resolved once and cached.
+    expect(upstream.requests.filter((r) => r.url.pathname === "/v1/access/me")).toHaveLength(1);
+    // The legacy array form is refused rather than silently unfiltered.
+    expect((await rejection(browser.listSessions(WORKSPACE_ID))).status).toBe(400);
+  });
+
+  test("visible lists pass through; false disables listing", async () => {
+    const visible = setup({ sessionList: "visible" });
+    await visible.browser.listSessionPage(WORKSPACE_ID);
+    expect(visible.upstream.requests[0]!.url.searchParams.get("createdByKind")).toBeNull();
+    const off = setup({ sessionList: false });
+    expect((await rejection(off.browser.listSessionPage(WORKSPACE_ID))).status).toBe(404);
+  });
+
+  test("archives and restores the user's chat unless disabled", async () => {
+    const { upstream, browser } = setup();
+    await browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, {
+      archived: true,
+      expectedVersion: 2,
+    });
+    expect(upstream.requests[0]!.method).toBe("PUT");
+    expect(upstream.requests[0]!.body).toEqual({ archived: true, expectedVersion: 2 });
+    const off = setup({ archive: false });
+    expect(
+      (
+        await rejection(
+          off.browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, { archived: true }),
+        )
+      ).status,
+    ).toBe(404);
   });
 });
