@@ -399,19 +399,16 @@ export function ComposerField({
                 <PlusIcon aria-hidden="true" className="size-4" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-72 rounded-[16px] p-1.5">
-              <DropdownMenuLabel className="px-2 pt-1 pb-1.5 text-xs font-medium text-fg-subtle">
-                Tools this schedule can use
-              </DropdownMenuLabel>
+            <DropdownMenuContent align="start" className="w-72">
+              <DropdownMenuLabel>Tools this schedule can use</DropdownMenuLabel>
               <DropdownMenuCheckboxItem
                 checked={draft.includeOpenGeniTool}
                 disabled={!canAttachOpenGeniTool}
                 onCheckedChange={(checked) => update({ includeOpenGeniTool: checked === true })}
                 onSelect={(event) => event.preventDefault()}
-                className="min-h-9 rounded-[8px] pointer-coarse:min-h-11"
               >
-                <PlugIcon className="size-4 text-fg-subtle" />
-                <span className="min-w-0">
+                <PlugIcon />
+                <span className="min-w-0 flex-1">
                   <span className="block truncate">Workspace tools</span>
                   <span className="block text-xs leading-4.5 text-fg-muted">
                     {canAttachOpenGeniTool
@@ -426,15 +423,14 @@ export function ComposerField({
                   checked={selectedTools.includes(server.id)}
                   onCheckedChange={(checked) => toggleTool(server.id, checked === true)}
                   onSelect={(event) => event.preventDefault()}
-                  className="min-h-9 rounded-[8px] pointer-coarse:min-h-11"
                 >
                   <CapabilityLogo
                     src={server.logoSrc ?? null}
                     name={server.name}
                     size="sm"
-                    className="size-5 rounded-[6px]"
+                    className="size-4 rounded-[4px]"
                   />
-                  <span className="min-w-0">
+                  <span className="min-w-0 flex-1">
                     <span className="block truncate">{server.name}</span>
                     {server.detail ? (
                       <span className="block truncate text-xs leading-4.5 text-fg-muted">

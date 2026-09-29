@@ -28,9 +28,11 @@ import {
 } from "@/components/ui/dialog";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -249,31 +251,30 @@ export function BrowserAccountMenu() {
             <UsersIcon className="size-4" />
             Browser accounts
             {projection ? (
-              <span className="ml-auto text-xs font-normal text-popover-foreground forced-colors:text-[CanvasText]!">
+              <DropdownMenuMeta className="forced-colors:text-[CanvasText]!">
                 {projection.slots.length}/8
-              </span>
+              </DropdownMenuMeta>
             ) : null}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           {projection?.slots.map((slot) => (
             <DropdownMenuSub key={slot.id}>
-              <DropdownMenuSubTrigger className="min-h-11 whitespace-normal py-2 forced-colors:text-[CanvasText]!">
+              <DropdownMenuSubTrigger className="whitespace-normal forced-colors:text-[CanvasText]!">
                 <span className="grid min-w-0 flex-1 gap-0.5">
-                  <span className="flex min-w-0 items-center gap-1.5 font-medium">
-                    {slot.id === projection.selectedSlotId ? (
-                      <CheckIcon className="size-3.5 shrink-0 text-status-succeeded" />
-                    ) : null}
-                    <span className="truncate">{slot.displayName}</span>
-                  </span>
-                  <span className="truncate text-xs text-popover-foreground forced-colors:text-[CanvasText]!">
+                  <span className="truncate">{slot.displayName}</span>
+                  <span className="truncate text-xs text-fg-muted forced-colors:text-[CanvasText]!">
                     {slot.verifiedClaim.value}
                     {slot.state === "reauth_required" ? " · Re-authentication required" : ""}
                   </span>
                 </span>
+                <DropdownMenuCheck
+                  checked={slot.id === projection.selectedSlotId}
+                  className="ml-0"
+                />
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="w-[min(18rem,calc(100vw-1rem))] forced-colors:text-[CanvasText]!">
                 <DropdownMenuItem
-                  className="min-h-11 forced-colors:text-[CanvasText]!"
+                  className="forced-colors:text-[CanvasText]!"
                   disabled={
                     busy || slot.id === projection.selectedSlotId || slot.state !== "active"
                   }
@@ -282,16 +283,12 @@ export function BrowserAccountMenu() {
                   <CheckIcon className="size-4" />
                   Use this account
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="min-h-11"
-                  disabled={busy}
-                  onSelect={() => authenticate("reauth", slot)}
-                >
+                <DropdownMenuItem disabled={busy} onSelect={() => authenticate("reauth", slot)}>
                   <RefreshCwIcon className="size-4" />
                   Re-authenticate
                 </DropdownMenuItem>
                 <DropdownMenuItem
-                  className="min-h-11 forced-colors:text-[CanvasText]!"
+                  className="forced-colors:text-[CanvasText]!"
                   variant="destructive"
                   disabled={busy}
                   onSelect={() => requestLogout(slot)}
@@ -303,13 +300,11 @@ export function BrowserAccountMenu() {
             </DropdownMenuSub>
           ))}
           {projection?.slots.length === 0 ? (
-            <DropdownMenuItem disabled className="min-h-11">
-              No active accounts
-            </DropdownMenuItem>
+            <DropdownMenuItem disabled>No active accounts</DropdownMenuItem>
           ) : null}
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            className="min-h-11 forced-colors:text-[CanvasText]!"
+            className="forced-colors:text-[CanvasText]!"
             disabled={busy || (projection?.slots.length ?? 8) >= 8}
             onSelect={() => authenticate("add")}
           >
@@ -318,29 +313,25 @@ export function BrowserAccountMenu() {
           </DropdownMenuItem>
           <OrganizationInvitationsMenuItem
             controller={organizationInvitations}
-            className="min-h-11 forced-colors:text-[CanvasText]!"
+            className="forced-colors:text-[CanvasText]!"
             disabled={busy}
           />
           <AppearanceMenu />
-          <DropdownMenuItem asChild disabled={busy} className="min-h-11">
+          <DropdownMenuItem asChild disabled={busy}>
             <Link to="/settings/security">
               <ShieldCheckIcon className="size-4" />
               Personal settings
             </Link>
           </DropdownMenuItem>
           {showAnalyticsPreferences ? (
-            <DropdownMenuItem className="min-h-11" onSelect={() => openAnalyticsPreferences()}>
+            <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
               <ChartColumnIcon className="size-4" />
               Analytics preferences
             </DropdownMenuItem>
           ) : null}
-          <HelpMenu
-            documentationUrl={context.clientConfig.documentationUrl}
-            itemClassName="min-h-11"
-            leadingSeparator
-          />
+          <HelpMenu documentationUrl={context.clientConfig.documentationUrl} leadingSeparator />
           <DropdownMenuItem
-            className="min-h-11 forced-colors:text-[CanvasText]!"
+            className="forced-colors:text-[CanvasText]!"
             variant="destructive"
             disabled={busy || !projection?.slots.length}
             onSelect={() => setLogoutAllOpen(true)}
@@ -352,7 +343,6 @@ export function BrowserAccountMenu() {
             <>
               <DropdownMenuSeparator />
               <DropdownMenuItem
-                className="min-h-11"
                 onSelect={() => {
                   const retry = accounts.hasPendingTransition
                     ? accounts.continueTransition()
@@ -420,12 +410,7 @@ export function BrowserAccountMenu() {
             <Button variant="outline" className="min-h-11" onClick={() => setLogoutTarget(null)}>
               Cancel
             </Button>
-            <Button
-              variant="destructive"
-              className="min-h-11"
-              disabled={busy}
-              onClick={() => void confirmLogoutOne()}
-            >
+            <Button variant="destructive" disabled={busy} onClick={() => void confirmLogoutOne()}>
               Sign out
             </Button>
           </DialogFooter>
@@ -445,12 +430,7 @@ export function BrowserAccountMenu() {
             <Button variant="outline" className="min-h-11" onClick={() => setLogoutAllOpen(false)}>
               Cancel
             </Button>
-            <Button
-              variant="destructive"
-              className="min-h-11"
-              disabled={busy}
-              onClick={() => void confirmLogoutAll()}
-            >
+            <Button variant="destructive" disabled={busy} onClick={() => void confirmLogoutAll()}>
               Sign out all
             </Button>
           </DialogFooter>
@@ -476,15 +456,10 @@ export function BrowserAccountMenu() {
             ))}
           </ul>
           <DialogFooter>
-            <Button
-              variant="outline"
-              className="min-h-11"
-              onClick={() => accounts.cancelPendingTransition()}
-            >
+            <Button variant="outline" onClick={() => accounts.cancelPendingTransition()}>
               Keep working
             </Button>
             <Button
-              className="min-h-11"
               onClick={() =>
                 void accounts.continueTransition().catch((error) =>
                   toast.error("Couldn't change accounts", {

@@ -37,6 +37,7 @@ import {
 } from "react";
 
 import { DropdownMenu } from "radix-ui";
+import { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
 import {
@@ -48,6 +49,9 @@ import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
+
+// Queued prompts can be long; menu rows wrap instead of truncating.
+const QUEUE_MENU_ITEM_CLASS = `${MENU_ITEM_CLASS} whitespace-normal break-words`;
 
 /** The sole pending-input surface: compact above Goal, Agents, and composer. */
 type QueueSurfaceCommonProps = {
@@ -1139,48 +1143,45 @@ function SortableQueueRow({
               <DropdownMenu.Content
                 align="end"
                 sideOffset={4}
-                className="og-root z-50 w-48 max-w-[calc(100vw-16px)] rounded-md border border-border bg-surface p-1 text-og-control text-fg shadow-lg"
+                className={`${MENU_SURFACE_CLASS} og-root z-50 w-52 max-w-[calc(100vw-16px)]`}
                 style={portalTokenStyle}
                 data-testid={`queue-actions-menu-${index + 1}`}
               >
                 {onEdit ? (
                   <>
-                    <DropdownMenu.Item
-                      className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 pointer-coarse:min-h-[44px]"
-                      onSelect={onEdit}
-                    >
-                      <PencilIcon className="size-3.5" /> Edit in composer
+                    <DropdownMenu.Item className={QUEUE_MENU_ITEM_CLASS} onSelect={onEdit}>
+                      <PencilIcon /> Edit in composer
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                    <DropdownMenu.Separator className={MENU_SEPARATOR_CLASS} />
                   </>
                 ) : null}
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === 0}
                   onSelect={() => onMove(0)}
                 >
-                  <ArrowUpToLineIcon className="size-3.5" /> Move to top
+                  <ArrowUpToLineIcon /> Move to top
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === 0}
                   onSelect={() => onMove(index - 1)}
                 >
                   Move up
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(index + 1)}
                 >
                   Move down
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(count - 1)}
                 >
-                  <ArrowDownToLineIcon className="size-3.5" /> Move to bottom
+                  <ArrowDownToLineIcon /> Move to bottom
                 </DropdownMenu.Item>
               </DropdownMenu.Content>
             </DropdownMenu.Portal>

@@ -53,6 +53,7 @@ export function visibleSessionToolSelection(
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
 import { COMPOSER_MENU_PANEL_CLASS, ComposerMenuHeader } from "@/components/ui/composer-menu";
+import { MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 
 const LazySessionConnectorsMenuBody = lazy(() =>
   import("@/components/session-connectors-menu-body").then((module) => ({
@@ -67,7 +68,7 @@ export function SessionToolsMenuBody(props: SessionConnectorsMenuProps) {
       fallback={
         <>
           <ComposerMenuHeader title="Connectors" leading={props.leading} />
-          <p role="status" className="px-4 py-4 text-xs text-fg-muted">
+          <p role="status" className={MENU_NOTE_CLASS}>
             Loading connectors…
           </p>
         </>

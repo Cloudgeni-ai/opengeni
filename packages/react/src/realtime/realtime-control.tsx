@@ -1005,7 +1005,7 @@ export function RealtimeVoiceControl(props: {
               align="end"
               sideOffset={8}
               collisionPadding={12}
-              className="og-realtime-menu flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-1.5 shadow-xl"
+              className="og-realtime-menu flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden"
               onCloseAutoFocus={(event) => event.preventDefault()}
             >
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -1030,7 +1030,7 @@ export function RealtimeVoiceControl(props: {
 
               {status.phase !== "idle" ? (
                 <>
-                  <DropdownMenuSeparator className="mx-1 bg-og-border" />
+                  <DropdownMenuSeparator />
                   <div className="px-2.5 py-2" role="status" aria-live="polite">
                     <div className="flex items-center gap-2 text-og-sm font-medium text-og-fg">
                       <RealtimeStatusDot
@@ -1046,7 +1046,6 @@ export function RealtimeVoiceControl(props: {
 
               {audioBlocked ? (
                 <DropdownMenuItem
-                  className="rounded-og-md"
                   onSelect={() => void props.onRetryAudibleOutput().catch(() => undefined)}
                 >
                   <Volume2Icon />
@@ -1054,10 +1053,7 @@ export function RealtimeVoiceControl(props: {
                 </DropdownMenuItem>
               ) : null}
               {retryConnection ? (
-                <DropdownMenuItem
-                  className="rounded-og-md"
-                  onSelect={() => void props.onRetry().catch(() => undefined)}
-                >
+                <DropdownMenuItem onSelect={() => void props.onRetry().catch(() => undefined)}>
                   <RotateCcwIcon />
                   Retry connection
                 </DropdownMenuItem>
@@ -1065,7 +1061,6 @@ export function RealtimeVoiceControl(props: {
               {modeOwned && props.snapshot.status !== "lost_owner" ? (
                 <DropdownMenuItem
                   variant="destructive"
-                  className="rounded-og-md"
                   disabled={props.snapshot.status === "stopping"}
                   onSelect={() => void props.onStop().catch(() => undefined)}
                 >
@@ -1289,12 +1284,12 @@ function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: SessionRealtimeContro
 
   return (
     <>
-      <DropdownMenuSeparator className="mx-1 bg-og-border" />
+      <DropdownMenuSeparator />
       <DropdownMenuSub>
-        <DropdownMenuSubTrigger className="rounded-og-md text-og-fg-muted">
+        <DropdownMenuSubTrigger className="text-og-fg-muted">
           Realtime diagnostics
         </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent className="max-h-80 w-72 overflow-y-auto rounded-og-lg border-og-border bg-og-surface-1 p-1.5 text-og-fg shadow-og-lg">
+        <DropdownMenuSubContent className="max-h-80 w-72 overflow-y-auto">
           {rows.map(([label, value]) => (
             <DropdownMenuItem
               key={label}

@@ -2,7 +2,6 @@ import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,
   BoxIcon,
-  ChevronLeftIcon,
   ChevronRightIcon,
   GitBranchIcon,
   PaperclipIcon,
@@ -21,10 +20,11 @@ import {
 
 import { SessionToolsMenuBody, type SessionToolSelection } from "@/components/pickers";
 import {
-  COMPOSER_MENU_ACTION_CLASS,
   COMPOSER_MENU_PANEL_CLASS,
   ComposerMenuHeader,
+  MenuBackButton,
 } from "@/components/ui/composer-menu";
+import { MENU_CHEVRON_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 const AgentLearningSettingsEditor = lazy(() =>
   import("@/components/knowledge/agent-learning-settings").then((module) => ({
     default: module.AgentLearningSettingsEditor,
@@ -36,7 +36,11 @@ const AgentLearningDraftEditor = lazy(() =>
   })),
 );
 import { DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuMeta,
+} from "@/components/ui/dropdown-menu";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
@@ -116,17 +120,12 @@ export function ComposerMobilePlusPanel(
   const voiceModel = props.voiceModel;
 
   const backButton = (
-    <button
-      type="button"
-      aria-label="Back"
-      className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-11"
+    <MenuBackButton
       onClick={(event) => {
         event.preventDefault();
         setPanel("root");
       }}
-    >
-      <ChevronLeftIcon className="size-4" />
-    </button>
+    />
   );
 
   return (
@@ -141,7 +140,7 @@ export function ComposerMobilePlusPanel(
         <>
           {props.fileUploadsEnabled ? (
             <DropdownMenuItem
-              className={COMPOSER_MENU_ACTION_CLASS}
+              className="cursor-pointer"
               disabled={props.disabled}
               onSelect={(event) => {
                 event.preventDefault();
@@ -156,7 +155,7 @@ export function ComposerMobilePlusPanel(
           ) : null}
           {
             <DropdownMenuItem
-              className={COMPOSER_MENU_ACTION_CLASS}
+              className="cursor-pointer"
               disabled={props.disabled || props.toolsDisabled}
               onSelect={(event) => {
                 event.preventDefault();
@@ -166,15 +165,15 @@ export function ComposerMobilePlusPanel(
             >
               <PlugIcon className="size-4" />
               Connectors
-              <span className="ml-auto text-xs text-fg-muted">
+              <DropdownMenuMeta>
                 {props.toolsSaving ? "Saving…" : toolsSelected || ""}
-              </span>
-              <ChevronRightIcon className="size-4 text-fg-subtle" />
+              </DropdownMenuMeta>
+              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           }
           {repositories ? (
             <DropdownMenuItem
-              className={COMPOSER_MENU_ACTION_CLASS}
+              className="cursor-pointer"
               disabled={props.disabled || repositories.disabled}
               onSelect={(event) => {
                 event.preventDefault();
@@ -183,15 +182,13 @@ export function ComposerMobilePlusPanel(
             >
               <GitBranchIcon className="size-4" />
               Repositories
-              <span className="ml-auto text-xs text-fg-muted">
-                {repositories.selectedCount || ""}
-              </span>
-              <ChevronRightIcon className="size-4 text-fg-subtle" />
+              <DropdownMenuMeta>{repositories.selectedCount || ""}</DropdownMenuMeta>
+              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
           {props.variableSets ? (
             <DropdownMenuItem
-              className={COMPOSER_MENU_ACTION_CLASS}
+              className="cursor-pointer"
               disabled={props.disabled}
               onSelect={(event) => {
                 event.preventDefault();
@@ -200,12 +197,13 @@ export function ComposerMobilePlusPanel(
             >
               <BoxIcon className="size-4" />
               Variable sets
-              <ChevronRightIcon className="ml-auto size-4 text-fg-subtle" />
+              <DropdownMenuMeta>{props.variableSets.selectedCount || ""}</DropdownMenuMeta>
+              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
           {voiceModel ? (
             <DropdownMenuItem
-              className={COMPOSER_MENU_ACTION_CLASS}
+              className="cursor-pointer"
               disabled={props.disabled || voiceModel.disabled}
               onSelect={(event) => {
                 event.preventDefault();
@@ -214,15 +212,15 @@ export function ComposerMobilePlusPanel(
             >
               <AudioLinesIcon className="size-4" />
               Voice model
-              <span className="ml-auto max-w-[7rem] truncate text-2xs text-fg-subtle">
+              <DropdownMenuMeta className="max-w-[7rem] truncate">
                 {voiceModel.selectedLabel}
-              </span>
-              <ChevronRightIcon className="size-4 text-fg-subtle" />
+              </DropdownMenuMeta>
+              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
           {props.chatSettings || props.draftChatSettings ? (
             <DropdownMenuItem
-              className={COMPOSER_MENU_ACTION_CLASS}
+              className="cursor-pointer"
               onSelect={(event) => {
                 event.preventDefault();
                 setPanel("settings");
@@ -230,7 +228,7 @@ export function ComposerMobilePlusPanel(
             >
               <SettingsIcon className="size-4" />
               Chat settings
-              <ChevronRightIcon className="ml-auto size-4 text-fg-subtle" />
+              <ChevronRightIcon className={`ml-auto ${MENU_CHEVRON_CLASS}`} />
             </DropdownMenuItem>
           ) : null}
         </>
@@ -261,13 +259,13 @@ export function ComposerMobilePlusPanel(
       ) : panel === "settings" ? (
         <>
           <ComposerMenuHeader title="Chat settings" leading={backButton} />
-          <div className="min-h-0 overflow-y-auto overscroll-contain p-2">
+          <div className="min-h-0 overflow-y-auto overscroll-contain px-2.5 pb-1.5">
             <p className="mb-3 text-xs text-fg-muted">
               Choose what agents can add or update in this chat.
             </p>
             <Suspense
               fallback={
-                <p role="status" className="text-sm text-fg-muted">
+                <p role="status" className={MENU_NOTE_CLASS}>
                   Loading settings…
                 </p>
               }

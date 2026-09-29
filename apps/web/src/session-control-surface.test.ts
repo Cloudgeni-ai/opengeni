@@ -463,7 +463,8 @@ describe("session control surface architecture", () => {
   test("hands keyboard focus across optimistic project-move remounts", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
-    expect(list).toContain('void onMoveToChannel(session, null, "actions")');
+    // Default (channel id null) is the first row of the same project list.
+    expect(list).toContain('[{ id: null, name: "Default" }, ...channels].map');
     expect(list).toContain("pendingSessionFocus.current = {");
     expect(list).toContain("if (!remountSelection.current) return;");
     expect(list).toContain("event.preventDefault();");

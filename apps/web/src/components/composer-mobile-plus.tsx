@@ -5,6 +5,7 @@ import type { ComposerPlusProps, Panel } from "./composer-mobile-plus-panel";
 import { Button } from "@/components/ui/button";
 import { COMPOSER_MENU_PANEL_CLASS } from "@/components/ui/composer-menu";
 import { Dialog } from "@/components/ui/dialog";
+import { MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,7 +29,7 @@ function ComposerPanelNotice(props: ComposerPlusProps & { failed?: boolean }) {
       collisionPadding={12}
       className={COMPOSER_MENU_PANEL_CLASS}
     >
-      <p role={props.failed ? "alert" : "status"} className="px-4 py-4 text-xs text-fg-muted">
+      <p role={props.failed ? "alert" : "status"} className={MENU_NOTE_CLASS}>
         {props.failed ? "Composer actions could not be loaded." : "Loading actions…"}
       </p>
       {props.failed ? (

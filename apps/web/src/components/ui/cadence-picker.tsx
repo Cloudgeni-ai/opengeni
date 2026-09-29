@@ -39,6 +39,7 @@ import {
   SelectMenuPanel,
   type SelectOption,
 } from "@/components/ui/select-menu";
+import { MENU_CHECK_CLASS, MENU_SURFACE_CLASS } from "@/components/ui/menu-styles";
 import { cn } from "@/lib/utils";
 
 /* ============================================================================
@@ -1134,9 +1135,8 @@ const inputBase = cn(
   "cursor-text justify-center px-2 text-center tabular-nums focus-visible:border-brand pointer-coarse:text-base",
 );
 
-// Popovers match the Select panel: radius 16, one hairline, the menu shadow.
-const popoverPanel =
-  "z-50 overflow-hidden rounded-[16px] border border-border bg-surface text-fg shadow-og-md outline-none";
+// Popovers are the one menu surface (menu-styles.ts); their bodies set the inset.
+const popoverPanel = cn(MENU_SURFACE_CLASS, "z-50 overflow-hidden p-0 outline-none");
 
 const menuContent = cn(
   popoverPanel,
@@ -1144,7 +1144,7 @@ const menuContent = cn(
 );
 
 const menuItem =
-  "relative flex min-h-9 cursor-pointer items-start gap-2.5 rounded-[10px] py-2 pr-9 pl-2.5 text-sm text-fg outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:text-fg-muted data-[highlighted]:bg-surface-2 data-[state=checked]:bg-brand/5 data-[highlighted]:data-[state=checked]:bg-brand/10 pointer-coarse:min-h-11";
+  "relative flex min-h-8 cursor-pointer items-start gap-2.5 rounded-[10px] py-1.5 pr-9 pl-2.5 text-sm text-fg outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:text-fg-muted data-[highlighted]:bg-surface-2 pointer-coarse:min-h-11";
 
 const connector = "text-sm text-fg-muted";
 
@@ -1215,7 +1215,7 @@ function ValueSelect<V extends string>({
               <SelectPrimitive.Item key={option.value} value={option.value} className={menuItem}>
                 <span className="flex min-w-0 flex-col">
                   <SelectPrimitive.ItemText>
-                    <span className="font-medium">{option.label}</span>
+                    <span>{option.label}</span>
                   </SelectPrimitive.ItemText>
                   {option.description ? (
                     <span className="mt-0.5 text-xs leading-4.5 text-fg-muted">
@@ -1223,8 +1223,8 @@ function ValueSelect<V extends string>({
                     </span>
                   ) : null}
                 </span>
-                <SelectPrimitive.ItemIndicator className="absolute top-2.5 right-2.5">
-                  <CheckIcon aria-hidden="true" className="size-4 text-brand" strokeWidth={2.25} />
+                <SelectPrimitive.ItemIndicator className="absolute top-2 right-2.5">
+                  <CheckIcon aria-hidden="true" className={MENU_CHECK_CLASS} />
                 </SelectPrimitive.ItemIndicator>
               </SelectPrimitive.Item>
             ))}

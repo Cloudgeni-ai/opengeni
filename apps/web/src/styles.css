@@ -81,7 +81,8 @@
   --color-card: var(--color-surface);
   --color-card-foreground: var(--color-fg);
 
-  --color-popover: var(--color-surface-3);
+  /* Menus and popovers are the surface (DESIGN.md "Menus and popovers"). */
+  --color-popover: var(--color-surface);
   --color-popover-foreground: var(--color-fg);
 
   --color-secondary: var(--color-selection);

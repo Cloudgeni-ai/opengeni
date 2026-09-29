@@ -155,10 +155,10 @@ export function RailFooter() {
                 side={rail.collapsed ? "right" : "top"}
                 className="w-[min(18rem,calc(100vw-1rem))]"
               >
-                <DropdownMenuLabel className="grid gap-0.5">
-                  <span className="truncate text-sm">{displayName}</span>
+                <DropdownMenuLabel className="grid gap-0.5 pb-1.5">
+                  <span className="truncate text-sm text-fg">{displayName}</span>
                   {secondary && secondary !== displayName ? (
-                    <span className="truncate text-xs font-normal text-fg-subtle">{secondary}</span>
+                    <span className="truncate text-xs font-normal text-fg-muted">{secondary}</span>
                   ) : null}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -167,7 +167,7 @@ export function RailFooter() {
                 ) : null}
                 <AppearanceMenu />
                 {managed ? (
-                  <DropdownMenuItem asChild className="min-h-11">
+                  <DropdownMenuItem asChild>
                     <Link to="/settings/security">
                       <LockIcon className="size-4" />
                       Personal settings
@@ -182,7 +182,6 @@ export function RailFooter() {
                 ) : null}
                 <HelpMenu
                   documentationUrl={context.clientConfig.documentationUrl}
-                  itemClassName="min-h-11"
                   leadingSeparator={managed || showAnalyticsPreferences}
                 />
                 {managed ? (

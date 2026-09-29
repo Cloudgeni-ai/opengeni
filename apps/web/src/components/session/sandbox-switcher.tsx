@@ -9,14 +9,17 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // `fleet.machines` is empty, so this falls back to a static compute label.
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
-import { LaptopIcon, CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
+import { LaptopIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuMeta,
+  DropdownMenuNote,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
@@ -113,15 +116,8 @@ export function SessionSandboxSwitcher({
           )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        side="bottom"
-        sideOffset={8}
-        className="w-60 rounded-xl border-border bg-surface p-2 shadow-xl"
-      >
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
-          Run on
-        </DropdownMenuLabel>
+      <DropdownMenuContent align="end" side="bottom" sideOffset={8} className="w-60">
+        <DropdownMenuLabel>Run on</DropdownMenuLabel>
         {machines.map((machine) => {
           const selectable = isSelectable(machine);
           const swapping = fleet.attachingSandboxId === machine.sandboxId;
@@ -137,25 +133,25 @@ export function SessionSandboxSwitcher({
                 }
                 void fleet.attach(machine.sandboxId);
               }}
-              className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
+              className="cursor-pointer"
             >
-              <ServerIcon className="size-3.5 shrink-0 text-fg-subtle" />
+              <ServerIcon />
               <span className="min-w-0 flex-1 truncate">{machineDisplayName(machine)}</span>
               {machine.state !== "online" && !machine.active ? (
-                <span className="shrink-0 text-2xs text-fg-subtle">{machine.state}</span>
+                <DropdownMenuMeta>{machine.state}</DropdownMenuMeta>
               ) : null}
               {swapping ? (
-                <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
-              ) : machine.active ? (
-                <CheckIcon className="ml-1 size-4 shrink-0" />
-              ) : null}
+                <Loader2Icon className="size-4 shrink-0 animate-spin" />
+              ) : (
+                <DropdownMenuCheck checked={machine.active} className="ml-0" />
+              )}
             </DropdownMenuItem>
           );
         })}
         {fleet.mutationError ? (
-          <p className="px-2 pt-1 text-2xs text-danger">
+          <DropdownMenuNote role="alert" className="text-danger">
             Swap failed: {fleet.mutationError.message}
-          </p>
+          </DropdownMenuNote>
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>

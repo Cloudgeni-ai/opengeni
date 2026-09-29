@@ -20,6 +20,7 @@ import {
   type SVGProps,
 } from "react";
 import { cn } from "../lib/cn";
+import { MENU_CHEVRON_CLASS } from "../lib/menu-styles";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
   effortOptionsForModel,
@@ -301,25 +302,20 @@ export function PickerNavRow(props: {
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        // The one menu row (lib/menu-styles.ts), with density tokens for embedders.
+        "flex min-h-8 w-full cursor-pointer items-center gap-2.5 rounded-og-md px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-surface-2 focus-visible:bg-og-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
       {props.icon}
       <span className="min-w-0 flex-1">
-        <span className={cn("block truncate text-og-menu", props.active && "font-medium")}>
-          {props.label}
-        </span>
+        <span className="block truncate text-og-menu">{props.label}</span>
         {props.hint ? (
-          <span className="mt-0.5 block truncate text-og-control text-og-fg-subtle">
-            {props.hint}
-          </span>
+          <span className="mt-0.5 block truncate text-og-sm text-og-fg-muted">{props.hint}</span>
         ) : null}
       </span>
       {props.trailing ? <span className="ml-auto shrink-0">{props.trailing}</span> : null}
-      {props.showChevron === false ? null : (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
-      )}
+      {props.showChevron === false ? null : <ChevronRightIcon className={MENU_CHEVRON_CLASS} />}
     </button>
   );
 }
@@ -331,14 +327,16 @@ export function PickerBackHeader(props: {
   trailing?: ReactNode;
 }) {
   return (
-    <div className="mb-1 flex items-center gap-0.5 border-b border-og-border/70 px-0.5 pb-1.5">
+    <div className="mb-1.5 flex min-h-9 items-center gap-1 border-b border-og-border pb-1.5">
       <button
         type="button"
         onClick={props.onBack}
         data-testid="model-picker-back"
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-og-sm px-1.5 py-1.5 text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+        className="flex min-h-8 min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-og-md pr-2.5 text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11"
       >
-        <ChevronLeftIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
+        <span className="flex size-8 shrink-0 items-center justify-center text-og-fg-muted">
+          <ChevronLeftIcon className="size-4" />
+        </span>
         {props.icon}
         <span className="min-w-0 flex-1 truncate text-og-menu font-medium">{props.label}</span>
       </button>

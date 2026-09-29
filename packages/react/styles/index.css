@@ -184,7 +184,7 @@
   --color-foreground: var(--color-fg);
   --color-card: var(--color-surface);
   --color-card-foreground: var(--color-fg);
-  --color-popover: var(--color-surface-3);
+  --color-popover: var(--color-surface);
   --color-popover-foreground: var(--color-fg);
   --color-primary: var(--og-color-primary);
   --color-primary-foreground: var(--og-color-primary-fg);

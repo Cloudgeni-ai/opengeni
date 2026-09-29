@@ -35,7 +35,7 @@ function SessionVariableSetPickerLoadFailed(props: SessionVariableSetPickerProps
     <PickerNotice leading={props.leading}>
       <div
         role="alert"
-        className="flex items-center justify-between gap-3 px-2 py-1 text-sm text-fg-muted"
+        className="flex items-center justify-between gap-3 px-2.5 py-1 text-sm text-fg-muted"
       >
         <span>Variable sets could not be loaded.</span>
         <Button type="button" size="sm" variant="outline" onClick={() => window.location.reload()}>
@@ -58,7 +58,7 @@ export function SessionVariableSetPicker(props: SessionVariableSetPickerProps) {
     <Suspense
       fallback={
         <PickerNotice leading={props.leading}>
-          <p role="status" className="px-2 py-1 text-sm text-fg-muted">
+          <p role="status" className="px-2.5 py-2 text-sm text-fg-muted">
             Loading variable sets…
           </p>
         </PickerNotice>

@@ -1,17 +1,11 @@
 import { Link } from "@tanstack/react-router";
-import {
-  Building2Icon,
-  CheckIcon,
-  PauseIcon,
-  PlusIcon,
-  SettingsIcon,
-  UserIcon,
-} from "lucide-react";
+import { Building2Icon, PauseIcon, PlusIcon, SettingsIcon, UserIcon } from "lucide-react";
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
@@ -38,11 +32,8 @@ import {
 } from "@/lib/workspace-navigation-preference";
 import type { Workspace } from "@/types";
 
-/** Menus in the switchers: 16px radius, shadow-md, 14/500 rows. */
-export const SWITCHER_MENU_CLASS = "w-72 max-w-[calc(100vw-2rem)] rounded-[16px] p-1.5";
-export const SWITCHER_MENU_ITEM_CLASS = "min-h-8 pointer-coarse:min-h-11";
-export const SWITCHER_MENU_LABEL_CLASS =
-  "px-2 pt-1.5 pb-1 text-xs leading-4.5 font-normal text-fg-muted";
+/** The switcher menu's width; surface and rows are the one menu spec (menu-styles.ts). */
+export const SWITCHER_MENU_CLASS = "w-72 max-w-[calc(100vw-2rem)]";
 
 function workspaceInitial(workspace: Workspace | null): string {
   return (workspace?.name.trim()[0] ?? "W").toUpperCase();
@@ -82,11 +73,11 @@ export function OrganizationTile({ className }: { className?: string }) {
     <span
       aria-hidden="true"
       className={cn(
-        "flex size-5 shrink-0 items-center justify-center rounded bg-surface-3 text-fg-muted",
+        "flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-fg-muted",
         className,
       )}
     >
-      <Building2Icon className="size-3.5" />
+      <Building2Icon className="size-3" />
     </span>
   );
 }
@@ -129,11 +120,8 @@ export function CreateWorkspaceMenuItem(props: {
   if (!props.canCreate) {
     return (
       // Readable, not faded: the reason is the point of showing it.
-      <DropdownMenuItem
-        disabled
-        className={cn(SWITCHER_MENU_ITEM_CLASS, "items-start data-[disabled]:opacity-100")}
-      >
-        <PlusIcon className="mt-0.5 size-4 text-fg-muted" />
+      <DropdownMenuItem disabled className="items-start data-[disabled]:opacity-100">
+        <PlusIcon className="mt-0.5" />
         <span className="grid min-w-0 flex-1">
           <span className="truncate text-fg-muted">New workspace in {props.organizationLabel}</span>
           <span className="text-xs leading-4.5 text-fg-muted">
@@ -144,7 +132,7 @@ export function CreateWorkspaceMenuItem(props: {
     );
   }
   return (
-    <DropdownMenuItem asChild className={SWITCHER_MENU_ITEM_CLASS}>
+    <DropdownMenuItem asChild>
       <Link
         to="/workspaces/$workspaceId/organization"
         params={{ workspaceId: props.workspaceId }}
@@ -154,7 +142,7 @@ export function CreateWorkspaceMenuItem(props: {
           ...returnToSearch(props.returnTo),
         }}
       >
-        <PlusIcon className="size-4" />
+        <PlusIcon />
         <span
           className="min-w-0 flex-1 truncate"
           title={`New workspace in ${props.organizationLabel}`}
@@ -178,7 +166,6 @@ export function WorkspaceMenuItems(props: {
       {props.workspaces.map((workspace) => (
         <DropdownMenuItem
           key={workspace.id}
-          className={SWITCHER_MENU_ITEM_CLASS}
           aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
           onSelect={() => {
             if (workspace.id !== props.activeWorkspaceId) props.onSelect(workspace.id);
@@ -372,8 +359,8 @@ export function WorkspaceMenu(props: {
       >
         {currentOrg ? (
           <DropdownMenuGroup aria-label={`Workspaces in ${currentOrg.label}`}>
-            <DropdownMenuLabel className="flex min-w-0 items-center gap-2 px-2 pt-1.5 pb-2">
-              <OrganizationTile className="size-7 rounded-md" />
+            <DropdownMenuLabel className="flex min-w-0 items-center gap-2.5 pt-1.5 pb-1.5">
+              <OrganizationTile className="size-7 rounded-md [&_svg]:size-3.5" />
               <span className="grid min-w-0">
                 <span
                   className="truncate text-sm leading-5 font-medium text-fg"
@@ -401,12 +388,12 @@ export function WorkspaceMenu(props: {
         {currentOrg ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem asChild className={SWITCHER_MENU_ITEM_CLASS}>
+            <DropdownMenuItem asChild>
               <Link
                 to="/workspaces/$workspaceId/organization"
                 params={{ workspaceId: props.activeWorkspaceId }}
               >
-                <SettingsIcon className="size-4" />
+                <SettingsIcon />
                 Organization settings
               </Link>
             </DropdownMenuItem>
@@ -417,14 +404,11 @@ export function WorkspaceMenu(props: {
             <DropdownMenuSeparator />
             <DropdownMenuGroup aria-label="Switch organization">
               {otherOrgs.length > 0 ? (
-                <DropdownMenuLabel className={SWITCHER_MENU_LABEL_CLASS}>
-                  Switch organization
-                </DropdownMenuLabel>
+                <DropdownMenuLabel>Switch organization</DropdownMenuLabel>
               ) : null}
               {otherOrgs.map(({ org, landing }) => (
                 <DropdownMenuItem
                   key={org.accountId}
-                  className={SWITCHER_MENU_ITEM_CLASS}
                   onSelect={() => {
                     if (landing) props.onSelect(landing);
                   }}
@@ -437,13 +421,12 @@ export function WorkspaceMenu(props: {
               ))}
               {props.onCreateOrganization ? (
                 <DropdownMenuItem
-                  className={SWITCHER_MENU_ITEM_CLASS}
                   onSelect={(event) => {
                     event.preventDefault();
                     props.onCreateOrganization?.();
                   }}
                 >
-                  <PlusIcon className="size-4" />
+                  <PlusIcon />
                   New organization
                 </DropdownMenuItem>
               ) : null}
@@ -466,7 +449,7 @@ export function WorkspaceMenuItemContent(props: {
     <>
       <span
         aria-hidden="true"
-        className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+        className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted [&_svg]:size-3"
       >
         <WorkspaceGlyph workspace={props.workspace} personal={personal} />
       </span>
@@ -480,9 +463,7 @@ export function WorkspaceMenuItemContent(props: {
           <span className="sr-only"> Paused</span>
         </>
       ) : null}
-      {props.workspace.id === props.activeWorkspaceId ? (
-        <CheckIcon aria-hidden="true" className="size-4 text-brand" />
-      ) : null}
+      <DropdownMenuCheck checked={props.workspace.id === props.activeWorkspaceId} />
     </>
   );
 }

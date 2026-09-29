@@ -87,10 +87,10 @@ import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -2038,23 +2038,22 @@ function SessionFolderPicker({
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-56">
+      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-60">
         <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => onChange(null)}>
-          <FolderIcon className="size-4" />
+          <FolderIcon />
           <span className="min-w-0 flex-1 truncate">Default</span>
-          {selectedChannelId === null ? <CheckIcon className="size-4" /> : null}
+          <DropdownMenuCheck checked={selectedChannelId === null} />
         </DropdownMenuItem>
         {channels.map((channel) => (
           <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
-            <FolderIcon className="size-4" />
+            <FolderIcon />
             <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-            {channel.id === selectedChannelId ? <CheckIcon className="size-4" /> : null}
+            <DropdownMenuCheck checked={channel.id === selectedChannelId} />
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onCreateProject}>
-          <PlusIcon className="size-4" />
+          <PlusIcon />
           New project
         </DropdownMenuItem>
       </DropdownMenuContent>

@@ -14,6 +14,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
 import { ComposerMenuHeader, ComposerMenuSwitch } from "@/components/ui/composer-menu";
+import { MENU_BUTTON_CLASS, MENU_LABEL_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 
 import {
   ManualRepositoryEditor,
@@ -27,7 +28,6 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
@@ -250,9 +250,18 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 
   // Platform deployments expose only installation/connection. Operator
   // deployments additionally expose App registration and environment setup.
-  const setupForm = (
+  const setupHasActions =
+    (props.setupMode === "operator" && !props.configured) ||
+    Boolean(bindingPresentation.connectUrl) ||
+    props.installations.length > 0 ||
+    Boolean(linkError);
+  // Under the empty note the note already says why, so a platform deployment
+  // skips the second sentence; an operator keeps the setup instructions.
+  const renderSetupForm = (showDescription: boolean) => (
     <div className="space-y-3">
-      <p className="text-xs leading-5 text-fg-muted">{bindingPresentation.setupDescription}</p>
+      {showDescription ? (
+        <p className="text-xs leading-5 text-fg-muted">{bindingPresentation.setupDescription}</p>
+      ) : null}
       <div className="space-y-2">
         {props.setupMode === "operator" && !props.configured ? (
           <div className="min-w-0">
@@ -380,10 +389,19 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
         </div>
       ) : null}
       {linkError ? (
-        <p className="px-3 text-xs text-status-failed" role="alert">
+        <p className="text-xs text-status-failed" role="alert">
           {linkError}
         </p>
       ) : null}
+    </div>
+  );
+  const setupForm = renderSetupForm(true);
+  const emptyNote = (
+    <div className="px-2.5 py-2">
+      <p className="text-sm text-fg">No repositories connected</p>
+      <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
+        {bindingPresentation.emptyDescription}
+      </p>
     </div>
   );
 
@@ -395,7 +413,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
         <CollapsibleTrigger asChild>
           <button
             type="button"
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium text-fg transition-colors hover:bg-surface-2/60"
+            className="flex min-h-8 w-full items-center gap-2 rounded-[10px] px-2.5 py-1.5 text-left text-sm text-fg transition-colors hover:bg-surface-2 pointer-coarse:min-h-11"
           >
             <ChevronDownIcon
               className={cn(
@@ -409,7 +427,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           </button>
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <div className="px-1 pb-1 pt-2">{setupForm}</div>
+          <div className="px-2.5 pb-1 pt-2">{setupForm}</div>
         </CollapsibleContent>
       </div>
     </Collapsible>
@@ -420,7 +438,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
       <ComposerMenuHeader title="Repositories" leading={props.leading} />
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)]">
-        <div className="space-y-2 p-2">
+        <div className="space-y-1">
           {props.repositories.length + (props.personalGitHubRepositories?.length ?? 0) > 5 ? (
             <Input
               aria-label="Search repositories"
@@ -433,12 +451,12 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           {search.trim() &&
           !props.repositories.some((repo) => matchesSearch(repo.fullName)) &&
           personalRepositories.length === 0 ? (
-            <p className="px-3 text-xs text-fg-muted">No repositories match your search.</p>
+            <p className={MENU_NOTE_CLASS}>No repositories match your search.</p>
           ) : null}
           {props.personalGitHubStatus?.enabled ? (
             props.personalGitHubStatus.connection?.status === "active" ? (
               <section>
-                <div className="px-0 py-2">
+                <div className="px-2.5 py-2">
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0 truncate text-sm font-medium text-fg">
                       Your GitHub identity
@@ -453,12 +471,12 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                   <p className="mt-1 text-xs leading-4 text-fg-subtle">Writes appear as you.</p>
                 </div>
                 {props.personalGitHubBusy ? (
-                  <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
-                    <Loader2Icon className="size-3.5 animate-spin" />
+                  <div className={cn(MENU_NOTE_CLASS, "flex items-center gap-2")}>
+                    <Loader2Icon className="size-4 animate-spin" />
                     Loading your repositories
                   </div>
                 ) : personalRepositories.length === 0 ? (
-                  <div className="p-3 text-xs leading-5 text-fg-muted">
+                  <div className={MENU_NOTE_CLASS}>
                     {search.trim()
                       ? "No personal repositories match your search."
                       : "No personal repositories are allowed yet. Choose them from Integrations."}
@@ -472,7 +490,10 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                         locked ||
                         props.selectedPersonalGitHubRepoIds?.has(repo.repositoryId) === true;
                       return (
-                        <div key={repo.repositoryId} className="px-0 py-3 hover:bg-surface-2/45">
+                        <div
+                          key={repo.repositoryId}
+                          className="rounded-[10px] px-2.5 py-2 transition-colors hover:bg-surface-2"
+                        >
                           <div className="flex w-full items-center gap-3 text-left">
                             <span className="min-w-0 flex-1">
                               <span className="flex min-w-0 items-center gap-1.5">
@@ -541,7 +562,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                 )}
               </section>
             ) : (
-              <div className="flex items-center justify-between gap-3 p-3">
+              <div className="flex items-center justify-between gap-3 px-2.5 py-2">
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-fg">Use your GitHub identity</div>
                   <div className="mt-0.5 text-xs text-fg-subtle">
@@ -561,28 +582,26 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           ) : null}
 
           {props.status === "disabled" ? (
-            <div className="space-y-3">
-              <EmptyState
-                icon={<GitBranchIcon className="size-5" />}
-                title="No repositories connected"
-                description={bindingPresentation.emptyDescription}
-              />
-              <div className="px-1 pt-1">{setupForm}</div>
+            <div>
+              {emptyNote}
+              {setupHasActions ? (
+                <div className="px-2.5 pt-1 pb-2">
+                  {renderSetupForm(props.setupMode === "operator")}
+                </div>
+              ) : null}
             </div>
           ) : props.repoBusy ? (
-            <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
-              <Loader2Icon className="size-3.5 animate-spin" />
+            <div className={cn(MENU_NOTE_CLASS, "flex items-center gap-2")}>
+              <Loader2Icon className="size-4 animate-spin" />
               Loading repositories…
             </div>
           ) : !hasRepos ? (
-            <div className="space-y-3">
-              <EmptyState
-                icon={<GitBranchIcon className="size-5" />}
-                title="No repositories connected"
-                description={bindingPresentation.emptyDescription}
-              />
+            <div>
+              {emptyNote}
               {props.setupMode === "platform" ? (
-                <div className="px-1 pt-1">{setupForm}</div>
+                setupHasActions ? (
+                  <div className="px-2.5 pt-1 pb-2">{renderSetupForm(false)}</div>
+                ) : null
               ) : (
                 settingsDisclosure
               )}
@@ -597,12 +616,8 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                     )
                     .map((group) => (
                       <div key={group.installationId} className="py-1">
-                        <div className="flex items-center justify-between gap-3 px-0 py-2">
-                          <div className="min-w-0 truncate text-sm font-medium text-fg">
-                            {group.label}
-                          </div>
-                        </div>
-                        <div className="divide-y divide-border/70">
+                        <div className={cn(MENU_LABEL_CLASS, "truncate")}>{group.label}</div>
+                        <div>
                           {group.repositories
                             .filter((repo) => matchesSearch(repo.fullName))
                             .map((repo) => {
@@ -616,7 +631,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                                 <div
                                   key={`${repo.installationId}:${repo.id}`}
                                   className={cn(
-                                    "px-0 py-3 transition-colors hover:bg-surface-2/45",
+                                    "rounded-[10px] px-2.5 py-2 transition-colors hover:bg-surface-2",
                                     blocked && "opacity-55",
                                   )}
                                 >
@@ -685,7 +700,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           )}
 
           {props.unavailableMountedRepositories?.map((repo) => (
-            <div key={`${repo.uri}:${repo.ref}`} className="flex items-center gap-3 px-0 py-3">
+            <div key={`${repo.uri}:${repo.ref}`} className="flex items-center gap-3 px-2.5 py-2">
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium text-fg" title={repo.uri}>
                   {repo.uri}
@@ -709,7 +724,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           {props.manualRepos
             .filter((repo) => props.lockedManualRepoIds?.has(repo.id))
             .map((repo) => (
-              <div key={repo.id} className="flex items-center gap-3 px-0 py-3">
+              <div key={repo.id} className="flex items-center gap-3 px-2.5 py-2">
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium text-fg" title={repo.url}>
                     {repo.url}
@@ -730,25 +745,23 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             ))}
 
           {props.manualRepos.length === 0 ? (
-            <Button
+            <button
               type="button"
-              variant="ghost"
-              size="sm"
               onClick={props.onManualAdd}
               disabled={props.pending}
-              className="w-full justify-start text-sm text-fg-muted"
+              className={MENU_BUTTON_CLASS}
             >
-              <PlusIcon className="size-3.5" />
+              <PlusIcon />
               Add repository URL
-            </Button>
+            </button>
           ) : (
             <Collapsible open={props.manualOpen} onOpenChange={props.onManualOpenChange}>
               <div className="border-t border-border/60 pt-1">
-                <div className="flex items-center justify-between gap-2 px-3 py-2">
+                <div className="flex items-center justify-between gap-2 px-2.5 py-1">
                   <CollapsibleTrigger asChild>
                     <button
                       type="button"
-                      className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg"
+                      className="flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-[10px] text-left text-sm text-fg pointer-coarse:min-h-11"
                     >
                       <ChevronDownIcon
                         className={cn(
@@ -810,21 +823,24 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
               </div>
             </Collapsible>
           )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="w-full justify-start text-sm text-fg-muted"
-            onClick={() => void refreshList()}
-            disabled={!canRefresh || props.repoBusy || refreshBusy}
-          >
-            <RefreshCwIcon
-              className={cn("size-3.5", (props.repoBusy || refreshBusy) && "animate-spin")}
-            />
-            Refresh list
-          </Button>
+          {/* A list that can't be refreshed (GitHub unavailable) has no Refresh action. */}
+          {canRefresh ? (
+            <button
+              type="button"
+              className={MENU_BUTTON_CLASS}
+              onClick={() => void refreshList()}
+              disabled={props.repoBusy || refreshBusy}
+            >
+              <RefreshCwIcon
+                className={cn(
+                  (props.repoBusy || refreshBusy) && "animate-spin motion-reduce:animate-none",
+                )}
+              />
+              Refresh list
+            </button>
+          ) : null}
           {refreshError ? (
-            <p className="px-3 text-xs text-status-failed" role="alert">
+            <p className="px-2.5 text-xs text-status-failed" role="alert">
               {refreshError}
             </p>
           ) : null}
@@ -833,7 +849,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             (props.lockedPersonalGitHubRepoIds?.size ?? 0) +
             (props.lockedManualRepoIds?.size ?? 0) >
             0 ? (
-            <p className="px-3 text-2xs text-fg-muted">
+            <p className="px-2.5 text-xs leading-4.5 text-fg-muted">
               Mounted repositories cannot be removed or retargeted.{" "}
               <a href={props.newChatUrl} className="text-brand hover:underline">
                 Start a new chat
@@ -842,7 +858,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             </p>
           ) : null}
           {props.validationError && (!props.manualOpen || props.manualRepos.length === 0) ? (
-            <p className="px-3 text-xs text-status-failed" role="alert">
+            <p className="px-2.5 text-xs text-status-failed" role="alert">
               {props.validationError}
             </p>
           ) : null}

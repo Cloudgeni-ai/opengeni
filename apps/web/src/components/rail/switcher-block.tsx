@@ -5,12 +5,13 @@
 // workspace-initial avatar that opens the same menu.
 import { Link } from "@tanstack/react-router";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import { BuildingIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -269,7 +270,7 @@ export function OrganizationSwitcherLine(props: {
       <DropdownMenuContent align="start" className="min-w-56">
         {props.orgs.length > 1 ? (
           <>
-            <DropdownMenuLabel className="text-fg-subtle">Organizations</DropdownMenuLabel>
+            <DropdownMenuLabel>Organizations</DropdownMenuLabel>
             {props.orgs.map((org) => (
               <DropdownMenuItem
                 key={org.accountId}
@@ -282,22 +283,20 @@ export function OrganizationSwitcherLine(props: {
               >
                 <span
                   aria-hidden="true"
-                  className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+                  className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted"
                 >
                   {org.label
                     .replace(/^Org\s+/, "")
-                    .slice(0, 2)
+                    .slice(0, 1)
                     .toUpperCase()}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{org.label}</span>
-                {org.accountId === props.activeAccountId ? (
-                  <CheckIcon aria-hidden="true" className="size-4 text-brand" />
-                ) : null}
+                <DropdownMenuCheck checked={org.accountId === props.activeAccountId} />
               </DropdownMenuItem>
             ))}
           </>
         ) : (
-          <DropdownMenuLabel className="text-fg-subtle">{props.currentLabel}</DropdownMenuLabel>
+          <DropdownMenuLabel>{props.currentLabel}</DropdownMenuLabel>
         )}
         {props.onCreate ? (
           <>
@@ -308,8 +307,8 @@ export function OrganizationSwitcherLine(props: {
                 props.onCreate?.();
               }}
             >
-              <PlusIcon className="size-4" />
-              New organization…
+              <PlusIcon />
+              New organization
             </DropdownMenuItem>
           </>
         ) : null}
@@ -321,7 +320,7 @@ export function OrganizationSwitcherLine(props: {
                 to="/workspaces/$workspaceId/organization"
                 params={{ workspaceId: props.workspaceId }}
               >
-                <SettingsIcon className="size-4" />
+                <SettingsIcon />
                 Organization settings
               </Link>
             </DropdownMenuItem>

@@ -664,9 +664,9 @@ export function SessionTenancyControl({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-72">
-              <div className="px-2 py-1.5">
-                <p className="text-sm font-medium">{stateLabel} session</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">{stateDescription}</p>
+              <div className="px-2.5 py-1.5">
+                <p className="text-sm font-medium text-fg">{stateLabel} session</p>
+                <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">{stateDescription}</p>
               </div>
               {mayManage ? (
                 <>
@@ -693,12 +693,12 @@ export function SessionTenancyControl({
                 }
               >
                 <CopyPlusIcon />
-                {retryingFork ? "Retry session fork…" : "Fork session…"}
+                {retryingFork ? "Retry session fork" : "Fork session"}
               </DropdownMenuItem>
               {failure ? (
                 <>
                   <DropdownMenuSeparator />
-                  <div className="px-2 py-1.5 text-xs text-status-waiting">
+                  <div className="px-2.5 py-1.5 text-xs leading-4.5 text-status-waiting">
                     <span className="font-medium">Access change needs attention.</span> {failure}
                   </div>
                 </>

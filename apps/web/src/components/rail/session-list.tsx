@@ -17,7 +17,6 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ChevronRightIcon,
-  Clock3Icon,
   EllipsisIcon,
   FolderIcon,
   FolderPlusIcon,
@@ -67,6 +66,7 @@ import {
 } from "@/components/ui/context-menu";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -3547,13 +3547,13 @@ function SessionGroup(props: {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="right">
                 <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
-                  <PencilIcon aria-hidden="true" className="size-3.5" />
+                  <PencilIcon aria-hidden="true" />
                   Rename project
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
                     aria-hidden="true"
-                    className={props.project.pinned ? "size-3.5 fill-current" : "size-3.5"}
+                    className={props.project.pinned ? "size-4 fill-current" : "size-4"}
                   />
                   {props.project.pinned ? "Unpin project" : "Pin project"}
                 </DropdownMenuItem>
@@ -3562,7 +3562,7 @@ function SessionGroup(props: {
                   variant="destructive"
                   onSelect={() => props.onDeleteProject?.(props.project!)}
                 >
-                  <Trash2Icon aria-hidden="true" className="size-3.5" />
+                  <Trash2Icon aria-hidden="true" />
                   Delete project
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -4118,14 +4118,13 @@ function SessionRow(props: {
           contextPinSelection.current = false;
         }}
       >
-        <ContextMenuItem className="pointer-coarse:min-h-11" onSelect={rename.startEditing}>
+        <ContextMenuItem onSelect={rename.startEditing}>
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
         {!props.session.archived ? (
           <>
             <ContextMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() => {
                 contextPinSelection.current = true;
                 void props.onPin(props.session, !props.session.pinned, "row");
@@ -4135,7 +4134,6 @@ function SessionRow(props: {
               {props.session.pinned ? "Unpin" : "Pin"}
             </ContextMenuItem>
             <ContextMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() =>
                 void props.onUpdateAttention(props.session, { unread: !props.session.unread })
               }
@@ -4148,7 +4146,6 @@ function SessionRow(props: {
               {props.session.unread ? "Mark as read" : "Mark as unread"}
             </ContextMenuItem>
             <ContextMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() =>
                 void props.onUpdateAttention(props.session, {
                   activelyWorking: !props.session.activelyWorking,
@@ -4162,7 +4159,6 @@ function SessionRow(props: {
         ) : null}
         {props.session.parentSessionId === null ? (
           <ContextMenuItem
-            className="pointer-coarse:min-h-11"
             onSelect={() => void props.onArchive(props.session, !props.session.archived)}
           >
             <ArchiveIcon className="size-4" />
@@ -4171,7 +4167,7 @@ function SessionRow(props: {
         ) : null}
         {props.session.parentSessionId === null && props.session.archived ? (
           <ContextMenuItem
-            className="pointer-coarse:min-h-11 text-status-failed"
+            variant="destructive"
             onSelect={() => props.onRequestDelete(props.session)}
           >
             <Trash2Icon className="size-4" />
@@ -4183,22 +4179,25 @@ function SessionRow(props: {
         !props.session.archived ? (
           <>
             <ContextMenuSeparator />
-            <ContextMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
-              Move to project
-            </ContextMenuLabel>
-            {[...props.channels, { id: null, name: "Default" }].map((channel) => (
-              <ContextMenuItem
-                key={channel.id ?? "default"}
-                className="pointer-coarse:min-h-11"
-                disabled={props.session.channelId === channel.id}
-                onSelect={() => {
-                  contextPinSelection.current = true;
-                  void props.onMoveToChannel(props.session, channel.id, "row");
-                }}
-              >
-                <span className="truncate">{channel.name}</span>
-              </ContextMenuItem>
-            ))}
+            <ContextMenuLabel>Move to project</ContextMenuLabel>
+            {[{ id: null, name: "Default" }, ...props.channels].map((channel) => {
+              const current = props.session.channelId === channel.id;
+              return (
+                <ContextMenuItem
+                  key={channel.id ?? "default"}
+                  aria-current={current ? "true" : undefined}
+                  onSelect={() => {
+                    if (current) return;
+                    contextPinSelection.current = true;
+                    void props.onMoveToChannel(props.session, channel.id, "row");
+                  }}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  <DropdownMenuCheck checked={current} />
+                </ContextMenuItem>
+              );
+            })}
           </>
         ) : null}
       </ContextMenuContent>
@@ -4341,7 +4340,6 @@ function RowActionsMenu({
         }}
       >
         <DropdownMenuItem
-          className="pointer-coarse:min-h-11"
           onSelect={onRename}
           // The menu item lives inside the row; stop the synthetic click from
           // activating the session link.
@@ -4353,7 +4351,6 @@ function RowActionsMenu({
         {!session.archived ? (
           <>
             <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() => {
                 remountSelection.current = true;
                 void onPin(session, !session.pinned, "actions");
@@ -4364,7 +4361,6 @@ function RowActionsMenu({
               {session.pinned ? "Unpin" : "Pin"}
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() => void onUpdateAttention(session, { unread: !session.unread })}
               onClick={(event) => event.stopPropagation()}
             >
@@ -4376,7 +4372,6 @@ function RowActionsMenu({
               {session.unread ? "Mark as read" : "Mark as unread"}
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() =>
                 void onUpdateAttention(session, { activelyWorking: !session.activelyWorking })
               }
@@ -4389,7 +4384,6 @@ function RowActionsMenu({
         ) : null}
         {session.parentSessionId === null ? (
           <DropdownMenuItem
-            className="pointer-coarse:min-h-11"
             onSelect={() => void onArchive(session, !session.archived)}
             onClick={(event) => event.stopPropagation()}
           >
@@ -4413,35 +4407,26 @@ function RowActionsMenu({
           // re-clusters ~470 KB of shared chunks into the startup bundle.
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
-              Move to project
-            </DropdownMenuLabel>
-            {channels.map((channel) => (
-              <DropdownMenuItem
-                key={channel.id}
-                className="pointer-coarse:min-h-11"
-                disabled={session.channelId === channel.id}
-                onSelect={() => {
-                  remountSelection.current = true;
-                  void onMoveToChannel(session, channel.id, "actions");
-                }}
-                onClick={(event) => event.stopPropagation()}
-              >
-                <span className="truncate">{channel.name}</span>
-              </DropdownMenuItem>
-            ))}
-            <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
-              disabled={session.channelId === null}
-              onSelect={() => {
-                remountSelection.current = true;
-                void onMoveToChannel(session, null, "actions");
-              }}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <Clock3Icon className="size-4" />
-              Default
-            </DropdownMenuItem>
+            <DropdownMenuLabel>Move to project</DropdownMenuLabel>
+            {[{ id: null, name: "Default" }, ...channels].map((channel) => {
+              const current = session.channelId === channel.id;
+              return (
+                <DropdownMenuItem
+                  key={channel.id ?? "default"}
+                  aria-current={current ? "true" : undefined}
+                  onSelect={() => {
+                    if (current) return;
+                    remountSelection.current = true;
+                    void onMoveToChannel(session, channel.id, "actions");
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  <DropdownMenuCheck checked={current} />
+                </DropdownMenuItem>
+              );
+            })}
           </>
         ) : null}
       </DropdownMenuContent>

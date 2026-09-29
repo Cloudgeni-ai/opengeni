@@ -1,22 +1,50 @@
-import type { ReactNode } from "react";
+import { ChevronLeftIcon } from "lucide-react";
+import type { ComponentProps, ReactNode } from "react";
+
+import {
+  MENU_BACK_BUTTON_CLASS,
+  MENU_BACK_HEADER_CLASS,
+  MENU_SURFACE_CLASS,
+} from "@/components/ui/menu-styles";
 import { cn } from "@/lib/utils";
 
-/** One shell for composer drill-ins, regardless of the kind of resource. */
-export const COMPOSER_MENU_PANEL_CLASS =
-  "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-md";
+/**
+ * One shell for the composer "+" menu and its drill-ins, regardless of the
+ * kind of resource: the app's one menu surface at a fixed width.
+ */
+export const COMPOSER_MENU_PANEL_CLASS = cn(
+  "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden",
+  MENU_SURFACE_CLASS,
+);
 
-export const COMPOSER_MENU_ACTION_CLASS =
-  "min-h-11 cursor-pointer gap-3 rounded-md px-2 py-2 text-sm";
+/** The back control of every drill-in header. */
+export function MenuBackButton({
+  label = "Back",
+  className,
+  ...props
+}: Omit<ComponentProps<"button">, "children"> & { label?: string }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      className={cn(MENU_BACK_BUTTON_CLASS, className)}
+      {...props}
+    >
+      <ChevronLeftIcon aria-hidden="true" className="size-4" />
+    </button>
+  );
+}
 
+/** A drill-in's header: back, the submenu's title, optional trailing control. */
 export function ComposerMenuHeader(props: {
   title: string;
   leading?: ReactNode;
   trailing?: ReactNode;
 }) {
   return (
-    <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-border px-2 pb-2">
+    <div className={cn(MENU_BACK_HEADER_CLASS, !props.leading && "pl-2.5")}>
       {props.leading}
-      <h2 className="min-w-0 flex-1 text-sm font-medium">{props.title}</h2>
+      <h2 className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{props.title}</h2>
       {props.trailing}
     </div>
   );
