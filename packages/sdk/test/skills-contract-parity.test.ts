@@ -39,3 +39,28 @@ test("Skill catalog pagination preserves the server cursor and sends bounded que
   expect(query.get("limit")).toBe("25");
   expect(query.get("sessionId")).toBe("session");
 });
+
+test("Skill removal sends the exact concurrency and replay arguments", async () => {
+  let captured: { url: string; method: string | undefined; body: unknown } | undefined;
+  const client = new OpenGeniClient({
+    baseUrl: "https://example.test",
+    fetch: (async (input, init) => {
+      captured = { url: String(input), method: init?.method, body: JSON.parse(String(init?.body)) };
+      return Response.json({ removed: true, outcome: "applied" });
+    }) as typeof fetch,
+  });
+  const request = {
+    operationId: "operation",
+    expectedRevisionId: null,
+    expectedScopeVersion: 3,
+    reason: "Remove",
+  };
+  expect(await client.removeWorkspaceSkill("workspace", "skill/id", request)).toMatchObject({
+    removed: true,
+  });
+  expect(captured).toEqual({
+    url: "https://example.test/v1/workspaces/workspace/skills/content/skill%2Fid/remove",
+    method: "POST",
+    body: request,
+  });
+});
