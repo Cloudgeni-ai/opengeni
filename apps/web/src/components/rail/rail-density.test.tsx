@@ -174,7 +174,7 @@ describe("session-first rail density", () => {
       expect(railShell).toMatch(
         /id="mobile-nav-panel-workspace"[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
       );
-      expect(railHeader).toMatch(/\{!rail\.collapsed \? <SwitcherBlock inline \/> : null\}/);
+      expect(railHeader).toMatch(/\{!rail\.collapsed \? <SwitcherBlock \/> : null\}/);
     } finally {
       await act(async () => workspace.root.unmount());
       workspace.container.remove();

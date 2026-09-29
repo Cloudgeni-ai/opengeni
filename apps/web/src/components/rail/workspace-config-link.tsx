@@ -97,7 +97,7 @@ export function WorkspaceConfigLink(props: {
           <span
             aria-hidden="true"
             className={cn(
-              "shrink-0 rounded-full bg-amber-500",
+              "shrink-0 rounded-full bg-status-waiting",
               collapsed ? "absolute right-1 top-1 size-2 ring-2 ring-surface" : "ml-auto size-2",
             )}
           />
