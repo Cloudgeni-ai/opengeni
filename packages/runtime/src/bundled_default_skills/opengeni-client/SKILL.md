@@ -75,8 +75,7 @@ Default to OpenGeni's complete conversation experience: `@opengeni/react`'s
 product server. It already provides streaming, replay, queue, steer, approvals,
 human input, attachments, and pause/resume. Deviate only when the product needs
 a materially different interaction model, a non-React frontend, or compute
-surfaces, and record why. Verify exact props and options against the installed
-package versions.
+surfaces, and record why.
 
 ```ts
 // Server only: the organization API key never reaches the browser.
@@ -129,15 +128,12 @@ const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 <SessionConversation client={client} workspaceId={workspaceId} sessionId={session.id} />;
 ```
 
-The proxy calls `resolve` on every request, acts only through `asUser` (never
-the key's service authority), rejects any other workspace, and serves only the
-conversation's native routes. Browser session creation stays off unless the
-server supplies `createSession`, which receives only `initialMessage` and
-`idempotencyKey` and returns the complete request. Use `authorizeSession` for
-product-level session checks and `modelSelection: false` to lock model choice.
-Never copy the raw passthrough in `examples/northstar-support`: it forwards any
-workspace path with the organization key's service authority and no user
-identity. Reset UI state when the authenticated user or tenant changes.
+The proxy calls `resolve` per request, acts only through `asUser`, pins the
+workspace, and serves only conversation routes. Browser creation needs a
+server `createSession` hook that turns `{ initialMessage, idempotencyKey }` into
+the full request; `authorizeSession` and `modelSelection: false` narrow further.
+Never copy `examples/northstar-support`'s raw passthrough (any workspace path,
+service authority, no user). Reset UI state when the user or tenant changes.
 
 ## Deliberate deviations
 
@@ -160,17 +156,14 @@ Choose one only for its stated reason; read
 - **In-process embedding** of the OpenGeni runtime is infrastructure work; see
   the repo-maintainer `opengeni` skill and `docs/embedding.md`.
 
-Read [Integration configuration and verification](references/runtime-profile-and-verification.md)
-when defining agent behavior or verifying delivery; check useful answers and
-actual tool execution with representative product questions, not just
-connectivity. For deeper decisions, read selectively:
-
-- [Product integration shapes](references/product-integration-shapes.md) and
-  [API workflows](references/api-workflows.md)
-- [Discovery and autonomy](references/discovery-and-autonomy.md)
-- [Isolation and authorization](references/isolation-and-authorization.md)
-- [Data tools and credentials](references/data-tools-and-credentials.md)
-- [External users and embedded connection setup](references/external-users-and-connect.md)
+Verify delivery with representative product questions, checking useful answers
+and actual tool execution, not just connectivity: see
+[Integration configuration and verification](references/runtime-profile-and-verification.md).
+Read selectively: [Product integration shapes](references/product-integration-shapes.md),
+[API workflows](references/api-workflows.md),
+[Isolation and authorization](references/isolation-and-authorization.md),
+[Data tools and credentials](references/data-tools-and-credentials.md), and
+[External users and embedded connection setup](references/external-users-and-connect.md).
 
 This tree is the canonical developer guide for product integration. It does not
 define a runtime profile API, schedule Skill fields, or a new registry; an
@@ -225,31 +218,22 @@ customer guidance; its exact wire kind is `"shared"`. Personal workspaces are
 excluded and must never be selected through a default-workspace fallback.
 
 Choose the workspace from who shares documents, workspace instructions,
-Connections, and integrations: normally one workspace per customer. Chat
-human visibility is controlled by `visibility`, not by `agentAccess` or Knowledge.
-Use `asUser(externalId)` for the authenticated product user. The server derives
-the canonical user; never supply an `endUser` label as authority. Separately,
-`agentAccess: "session" | "user" | "workspace"` controls cross-session agent
-reach. Compatibility `memoryScope: "workspace" | "user" | "off"` selects Knowledge
-authoring scope, not transcript visibility. Off initializes authoring to Off;
-existing authorized Knowledge remains retrievable. Personal Knowledge belongs
-to the verified user of the active
-turn, including when different users collaborate in one shared session. Use
-existing task notes for temporary session-tree coordination; there is no active
-session Memory scope. Use a separate workspace when groups need different
-Connections, integrations, or instructions.
-
-Unscoped organization-key-created top-level sessions are workspace-visible.
-For product-user ownership, use the server-side `asUser(externalId)` client and
-explicit workspace membership described in `references/external-users-and-connect.md`;
-verified external owners can create private sessions when the organization enables
-that feature. Private sessions do not make workspace Files or Sites private.
-Managed-human Only-me sessions are not a backend impersonation mechanism. A live
-agent with cross-session tools can reach unrelated sessions only when its
-outbound `agentAccess` scope and ordinary resource authorization allow it.
-The target's `agentAccess` never restricts inbound access; private-session
-ownership and ordinary permissions still apply.
-Removing tools is not a substitute for private human visibility.
+Connections, and integrations: normally one per customer, and a separate one
+when groups need different Connections, integrations, or instructions. Use
+`asUser(externalId)` for the authenticated product user; the server derives the
+canonical user, so never supply an `endUser` label as authority. Human
+visibility is `visibility` (verified external owners can create private sessions
+when the organization enables it; private sessions do not make workspace Files
+or Sites private). `agentAccess: "session" | "user" | "workspace"` separately
+limits outbound agent reach; the target's `agentAccess` never restricts inbound
+access, and removing tools is not a substitute for private visibility.
+Compatibility `memoryScope: "workspace" | "user" | "off"` selects Knowledge
+authoring scope, not transcript visibility; Off leaves authorized retrieval
+available, and personal Knowledge belongs to the verified user of the active
+turn. Use task notes for temporary session-tree coordination; there is no
+active session Memory scope. Unscoped organization-key-created top-level
+sessions are workspace-visible, and managed-human Only-me sessions are not a
+backend impersonation mechanism. See `references/external-users-and-connect.md`.
 
 The external backend owns product Skills. Store and version them outside
 OpenGeni, then pass the selected definitions inline in
@@ -286,24 +270,20 @@ agent instruction prefix.
 
 ## Client Workflow
 
-1. Resolve the API base URL and load the server-held organization API key.
-2. Resolve the authenticated product tenant, call `ensureWorkspace` with its
-   stable external identity, and persist or verify the opaque workspace mapping.
-3. Read client config and access context without falling back to a Personal
-   workspace.
-4. Load the exact Skills selected by the external product and pass them inline.
-5. Create a session with a stable idempotency key; optionally preallocate its ID
-   when the product must persist a link before the first turn can run.
-6. Attach only canonical resources and an explicit minimal tool selection the
-   user may use. Omitting tool selections inherits workspace/deployment
+1. Load the server-held organization API key; resolve the authenticated product
+   tenant, call `ensureWorkspace`, and persist the opaque workspace mapping.
+2. Read client config and access context without a Personal-workspace fallback.
+3. Create sessions with the product-selected inline Skills, a stable idempotency
+   key (optionally a preallocated ID), canonical resources, and an explicit
+   minimal tool selection. Omitted tool selections inherit workspace/deployment
    defaults, including first-party workspace and cross-session capabilities.
-7. Serve the browser through the packaged proxy, or stream/replay through the
+4. Serve the browser through the packaged proxy, or stream/replay through the
    SDK in a custom route; tolerate unknown additive event types.
-8. Send visible text separately from `modelContext`.
-9. Use the SDK upload helper; it owns begin, signed storage PUT, and completion.
-10. Surface approvals, human-input requests, queue state, errors, credit limits,
+5. Send visible text separately from `modelContext`; upload through the SDK
+   helper, which owns begin, signed storage PUT, and completion.
+6. Surface approvals, human-input requests, queue state, errors, credit limits,
    and reconnect state as product state rather than generic chat text.
-11. Add realtime, Connected Machines, schedules, or the workbench only when the
+7. Add realtime, Connected Machines, schedules, or the workbench only when the
    product use case needs them.
 
 ## Guardrails

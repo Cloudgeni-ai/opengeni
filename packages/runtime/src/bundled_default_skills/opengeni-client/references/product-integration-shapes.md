@@ -95,11 +95,8 @@ composable; a deviation can still reuse individual hooks or components.
   inherits workspace/deployment defaults; an explicit empty array suppresses
   that category.
 - Calls `OpenGeniClient` and returns product-shaped responses.
-- Mounts `createSessionProxyHandler` for the React conversation: `resolve`
-  authenticates every request, calls run through `asUser`, the workspace is
-  pinned, and only conversation routes are served. A custom route re-streams
-  SSE with `proxySessionEventStream`. Never forward arbitrary paths under the
-  organization key.
+- Mounts `createSessionProxyHandler` for the React conversation (a custom route
+  uses `proxySessionEventStream`); never forwards arbitrary paths under the key.
 - Rejects caller-supplied workspace/session IDs that are not already authorized
   by the product relationship.
 
