@@ -18,8 +18,10 @@ import type { ChatChunk, ChatPending } from "./types";
 
 /**
  * Vercel AI SDK UI message stream (protocol v1, as consumed by `useChat` with
- * the default transport). Parts are `data: <json>` SSE lines terminated by
- * `data: [DONE]`, under the `x-vercel-ai-ui-message-stream: v1` header.
+ * the default transport in AI SDK 5, 6, and 7; approval requests need 6+).
+ * Parts are `data: <json>` SSE
+ * lines terminated by `data: [DONE]`, under the
+ * `x-vercel-ai-ui-message-stream: v1` header.
  */
 
 export const UI_MESSAGE_STREAM_HEADER = "x-vercel-ai-ui-message-stream";
@@ -28,6 +30,22 @@ export const UI_MESSAGE_STREAM_VERSION = "v1";
 export type UIMessageStreamOptions = {
   /** Assistant message id announced in the `start` part. Defaults to a random UUID. */
   messageId?: string | undefined;
+  /**
+   * Emit OpenGeni's own tool activity as tool parts. Off by default: those
+   * tools are not in the app's typed tool set. When on, parts are marked
+   * `dynamic` and `providerExecuted`, so `useChat` renders them as
+   * `dynamic-tool` parts and never tries to execute them. Approval requests
+   * are always emitted (as dynamic tool parts) because answering them is part
+   * of the conversation.
+   */
+  toolParts?: boolean | undefined;
+  /**
+   * Emit the `start` / `start-step` / `finish-step` / `finish` framing. Set to
+   * false when writing into an existing AI SDK stream that owns its framing
+   * (for example `createUIMessageStream({ execute: ({ writer }) => ... })`).
+   * Defaults to true.
+   */
+  framing?: boolean | undefined;
 };
 
 /** Protocol parts for one reply, in order. */
@@ -43,8 +61,11 @@ export async function* uiMessageStreamParts(
     textOpen = false;
     return [{ type: "text-end", id: textId }];
   };
-  yield { type: "start", messageId };
-  yield { type: "start-step" };
+  const framing = options.framing ?? true;
+  if (framing) {
+    yield { type: "start", messageId };
+    yield { type: "start-step" };
+  }
   try {
     for await (const chunk of chunks) {
       switch (chunk.type) {
@@ -56,18 +77,22 @@ export async function* uiMessageStreamParts(
           yield { type: "text-delta", id: textId, delta: chunk.text };
           break;
         case "tool": {
+          if (!options.toolParts) break;
           yield* closeText();
           const toolCallId = chunk.callId ?? `call_${crypto.randomUUID()}`;
+          const tool = { toolCallId, dynamic: true, providerExecuted: true };
           if (chunk.status === "started") {
-            yield { type: "tool-input-start", toolCallId, toolName: chunk.name };
+            yield { type: "tool-input-start", ...tool, toolName: chunk.name };
             yield {
               type: "tool-input-available",
-              toolCallId,
+              ...tool,
               toolName: chunk.name,
               input: chunk.input ?? {},
             };
+          } else if (chunk.status === "failed") {
+            yield { type: "tool-output-error", ...tool, errorText: "The tool call failed." };
           } else {
-            yield { type: "tool-output-available", toolCallId, output: { status: chunk.status } };
+            yield { type: "tool-output-available", ...tool, output: { status: chunk.status } };
           }
           break;
         }
@@ -81,8 +106,10 @@ export async function* uiMessageStreamParts(
       }
     }
     yield* closeText();
-    yield { type: "finish-step" };
-    yield { type: "finish" };
+    if (framing) {
+      yield { type: "finish-step" };
+      yield { type: "finish" };
+    }
   } catch (error) {
     yield* closeText();
     yield { type: "error", errorText: chatErrorSummary(error).message };
@@ -97,6 +124,8 @@ function* pendingParts(pending: ChatPending): Generator<Record<string, unknown>>
       type: "tool-input-available",
       toolCallId: pending.requestId,
       toolName: pending.name ?? "tool",
+      dynamic: true,
+      providerExecuted: true,
       input: raw.arguments ?? rawItem.arguments ?? {},
     };
     yield {
@@ -151,6 +180,7 @@ export async function handleVercelChatRequest(
   og: OpenGeni,
   request: Request,
   resolve: ChatResolve,
+  options: Pick<UIMessageStreamOptions, "toolParts"> = {},
 ): Promise<Response> {
   const body = await readJsonObject(request);
   const prompt = lastUIMessageText(body?.messages)?.trim() ?? "";
@@ -169,5 +199,6 @@ export async function handleVercelChatRequest(
   const importedHistory = importedHistoryBefore(body?.messages, ["text"], "parts");
   return uiMessageStreamResponse(
     opened.chat.stream(prompt, { signal: request.signal, steer, importedHistory }),
+    options.toolParts ? { toolParts: true } : {},
   );
 }

@@ -6,8 +6,14 @@ import {
   Suspense,
   useEffect,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { cn } from "../lib/cn";
+import {
+  loadPierreDiffs,
+  pierreDiffsRevision,
+  subscribePierreDiffs,
+} from "../lib/pierre-diffs-loader";
 
 /** Pierre `File` props subset we drive — the single-file, syntax-highlighted view
  *  (Shiki), the read counterpart of `PatchDiff`. */
@@ -44,7 +50,7 @@ export type PierreFileProps = {
 // Lazy-load `@pierre/diffs/react`'s `File` so Shiki + the worker pool stay off the
 // critical path (and out of an SSR bundle) until a file is actually viewed.
 const LazyFile = lazy(async () => {
-  const mod = (await import("@pierre/diffs/react")) as unknown as { File: FileComponent };
+  const mod = (await loadPierreDiffs()) as { File: FileComponent };
   return { default: mod.File };
 });
 
@@ -65,18 +71,30 @@ export function PierreFile({
   className,
 }: PierreFileProps) {
   const [failed, setFailed] = useState(false);
+  const [ready, setReady] = useState(false);
 
   // Probe the import once so a hard failure (peer missing) shows `fallback`
   // rather than a Suspense boundary that never resolves.
+  const loaderRevision = useSyncExternalStore(
+    subscribePierreDiffs,
+    pierreDiffsRevision,
+    pierreDiffsRevision,
+  );
   useEffect(() => {
     let cancelled = false;
-    void import("@pierre/diffs/react").catch(() => {
-      if (!cancelled) setFailed(true);
-    });
+    setFailed(false);
+    loadPierreDiffs().then(
+      () => {
+        if (!cancelled) setReady(true);
+      },
+      () => {
+        if (!cancelled) setFailed(true);
+      },
+    );
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loaderRevision]);
 
   const name = path.split("/").filter(Boolean).pop() ?? path;
 
@@ -117,11 +135,15 @@ export function PierreFile({
       <Suspense fallback={loading ?? <FileSkeleton />}>
         {/* `cacheKey` keys Pierre's worker-pool highlight cache on path+size so a
             re-select of the same file is instant but an edited file re-highlights. */}
-        <LazyFile
-          file={{ name, contents }}
-          options={options}
-          {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
-        />
+        {ready ? (
+          <LazyFile
+            file={{ name, contents }}
+            options={options}
+            {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
+          />
+        ) : (
+          (loading ?? <FileSkeleton />)
+        )}
       </Suspense>
     </div>
   );

@@ -2,6 +2,10 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MessageTimeline, type ToolCallItem } from "@opengeni/react";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 const commands = [
   "rg --files src",
   "cat package.json",

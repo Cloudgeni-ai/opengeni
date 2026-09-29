@@ -42,6 +42,7 @@ export default defineConfig({
     "src/artifacts-presentation.ts",
     "src/interaction.ts",
     "src/clipboard.ts",
+    "src/diffs.ts",
   ],
   format: ["esm"],
   target: "es2022",
