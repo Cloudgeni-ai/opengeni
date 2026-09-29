@@ -221,7 +221,26 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-schema-contract");
     expect(plan.guards).toContain("migration-test-budgets");
+    expect(plan.guards).toContain("public-api");
+    expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
+  });
+
+  test("public API surface guards follow the API, contracts, SDK, and React graph", () => {
+    for (const path of [
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/index.ts",
+      "apps/api/src/app.ts",
+      "packages/core/src/domain/sessions.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.guards).toContain("public-api");
+      expect(plan.guards).toContain("sdk-compat");
+    }
+    const web = createImpactPlan(["apps/web/src/main.tsx"]);
+    expect(web.guards).not.toContain("public-api");
+    expect(web.guards).not.toContain("sdk-compat");
   });
 
   test("empty and invalid change sets fail closed", () => {

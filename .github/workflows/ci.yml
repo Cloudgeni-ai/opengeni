@@ -381,6 +381,10 @@ jobs:
 
       - name: Run exactly the explained source guards
         timeout-minutes: 16
+        env:
+          # The published-SDK compatibility guard boots the API on real
+          # PostgreSQL; fail closed instead of skipping when docker is missing.
+          OPENGENI_REQUIRE_REAL_DB: "1"
         run: >-
           bun scripts/ci/profile-command.ts
           --name guards

@@ -85,6 +85,17 @@ const GENERATED_FENCES = [
   /^packages\/agent-proto\/scripts\/codegen\.sh$/,
   /^packages\/agent-proto\/src\/gen\//,
 ];
+/**
+ * Workspaces whose change can alter the public API surface: the API routes,
+ * the contracts schemas behind them, and the SDK/React packages. Everything the
+ * API depends on reaches this set through `transitiveDependents`.
+ */
+const PUBLIC_API_WORKSPACES = new Set([
+  "@opengeni/api-router",
+  "@opengeni/contracts",
+  "@opengeni/react",
+  "@opengeni/sdk",
+]);
 const MIGRATION_FENCES = [/^packages\/db\/drizzle\//, /^packages\/db\/src\/migrate\.ts$/];
 const DOC_PATTERN = /^(?:docs\/|[^/]+\.md$)/;
 
@@ -645,6 +656,10 @@ function fullPlan(
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
+      // The public API surface snapshot and the published-SDK compatibility
+      // run (docs/design/api-compatibility-policy.md).
+      "public-api",
+      "sdk-compat",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -851,6 +866,9 @@ export function createImpactPlan(
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
     guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");
+  }
+  if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
+    guards.push("public-api", "sdk-compat");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");
