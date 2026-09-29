@@ -68,6 +68,10 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 | `status-running` | Amber: Running, Syncing |
 | `danger` | Red: Failed, Expired, destructive actions |
 
+**Titles are never grey.** Every title, heading, row title, notice title, empty-state title,
+card title, form label and legend is `fg`. `fg-muted` and `fg-subtle` are only for descriptions,
+meta, placeholders and counts.
+
 The palette is neutral grey everywhere (no blue or slate tint). Color appears only in the
 primary button's teal wash, the soft teal/peach glow and the status hues.
 
@@ -131,7 +135,8 @@ Inter Variable with `cv11 ss01 ss03`; JetBrains Mono for IDs, code and key prefi
 | Page title, detail page title | 20 / 28 | 600 | -0.5px tracking |
 | Dialog title | 18 / 26 | 600 | -0.25px |
 | Section heading | 16 / 24 | 600 | -0.2px; one step above row titles so a section never reads as a setting |
-| Row title, tab, nav, button, label | 14 / 20 | 500 | |
+| Row title, tab, button, label | 14 / 20 | 500 | `fg` |
+| Rail and settings-rail items, session titles | 14 / 20 | 400 | `fg-label`; the active item is marked by its fill and bar, not by weight |
 | Body, page subtitle, meta line under a detail title | 14 / 20 | 400 | `fg-muted` |
 | Description, help | 12 / 18 | 400 | `fg-muted`, 2-line clamp in rows |
 | Meta, chip, count | 11 / 16 | 500 | `fg-subtle` or a tone |
@@ -150,8 +155,15 @@ opacity-muted text.
   back link and title sit where the detail page puts them.
 - Header rhythm: title top 24, subtitle +4, hairline 16 below; tabs 44px tall; first section 44
   below the tab rule.
-- Sections: heading to description 4, to content 12. Between sections one hairline with 24 above
-  and below. No boxes around sections.
+- Sections: heading to description 4, to content 12. **In settings (workspace and
+  organization), every section is a grouped card**: the heading and description sit outside,
+  above; the rows sit in one card (1px `border`, radius 14, `surface`, 20px side gutter, 4px top
+  and bottom) split by inset hairlines, and sections are 32px apart with no rule between them. A
+  resource list (people, API keys) that is a page's content is itself the card. A Notice among
+  the rows loses its own box (never a card in a card); a section whose rows render nothing shows
+  no empty card. The settings shell sets this (`SectionVariantProvider variant="group"`); pages
+  don't choose it. Outside settings, sections stay open: one hairline with 24 above and below,
+  no boxes.
 - Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 56-64px (32px
   tile, one column, hairline dividers, for things you own). A short list of accounts on a settings
   page may use the 40px tile. Inside an open section a resource list is `flush`: tiles and titles
@@ -166,7 +178,7 @@ opacity-muted text.
   `shadow-lg`. Menus: `shadow-md`.
 - Focus: 2px ring in brand (neutral grey) at 55%, 2px offset. Motion: 120ms, color and opacity
   only.
-- Rail: 240px in every mode, on the rail glow. Nav item 32px, radius 10, 16px icon, 14/500
+- Rail: 240px in every mode, on the rail glow. Nav item 32px, radius 10, 16px icon, 14/400
   `fg-label` (icon and text alike); active = `surface-2` + `fg` + a 2x16px brand bar. Session
   titles and the "Sessions" heading are `fg-label` too; only true meta (timestamps, counts, "Show
   2 more", the empty note) is `fg-muted` or `fg-subtle`. The open session row is a selected row:
@@ -372,7 +384,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | --- | --- |
 | Page header | Icon on main-rail pages only; settings pages drop the icon because the settings rail gives context. |
 | Navigation | Settings swaps the rail for the settings rail (240px, grouped, icons) with a back link that restores the main rail. No settings sub-nav inside the content. |
-| Section | Open section: 16px title (one step above the 14px row titles), 12px description, rows below, one hairline between sections, no box. |
+| Section | 16px title (one step above the 14px row titles), 12px description. In settings the rows below sit in one grouped card; elsewhere they sit open with one hairline between sections. |
 | Tabs and toolbar | Underline tabs; search, filter and the primary action in a toolbar that keeps its shape. Status filters are not a second tab row. |
 | List row | Divided resource row (56-64px, 32px tile, one meta line) for things you own; the catalog row (76px, 40px tile, 2 columns) for discovery. Same tile, type and hover. |
 | Detail | **Detail page** (section 8). No side sheets. Expand in place only for one level of secondary options. |
