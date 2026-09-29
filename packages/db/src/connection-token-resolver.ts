@@ -139,13 +139,6 @@ export type ResolveConnectionCredentialResult =
       resource?: string;
       selectedResources?: McpConnectionResourceScope[];
       authorizationUrl?: string;
-      /**
-       * Internal diagnosis only; never published on the wire. Set when an
-       * active non-OAuth Connection exists but its stored bundle carries no
-       * usable `headers`/`placements`, so "refresh" or "connect an account"
-       * would mislead the caller about the actual fix.
-       */
-      detail?: "invalid_credential";
     };
 type AuthNeededReason = Extract<
   ResolveConnectionCredentialResult,
@@ -548,9 +541,6 @@ export function buildConnectionTokenResolver(
       return {
         status: "auth_needed",
         reason: material.status === "unsupported" ? "unsupported_auth" : "refresh_failed",
-        ...(material.status === "invalid" && cred.kind !== "oauth2"
-          ? { detail: "invalid_credential" as const }
-          : {}),
         providerDomain: ref.providerDomain,
         ...(ref.provider ? { provider: ref.provider } : {}),
         connectionId: cred.id,
