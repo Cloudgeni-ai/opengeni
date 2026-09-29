@@ -2,11 +2,13 @@
 name: opengeni-client
 audience: integration-agent
 description: >-
-  Integrate OpenGeni capabilities into an external product, website, backend,
-  CLI, or automation. Use for discovery, connecting repositories and resources,
-  SDK/API and React choices, implementation, verification, and handoff against
-  a managed, self-hosted, or local OpenGeni deployment. Not for changing
-  OpenGeni internals or mounting its runtime inside the customer's process.
+  Integrate OpenGeni into an external product, website, backend, CLI, or
+  automation. Defaults to embedding the full React conversation behind the
+  packaged SDK session proxy. Use for discovery, connecting repositories and
+  resources, SDK/API and React choices, implementation, verification, and
+  handoff against a managed, self-hosted, or local OpenGeni deployment. Not for
+  changing OpenGeni internals or mounting its runtime inside the customer's
+  process.
 ---
 
 # OpenGeni Client
@@ -14,10 +16,6 @@ description: >-
 Use this skill when a customer's product and OpenGeni remain separate systems.
 That is the normal integration shape: the product owns its users and business
 UI, while a standalone OpenGeni deployment owns agent sessions and execution.
-
-Do not interpret "embed" as "move OpenGeni into the product process." Advanced
-in-process router/core embedding is a separate infrastructure choice. Route that
-work to the repo-maintainer `opengeni` skill and `docs/embedding.md`.
 
 Do not confuse two meanings of "skill": this file teaches a customer's coding
 agent how to integrate OpenGeni; session `skills` are runtime capabilities or
@@ -68,126 +66,115 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 - This Skill guides an implementation agent. Never copy it into the runtime
   Skills of the customer-facing agent.
 
-## Choose the product experience before the transport
+## Default: the full conversation behind a packaged proxy
 
-Read [Product shapes and UI](references/product-shapes-and-ui.md) when adding
-or changing a user-facing surface. Preserve a suitable existing interface;
-for new React chat, evaluate the packaged components and headless hooks before
-writing replacements. The chat facade below serves compatible/custom clients;
-packaged React conversation components use the normal session SDK and authenticated
-proxy routes. Choose the combination that fits the product, not the shortest snippet.
-
-Read [Integration configuration and verification](references/runtime-profile-and-verification.md)
-when defining agent behavior or verifying delivery. Use representative product
-questions to check useful answers and actual tool execution, not just connectivity.
-
-## Chat facade: `@opengeni/sdk/chat`
-
-When using `user`, first provision that user's approved workspace membership
-through the explicit onboarding flow in `references/external-users-and-connect.md`.
-The facade uses `asUser()` and never grants or restores membership on a chat
-request. An existing tenant is not proof that this user belongs to it. For shared
-conversations use the same OpenGeni session ID; identity changes authority, not
-the conversation address. Use `chatBySessionId` to reopen historical sessions
-whose IDs were derived with the old user-namespaced helper.
-
-Use this when the chosen frontend speaks one of the supported chat protocols
-and OpenGeni should sit behind it. Install, keep the organization API key on the
-server, and put one handler behind the chat endpoint:
-
-```bash
-bun add @opengeni/sdk
-```
+Default to OpenGeni's complete conversation experience: `@opengeni/react`'s
+`SessionConversation` plus `@opengeni/react/compiled.css` (brand it with
+`--og-*` tokens), backed by the normal session SDK through
+`createSessionProxyHandler`, a tenant/user-scoped same-origin proxy on the
+product server. It already provides streaming, replay, queue, steer, approvals,
+human input, attachments, and pause/resume. Deviate only when the product needs
+a materially different interaction model, a non-React frontend, or compute
+surfaces, and record why. Verify exact props and options against the installed
+package versions.
 
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+// Server only: the organization API key never reaches the browser.
+import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
 
-const og = new OpenGeni({
-  apiKey: process.env.OPENGENI_API_KEY!,
-  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+const og = new OpenGeniClient({ baseUrl: OPENGENI_URL, apiKey: OPENGENI_API_KEY });
+const source = "acme-app"; // stable external-identity namespace
+
+// 1. Onboarding, once per tenant and per admitted user. Persist the workspace id;
+//    store operationId before calling so retries are safe.
+const { workspace } = await og.ensureWorkspace({
+  accountId: OPENGENI_ORGANIZATION_ID, externalSource: source,
+  externalId: tenant.id, name: tenant.name,
+});
+await og.addExternalWorkspaceMember(workspace.id, {
+  identity: { externalId: user.id, source },
+  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control",
+    "files:upload", "files:read"],
+  operationId,
 });
 
-export const POST = createChatHandler(og, {
-  // Your auth hook. Tenant and user come from the authenticated request, never the body.
+// 2. The server creates sessions: explicit tools, stable idempotency key.
+const session = await og.asUser(user.id, { source }).createSession(workspace.id, {
+  initialMessage: `Help me with ticket ${ticket.id}`,
+  idempotencyKey: `ticket:${ticket.id}:${user.id}`,
+  skills: productSkills, // product-owned, inline
+  tools: [{ kind: "mcp", id: "acme" }], // explicit minimal selection
+  firstPartyMcpTools: [],
+});
+
+// 3. Mount at /api/opengeni/* (Next.js route handler, Hono, Bun.serve, workers).
+export const handler = createSessionProxyHandler(og, {
   resolve: async (request) => {
-    const me = await authenticate(request);
-    return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
+    const me = await authenticate(request); // the product's own session check
+    return me
+      ? { workspaceId: me.openGeniWorkspaceId, user: me.id, source }
+      : new Response("Unauthorized", { status: 401 });
   },
-  // format: "vercel" keeps an existing useChat client; "openai-chat" / "openai-responses"
-  // keep an OpenAI-shaped client. The default streams native chunks for custom clients.
+  authorizeMutation: verifyCsrf, // the product's existing CSRF policy
 });
-
-// Server-side use without an endpoint:
-const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
-const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
 ```
 
-Browser: use a custom or compatible frontend for the backend chat handler.
-For native OpenGeni React UI, install `@opengeni/react` and use
-`SessionConversation` or compose `MessageTimeline` and `ChatComposer` with
-the normal SDK and authenticated session routes. Reset private UI state and cancel old
-requests when the authenticated user or tenant changes. Every customer gets one workspace (`tenant`), every
-conversation one deterministic session, and each session picks its own
-isolation. Conversation IDs are independent of the acting user; ordinary API
-authorization decides who can use the same shared conversation. Without a `user`,
-`resolve` must return the `conversation` itself. The Vercel and OpenAI adapters
-send only the latest user message and import earlier messages once as context
-on the first message; afterwards OpenGeni owns the history.
+```tsx
+// Browser: the unmodified SDK client, pointed at the mount.
+import { OpenGeniClient } from "@opengeni/sdk";
+import { SessionConversation } from "@opengeni/react";
+import "@opengeni/react/compiled.css";
 
-| Scenario | `agentAccess` | `memory` |
-| --- | --- | --- |
-| Support desk: agent confined to its chat tree | `"session"` (default) | `false` (default) |
-| Agents restricted to their canonical user's chats | `"user"` with `asUser()` | `"user"` |
-| A team collaborating across chats | `"workspace"` | `"workspace"` |
-| Any of the above with Knowledge authoring initially Off | any | `false` |
+const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
+<SessionConversation client={client} workspaceId={workspaceId} sessionId={session.id} />;
+```
 
-`agentAccess` is enforced in the server-side session-authorization seam for
-agents as outbound task scope: own tree, same canonical user, or workspace.
-A narrow target remains reachable by an authorized broad coordinator; target
-private visibility and normal permissions still apply. `asUser()` establishes
-canonical authority, not a second end-user label. Graduate to `og.client`
-(`OpenGeniClient`) on the same `chat.sessionId` when the product needs files,
-tools, approval policies, forks, or realtime voice. The
-`examples/chat-quickstart` directory provides a backend-only server example.
+The proxy calls `resolve` on every request, acts only through `asUser` (never
+the key's service authority), rejects any other workspace, and serves only the
+conversation's native routes. Browser session creation stays off unless the
+server supplies `createSession`, which receives only `initialMessage` and
+`idempotencyKey` and returns the complete request. Use `authorizeSession` for
+product-level session checks and `modelSelection: false` to lock model choice.
+Never copy the raw passthrough in `examples/northstar-support`: it forwards any
+workspace path with the organization key's service authority and no user
+identity. Reset UI state when the authenticated user or tenant changes.
 
-## Choose The Integration Shape First
+## Deliberate deviations
 
-Pick the smallest surface that satisfies the product:
+Choose one only for its stated reason; read
+[Product shapes and UI](references/product-shapes-and-ui.md) first.
 
-1. **Stock OpenGeni handoff** — link or deep-link into the OpenGeni web app.
-   The product keeps no agent UI.
-2. **Headless product integration** — the product backend uses
-   `@opengeni/sdk`; the product renders its own UI and exposes tenant-scoped,
-   same-origin routes to its browser or mobile client.
-3. **React session integration** — compose `@opengeni/react/session` hooks and
-   pure projections into the product's UI. Add styled subpaths only for the
-   surfaces the product wants.
-4. **OpenGeni-rendered React experience** — mount the packaged composer,
-   timeline, realtime, or session chrome and import
-   `@opengeni/react/compiled.css` once. No Tailwind setup or source scan is
-   required. Override `--og-*` tokens only when branding is wanted.
-5. **Workbench integration** — mount the optional Changes/Files/Terminal/Desktop
-   workspace when the product genuinely exposes agent compute. It has optional
-   heavy peers and is not required for ordinary chat/session integration.
+- **Headless React hooks** (`@opengeni/react/session`): the product needs a
+  materially different interaction model but still wants canonical event,
+  queue, composer, approval, and human-input behavior.
+- **SDK only**: a non-React frontend (Svelte, Vue, native mobile), a CLI, or
+  backend automation. Keep the SDK on a product backend route.
+- **Workbench**: the product genuinely exposes agent compute (changes, files,
+  terminal, desktop). It has optional heavy peers.
+- **Chat facade fallback** (`@opengeni/sdk/chat`): the product already has a
+  chat UI speaking Vercel `useChat` or an OpenAI-shaped protocol, or a
+  server-side bot needs `og.chat(...).send()`. It is a text-only projection:
+  tool outputs are dropped, with no files, artifacts, images, goals, queue, or
+  steer UI, and reopening restores only text. See
+  [Chat facade fallback](references/chat-facade-fallback.md).
+- **In-process embedding** of the OpenGeni runtime is infrastructure work; see
+  the repo-maintainer `opengeni` skill and `docs/embedding.md`.
 
-Read `references/product-integration-shapes.md` before designing the boundary.
-Read `references/api-workflows.md` for session, upload, retry, repository,
-machine, and schedule patterns.
+Read [Integration configuration and verification](references/runtime-profile-and-verification.md)
+when defining agent behavior or verifying delivery; check useful answers and
+actual tool execution with representative product questions, not just
+connectivity. For deeper decisions, read selectively:
 
-For deeper implementation decisions, read selectively:
-
+- [Product integration shapes](references/product-integration-shapes.md) and
+  [API workflows](references/api-workflows.md)
 - [Discovery and autonomy](references/discovery-and-autonomy.md)
 - [Isolation and authorization](references/isolation-and-authorization.md)
-- [Product shapes and UI](references/product-shapes-and-ui.md)
 - [Data tools and credentials](references/data-tools-and-credentials.md)
-- [Integration configuration and verification](references/runtime-profile-and-verification.md)
 - [External users and embedded connection setup](references/external-users-and-connect.md)
 
-This tree is the canonical developer guide for product integration. It does not define a runtime
-profile API, schedule Skill fields, or a new registry. Any references to an
-integration's "runtime profile" mean configuration owned by the customer's code,
-not a new OpenGeni resource. Use this Skill for a coding session, not an end-user
-runtime session.
+This tree is the canonical developer guide for product integration. It does not
+define a runtime profile API, schedule Skill fields, or a new registry; an
+integration's "runtime profile" is configuration owned by the customer's code.
 
 ## Choose The Credential
 
@@ -208,8 +195,8 @@ runtime session.
   workspace/session server-side, and expose only the routes that product needs.
 - Use `@opengeni/sdk` instead of reconstructing event streaming, upload signing,
   retries, or wire types by hand.
-- Use `proxySessionEventStream` for a same-origin browser SSE route. Structural
-  React client types let a host implement only the methods its mounted hooks use.
+- Use `createSessionProxyHandler` for the React conversation, or
+  `proxySessionEventStream` inside a custom same-origin SSE route.
 - Direct browser access is valid only when the deployment's normal browser auth
   or an explicitly accepted bearer/CORS design makes it safe. Never ship a
   privileged shared API key in a browser bundle.
@@ -310,8 +297,8 @@ agent instruction prefix.
 6. Attach only canonical resources and an explicit minimal tool selection the
    user may use. Omitting tool selections inherits workspace/deployment
    defaults, including first-party workspace and cross-session capabilities.
-7. Stream/replay session events through the SDK; tolerate unknown additive event
-   types.
+7. Serve the browser through the packaged proxy, or stream/replay through the
+   SDK in a custom route; tolerate unknown additive event types.
 8. Send visible text separately from `modelContext`.
 9. Use the SDK upload helper; it owns begin, signed storage PUT, and completion.
 10. Surface approvals, human-input requests, queue state, errors, credit limits,

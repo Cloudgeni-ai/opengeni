@@ -62,10 +62,10 @@ for await (const event of client.streamEvents(workspace.id, created.id)) {
 }
 ```
 
-This code belongs on the product server, not in a browser bundle. For a browser
-timeline, expose a tenant-scoped same-origin route and use the SDK's
-`proxySessionEventStream` helper. Authenticate the product user and resolve the
-allowed workspace/session before opening the upstream stream.
+This code belongs on the product server, not in a browser bundle. For the
+browser, mount `createSessionProxyHandler` (the default conversation backend) or,
+in a custom route, the SDK's `proxySessionEventStream` helper. Authenticate the
+product user and resolve the allowed workspace/session before any upstream call.
 
 `ensureWorkspace` maps through `PUT /v1/workspaces/external`. Use a stable
 external source/id pair and persist the returned opaque id. The returned
