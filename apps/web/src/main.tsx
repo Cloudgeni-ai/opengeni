@@ -4,6 +4,7 @@ import "./lib/signup-attribution-boot";
 import { AppearanceProvider } from "./lib/appearance";
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { App, appDestinationRoutePattern, appRoutePattern } from "./App";
 import { apiBaseUrl, bundleDeploymentRevision } from "./api";
 import {
@@ -25,6 +26,8 @@ import {
 import "./styles.css";
 
 retainIdentityLinkContinuation(window);
+// The console ships the optional @pierre/diffs peer for highlighted diffs.
+enablePierreDiffs();
 // Content-free operational error counter; see lib/client-error-reporting.ts.
 setClientErrorReporter(
   createClientErrorReporter({

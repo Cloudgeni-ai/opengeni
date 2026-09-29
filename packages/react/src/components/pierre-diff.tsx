@@ -10,6 +10,7 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { gitFileDiffToPatch } from "../lib/git-patch";
+import { loadPierreDiffs } from "../lib/pierre-diffs-loader";
 
 /** Pierre `PatchDiff` props subset we drive. */
 type PatchDiffComponent = ComponentType<{
@@ -50,10 +51,10 @@ export type PierreDiffProps = {
 
 // Lazy-load `@pierre/diffs/react` so Shiki + the worker pool stay off the
 // critical path (and out of an SSR bundle) until a diff is actually shown. The
-// dynamic specifier is static so the bundler can resolve + chunk it. If the
-// optional peer is absent the import rejects and we render `fallback`.
+// peer is loaded only through the host-registered loader (see
+// `enablePierreDiffs`); without one the load rejects and we render `fallback`.
 const LazyPatchDiff = lazy(async () => {
-  const mod = (await import("@pierre/diffs/react")) as unknown as {
+  const mod = (await loadPierreDiffs()) as {
     PatchDiff: PatchDiffComponent;
   };
   return { default: mod.PatchDiff };
@@ -78,6 +79,7 @@ export function PierreDiff({
   className,
 }: PierreDiffProps) {
   const [failed, setFailed] = useState(false);
+  const [ready, setReady] = useState(false);
   const [forcedColors, setForcedColors] = useState(false);
 
   // Pierre's rich renderer distinguishes additions/deletions primarily through
@@ -98,9 +100,16 @@ export function PierreDiff({
   useEffect(() => {
     if (plain) return;
     let cancelled = false;
-    void import("@pierre/diffs/react").catch(() => {
-      if (!cancelled) setFailed(true);
-    });
+    // Mount the lazy renderer only after the peer loaded, so a missing peer
+    // never poisons React.lazy's cached result for the rest of the page.
+    loadPierreDiffs().then(
+      () => {
+        if (!cancelled) setReady(true);
+      },
+      () => {
+        if (!cancelled) setFailed(true);
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -168,15 +177,17 @@ export function PierreDiff({
   return (
     <div className={cn("min-w-0", className)} data-opengeni-pierre-diff style={pierreVars}>
       <Suspense fallback={loading ?? <DiffSkeleton />}>
-        {diff.map((file) => (
-          <div key={file.path} className="mb-2">
-            <LazyPatchDiff
-              patch={gitFileDiffToPatch(file)}
-              options={options}
-              {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
-            />
-          </div>
-        ))}
+        {ready
+          ? diff.map((file) => (
+              <div key={file.path} className="mb-2">
+                <LazyPatchDiff
+                  patch={gitFileDiffToPatch(file)}
+                  options={options}
+                  {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
+                />
+              </div>
+            ))
+          : (loading ?? <DiffSkeleton />)}
       </Suspense>
     </div>
   );

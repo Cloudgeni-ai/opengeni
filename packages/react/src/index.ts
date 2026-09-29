@@ -569,6 +569,9 @@ export type { WorkbenchChangesProps } from "./components/workbench-changes";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
 export { PierreDiff } from "./components/pierre-diff";
+// Opt in to the optional `@pierre/diffs` peer with `enablePierreDiffs()` from
+// `@opengeni/react/diffs`; the root entry never names the peer.
+export { registerPierreDiffs, type PierreDiffsLoader } from "./lib/pierre-diffs-loader";
 export type { PierreDiffProps } from "./components/pierre-diff";
 export { PierreFile } from "./components/pierre-file";
 export type { PierreFileProps } from "./components/pierre-file";
