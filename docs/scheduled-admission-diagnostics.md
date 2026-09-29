@@ -25,7 +25,7 @@ always be distinguished from an invisible one; the receipt preserves that bounda
 ## Admission refusals
 
 Every other occurrence the scheduler refuses before accepting execution is a
-run receipt too (migration `0538_scheduled_admission_refusals.sql`, rolling),
+run receipt too (migration `0539_scheduled_admission_refusals.sql`, rolling),
 never an activity retried to exhaustion with no run and never a silently
 dropped occurrence. The run carries `admissionRefusal`
 (`{ "version": 1, "reason", "retryable" }`) with `error` equal to `reason`:

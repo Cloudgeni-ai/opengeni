@@ -18132,7 +18132,7 @@ export type ScheduledTaskAdmissionRefusalReason =
 
 /**
  * Record a refused occurrence as an immutable run receipt under its producer
- * identity (migration 0538). A transient refusal is `skipped`, a terminal one
+ * identity (migration 0539). A transient refusal is `skipped`, a terminal one
  * `failed`; neither carries accepted execution. An existing receipt for the
  * producer wins, so redelivery never duplicates a run: the caller replays it.
  */

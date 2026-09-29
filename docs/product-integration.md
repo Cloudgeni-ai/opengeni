@@ -136,8 +136,9 @@ The permissions above cover the conversation; drop `files:*` without
 attachments. Membership is granted only by explicit onboarding: the proxy and
 `asUser` never grant or restore it, and without it the API answers 403. Pass an
 `operationId` you store first to make onboarding retries safe; see
-[external membership operations](external-membership-operations.md). To map
-tenants lazily, pass the `OpenGeni` facade from `@opengeni/sdk/chat` instead of
+[external membership operations](external-membership-operations.md). To change
+a member's permissions later, call `updateExternalWorkspaceMember` with a new
+`operationId` instead of removing and re-adding them. To map tenants lazily, pass the `OpenGeni` facade from `@opengeni/sdk/chat` instead of
 a client and return `{ tenant, user }` from `resolve`.
 
 ### Pick the privacy and memory of each session

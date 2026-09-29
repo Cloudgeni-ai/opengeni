@@ -64,7 +64,7 @@ member must be confirmed again. Nothing is cancelled, interrupted, or torn down:
 sessions, turns, attempts, schedules, and processes keep running.
 
 The receipt ledger, organization lock, and replay contract are those of a grant
-(migration 0537 adds the `update` action). Retain the exact body and retry it
+(migration 0540 adds the `update` action). Retain the exact body and retry it
 unchanged after response loss; a replay returns the original receipt even after a
 later change, which is not proof of current access. Reusing an operation ID with a
 different body conflicts.
