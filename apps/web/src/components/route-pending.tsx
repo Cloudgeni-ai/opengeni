@@ -1,7 +1,7 @@
 import { LoadingPanel } from "@/components/common";
 
 export function RoutePending() {
-  return <LoadingPanel label="Loading page" />;
+  return <LoadingPanel />;
 }
 
 /**

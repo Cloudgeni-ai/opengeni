@@ -357,11 +357,17 @@ describe("signed-out browser account recovery", () => {
       await flush();
 
       expect(container.querySelector('[data-tenant-surface="true"]')).toBeNull();
-      expect(container.textContent).toContain("Loading browser accounts");
+      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+      // The shared loading indicator is portaled outside the gated tenant tree.
+      expect(
+        document.body.querySelector('[data-page-loading][role="status"][aria-label="Loading"]'),
+      ).not.toBeNull();
 
       await act(async () => releaseSelection());
       await flush();
       expect(container.querySelector('[data-tenant-surface="true"]')).not.toBeNull();
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+      expect(document.body.querySelector("[data-page-loading]")).toBeNull();
     } finally {
       releaseSelection();
       await act(async () => root.unmount());

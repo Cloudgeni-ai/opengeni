@@ -693,6 +693,7 @@ export {
   loadIntegrationOAuthPendingState,
   storeIntegrationOAuthPendingState,
 } from "./integration-oauth-pending-states";
+export * from "./workspace-integrations";
 export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,

@@ -27,6 +27,7 @@ const testFiles =
         "./test/e2e/restored-attachment-preview.browser.e2e.ts",
         "./test/e2e/chat-media-entry.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
+        "./test/e2e/session-loading-startup.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
         "./test/e2e/project-rename.browser.e2e.ts",
         "./test/e2e/session-sidebar.browser.e2e.ts",

@@ -4749,6 +4749,8 @@ export type WorkspaceSettings = {
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
   /** Exact capability selection inherited by new top-level sessions. */
   sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  /** Allowlisted sandbox image for new managed boxes; absent uses the deployment image. */
+  defaultSandboxImage?: string | null | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4858,6 +4860,8 @@ export type UpdateWorkspaceSettingsRequest = {
   codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
+  /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
+  defaultSandboxImage?: string | null | undefined;
   [key: string]: unknown;
 };
 

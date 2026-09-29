@@ -3986,6 +3986,9 @@ export type PrepareToolsOptions = {
   // Immutable human authority used only for subject-owned connection lookup.
   // This is intentionally separate from the worker's first-party MCP identity.
   credentialSubjectId?: string;
+  // The turn's frozen causal human, advertised to MCP servers in the
+  // `_meta.opengeni` identity of every tools/call. Informational, never authority.
+  initiatingHumanSubjectId?: string | null;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
@@ -4909,7 +4912,13 @@ async function prepareAttemptToolEnvironment(
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
-  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
+  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry, {
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    turnId: scope.turnId,
+    attemptId: scope.attemptId,
+    initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
+  });
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
       ...prepared.definitions.map((definition) => ({
@@ -5148,9 +5157,25 @@ async function prepareWorkspaceToolGatewayEnvironment(
   });
 }
 
+/**
+ * Identity OpenGeni advertises to MCP servers as `_meta.opengeni` on every
+ * tools/call, so a server can correlate the call with a workspace, session,
+ * turn, and causal human. It is trusted worker scope, set after caller
+ * transport metadata so a caller cannot replace it, and it is informational:
+ * a server must still authorize with the connection's own credential.
+ */
+export type McpCallIdentity = {
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  initiatingHumanSubjectId: string | null;
+};
+
 async function prepareToolGatewayDefinitionsFromServers(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+  callIdentity?: McpCallIdentity,
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: ToolGatewayDefinition[];
@@ -5209,7 +5234,7 @@ async function prepareToolGatewayDefinitionsFromServers(
               await server.executeCatalogTool(
                 toolName,
                 args,
-                attemptToolCallMeta(server.registryId, context),
+                attemptToolCallMeta(server.registryId, context, callIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                 },
@@ -5257,6 +5282,7 @@ export function attemptToolCallMeta(
     caller: Pick<ToolGatewayCaller, "kind">;
     transportMeta?: Record<string, unknown> | null;
   },
+  callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
   const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
     context.transportMeta ?? {};
@@ -5264,6 +5290,8 @@ export function attemptToolCallMeta(
     ...transportMeta,
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
+    // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
+    ...(callIdentity ? { opengeni: { ...callIdentity } } : {}),
   };
 }
 

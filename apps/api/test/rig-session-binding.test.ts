@@ -17,7 +17,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
-import { createSessionForRequest } from "@opengeni/core";
+import { createSessionForRequest, createValidatedScheduledTask } from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // M3 rig session binding, driven through the REAL createSessionForRequest
@@ -256,6 +256,45 @@ describe("M3 rig binding: freeze at create", () => {
     );
     expect(rigless.rigId).toBeNull();
     expect(rigless.rigVersionId).toBeNull();
+  }, 60_000);
+
+  test("a new-session scheduled task freezes the workspace default rig when rigId is omitted", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const def = await seedRig(accountId, workspaceId, "scheduled-default-rig");
+    const other = await seedRig(accountId, workspaceId, "scheduled-other-rig");
+    await admin`update workspaces set default_rig_id = ${def.rigId} where id = ${workspaceId}`;
+    const create = async (rigId?: string | null) =>
+      await createValidatedScheduledTask({
+        settings,
+        db,
+        objectStorage: null as never,
+        grant: {
+          ...grant(accountId, workspaceId),
+          permissions: ["sessions:create", "sessions:read", "scheduled_tasks:manage"],
+        } as AccessGrant,
+        payload: {
+          name: `nightly ${String(rigId)}`,
+          schedule: { type: "interval", everySeconds: 86400 },
+          runMode: "new_session_per_run",
+          overlapPolicy: "allow_concurrent",
+          status: "active",
+          metadata: {},
+          agentConfig: {
+            prompt: "Summarize yesterday.",
+            resources: [],
+            tools: [],
+            metadata: {},
+            model: "scripted-model",
+            sandboxBackend: "none",
+          },
+          ...(rigId !== undefined ? { rigId } : {}),
+        } as never,
+        toolsProvided: true,
+      });
+    expect((await create()).rigId).toBe(def.rigId);
+    expect((await create(null)).rigId).toBeNull();
+    expect((await create(other.rigId)).rigId).toBe(other.rigId);
   }, 60_000);
 
   test("a session with no rig and no workspace default is rig-less (both null)", async () => {

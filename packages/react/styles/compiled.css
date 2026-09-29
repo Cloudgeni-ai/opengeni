@@ -1423,6 +1423,9 @@
 :where(.og-root).top-10,:where(.og-root) .top-10 {
     top: calc(var(--spacing) * 10);
   }
+:where(.og-root).top-\[var\(--og-work-header-top\,0px\)\],:where(.og-root) .top-\[var\(--og-work-header-top\,0px\)\] {
+    top: var(--og-work-header-top,0px);
+  }
 :where(.og-root).-right-0\.5,:where(.og-root) .-right-0\.5 {
     right: calc(var(--spacing) * -0.5);
   }
@@ -2082,6 +2085,9 @@
   }
 :where(.og-root).max-w-\[240px\],:where(.og-root) .max-w-\[240px\] {
     max-width: 240px;
+  }
+:where(.og-root).max-w-\[calc\(50\%-0\.5rem\)\],:where(.og-root) .max-w-\[calc\(50\%-0\.5rem\)\] {
+    max-width: calc(50% - 0.5rem);
   }
 :where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
     max-width: calc(100% - 1.5rem);
@@ -3422,23 +3428,14 @@
 :where(.og-root).pt-16,:where(.og-root) .pt-16 {
     padding-top: calc(var(--spacing) * 16);
   }
-:where(.og-root).pr-0\.5,:where(.og-root) .pr-0\.5 {
-    padding-right: calc(var(--spacing) * 0.5);
-  }
 :where(.og-root).pr-1,:where(.og-root) .pr-1 {
     padding-right: calc(var(--spacing) * 1);
-  }
-:where(.og-root).pr-3,:where(.og-root) .pr-3 {
-    padding-right: calc(var(--spacing) * 3);
   }
 :where(.og-root).pr-4,:where(.og-root) .pr-4 {
     padding-right: calc(var(--spacing) * 4);
   }
 :where(.og-root).pr-6,:where(.og-root) .pr-6 {
     padding-right: calc(var(--spacing) * 6);
-  }
-:where(.og-root).pr-8,:where(.og-root) .pr-8 {
-    padding-right: calc(var(--spacing) * 8);
   }
 :where(.og-root).pb-0\.5,:where(.og-root) .pb-0\.5 {
     padding-bottom: calc(var(--spacing) * 0.5);
@@ -4289,11 +4286,6 @@
 :where(.og-root).group-focus-visible\:bg-og-accent,:where(.og-root) .group-focus-visible\:bg-og-accent {
     &:is(:where(.group):focus-visible *) {
       background-color: var(--og-color-accent);
-    }
-  }
-:where(.og-root).group-focus-visible\:opacity-100,:where(.og-root) .group-focus-visible\:opacity-100 {
-    &:is(:where(.group):focus-visible *) {
-      opacity: 100%;
     }
   }
 :where(.og-root).group-data-\[separator-state\=dragging\]\:bg-og-accent,:where(.og-root) .group-data-\[separator-state\=dragging\]\:bg-og-accent {

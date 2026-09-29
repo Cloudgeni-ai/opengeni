@@ -30,6 +30,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
+const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const CONNECTOR_ACCOUNTS_E2E = "test/e2e/connector-accounts.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
@@ -54,6 +55,26 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("loading/startup is CI-discovered for its web, React, SDK and test-helper dependencies", () => {
+    expect(discoverTestFiles().e2e).toContain(SESSION_LOADING_STARTUP_E2E);
+    expect(usesBrowserRunner(SESSION_LOADING_STARTUP_E2E)).toBe(true);
+    for (const path of [
+      SESSION_LOADING_STARTUP_E2E,
+      "apps/web/src/context.tsx",
+      "apps/web/src/lib/session-startup.ts",
+      "packages/react/src/components/session-status.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(SESSION_LOADING_STARTUP_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_LOADING_STARTUP_E2E);
+    }
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${SESSION_LOADING_STARTUP_E2E}"`,
+    );
+  });
   test("session Skill review follows its web and shared dependencies without widening leaf plans", () => {
     for (const path of [
       SESSION_SKILL_REVIEW_E2E,
@@ -251,6 +272,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
+      SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
@@ -728,6 +750,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
+      SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,

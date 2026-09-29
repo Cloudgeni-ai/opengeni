@@ -1295,6 +1295,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ];
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
+            runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             input,
             catalogSourceSettings,
             db,
