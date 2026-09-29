@@ -483,3 +483,61 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 });
+
+describe("child sessions and the parent's Sandbox Environment and Variable Sets", () => {
+  // A child is created like any other session: nothing about the parent's
+  // environment or Variable Sets is copied. An omitted rigId resolves to the
+  // workspace default and omitted variableSetIds attach none, so the child
+  // lands on its own box. Naming the parent's environment and sets explicitly
+  // reaches them and keeps the shared box.
+  test("omission resolves like a top-level create; explicit ids reach the parent's", async () => {
+    if (!available) return;
+    const bus = new MemoryEventBus();
+    const { accountId, workspaceId } = await freshWorkspace();
+    const credentials = await createVariableSet(db, {
+      accountId,
+      workspaceId,
+      name: "parent-credentials",
+    });
+    const workspaceDefault = await seedRig(accountId, workspaceId, "child-default");
+    const parentRig = await seedRig(accountId, workspaceId, "child-parent-rig");
+    await admin`update workspaces set default_rig_id = ${workspaceDefault.rigId} where id = ${workspaceId}`;
+    const attach: Permission[] = ["variable-sets:attach", "variable-sets:use"];
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, undefined, attach),
+      workspaceId,
+      {
+        initialMessage: "parent",
+        rigId: parentRig.rigId,
+        variableSetIds: [credentials.id],
+        sandboxBackend: "modal",
+      },
+    );
+
+    const omitted = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id, attach),
+      workspaceId,
+      { initialMessage: "child with omitted environment" },
+    );
+    expect(omitted.parentSessionId).toBe(parent.id);
+    expect(omitted.rigId).toBe(workspaceDefault.rigId);
+    expect(omitted.variableSetIds).toEqual([]);
+    expect(omitted.sandboxGroupId).not.toBe(parent.sandboxGroupId);
+
+    const explicit = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id, attach),
+      workspaceId,
+      {
+        initialMessage: "child naming the parent's environment",
+        rigId: parentRig.rigId,
+        variableSetIds: [credentials.id],
+      },
+    );
+    expect(explicit.rigId).toBe(parentRig.rigId);
+    expect(explicit.variableSetIds).toEqual([credentials.id]);
+    expect(explicit.sandboxGroupId).toBe(parent.sandboxGroupId);
+  }, 60_000);
+});

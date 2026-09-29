@@ -6,7 +6,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
-import { resolveSiteSessionOrigin } from "../site-session-origin";
+import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
@@ -364,6 +364,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     observability: deps.observability,
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
+  const withSiteCommandOrigin = <T>(c: Context, workspaceId: string, run: () => Promise<T>) =>
+    withOptionalSiteCommandOrigin(
+      db,
+      workspaceId,
+      c.req.header("x-opengeni-site-id"),
+      c.req.header("x-opengeni-site-version"),
+      run,
+    );
   const ptyIdentity = (pty: SandboxOpenPtySessionRow): SandboxPtyProcessIdentity => ({
     leaseId: pty.leaseId,
     sandboxGroupId: pty.sandboxGroupId,
@@ -3403,28 +3411,30 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
     try {
-      result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-        text: payload.text,
-        annotations: payload.annotations,
-        modelContext: payload.modelContext ?? null,
-        resources: payload.resources,
-        model: payload.model ?? null,
-        reasoningEffort: payload.reasoningEffort ?? null,
-        latencyMode: payload.latencyMode ?? null,
-        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-        connectionAccounts: payload.connectionAccounts,
-        ...(payload.personalResourceAttachment
-          ? { personalResourceAttachment: payload.personalResourceAttachment }
-          : {}),
-        authorization,
-        delivery: "steer",
-        origin: "human",
-        ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
-        ...(payload.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: payload.expectedDraftRevision }
-          : {}),
-        ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-      });
+      result = await withSiteCommandOrigin(c, workspaceId, () =>
+        acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+          text: payload.text,
+          annotations: payload.annotations,
+          modelContext: payload.modelContext ?? null,
+          resources: payload.resources,
+          model: payload.model ?? null,
+          reasoningEffort: payload.reasoningEffort ?? null,
+          latencyMode: payload.latencyMode ?? null,
+          mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+          connectionAccounts: payload.connectionAccounts,
+          ...(payload.personalResourceAttachment
+            ? { personalResourceAttachment: payload.personalResourceAttachment }
+            : {}),
+          authorization,
+          delivery: "steer",
+          origin: "human",
+          ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
+          ...(payload.expectedDraftRevision !== undefined
+            ? { expectedDraftRevision: payload.expectedDraftRevision }
+            : {}),
+          ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+        }),
+      );
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -3446,9 +3456,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
-        authorization,
-      });
+      result = await withSiteCommandOrigin(c, workspaceId, () =>
+        submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
+          authorization,
+        }),
+      );
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -3487,28 +3499,30 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (event.type === "user.message") {
       let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
       try {
-        result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-          text: event.payload.text,
-          annotations: event.payload.annotations,
-          modelContext: event.payload.modelContext ?? null,
-          resources: event.payload.resources ?? [],
-          model: event.payload.model ?? null,
-          reasoningEffort: event.payload.reasoningEffort ?? null,
-          latencyMode: event.payload.latencyMode ?? null,
-          mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
-          connectionAccounts: event.payload.connectionAccounts,
-          ...(event.payload.personalResourceAttachment
-            ? { personalResourceAttachment: event.payload.personalResourceAttachment }
-            : {}),
-          authorization,
-          ...(event.payload.controlEtag !== undefined
-            ? { controlEtag: event.payload.controlEtag }
-            : {}),
-          ...(event.payload.expectedDraftRevision !== undefined
-            ? { expectedDraftRevision: event.payload.expectedDraftRevision }
-            : {}),
-          ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-        });
+        result = await withSiteCommandOrigin(c, workspaceId, () =>
+          acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+            text: event.payload.text,
+            annotations: event.payload.annotations,
+            modelContext: event.payload.modelContext ?? null,
+            resources: event.payload.resources ?? [],
+            model: event.payload.model ?? null,
+            reasoningEffort: event.payload.reasoningEffort ?? null,
+            latencyMode: event.payload.latencyMode ?? null,
+            mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+            connectionAccounts: event.payload.connectionAccounts,
+            ...(event.payload.personalResourceAttachment
+              ? { personalResourceAttachment: event.payload.personalResourceAttachment }
+              : {}),
+            authorization,
+            ...(event.payload.controlEtag !== undefined
+              ? { controlEtag: event.payload.controlEtag }
+              : {}),
+            ...(event.payload.expectedDraftRevision !== undefined
+              ? { expectedDraftRevision: event.payload.expectedDraftRevision }
+              : {}),
+            ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+          }),
+        );
       } catch (error) {
         return commandConflictResponse(c, error);
       }

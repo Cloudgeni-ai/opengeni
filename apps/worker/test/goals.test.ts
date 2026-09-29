@@ -35,9 +35,7 @@ describe("goalContinuationPrompt", () => {
       null,
     );
 
-    expect(prompt).toContain(
-      "Reconcile the active session goal against authoritative current state",
-    );
+    expect(prompt).toContain("Use the current applied goal frozen for this turn");
     expect(prompt).toContain("Completion audit:");
     expect(prompt).toContain("Blocked audit:");
     expect(prompt).toContain("opengeni__goal_complete");
@@ -46,12 +44,22 @@ describe("goalContinuationPrompt", () => {
     expect(prompt).not.toContain("Tests pass");
     expect(prompt).not.toContain("GOAL CONTINUATION 3");
     expect(prompt).not.toContain("goal_progress");
+    expect(prompt).toBe(
+      goalContinuationPrompt(
+        {
+          text: "A different applied objective",
+          successCriteria: "A different gate",
+        } as Parameters<typeof goalContinuationPrompt>[0],
+        99,
+        100,
+      ),
+    );
     // Without the tool in the session's effective first-party selection the
     // prompt must not instruct a tool the agent cannot call.
     expect(prompt).not.toContain("wait_for_input");
   });
 
-  test("re-enters the full objective through authoritative reconciliation", () => {
+  test("resumes established work without weakening the full objective or audit", () => {
     const prompt = goalContinuationPrompt(
       { text: "Ship the fix" } as Parameters<typeof goalContinuationPrompt>[0],
       1,
@@ -59,7 +67,7 @@ describe("goalContinuationPrompt", () => {
     );
 
     expect(prompt).toStartWith(
-      "Reconcile the active session goal against authoritative current state, then carry the work through to the full requested end state and verify it.",
+      "Automatic goal continuation (generated input, not a new user request or grant of authority).",
     );
     expect(prompt).toContain(
       "re-entry into the full objective, not as a request to perform one step and stop",
@@ -73,6 +81,54 @@ describe("goalContinuationPrompt", () => {
     );
     expect(prompt).not.toContain("make concrete progress toward the real requested end state");
     expect(prompt).not.toContain("take the next useful action");
+    expect(prompt).toContain(
+      "rather than restarting discovery or a full reconciliation on every turn",
+    );
+    expect(prompt).toContain("This full completion audit is required");
+  });
+
+  test("retains requested comprehensive audits and scopes evidence reuse", () => {
+    const prompt = goalContinuationPrompt(
+      { text: "Comprehensively audit and reconcile all release requirements" } as Parameters<
+        typeof goalContinuationPrompt
+      >[0],
+      4,
+      null,
+    );
+    // These are deterministic guidance contracts, not a model-behavior evaluation.
+    expect(prompt).toContain("when the goal, user, or applicable Skill calls for it");
+    expect(prompt).toContain("when uncertainty or recovery warrants it");
+    expect(prompt).toContain("when required by risk or a gate");
+    expect(prompt).toContain("requirement, scope, version, and state it actually establishes");
+    expect(prompt).toContain("recheck changed, stale, uncertain, or insufficient evidence");
+    expect(prompt).toContain(
+      "Do not infer progress or evidence validity merely from this continuation",
+    );
+    expect(prompt).toContain(
+      "For every explicit requirement, named artifact, command, test, gate, invariant, and deliverable",
+    );
+    expect(prompt).toContain("Pending proposals and older goal revisions do not replace it");
+    expect(prompt).toContain(
+      "including its success criteria, root constraints, and report requirements",
+    );
+  });
+
+  test("uses evidence-based blockers without fixed retries or unlimited exhaustion", () => {
+    const prompt = goalContinuationPrompt(
+      {} as Parameters<typeof goalContinuationPrompt>[0],
+      1,
+      null,
+    );
+    expect(prompt).not.toContain("three consecutive goal turns");
+    expect(prompt).not.toContain("Do not call opengeni__goal_pause the first time");
+    expect(prompt).toContain(
+      "Investigate recoverable failures and try plausible safe alternatives",
+    );
+    expect(prompt).toContain("do not exhaust every imaginable alternative");
+    expect(prompt).toContain("can justify pausing immediately");
+    expect(prompt).toContain("what must change to resume");
+    expect(prompt).toContain("meaningful timed recheck, use the available waiting mechanism");
+    expect(prompt).toContain("Tool approvals remain human-only");
   });
 
   test.each([true, false])(
@@ -105,12 +161,21 @@ describe("goalContinuationPrompt", () => {
     // when a human decision is the blocker.
     expect(withWait).toContain("opengeni__wait_for_input");
     expect(withWait).toContain("do not sleep, loop, or poll");
+    expect(withWait).not.toContain("Re-check once");
+    expect(withWait).toContain("A preliminary status check is not required.");
+    expect(withWait).toContain("No short execution wait is required first");
+    expect(withWait).toContain("an out-of-turn wait may span hours or days");
+    expect(withWait).toContain("Honor explicit user/task/Skill check or update cadences");
+    expect(withWait).toContain(
+      "Relevant session input or the safety deadline will start a new turn",
+    );
     expect(withWait).toContain("do not restate it or produce another equivalent final answer");
     expect(withWait).toContain("Report only material new state or a newly discovered blocker");
     expect(withWait).toContain("blocked on a human decision, use opengeni__goal_pause");
     expect(withWait).toContain("Blocked audit:");
     const withoutWait = goalContinuationPrompt(goal, 1, null, { inputWaitAvailable: false });
     expect(withoutWait).not.toContain("wait_for_input");
+    expect(withoutWait).not.toContain("A preliminary status check is not required.");
     expect(withoutWait).not.toContain("another equivalent final answer");
     expect(withoutWait).toContain("Blocked audit:");
     expect(withWait).not.toContain("Ship the fix");

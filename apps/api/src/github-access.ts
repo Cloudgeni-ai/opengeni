@@ -1,8 +1,10 @@
-import type {
-  GitHubAppRepositoryBranchPage,
-  GitHubBindingStatus,
-  GitHubInstallationBinding,
-  GitHubRepository,
+import {
+  defaultRepositoryMountPath,
+  type GitHubAppRepositoryBranchPage,
+  type GitHubBindingStatus,
+  type GitHubInstallationBinding,
+  type GitHubRepository,
+  type RepositoryResourceRef,
 } from "@opengeni/contracts";
 import {
   GitHubRepositoryBranchesResponse as GitHubRepositoryBranchesResponseSchema,
@@ -198,6 +200,30 @@ export async function listWorkspaceGitHubRepositories(
     }
     return installation.repositoryIds.includes(repository.id);
   });
+}
+
+/**
+ * The exact session repository resource for one workspace GitHub App
+ * repository: its default branch, a canonical clone URI, and the installation
+ * identity that platform-brokered Git auth and create-time validation check.
+ */
+export function githubRepositoryResourceRef(repository: GitHubRepository): RepositoryResourceRef {
+  const uri = normalizedRepositoryUri(repository.cloneUrl);
+  return {
+    kind: "repository",
+    uri,
+    ref: repository.defaultBranch,
+    provider: "github",
+    mountPath: defaultRepositoryMountPath(uri, "github"),
+    githubInstallationId: repository.installationId,
+    githubRepositoryId: repository.id,
+  };
+}
+
+function normalizedRepositoryUri(value: string): string {
+  const url = new URL(value);
+  const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  return `https://${url.host.toLowerCase()}/${path}.git`;
 }
 
 export async function listWorkspaceGitHubRepositoryBranches(

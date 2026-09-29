@@ -13,6 +13,7 @@ import {
   retainCreateSessionAttemptAfterFailure,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
+  workspaceDefaultRigOptionLabel,
 } from "./session-create";
 import { newSessionProjectSelection } from "../routes/sessions-index-hydration";
 
@@ -837,5 +838,33 @@ describe("new-session draft option mapping", () => {
     });
     expect(restored.customMcpPermissions).toBe(false);
     expect(restored.mcpPermissions.size).toBeGreaterThan(0);
+  });
+});
+
+describe("workspace default Sandbox Environment option", () => {
+  const rigs = [
+    { id: "00000000-0000-4000-8000-00000000d001", name: "Analytics" },
+    { id: "00000000-0000-4000-8000-00000000d002", name: "Build" },
+  ];
+
+  test("names the workspace default the empty choice binds", () => {
+    expect(workspaceDefaultRigOptionLabel(rigs[0]!.id, rigs)).toBe("Workspace default: Analytics");
+  });
+
+  test("says None when the workspace has no default, because empty means no environment", () => {
+    expect(workspaceDefaultRigOptionLabel(null, rigs)).toBe("None");
+    expect(workspaceDefaultRigOptionLabel(undefined, rigs)).toBe("None");
+  });
+
+  test("keeps a neutral label when the default is not visible to this person", () => {
+    expect(workspaceDefaultRigOptionLabel("00000000-0000-4000-8000-00000000d003", rigs)).toBe(
+      "Workspace default",
+    );
+  });
+
+  test("the empty choice still omits rigId so the server resolves the default", () => {
+    const draft = emptySessionDraft();
+    expect(draft.rigId).toBe("");
+    expect(newSessionDraftOptionsFromSessionDraft(draft)).not.toHaveProperty("rigId");
   });
 });

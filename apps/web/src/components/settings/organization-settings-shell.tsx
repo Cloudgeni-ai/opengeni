@@ -1,158 +1,143 @@
 import { Link } from "@tanstack/react-router";
 import {
-  BrainCircuitIcon,
-  Code2Icon,
-  CreditCardIcon,
+  BlocksIcon,
+  CodeIcon,
   CpuIcon,
-  DatabaseIcon,
-  LayoutDashboardIcon,
-  PlugIcon,
-  ShieldCheckIcon,
+  CreditCardIcon,
+  FingerprintIcon,
+  ShieldIcon,
+  SlidersHorizontalIcon,
+  SquareStackIcon,
   UsersIcon,
 } from "lucide-react";
-import type { ComponentType, ReactNode } from "react";
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { OrganizationSettingsSwitcher } from "./organization-settings-switcher";
-import {
-  SettingsSidebar,
-  SETTINGS_SHELL_CLASS,
-  SETTINGS_NAV_CLASS,
-  settingsNavItemClass,
-} from "./settings-sidebar";
+import { SettingsShell, settingsHomeLink } from "./settings-sidebar";
+import { useAppContext } from "@/context";
+import { organizationsForSubject } from "@/lib/org";
 import type { OrganizationAdminSection } from "@/lib/organization-admin";
-import { ContentPage } from "@/components/ui/content-layout";
-import { SettingsPageHeader } from "./settings-layout";
 
 type OrganizationSettingsItem = {
   id: OrganizationAdminSection;
   label: string;
-  icon: ComponentType<{ className?: string }>;
+  icon: LucideIcon;
 };
 
-const ITEMS: readonly OrganizationSettingsItem[] = [
-  { id: "overview", label: "Overview", icon: LayoutDashboardIcon },
-  { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon },
+export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = [
+  { id: "general", label: "General", icon: SlidersHorizontalIcon },
+  { id: "people", label: "People", icon: UsersIcon },
+  { id: "workspaces", label: "Workspaces", icon: SquareStackIcon },
   { id: "models", label: "Models", icon: CpuIcon },
-  { id: "integrations", label: "Integrations", icon: PlugIcon },
-  { id: "people", label: "People & invitations", icon: UsersIcon },
-  { id: "recovery", label: "Recovery", icon: ShieldCheckIcon },
-  { id: "retention", label: "Retention", icon: DatabaseIcon },
-  { id: "developer", label: "Developer", icon: Code2Icon },
-  { id: "billing", label: "Billing", icon: CreditCardIcon },
+  { id: "integrations", label: "Integrations", icon: BlocksIcon },
+  { id: "identity", label: "Organization identity", icon: FingerprintIcon },
+  { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
+  { id: "developer", label: "Developer", icon: CodeIcon },
+  { id: "security", label: "Security & data", icon: ShieldIcon },
 ];
 
-const COPY: Record<OrganizationAdminSection, { title: string; description: string }> = {
-  overview: {
-    title: "Overview",
-    description: "Identity, workspaces, access, and organization-wide session policy.",
-  },
-  knowledge: {
-    title: "Knowledge",
-    description:
-      "Set the small identity agents always know and explore company knowledge they retrieve when relevant.",
-  },
-  models: {
-    title: "Models",
-    description: "Manage subscriptions and provider accounts shared with your workspaces.",
-  },
-  integrations: {
-    title: "Integrations",
-    description: "Choose which integrations can be connected across organization workspaces.",
-  },
-  people: {
-    title: "People & invitations",
-    description: "Manage organization membership, roles, invitations, and workspace access.",
-  },
-  recovery: {
-    title: "Recovery",
-    description: "Configure recovery custody and review protected co-owner promotion operations.",
-  },
-  retention: {
-    title: "Retention",
-    description: "Control how long organization data is retained.",
-  },
-  developer: {
-    title: "Developer",
-    description: "Connect your product to every organization workspace.",
-  },
-  billing: {
-    title: "Billing",
-    description: "Credits, usage, plan entitlements, and payment settings.",
-  },
-};
+function description(
+  section: OrganizationAdminSection,
+  organizationName: string,
+): string | undefined {
+  switch (section) {
+    case "general":
+      // The rows (Name, Organization ID) say it; a description would restate them.
+      return undefined;
+    case "people":
+      return `Everyone in ${organizationName}, with one role each and a private Personal workspace.`;
+    case "workspaces":
+      return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
+    case "models":
+      return "Subscriptions and API keys the organization pays for, and which workspaces can use them.";
+    case "integrations":
+      return "Which integrations workspaces can connect.";
+    case "identity":
+      return "Who the organization is and what it does, for every agent.";
+    case "billing":
+      return "Credits, plan and usage by workspace.";
+    case "developer":
+      return "Organization API keys and the integration guide.";
+    case "security":
+      return "Private chats, how long data is kept, and recovery.";
+  }
+}
 
 export function OrganizationSettingsShell({
   workspaceId,
   organizationLabel,
   section,
-  showModels,
+  visibleSections,
+  actions,
+  hideHeader = false,
   children,
 }: {
   workspaceId: string;
   organizationLabel: string;
   section: OrganizationAdminSection;
-  showModels: boolean;
+  /** Pages this person can use. The rest are hidden. */
+  visibleSections: ReadonlySet<OrganizationAdminSection>;
+  /** The page's one primary action, in the header. */
+  actions?: ReactNode;
+  /** A sub-page (a person, a workspace, a form) brings its own back link and title. */
+  hideHeader?: boolean;
   children: ReactNode;
 }) {
-  const copy = COPY[section];
+  const context = useAppContext();
+  const organizationCount = organizationsForSubject(
+    context.accessContext,
+    context.workspaces,
+  ).length;
+  const items = ORGANIZATION_SETTINGS_ITEMS.filter((item) => visibleSections.has(item.id));
+  const current = ORGANIZATION_SETTINGS_ITEMS.find((item) => item.id === section)!;
   return (
-    <div data-workspace-scroll-owner="self-managed" className={SETTINGS_SHELL_CLASS}>
-      <a
-        href="#organization-settings-content"
-        className="sr-only z-50 rounded-md bg-bg px-3 py-2 text-sm font-medium text-fg focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus-visible:ring-2 focus-visible:ring-brand"
-      >
-        Skip to organization settings
-      </a>
-      <SettingsSidebar
-        workspaceId={workspaceId}
-        backToWorkspaceSettings
-        label="Organization settings"
-        currentPage={copy.title}
-        identity={
-          <div className="mt-2 min-w-0">
-            <OrganizationSettingsSwitcher
-              workspaceId={workspaceId}
-              organizationLabel={organizationLabel}
-              section={section}
-            />
-            <p className="mt-1.5 px-1 text-2xs text-fg-subtle">Settings and governance</p>
+    <SettingsShell
+      label="Organization settings"
+      back={{
+        label: "Workspace settings",
+        link: <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }} />,
+      }}
+      home={settingsHomeLink(workspaceId)}
+      scope={
+        organizationCount > 1 ? (
+          <OrganizationSettingsSwitcher
+            workspaceId={workspaceId}
+            organizationLabel={organizationLabel}
+            section={section}
+          />
+        ) : (
+          <div className="min-w-0 px-2.5">
+            <p className="truncate text-sm leading-5 font-semibold text-fg">{organizationLabel}</p>
+            <p className="text-xs leading-4.5 text-fg-subtle">Organization</p>
           </div>
-        }
-      >
-        <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-          Settings
-        </p>
-        <nav aria-label="Organization settings" className={SETTINGS_NAV_CLASS}>
-          {ITEMS.filter((item) => item.id !== "models" || showModels).map((item) => {
-            const Icon = item.icon;
-            const selected = item.id === section;
-            return (
+        )
+      }
+      groups={[
+        {
+          items: items.map((item) => ({
+            id: item.id,
+            label: item.label,
+            icon: item.icon,
+            link: (
               <Link
-                key={item.id}
                 to="/workspaces/$workspaceId/organization"
                 params={{ workspaceId }}
                 search={{ section: item.id }}
-                aria-current={selected ? "page" : undefined}
-                className={settingsNavItemClass(selected)}
-              >
-                <Icon aria-hidden="true" className="size-4 shrink-0" />
-                <span className="truncate">{item.label}</span>
-              </Link>
-            );
-          })}
-        </nav>
-      </SettingsSidebar>
-
-      <main id="organization-settings-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <ContentPage width="standard">
-          <SettingsPageHeader
-            title={copy.title}
-            description={copy.description}
-            context={organizationLabel}
-          />
-          <div className="py-7">{children}</div>
-        </ContentPage>
-      </main>
-    </div>
+              />
+            ),
+          })),
+        },
+      ]}
+      activeId={section}
+      currentPage={current.label}
+      page={
+        hideHeader
+          ? null
+          : { title: current.label, description: description(section, organizationLabel), actions }
+      }
+    >
+      {children}
+    </SettingsShell>
   );
 }

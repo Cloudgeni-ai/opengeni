@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { BookOpenIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
 import { ConnectionInstalled } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
@@ -9,18 +9,17 @@ import type {
   PreferenceRegistryRevisionSummary,
 } from "@opengeni/sdk";
 import { CatalogHeader } from "@/components/capabilities/catalog-header";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Select } from "@/components/ui/select";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
-  Dialog as Sheet,
-  DialogDescription as SheetDescription,
-  DialogHeader as SheetHeader,
-  DialogTitle as SheetTitle,
-} from "@/components/ui/dialog";
+  CapabilitySlotPage,
+  useCapabilityPageSlot,
+} from "@/components/capabilities/capability-page-slot";
+import { humanizeName } from "@/components/capabilities/skill-copy";
+import { SkillPage, skillStatus } from "@/components/capabilities/skill-page";
+import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { DetailPage } from "@/components/ui/detail-page";
+import { DetailSkeleton } from "@/components/ui/detail-sheet";
+import { EmptyState } from "@/components/ui/empty-state";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -87,7 +86,9 @@ export function SkillsPanelContent({
   openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   const { client } = context;
-  const editorId = useId();
+  // Inside Capabilities a skill opens as its own page in the route's page slot
+  // (`?open=skill:<id>`); elsewhere the page replaces the list in place.
+  const slot = useCapabilityPageSlot();
   const openerRef = useRef<HTMLElement | null>(null);
   const newSkillRef = useRef<HTMLButtonElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -118,6 +119,10 @@ export function SkillsPanelContent({
   const [loading, setLoading] = useState(true);
   const [reload, setReload] = useState(0);
   const [discardAction, setDiscardAction] = useState<(() => void) | null>(null);
+  // The id of a skill created on this page and not saved yet.
+  const [draftId, setDraftId] = useState<string | null>(null);
+  // The skill a page open is loading, so the URL sync does not load it twice.
+  const openingRef = useRef<string | null>(null);
   const generation = useRef(0);
   const inventoryGeneration = useRef(0);
   const dirty = Boolean(
@@ -131,6 +136,7 @@ export function SkillsPanelContent({
 
   useEffect(() => {
     generation.current++;
+    openingRef.current = null;
     const current = ++inventoryGeneration.current;
     setLoading(true);
     setBusy(false);
@@ -201,6 +207,34 @@ export function SkillsPanelContent({
     };
   });
 
+  // Keep the open page and the URL in step: Back, Forward and shared links.
+  const slotKey = slot?.openKey ?? null;
+  useEffect(() => {
+    if (!slot) return;
+    if (slotKey?.startsWith("skill:")) {
+      const id = slotKey.slice("skill:".length);
+      if (id === "new") {
+        if (record && record.id === draftId) return;
+        const scope = ([personalWorkspace ? "user" : "workspace", "organization"] as const).find(
+          canManage,
+        );
+        if (scope) create(scope);
+        else slot.close({ replace: true });
+        return;
+      }
+      if (record?.id === id || openingRef.current === id) return;
+      void open(id);
+      return;
+    }
+    if (record) {
+      generation.current++;
+      setRecord(null);
+      setDraftId(null);
+      setBusy(false);
+    }
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- follows the URL and a reloaded inventory
+  }, [slotKey, loading]);
+
   useEffect(() => {
     if (!dirty) return;
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -249,6 +283,8 @@ export function SkillsPanelContent({
   }
   async function open(skillId: string, revisionId?: string) {
     if (!record) openerRef.current = document.activeElement as HTMLElement | null;
+    openingRef.current = skillId;
+    if (slot && slot.openKey !== `skill:${skillId}`) slot.open(`skill:${skillId}`);
     const current = ++generation.current;
     setBusy(true);
     setError(null);
@@ -259,14 +295,33 @@ export function SkillsPanelContent({
         client.getPreferenceRegistry(workspaceId, skillId),
       ]);
       if (generation.current !== current) return;
+      setDraftId(null);
       show(next);
       setHistory(detail.revisions);
     } catch (reason) {
       if (generation.current === current)
         setError(reason instanceof Error ? reason.message : "Could not open Skill");
     } finally {
-      if (generation.current === current) setBusy(false);
+      if (generation.current === current) {
+        setBusy(false);
+        openingRef.current = null;
+      }
     }
+  }
+  function closePage() {
+    generation.current++;
+    setRecord(null);
+    setDraftId(null);
+    setError(null);
+    setNotice(null);
+    setBusy(false);
+    if (slot?.openKey?.startsWith("skill:")) slot.close();
+    const opener = openerRef.current;
+    openerRef.current = null;
+    queueMicrotask(() => {
+      if (opener?.isConnected && !opener.matches(":disabled")) opener.focus();
+      else headingRef.current?.focus();
+    });
   }
   function create(scope: SkillScope) {
     openerRef.current = newSkillRef.current;
@@ -274,8 +329,11 @@ export function SkillsPanelContent({
     setHistory([]);
     setError(null);
     setNotice(null);
+    const id = crypto.randomUUID();
+    setDraftId(id);
+    if (slot && slot.openKey !== "skill:new") slot.open("skill:new");
     show({
-      id: crypto.randomUUID(),
+      id,
       stableKey: "",
       scope,
       scopeVersion: 1,
@@ -370,6 +428,7 @@ export function SkillsPanelContent({
       if (generation.current !== current) return;
       if (receipt.removed) {
         setRecord(null);
+        if (slot?.openKey?.startsWith("skill:")) slot.close({ replace: true });
         setSkills((await client.listWorkspaceSkills(workspaceId)).skills);
         setNotice("Skill and all stored revisions permanently deleted.");
         return;
@@ -386,6 +445,10 @@ export function SkillsPanelContent({
       }
       if (generation.current !== current) return;
       show(updated);
+      if (draftId) {
+        setDraftId(null);
+        if (slot) slot.open(`skill:${updated.id}`, { replace: true });
+      }
 
       setHistory(detail.revisions);
       setNotice(
@@ -406,277 +469,165 @@ export function SkillsPanelContent({
     record &&
     canManage(record.scope) &&
     (record.revisionId === record.activeRevisionId || record.revisionId === null);
-  const selected = files.find((file) => file.path === path);
   const matchingSkills = skills.filter((skill) =>
     `${skill.title} ${skill.stableKey}`.toLowerCase().includes(query.trim().toLowerCase()),
   );
 
+  const backLabel = slot ? "Capabilities" : "Skills";
+  const back = () => navigate(() => closePage());
+  const slotSkillKey = slot?.openKey?.startsWith("skill:") ? slot.openKey : null;
+  const pageContent = record ? (
+    <SkillPage
+      record={record}
+      files={files}
+      path={path}
+      newPath={newPath}
+      history={history}
+      error={error}
+      notice={notice}
+      busy={busy}
+      dirty={dirty}
+      isNew={record.id === draftId}
+      editable={Boolean(editable)}
+      canManage={canManage}
+      backLabel={backLabel}
+      onBack={back}
+      onPathChange={setPath}
+      onNewPathChange={setNewPath}
+      onContentChange={(content) =>
+        setFiles((current) =>
+          current.map((file) => (file.path === path ? { ...file, content } : file)),
+        )
+      }
+      onAddFile={() => {
+        setFiles((current) => [...current, { path: newPath, content: "" }]);
+        setPath(newPath);
+        setNewPath("");
+      }}
+      onRemoveFile={() => {
+        setFiles((current) => current.filter((file) => file.path !== path));
+        setPath("SKILL.md");
+      }}
+      onSave={() => void mutate("save")}
+      onDiscard={() => {
+        setFiles(record.files);
+        setPath("SKILL.md");
+      }}
+      onReviewRevision={(operation) => void mutate(operation)}
+      onChangeScope={(scope) => void changeScope(scope)}
+      onOpenRevision={(revisionId) => navigate(() => void open(record.id, revisionId))}
+    />
+  ) : slotSkillKey ? (
+    <DetailPage back={{ label: backLabel, onClick: back }}>
+      {error ? (
+        <EmptyState
+          variant="page"
+          title="Couldn't open this skill"
+          description={error}
+          action={
+            <Button type="button" variant="outline" size="sm" onClick={back}>
+              Back to Capabilities
+            </Button>
+          }
+        />
+      ) : (
+        <DetailSkeleton />
+      )}
+    </DetailPage>
+  ) : null;
+  const pageInPlace = !slot && record !== null;
+
   return (
     <section aria-label="Skills" className="skills-panel space-y-4">
-      <CatalogHeader
-        title="Skills"
-        headingRef={headingRef}
-        hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
-        action={
-          <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
-            {([personalWorkspace ? "user" : "workspace", "organization"] as const)
-              .filter(canManage)
-              .slice(0, 1)
-              .map((scope) => (
-                <DropdownMenu key={scope}>
-                  <DropdownMenuTrigger asChild>
-                    <Button ref={newSkillRef} variant="default" disabled={busy}>
-                      <PlusIcon aria-hidden="true" />
-                      New skill
-                      <ChevronDownIcon aria-hidden="true" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
-                      Create manually
-                    </DropdownMenuItem>
-                    {onFindSkill ? (
-                      <DropdownMenuItem onSelect={onFindSkill}>
-                        Find a skill in the catalogue
+      <div hidden={pageInPlace} className="space-y-4">
+        <CatalogHeader
+          title="Skills"
+          headingRef={headingRef}
+          hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
+          action={
+            <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
+              {([personalWorkspace ? "user" : "workspace", "organization"] as const)
+                .filter(canManage)
+                .slice(0, 1)
+                .map((scope) => (
+                  <DropdownMenu key={scope}>
+                    <DropdownMenuTrigger asChild>
+                      <Button ref={newSkillRef} variant="default" disabled={busy}>
+                        <PlusIcon aria-hidden="true" />
+                        New skill
+                        <ChevronDownIcon aria-hidden="true" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
+                        Create manually
                       </DropdownMenuItem>
-                    ) : null}
-                    {onImportSkill ? (
-                      <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem>
-                    ) : null}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              ))}
-          </div>
-        }
-      />
-      {error && !record ? (
-        <p role="alert" className="text-sm text-status-error">
-          {error}{" "}
-          <Button
-            variant="outline"
-            disabled={busy}
-            onClick={() => navigate(() => setReload((value) => value + 1))}
-          >
-            Reload Skills
-          </Button>
-        </p>
-      ) : null}
-      {notice && !record ? (
-        <p role="status" className="text-sm">
-          {notice}
-        </p>
-      ) : null}
-      {loading ? <p role="status">Loading Skills…</p> : null}
-      {!loading && !skills.length ? (
-        <p className="text-sm text-fg-subtle">
-          {onFindSkill
-            ? "No skills installed yet. Browse the catalog below or add your own."
-            : "No skills yet. Create one to give your agent reusable instructions."}
-        </p>
-      ) : null}
-      <ConnectionInstalled
-        title="Your skills"
-        items={matchingSkills.map((skill) => ({
-          id: skill.id,
-          name: skill.title || skill.stableKey,
-          icon: <BookOpenIcon aria-hidden="true" className="size-10 p-2 text-fg-muted" />,
-          status: skill.pendingRevisionIds.length
-            ? "Pending changes"
-            : skill.status === "active"
-              ? "Installed"
-              : `Not active · ${skill.status}`,
-          needsAttention: Boolean(skill.pendingRevisionIds.length),
-          disabled: busy,
-          onOpen: () => {
-            if (!busy) navigate(() => void open(skill.id));
-          },
-        }))}
-      />
-      {nextCursor ? (
-        <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
-          Load more Skills
-        </Button>
-      ) : null}
-      <Sheet
-        open={record !== null}
-        onOpenChange={(isOpen) => {
-          if (!isOpen && !busy) navigate(() => setRecord(null));
-        }}
-      >
-        {record ? (
-          <CapabilityDialogContent
-            id={editorId}
-            showCloseButton={!busy}
-            onEscapeKeyDown={(event) => {
-              if (busy) event.preventDefault();
-            }}
-            onInteractOutside={(event) => {
-              if (busy) event.preventDefault();
-            }}
-            onCloseAutoFocus={(event) => {
-              event.preventDefault();
-              const opener = openerRef.current;
-              openerRef.current = null;
-              if (opener?.isConnected && !opener.matches(":disabled")) opener.focus();
-              else headingRef.current?.focus();
-            }}
-          >
-            <SheetHeader className="shrink-0 border-b border-border px-6 py-5 pr-12 text-left">
-              <SheetTitle className="break-words text-xl font-semibold tracking-tight">
-                {record.title || record.stableKey || "New skill"}
-              </SheetTitle>
-              <SheetDescription>
-                Edit the name and description at the top of SKILL.md.
-              </SheetDescription>
-            </SheetHeader>
-            <div className="skill-editor min-h-0 space-y-4 overflow-y-auto px-6 py-5">
-              {error ? (
-                <p role="alert" className="text-sm text-status-error">
-                  {error}
-                </p>
-              ) : null}
-              {notice ? (
-                <p role="status" className="text-sm">
-                  {notice}
-                </p>
-              ) : null}
-              <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
-                {record.source
-                  ? "Installed Skill · workspace edits preserve the upstream source"
-                  : "Authored Skill"}{" "}
-                <Select
-                  aria-label="Skill scope"
-                  value={record.scope}
-                  disabled={busy || !canManage(record.scope)}
-                  onChange={(event) => void changeScope(event.target.value as SkillScope)}
-                >
-                  {(["user", "workspace", "organization"] as const)
-                    .filter((scope) => scope === record.scope || canManage(scope))
-                    .map((scope) => (
-                      <option key={scope} value={scope}>
-                        {scope === "user"
-                          ? "Personal"
-                          : scope === "workspace"
-                            ? "Workspace"
-                            : "Organization"}
-                      </option>
-                    ))}
-                </Select>
-              </div>
-              {history.length ? (
-                <label className="flex flex-wrap items-center gap-3 text-sm">
-                  History
-                  <Select
-                    aria-label="History"
-                    value={record.revisionId ?? ""}
-                    disabled={busy}
-                    onChange={(event) => {
-                      const revisionId = event.target.value;
-                      navigate(() => void open(record.id, revisionId));
-                    }}
-                  >
-                    {history.map((revision) => (
-                      <option key={revision.id} value={revision.id}>
-                        Version {revision.revision}
-                        {revision.id === record.activeRevisionId ? " · active" : ""}
-                        {record.pendingRevisionIds.includes(revision.id) ? " · pending" : ""}
-                      </option>
-                    ))}
-                  </Select>
-                </label>
-              ) : null}
-              <label className="flex flex-wrap items-center gap-3 text-sm">
-                File
-                <Select
-                  aria-label="File"
-                  value={path}
-                  onChange={(event) => setPath(event.target.value)}
-                >
-                  {files.map((file) => (
-                    <option key={file.path} value={file.path}>
-                      {file.path}
-                    </option>
-                  ))}
-                </Select>
-              </label>
-              <Textarea
-                aria-label={`Contents of ${path}`}
-                value={selected?.content ?? ""}
-                disabled={!editable || busy}
-                className="min-h-72 font-mono"
-                onChange={(event) =>
-                  setFiles((current) =>
-                    current.map((file) =>
-                      file.path === path ? { ...file, content: event.target.value } : file,
-                    ),
-                  )
-                }
-              />
-              {editable ? (
-                <div className="flex flex-wrap gap-2">
-                  <Input
-                    aria-label="New relative file path"
-                    placeholder="references/example.md"
-                    value={newPath}
-                    onChange={(event) => setNewPath(event.target.value)}
-                    disabled={busy}
-                    className="max-w-sm"
-                  />
-                  <Button
-                    variant="outline"
-                    disabled={busy || !newPath || files.some((file) => file.path === newPath)}
-                    onClick={() => {
-                      setFiles((current) => [...current, { path: newPath, content: "" }]);
-                      setPath(newPath);
-                      setNewPath("");
-                    }}
-                  >
-                    Add text file
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy || path === "SKILL.md"}
-                    onClick={() => {
-                      setFiles((current) => current.filter((file) => file.path !== path));
-                      setPath("SKILL.md");
-                    }}
-                  >
-                    Remove selected file
-                  </Button>
-                  <Button
-                    disabled={
-                      busy || !files.some((file) => file.path === "SKILL.md" && file.content.trim())
-                    }
-                    onClick={() => void mutate("save")}
-                  >
-                    Save Skill
-                  </Button>
-                </div>
-              ) : null}
-              {canManage(record.scope) &&
-              record.revisionId &&
-              record.revisionId !== record.activeRevisionId ? (
-                <Button
-                  disabled={busy}
-                  onClick={() =>
-                    void mutate(
-                      record.pendingRevisionIds.includes(record.revisionId!)
-                        ? "approve"
-                        : "restore",
-                    )
-                  }
-                >
-                  {record.pendingRevisionIds.includes(record.revisionId)
-                    ? record.removalOperationId
-                      ? "Permanently delete Skill and all revisions (cannot be undone)"
-                      : "Approve this revision"
-                    : "Restore as a new revision"}
-                </Button>
-              ) : null}
+                      {onFindSkill ? (
+                        <DropdownMenuItem onSelect={onFindSkill}>Browse skills</DropdownMenuItem>
+                      ) : null}
+                      {onImportSkill ? (
+                        <DropdownMenuItem onSelect={onImportSkill}>
+                          Import from URL
+                        </DropdownMenuItem>
+                      ) : null}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ))}
             </div>
-          </CapabilityDialogContent>
+          }
+        />
+        {error && !record ? (
+          <p role="alert" className="text-sm text-status-error">
+            {error}{" "}
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => navigate(() => setReload((value) => value + 1))}
+            >
+              Reload Skills
+            </Button>
+          </p>
         ) : null}
-      </Sheet>
+        {notice && !record ? (
+          <p role="status" className="text-sm">
+            {notice}
+          </p>
+        ) : null}
+        {loading ? <p role="status">Loading Skills…</p> : null}
+        {!loading && !skills.length ? (
+          <p className="text-sm text-fg-subtle">
+            {onFindSkill
+              ? "No skills installed yet. Browse the catalog below or add your own."
+              : "No skills yet. Create one to give your agent reusable instructions."}
+          </p>
+        ) : null}
+        <ConnectionInstalled
+          title="Your skills"
+          items={matchingSkills.map((skill) => ({
+            id: skill.id,
+            name: humanizeName(skill.title || skill.stableKey),
+            icon: <BookOpenIcon aria-hidden="true" className="size-10 p-2 text-fg-muted" />,
+            status: skillStatus(skill),
+            needsAttention: Boolean(skill.pendingRevisionIds.length),
+            disabled: busy,
+            onOpen: () => {
+              if (!busy) navigate(() => void open(skill.id));
+            },
+          }))}
+        />
+        {nextCursor ? (
+          <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
+            Load more Skills
+          </Button>
+        ) : null}
+      </div>
+      {pageContent ? (
+        slot ? (
+          <CapabilitySlotPage pageKey={slotSkillKey ?? ""}>{pageContent}</CapabilitySlotPage>
+        ) : (
+          pageContent
+        )
+      ) : null}
       <ConfirmDialog
         open={discardAction !== null}
         onOpenChange={(isOpen) => {

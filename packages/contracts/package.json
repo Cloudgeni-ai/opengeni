@@ -30,6 +30,10 @@
       "types": "./src/client-error-report.ts",
       "default": "./src/client-error-report.ts"
     },
+    "./analytics-consent-report": {
+      "types": "./src/analytics-consent-report.ts",
+      "default": "./src/analytics-consent-report.ts"
+    },
     "./mcp-endpoint": {
       "types": "./src/mcp-endpoint.ts",
       "default": "./src/mcp-endpoint.ts"

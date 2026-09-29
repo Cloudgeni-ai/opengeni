@@ -1524,6 +1524,8 @@ describe("session realtime ledger", () => {
     expect(facts.replacement).toMatchObject({
       id: replacementId,
       status: "queued",
+      // Analytics: a live voice delegation entered through voice.
+      surface: "voice",
       metadata: {
         delivery: "steer",
         replacedTurnId: foreground.turnId,

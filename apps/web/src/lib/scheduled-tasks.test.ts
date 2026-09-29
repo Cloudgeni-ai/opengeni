@@ -15,7 +15,14 @@ import {
   scheduleLabel,
   scheduledTaskCadence,
   loadSessionSchedules,
+  namedList,
+  scheduledTaskAccessFailureText,
+  scheduledTaskAccessFailuresText,
   scheduledTaskDescription,
+  scheduledTaskDriftIsDismissible,
+  scheduledTaskPolicyDriftLines,
+  scheduledTaskUnavailableAccountsText,
+  visibleScheduledTaskPolicyDrift,
   scheduledTaskRunLabel,
   scheduledTaskRunSessionAccess,
   scheduledTaskRunTriggerIsRedundant,
@@ -185,6 +192,27 @@ describe("scheduled task form projection", () => {
     const fresh = newScheduledTaskFormState(true);
     expect(fresh.slackBotConnectionId).toBe("");
     expect(agentConfigFromFormState(fresh)).not.toHaveProperty("slackBotConnectionId");
+  });
+
+  test("round-trips the chosen Slack channel only with its bot and its own chats", () => {
+    const task = scheduledTask();
+    task.agentConfig.slackBotChannelId = "C0SCHED01";
+    const form = formStateFromScheduledTask(task);
+    expect(form.slackBotChannelId).toBe("C0SCHED01");
+    expect(agentConfigFromFormState(form, task)).toMatchObject({
+      slackBotConnectionId: connectionId,
+      slackBotChannelId: "C0SCHED01",
+    });
+    expect(agentConfigFromFormState({ ...form, slackBotChannelId: "" }, task)).not.toHaveProperty(
+      "slackBotChannelId",
+    );
+    expect(
+      agentConfigFromFormState({ ...form, slackBotConnectionId: "" }, task),
+    ).not.toHaveProperty("slackBotChannelId");
+    expect(
+      agentConfigFromFormState({ ...form, runMode: "existing_session" }, task),
+    ).not.toHaveProperty("slackBotChannelId");
+    expect(newScheduledTaskFormState(true).slackBotChannelId).toBe("");
   });
 
   test("keeps the human description separate from agent instructions", () => {
@@ -811,5 +839,127 @@ test("editing an ordinary source task preserves its source binding and private l
   expect(scheduledTaskStateLabel(task)).toMatchObject({
     active: false,
     reason: "connection_paused",
+  });
+});
+
+describe("scheduled task access in plain words", () => {
+  test("names each failing connector and why the run could not use it", () => {
+    const failure = {
+      serverId: "slack",
+      name: "Slack",
+      providerDomain: "slack.com",
+      reason: "personal_authority_unavailable" as const,
+      count: 2,
+      firstOccurredAt: "2026-09-17T08:00:05.000Z",
+    };
+    expect(scheduledTaskAccessFailureText(failure)).toBe(
+      "Couldn't use Slack: your personal account is not available to this schedule.",
+    );
+    expect(
+      scheduledTaskAccessFailuresText([
+        failure,
+        { ...failure, serverId: "gmail", name: "Gmail", reason: "expired" },
+      ]),
+    ).toBe(
+      "Couldn't use Slack: your personal account is not available to this schedule. Couldn't use Gmail: its connection expired.",
+    );
+    expect(scheduledTaskAccessFailuresText([])).toBeNull();
+    expect(scheduledTaskAccessFailuresText(undefined)).toBeNull();
+  });
+
+  test("lists names without an unbounded run-on", () => {
+    expect(namedList(["Gmail"])).toBe("Gmail");
+    expect(namedList(["Gmail", "Linear"])).toBe("Gmail and Linear");
+    expect(namedList(["Gmail", "Linear", "Notion", "PostHog", "Grafana"])).toBe(
+      "Gmail, Linear, Notion and 2 more",
+    );
+  });
+
+  test("says what an access refresh would change, most urgent first", () => {
+    expect(
+      scheduledTaskPolicyDriftLines({
+        missingConnectors: [{ id: "gmail", name: "Gmail" }],
+        unavailableConnectors: [{ id: "old-crm", name: "old-crm" }],
+        missingOpenGeniTools: ["browser_read", "browser_screenshot"],
+        unavailableAccounts: [{ id: "slack", name: "Slack" }],
+        attachableAccounts: [{ id: "linear", name: "Linear" }],
+        canRefresh: true,
+      }),
+    ).toEqual([
+      "The account chosen for Slack can no longer be used, so new runs cannot start.",
+      "Linear has no account on this schedule, although one is now connected.",
+      "New schedules in this workspace also get Gmail; this one does not.",
+      "2 newer OpenGeni tools are not available to it: browser read and browser screenshot.",
+      "old-crm is no longer set up in this workspace and will be removed.",
+    ]);
+    expect(scheduledTaskPolicyDriftLines(null)).toEqual([]);
+    expect(scheduledTaskPolicyDriftLines(undefined)).toEqual([]);
+  });
+
+  test("says a blocked account once when a louder notice already names it", () => {
+    const drift = {
+      missingConnectors: [],
+      unavailableConnectors: [],
+      missingOpenGeniTools: [],
+      unavailableAccounts: [
+        { id: "slack", name: "Slack" },
+        { id: "gmail", name: "Gmail" },
+      ],
+      attachableAccounts: [],
+      canRefresh: true,
+    };
+    expect(scheduledTaskUnavailableAccountsText(drift.unavailableAccounts)).toBe(
+      "The account chosen for Slack and Gmail can no longer be used, so new runs cannot start.",
+    );
+    expect(scheduledTaskUnavailableAccountsText([])).toBeNull();
+    expect(scheduledTaskPolicyDriftLines(drift, { omitUnavailableAccounts: true })).toEqual([]);
+  });
+
+  test("hides only the defaults the owner kept off, and only for the task head they saw", () => {
+    const drift = {
+      missingConnectors: [
+        { id: "gmail", name: "Gmail" },
+        { id: "notion", name: "Notion" },
+      ],
+      unavailableConnectors: [],
+      missingOpenGeniTools: ["browser_read" as const],
+      unavailableAccounts: [],
+      attachableAccounts: [],
+      canRefresh: true,
+    };
+    const head = "a".repeat(64);
+    const dismissal = { executionDigest: head, connectors: ["gmail"], openGeniTools: [] };
+    expect(visibleScheduledTaskPolicyDrift(drift, dismissal, head)).toEqual({
+      ...drift,
+      missingConnectors: [{ id: "notion", name: "Notion" }],
+    });
+    // Everything dismissed: nothing left to show.
+    expect(
+      visibleScheduledTaskPolicyDrift(
+        drift,
+        { executionDigest: head, connectors: ["gmail", "notion"], openGeniTools: ["browser_read"] },
+        head,
+      ),
+    ).toBeNull();
+    // A broken account is never hidden by a dismissal.
+    const blocked = { ...drift, unavailableAccounts: [{ id: "slack", name: "Slack" }] };
+    expect(
+      visibleScheduledTaskPolicyDrift(
+        blocked,
+        { executionDigest: head, connectors: ["gmail", "notion"], openGeniTools: ["browser_read"] },
+        head,
+      ),
+    ).toMatchObject({ missingConnectors: [], unavailableAccounts: [{ id: "slack" }] });
+    // A dismissal made for another task head no longer applies.
+    expect(visibleScheduledTaskPolicyDrift(drift, dismissal, "b".repeat(64))).toBe(drift);
+    expect(visibleScheduledTaskPolicyDrift(null, dismissal, head)).toBeNull();
+    expect(scheduledTaskDriftIsDismissible(drift)).toBe(true);
+    expect(
+      scheduledTaskDriftIsDismissible({
+        ...blocked,
+        missingConnectors: [],
+        missingOpenGeniTools: [],
+      }),
+    ).toBe(false);
   });
 });

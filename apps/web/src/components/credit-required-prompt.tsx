@@ -18,6 +18,7 @@ import { CreditAmountPicker } from "@/components/credit-amount-picker";
 import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
 import { validTopupAmount } from "@/lib/format";
+import { analyticsAction } from "@/lib/analytics-actions";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -101,6 +102,7 @@ export function CreditRequiredPromptView({
               type="button"
               disabled={busy || !validTopupAmount(topupAmount)}
               onClick={() => void buyCredits()}
+              {...analyticsAction("buy_credits")}
             >
               {busy ? (
                 <Loader2Icon className="size-4 animate-spin" />
@@ -122,6 +124,7 @@ export function CreditRequiredPromptView({
               params={{ workspaceId }}
               search={{ section: "models" }}
               onClick={() => onOpenChange(false)}
+              {...analyticsAction("connect_model")}
             >
               <SparklesIcon className="size-3.5" />
               Connect a model
@@ -182,6 +185,7 @@ export function EmptyCreditsNotice({
               to="/workspaces/$workspaceId/organization"
               params={{ workspaceId }}
               search={{ section: "billing" }}
+              {...analyticsAction("buy_credits")}
             >
               <CreditCardIcon className="size-3.5" />
               Buy credits
@@ -193,6 +197,7 @@ export function EmptyCreditsNotice({
             to="/workspaces/$workspaceId/settings"
             params={{ workspaceId }}
             search={{ section: "models" }}
+            {...analyticsAction("connect_model")}
           >
             Connect a model
           </Link>

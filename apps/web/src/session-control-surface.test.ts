@@ -9,7 +9,7 @@ describe("session control surface architecture", () => {
     for (const [path, workspace] of [
       ["routes/session.tsx", "props.session.workspaceId"],
       ["routes/sessions-index.tsx", "workspaceId"],
-      ["routes/schedules.tsx", "props.workspaceId"],
+      ["components/schedules/schedule-form-page.tsx", "workspaceId"],
     ] as const) {
       const route = await source(path);
       const start = route.indexOf("const connectionAccounts = useConnectionAccounts(");
@@ -426,11 +426,34 @@ describe("session control surface architecture", () => {
   test("loads the first page and older sessions independently in each project", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
-    expect(list).toContain('limit: group.kind === "channel" ? 50 : 100');
-    expect(list).toContain("if (!channelMode || search) return;");
+    expect(list).toContain("limit: 50");
+    expect(list).toContain('if (!channelMode || search || browseStatus === "archived") return;');
     expect(list).toContain("void loadMoreInGroup(group);");
     expect(list).toContain("sessionPaginationProjectGroup(section.channelId, section.name)");
-    expect(list).toContain("(!channelMode || search) && workspacePagination");
+    expect(list).toMatch(/\(!channelMode \|\| search\)\s*&&\s*workspacePagination/);
+  });
+
+  test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain(
+      "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
+    );
+    expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
+    expect(list).toContain("visibleNodes={visibleNodesForGroup(");
+    expect(list).toContain("Show ${revealCount} more");
+  });
+
+  test("separates archive browsing and hydrates sparse creator groups", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("browseSessions.filter((session) => !session.archived)");
+    expect(list).toContain('browseStatus === "archived" || session.archived');
+    expect(list).toContain('label="Archived"');
+    expect(list).toContain('sectionId="archived"');
+    expect(list).toContain("allowNewSession={false}");
+    expect(list).toContain(
+      'if (browseGroupBy !== "creator" || search || browseStatus === "archived") return;',
+    );
+    expect(list).toContain('group.kind === "archived" ? {} : { sortBy: browseSortBy }');
   });
 
   test("hands keyboard focus across optimistic project-move remounts", async () => {

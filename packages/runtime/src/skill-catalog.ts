@@ -55,3 +55,24 @@ export function formatSkillCatalog(descriptors: readonly SkillCatalogDescriptor[
     );
   return lines.join("\n");
 }
+
+/**
+ * Ids of the entries a rendered catalog lists. Entries omitted by the bounds
+ * above are not listed, so they are not in the set; header and notice lines
+ * are never entries.
+ */
+export function skillCatalogEntryIds(catalog: string): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const line of catalog.split("\n")) {
+    if (!line.startsWith("- {")) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line.slice(2));
+    } catch {
+      continue;
+    }
+    const id = (entry as { id?: unknown } | null)?.id;
+    if (typeof id === "string" && id) ids.add(id);
+  }
+  return ids;
+}

@@ -3,6 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { SparklesIcon } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { ErrorMessage } from "@/components/ui/error-message";
+import { Field, TextArea } from "@/components/ui/field";
 import { useAppContext } from "@/context";
 
 type OrganizationKnowledgeModelSelection = {
@@ -173,61 +176,47 @@ export function OrganizationKnowledgePrompt({ workspaceId }: { workspaceId: stri
   };
 
   return (
-    <form
-      className="grid gap-3 border-b border-border pb-6"
-      onSubmit={(event) => void start(event)}
-    >
-      <label className="grid gap-2 text-sm font-medium text-fg">
-        <span className="flex items-center gap-2">
-          <SparklesIcon aria-hidden="true" className="size-4 text-brand" />
-          Describe your organization
-        </span>
-        <textarea
+    <form className="mt-1 flex min-w-0 flex-col gap-3" onSubmit={(event) => void start(event)}>
+      <Field label="Describe your organization">
+        <TextArea
           name="organization-description"
           autoComplete="off"
-          className="min-h-28 rounded-lg border border-border bg-surface/45 px-3 py-2 text-sm leading-6 text-fg outline-none transition-colors focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/15"
+          rows={4}
           value={request}
-          placeholder="For example: OpenGeni builds infrastructure for teams running dependable autonomous agents. We exist to make capable agents safe and practical to operate…"
+          placeholder="For example: we build infrastructure for teams running dependable autonomous agents, because capable agents should be safe and practical to operate."
           onChange={(event) => setRequest(event.target.value)}
         />
-      </label>
-      <p className="text-xs leading-5 text-fg-subtle">
-        OpenGeni will keep this to identity and mission, ask questions only if needed, and show you
-        the complete version before saving it.
-      </p>
-      {modelSelection ? (
-        <p className="text-xs leading-5 text-fg-subtle" role="status">
-          Model: <span className="font-medium text-fg">{modelSelection.label}</span>
-          {" · "}
-          {modelSelection.paymentSource}
-        </p>
+      </Field>
+      {catalog.error ? (
+        <ErrorMessage
+          variant="inline"
+          title="Couldn't find a model this workspace allows."
+          action={
+            <Button type="button" variant="outline" size="sm" onClick={catalog.refresh}>
+              Try again
+            </Button>
+          }
+        >
+          {catalog.error}
+        </ErrorMessage>
       ) : null}
       {noModelAvailable ? (
-        <p className="text-xs leading-5 text-status-error" role="status">
-          No model is available for this workspace. Check the workspace model policy and provider
-          credentials.
+        <p className="text-xs leading-[18px] text-danger" role="status">
+          No model is available for this workspace. Check its allowed models and connected accounts.
         </p>
       ) : null}
-      {catalog.error ? (
-        <p className="flex flex-wrap items-center gap-2 text-xs leading-5 text-fg-subtle">
-          <span>Could not resolve an allowed workspace model: {catalog.error}.</span>
-          <button
-            type="button"
-            className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-fg hover:bg-surface-muted"
-            onClick={catalog.refresh}
-          >
-            Retry
-          </button>
-        </p>
-      ) : null}
-      <div>
-        <button
-          type="submit"
-          className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={!canSubmit}
-        >
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+        <Button type="submit" disabled={!canSubmit} className="pointer-coarse:h-11">
+          <SparklesIcon aria-hidden="true" />
           {starting ? "Starting…" : "Create with OpenGeni"}
-        </button>
+        </Button>
+        {modelSelection ? (
+          <p className="text-xs leading-[18px] text-fg-muted" role="status">
+            Runs on <span className="text-fg">{modelSelection.label}</span>
+            {" · "}
+            {modelSelection.paymentSource}
+          </p>
+        ) : null}
       </div>
     </form>
   );

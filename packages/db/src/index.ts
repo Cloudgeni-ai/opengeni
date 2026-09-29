@@ -21,6 +21,8 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  sessionTurnSurfaceOrNull,
+  type SessionTurnSurface,
 } from "@opengeni/contracts";
 import {
   readReasoningConfiguration,
@@ -56,6 +58,7 @@ import {
   type CodexPlanEntitlementExclusion,
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
+export * from "./scheduled-task-access";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
   CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
@@ -77,6 +80,7 @@ import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
+export * from "./scheduled-slack-bot-messages";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
@@ -125,6 +129,7 @@ import {
   readSkillMetadata,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
+  storedBundledSkillSelectionIdentity,
   type BundledSkillId,
   type SkillRecord,
 } from "@opengeni/contracts";
@@ -175,6 +180,7 @@ import {
   SessionGoalSnapshot,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
+  ConnectionAccountSelectionDiagnostic,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
@@ -230,6 +236,8 @@ import type {
   GitHubRepositoryScope,
   HostEventExport,
   HostEventExportBatch,
+  HostLifecycleFactExport,
+  HostLifecycleFactExportBatch,
   HostUsageExport,
   HostUsageExportBatch,
   ManagedAccount,
@@ -403,6 +411,8 @@ import {
   HostEventExport as HostEventExportContract,
   HostEventExportBatch as HostEventExportBatchContract,
   HostExportConsumerId,
+  HostLifecycleFactExport as HostLifecycleFactExportContract,
+  HostLifecycleFactExportBatch as HostLifecycleFactExportBatchContract,
   HostUsageExport as HostUsageExportContract,
   HostUsageExportBatch as HostUsageExportBatchContract,
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
@@ -626,6 +636,7 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
+export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -893,7 +904,7 @@ export class SessionSpawnDeniedDbError extends Error {
 // Durable host export
 // ---------------------------------------------------------------------------
 
-export type HostExportKind = "session_event" | "usage_event";
+export type HostExportKind = "session_event" | "usage_event" | "lifecycle_fact";
 
 /**
  * A leased row did not satisfy this consumer build's export contract. Only
@@ -943,8 +954,9 @@ type HostExportRow = {
   lease_through: string | number | bigint;
   export_cursor: string | number | bigint;
   source_id: string;
-  account_id: string;
-  workspace_id: string;
+  // Null only for lifecycle facts (person-level, or organization-level facts).
+  account_id: string | null;
+  workspace_id: string | null;
   session_id: string | null;
   root_session_id: string | null;
   turn_id: string | null;
@@ -960,18 +972,31 @@ type HostExportRow = {
   initiator: unknown;
   initiator_context: unknown;
   origin: string | null;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
   payload: unknown;
   payload_codec_version: number | null;
   occurred_at: Date | string;
   source_recorded_at: Date | string;
 };
 
-type HostExportClaimRow = Omit<HostExportRow, "root_session_id" | "payload_codec_version">;
+type HostExportClaimRow = Omit<
+  HostExportRow,
+  "root_session_id" | "payload_codec_version" | "surface" | "model_provider" | "tool_family"
+>;
 
 type HostExportClaimSidecarRow = {
   export_cursor: string | number | bigint;
   root_session_id: string | null;
   payload_codec_version: number | null;
+};
+
+type HostExportClaimAnalyticsSidecarRow = {
+  export_cursor: string | number | bigint;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
 };
 
 function hostExportCursor(value: string | number | bigint): string {
@@ -983,7 +1008,7 @@ function hostExportTimestamp(value: Date | string): string {
 }
 
 function validateHostExportKind(kind: HostExportKind): void {
-  if (kind !== "session_event" && kind !== "usage_event") {
+  if (kind !== "session_event" && kind !== "usage_event" && kind !== "lifecycle_fact") {
     throw new Error(`Unknown host export kind: ${kind}`);
   }
 }
@@ -1065,6 +1090,18 @@ export async function claimHostExportBatch(
 export async function claimHostExportBatch(
   db: Database,
   input: {
+    kind: "lifecycle_fact";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
     kind: HostExportKind;
     consumerId: string;
     leaseToken: string;
@@ -1073,7 +1110,19 @@ export async function claimHostExportBatch(
     limit?: number;
     maxBytes?: number;
   },
-): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
   const rows = await db.transaction(async (tx) => {
     const transaction = tx as unknown as Database;
@@ -1113,16 +1162,34 @@ export async function claimHostExportBatch(
     const sidecarByExportCursor = new Map(
       sidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
     );
+    const analyticsSidecars = await rawRows<HostExportClaimAnalyticsSidecarRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.host_export_claim_analytics_sidecars(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+        )
+      `,
+    );
+    const analyticsByExportCursor = new Map(
+      analyticsSidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
+    );
     const materializedRows = claimedRows.map((row): HostExportRow => {
       const cursor = hostExportCursor(row.export_cursor);
       const sidecar = sidecarByExportCursor.get(cursor);
       if (!sidecar) {
         throw new Error(`Host export sidecar lookup omitted leased cursor ${cursor}`);
       }
+      const analytics = analyticsByExportCursor.get(cursor);
+      if (!analytics) {
+        throw new Error(`Host export analytics sidecar lookup omitted leased cursor ${cursor}`);
+      }
       return {
         ...row,
         root_session_id: sidecar.root_session_id,
         payload_codec_version: sidecar.payload_codec_version,
+        surface: analytics.surface,
+        model_provider: analytics.model_provider,
+        tool_family: analytics.tool_family,
       };
     });
     return materializedRows;
@@ -1142,6 +1209,9 @@ export async function claimHostExportBatch(
         initiator: row.initiator,
         initiatorContext: row.initiator_context,
         origin: row.origin,
+        surface: row.surface,
+        modelProvider: row.model_provider,
+        toolFamily: row.tool_family,
         event: {
           id: row.source_id,
           workspaceId: row.workspace_id,
@@ -1174,6 +1244,46 @@ export async function claimHostExportBatch(
     });
   }
 
+  if (input.kind === "lifecycle_fact") {
+    const facts = rows.map((row): HostLifecycleFactExport => {
+      const payload =
+        row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+          ? (row.payload as Record<string, unknown>)
+          : {};
+      const initiator =
+        row.initiator && typeof row.initiator === "object" && !Array.isArray(row.initiator)
+          ? (row.initiator as Record<string, unknown>)
+          : null;
+      const parsed = HostLifecycleFactExportContract.safeParse({
+        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+        cursor: hostExportCursor(row.export_cursor),
+        idempotencyKey: row.idempotency_key,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        fact: {
+          id: row.source_id,
+          type: row.event_type,
+          attribute: payload.attribute ?? null,
+          subjectKind: payload.subjectKind,
+          subjectId: initiator?.subjectId ?? null,
+          occurredAt: hostExportTimestamp(row.occurred_at),
+        },
+      });
+      if (!parsed.success) {
+        throw hostExportPayloadError(input, row, parsed.error.issues);
+      }
+      return parsed.data;
+    });
+    return HostLifecycleFactExportBatchContract.parse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      consumerId: first.consumer_id,
+      leaseToken: first.lease_token,
+      checkpoint: hostExportCursor(first.checkpoint),
+      throughCursor: hostExportCursor(first.lease_through),
+      events: facts,
+    });
+  }
+
   const events = rows.map((row): HostUsageExport => {
     const parsed = HostUsageExportContract.safeParse({
       schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
@@ -1187,6 +1297,8 @@ export async function claimHostExportBatch(
       initiator: row.initiator,
       initiatorContext: row.initiator_context,
       origin: row.origin,
+      surface: row.surface,
+      modelProvider: row.model_provider,
       usage: row.payload,
     });
     if (!parsed.success) {
@@ -5626,7 +5738,9 @@ export type ScheduledTaskCreatorSessionPolicy = {
  * null for a human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
  * effective first-party selection and permission set so a narrowed session
- * cannot widen itself through a schedule.
+ * cannot widen itself through a schedule. Only its owner's explicit access
+ * refresh re-freezes the tools and permissions, within that person's grants;
+ * the session policy never changes after create.
  */
 export type ScheduledTaskCreatorPolicy = {
   firstPartyMcpTools: FirstPartyMcpToolName[] | null;
@@ -5685,7 +5799,29 @@ export type UpdateScheduledTaskInput = Partial<{
   beforeUpdateCommit: (tx: Database) => Promise<void>;
 
   captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
+  /**
+   * Refuse the update unless the locked row still has this execution digest:
+   * the head a person reviewed before an explicit access refresh.
+   */
+  expectedExecutionDigest: string;
+  /**
+   * Re-freeze an agent-created task's OpenGeni tools and permissions (the
+   * owner's explicit access refresh). Applies only to a row whose creator
+   * tools are already frozen; the creator session policy is never rewritten.
+   */
+  creatorFirstPartyPolicy: {
+    firstPartyMcpTools: FirstPartyMcpToolName[];
+    firstPartyMcpPermissions: Permission[];
+  };
 }>;
+
+/** The task changed after the caller read it; nothing was written. */
+export class ScheduledTaskHeadChangedError extends Error {
+  constructor() {
+    super("scheduled task changed after it was read");
+    this.name = "ScheduledTaskHeadChangedError";
+  }
+}
 
 export type CreateKnowledgeMemoryInput = {
   accountId: string;
@@ -6424,6 +6560,8 @@ export type EnqueueSessionTurnInput = {
   triggerEventId: string;
   temporalWorkflowId: string;
   source: SessionTurnSource;
+  /** Content-free product surface the request entered through. */
+  surface?: SessionTurnSurface | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -11570,6 +11708,12 @@ export type SlackInteraction = {
    * make the ledger's byte comparison raise.
    */
   routedWorkspaceLabel: string | null;
+  /**
+   * One line naming what the bound session started with, frozen when the
+   * session bound so an acknowledgement repair renders the same bytes. Null
+   * means no line.
+   */
+  sessionDefaultsLine: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -12189,6 +12333,8 @@ export async function getOrCreateSlackInteraction(
     // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
     | "firstTaskHint"
     | "routedWorkspaceLabel"
+    // Owned by `bindSlackInteractionSession`, frozen with the bound session.
+    | "sessionDefaultsLine"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -12660,12 +12806,21 @@ export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
     sessionId: string;
+    /**
+     * Written only by the bind that wins; a replayed bind of the same session
+     * returns the line the first bind froze and never rewrites it.
+     */
+    sessionDefaultsLine?: string | null;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.slackInteractions)
-      .set({ sessionId: input.sessionId, updatedAt: sql`now()` })
+      .set({
+        sessionId: input.sessionId,
+        sessionDefaultsLine: input.sessionDefaultsLine ?? null,
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(schema.slackInteractions.id, input.id),
@@ -13197,6 +13352,11 @@ function mapSlackInteraction(
       row,
       "routedWorkspaceLabel",
       "routed_workspace_label",
+    ),
+    sessionDefaultsLine: slackRowNullableString(
+      row,
+      "sessionDefaultsLine",
+      "session_defaults_line",
     ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
@@ -17053,7 +17213,11 @@ export async function updateScheduledTask(
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [previousLinkRevision] = await scopedDb
-      .select({ authorityRevision: schema.scheduledTasks.authorityRevision })
+      .select({
+        authorityRevision: schema.scheduledTasks.authorityRevision,
+        executionDigest: schema.scheduledTasks.executionDigest,
+        creatorFirstPartyMcpTools: schema.scheduledTasks.creatorFirstPartyMcpTools,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -17063,6 +17227,15 @@ export async function updateScheduledTask(
       )
       .for("update")
       .limit(1);
+    if (
+      input.expectedExecutionDigest !== undefined &&
+      previousLinkRevision?.executionDigest !== input.expectedExecutionDigest
+    ) {
+      throw new ScheduledTaskHeadChangedError();
+    }
+    if (input.creatorFirstPartyPolicy && !previousLinkRevision?.creatorFirstPartyMcpTools) {
+      throw new Error("only an agent-created scheduled task has a creator tool policy to refresh");
+    }
     if (
       input.refreshPersonalResourceAuthority &&
       input.clonePersonalResourceAuthorityFromRevision !== undefined
@@ -17101,6 +17274,14 @@ export async function updateScheduledTask(
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.creatorFirstPartyPolicy
+          ? {
+              creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
+              creatorFirstPartyMcpPermissions: [
+                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ],
+            }
+          : {}),
         ...(input.refreshPersonalResourceAuthority ||
         input.clonePersonalResourceAuthorityFromRevision !== undefined
           ? {
@@ -17288,18 +17469,31 @@ export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
 /**
  * The frozen creator boundary of a scheduled task. Read at fire time (and by
  * recovery of an already-admitted run, which is why a tombstoned task still
- * answers): the columns are written once at create and never updated, so the
- * read is deterministic for the task's whole life. Null when the task has no
- * row at all.
+ * answers). The session policy column is written once at create and never
+ * updated, so recovery re-reads it deterministically. The tools and
+ * permissions change only through the owner's explicit access refresh, and an
+ * admitted run never re-reads them: its accepted execution carries the
+ * resolved tools and permissions. Null when the task has no row at all.
  */
 export async function getScheduledTaskCreatorPolicy(
   db: Database,
   workspaceId: string,
   taskId: string,
 ): Promise<ScheduledTaskCreatorPolicy | null> {
+  return (await listScheduledTaskCreatorPolicies(db, workspaceId, [taskId])).get(taskId) ?? null;
+}
+
+/** Batch form of {@link getScheduledTaskCreatorPolicy}; tasks without a row are absent. */
+export async function listScheduledTaskCreatorPolicies(
+  db: Database,
+  workspaceId: string,
+  taskIds: readonly string[],
+): Promise<Map<string, ScheduledTaskCreatorPolicy>> {
+  if (taskIds.length === 0) return new Map();
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
+    const rows = await scopedDb
       .select({
+        id: schema.scheduledTasks.id,
         firstPartyMcpTools: schema.scheduledTasks.creatorFirstPartyMcpTools,
         firstPartyMcpPermissions: schema.scheduledTasks.creatorFirstPartyMcpPermissions,
         sessionPolicy: schema.scheduledTasks.creatorSessionPolicy,
@@ -17308,28 +17502,38 @@ export async function getScheduledTaskCreatorPolicy(
       .where(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
+          inArray(schema.scheduledTasks.id, [...new Set(taskIds)]),
         ),
-      )
-      .limit(1);
-    if (!row) return null;
-    return {
-      firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
-      firstPartyMcpPermissions: row.firstPartyMcpPermissions
-        ? [...row.firstPartyMcpPermissions]
-        : null,
-      sessionPolicy: row.sessionPolicy
-        ? {
-            agentAccess: row.sessionPolicy.agentAccess ?? null,
-            scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
-            memoryScope:
-              row.sessionPolicy.memoryScope === "session"
-                ? "off"
-                : (row.sessionPolicy.memoryScope ?? null),
-          }
-        : null,
-    };
+      );
+    return new Map(rows.map((row) => [row.id, scheduledTaskCreatorPolicyFromRow(row)]));
   });
+}
+
+function scheduledTaskCreatorPolicyFromRow(row: {
+  firstPartyMcpTools: FirstPartyMcpToolName[] | null;
+  firstPartyMcpPermissions: Permission[] | null;
+  sessionPolicy: {
+    agentAccess?: string | null;
+    scopeSubjectId?: string | null;
+    memoryScope?: string | null;
+  } | null;
+}): ScheduledTaskCreatorPolicy {
+  return {
+    firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
+    firstPartyMcpPermissions: row.firstPartyMcpPermissions
+      ? [...row.firstPartyMcpPermissions]
+      : null,
+    sessionPolicy: row.sessionPolicy
+      ? {
+          agentAccess: row.sessionPolicy.agentAccess ?? null,
+          scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
+          memoryScope:
+            row.sessionPolicy.memoryScope === "session"
+              ? "off"
+              : (row.sessionPolicy.memoryScope ?? null),
+        }
+      : null,
+  };
 }
 
 export async function requireScheduledTask(
@@ -17438,6 +17642,42 @@ export async function listScheduledTasks(
       .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
       .limit(limit)
       .offset(offset);
+    return rows.map(mapScheduledTask);
+  });
+}
+
+/**
+ * Active agent-turn tasks that chose connector accounts, owned by `subjectId`
+ * (and, with `includeOwnerless`, tasks without an owner). Only these can have
+ * a fresh occurrence refused before it creates a run because a chosen account
+ * is gone, so the owner's access attention list checks each one's account
+ * plan. A caller without a subject passes an empty id, which owns nothing.
+ */
+export async function listActiveScheduledTasksWithConnectionAccounts(
+  db: Database,
+  workspaceId: string,
+  input: { subjectId: string; includeOwnerless: boolean; limit: number },
+): Promise<ScheduledTask[]> {
+  const limit = Math.max(1, Math.min(500, Math.floor(input.limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const owner = eq(schema.scheduledTasks.ownerSubjectId, input.subjectId);
+    const rows = await scopedDb
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          isNull(schema.scheduledTasks.deletedAt),
+          eq(schema.scheduledTasks.status, "active"),
+          sql`${schema.scheduledTasks.action} ->> 'kind' = 'agent_turn'`,
+          sql`(case when jsonb_typeof(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts') = 'array'
+            then jsonb_array_length(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts')
+            else 0 end) > 0`,
+          input.includeOwnerless ? or(owner, isNull(schema.scheduledTasks.ownerSubjectId)) : owner,
+        ),
+      )
+      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
+      .limit(limit);
     return rows.map(mapScheduledTask);
   });
 }
@@ -17690,6 +17930,93 @@ export async function deleteScheduledTask(
         changed,
       };
     });
+  });
+}
+
+/** A terminal refusal is evidence, not accepted execution or permission to retry. */
+export async function recordScheduledTaskAdmissionFailure(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+    taskExecutionDigest: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+    scheduledAt?: Date | null;
+    diagnostic: ConnectionAccountSelectionDiagnostic;
+  },
+): Promise<ScheduledTaskRun> {
+  const diagnostic = ConnectionAccountSelectionDiagnostic.parse(input.diagnostic);
+  if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    // Same task lock as accepted admission; both outcomes share the existing
+    // producer unique key. A committed winner is immutable even after repair.
+    const [task] = await tx
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) throw new Error("Scheduled task not found");
+    const readPrior = async () => {
+      const [prior] = await tx
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (prior && (prior.taskId !== input.taskId || prior.triggerType !== input.triggerType)) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      return prior;
+    };
+    const prior = await readPrior();
+    if (prior) return mapScheduledTaskRun(prior);
+    if (
+      task.status !== "active" ||
+      task.deletedAt ||
+      task.authorityRevision !== input.taskAuthorityRevision ||
+      task.executionDigest !== input.taskExecutionDigest
+    ) {
+      throw new Error("scheduled task changed before refusal recording");
+    }
+    const now = new Date();
+    const [inserted] = await tx
+      .insert(schema.scheduledTaskRuns)
+      .values({
+        accountId: task.accountId,
+        workspaceId: input.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+        triggerType: input.triggerType,
+        producerKey: input.producerKey,
+        scheduledAt: input.scheduledAt ?? null,
+        firedAt: now,
+        completedAt: now,
+        actionKind: "agent_turn",
+        status: "failed",
+        error: "connection_account_unavailable",
+        admissionDiagnostic: diagnostic,
+      })
+      .onConflictDoNothing({
+        target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+        where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+      })
+      .returning();
+    const result = inserted ?? (await readPrior());
+    if (!result) throw new Error("scheduled refusal receipt missing");
+    return mapScheduledTaskRun(result);
   });
 }
 
@@ -33101,7 +33428,7 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (
-    stableJson(bundledSkillSelectionFromMetadata(existing.metadata) ?? null) !==
+    stableJson(storedBundledSkillSelectionIdentity(existing.metadata) ?? null) !==
     stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
   ) {
     throw new SessionCreateIdempotencyConflictError();
@@ -34429,6 +34756,52 @@ export async function getSessionTurnMcpAccountBindings(
     async (scopedDb) =>
       await mcpAccountBindingsForTurnInTransaction(scopedDb, workspaceId, sessionId, turnId),
   );
+}
+
+/**
+ * The connector authority frozen on a session's first accepted turn: its exact
+ * MCP account bindings and personal connection delegations. For display only
+ * (Slack's "Using" line names just the connectors this snapshot can reach);
+ * runtime authority keeps reading the claimed turn itself. Null when the
+ * session has no turn yet.
+ */
+export async function getSessionFirstTurnConnectionAuthority(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        id: schema.sessionTurns.id,
+        bindings: schema.sessionTurns.mcpAccountBindings,
+        delegations: schema.sessionTurns.personalConnectionDelegations,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+        ),
+      )
+      .orderBy(
+        asc(schema.sessionTurns.position),
+        asc(schema.sessionTurns.createdAt),
+        asc(schema.sessionTurns.id),
+      )
+      .limit(1);
+    if (!row) return null;
+    return {
+      mcpAccountBindings: parseAcceptedMcpAccountBindings(row.bindings),
+      personalConnectionDelegations: parsedPersonalConnectionDelegations(
+        row.delegations,
+        `session_turns:${workspaceId}:${sessionId}:${row.id}`,
+      ),
+    };
+  });
 }
 
 export async function getSessionParentMcpAccountBindings(
@@ -44661,6 +45034,10 @@ export interface AcquireLeaseInput {
   // durable capture-and-drain rotation, N-holders throw SandboxImageConflictError. Omitted
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
+  /** Direct control of an already-owned interaction instance. Admit only that
+   * live provider, retaining its image across deployment changes. Never spawn
+   * or rotate a replacement for this request. Capture/rotation fences still apply. */
+  retainedInstanceId?: string;
   // The frozen rig version this run rides (M3). Stamped on the cold-create + CAS
   // and conflicted exactly like `image`: a live multi-holder box under a DIFFERENT
   // rig version throws SandboxRigConflictError; a solo holder requests durable
@@ -45939,6 +46316,14 @@ async function acquireLeaseOnce(
   if (input.kind === "process") {
     throw new Error("Process lease holders are created only by atomic retained-process promotion");
   }
+  if (
+    input.retainedInstanceId !== undefined &&
+    (input.kind !== "direct" || input.retainedInstanceId.length === 0)
+  ) {
+    throw new Error(
+      "Retained instance admission requires a direct holder and exact provider identity",
+    );
+  }
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
@@ -45994,6 +46379,21 @@ async function acquireLeaseOnce(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+        // Existing browser control and suspension must remain possible after a
+        // deployment changes the image for new boxes. Check under the lease lock
+        // before any holder, re-arm, billing admission or cold-spawner election.
+        if (
+          input.retainedInstanceId !== undefined &&
+          (row.instance_id !== input.retainedInstanceId ||
+            row.backend !== backend ||
+            (liveness !== "warm" && liveness !== "draining"))
+        ) {
+          return {
+            role: "fenced" as const,
+            reason: "superseded" as const,
+            lease: mapLeaseRow(row),
+          };
+        }
         const existingSnapshot = warmBillingSnapshot(row);
         if (row.resume_state?.opengeniWarmBilling && !existingSnapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
@@ -46110,7 +46510,11 @@ async function acquireLeaseOnce(
         // Each axis is enforced only when BOTH sides are known; a cold row / a legacy null /
         // an unset input never conflicts (the selfhosted path passes neither; a rig-less run
         // passes no rigVersionId, so it never stamps or conflicts on rig).
-        const imageConflict = image !== null && row.image !== null && row.image !== image;
+        const imageConflict =
+          input.retainedInstanceId === undefined &&
+          image !== null &&
+          row.image !== null &&
+          row.image !== image;
         const rigConflict =
           rigVersionId !== null &&
           row.rig_version_id !== null &&
@@ -66412,6 +66816,8 @@ export type InitializeSessionStartInput = {
   reasoningEffortFallback: ReasoningEffort;
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
+  /** Content-free product surface the create request entered through. */
+  surface?: SessionTurnSurface | null;
   createdEventPayload: Record<string, unknown>;
   /** Trusted backend-only capture for a newly inserted initial turn. Runs under
    * the canonical activity transaction; failure rolls back events and turn.
@@ -66966,6 +67372,7 @@ export async function initializeSessionStartAtomically(
                   temporalWorkflowId,
                   status: "queued",
                   source: "user",
+                  surface: input.surface ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -67289,6 +67696,7 @@ export async function enqueueSessionTurn(
                 temporalWorkflowId: input.temporalWorkflowId,
                 status: "queued",
                 source: input.source,
+                surface: input.surface ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -70313,6 +70721,9 @@ export async function claimSessionWorkForAttempt(
                     executionGeneration: 1,
                     activeAttemptId: input.attemptId,
                     source: "compaction",
+                    // Maintenance continues the session's work; keep the
+                    // surface of the turn it compacts after.
+                    surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
                     position: Number(position),
                     prompt: "",
                     resources: [],
@@ -70648,6 +71059,13 @@ export async function claimSessionWorkForAttempt(
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
           const scheduledTaskRunId = delivered.updates[0]?.scheduledTaskRunId ?? null;
+          // A scheduled occurrence or another agent's message is a new request;
+          // any other machine input continues the session's latest surface.
+          const internalSurface: SessionTurnSurface | null = scheduledTaskRunId
+            ? "scheduled"
+            : agentCommandUpdate
+              ? "agent"
+              : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
@@ -70890,6 +71308,7 @@ export async function claimSessionWorkForAttempt(
                   executionGeneration: 1,
                   activeAttemptId: input.attemptId,
                   source: routingGoalUpdate ? "goal" : "system",
+                  surface: internalSurface,
                   position: Number(position),
                   prompt: "Process the delivered internal session updates.",
                   resources: [],
@@ -74562,6 +74981,43 @@ export async function settleSessionIdleWithParentOutbox(
         )
         .limit(1);
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
+        return { action: "stale", episodeKey: null, events: [] } as const;
+      }
+      // Immediate machine input has no queued turn until claim. Its producer
+      // takes this same session fence, so a post-peek arrival must win before
+      // we publish the preceding episode's terminal result. Use the wake-class
+      // contract, not every pending row: deferred notices and unwaited command
+      // results do not reopen finished work. A late child notice likewise only
+      // reserves new work when its producer queued the session; active goals
+      // and held/due waits are independently protected below.
+      const pendingInputs = await tx
+        .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, sessionId),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+          ),
+        );
+      const pendingSteer = pendingInputs.some(({ kind }) => kind === "agent_steer_instruction");
+      const pendingImmediate = pendingInputs.some(
+        ({ kind }) =>
+          SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] === "immediate" &&
+          kind !== "background_command_result" &&
+          (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
+            session.status === "queued"),
+      );
+      if (
+        pendingSteer ||
+        (pendingImmediate &&
+          !(await latestFinishedTurnHasFailureCodeTx(
+            tx as unknown as Database,
+            workspaceId,
+            sessionId,
+            "context_compaction_failed",
+          )))
+      ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
       const [{ episodeSequence } = { episodeSequence: 0 }] = await tx
@@ -82463,6 +82919,7 @@ function mapSession(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string; activated: boolean },
 ): Session {
+  const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
     id: row.id,
     accountId: row.accountId,
@@ -82479,9 +82936,7 @@ function mapSession(
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
     skills: StoredSessionSkills.parse(row.skills ?? []),
-    ...(bundledSkillSelectionFromMetadata(row.metadata) !== undefined
-      ? { bundledSkillIds: bundledSkillSelectionFromMetadata(row.metadata) }
-      : {}),
+    ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
@@ -82782,6 +83237,10 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     knowledgeSummary: row.knowledgeSummary as ScheduledTaskRun["knowledgeSummary"],
     completedAt: row.completedAt?.toISOString() ?? null,
     error: row.error,
+    admissionDiagnostic:
+      row.admissionDiagnostic == null
+        ? null
+        : ConnectionAccountSelectionDiagnostic.parse(row.admissionDiagnostic),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

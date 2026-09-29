@@ -1,11 +1,12 @@
 import { createDiscoveryCache } from "./discovery-cache";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/sdk";
 import { BoxesIcon } from "lucide-react";
 import { CapabilityCatalogRow } from "./capability-catalog-row";
 import { ConnectionLogo } from "./connection-logo";
 
 const discoveryCache = createDiscoveryCache<PluginDiscoveryPage>();
+const spacedName = (name: string) => name.replace(/-/g, " ");
 const EMPTY_INSTALLED_IDS: ReadonlySet<string> = new Set();
 
 export type PluginDiscoveryProps = {
@@ -24,6 +25,10 @@ export type PluginDiscoveryProps = {
   resultLimit?: number;
   onShowMore?: () => void;
   onOpen: (item: PluginDiscoveryItem) => void;
+  /** Display name for a registry slug. Defaults to the slug with dashes as spaces. */
+  formatName?: (name: string) => string;
+  /** The row tile. Defaults to the plugin logo with a glyph fallback. */
+  renderIcon?: (item: PluginDiscoveryItem) => ReactNode;
 };
 export function PluginDiscovery(props: PluginDiscoveryProps) {
   const [provider, setProvider] = useState(props.defaultProvider ?? "");
@@ -72,6 +77,8 @@ function Results({
   onOpen,
   resultLimit,
   onShowMore,
+  formatName = spacedName,
+  renderIcon,
 }: PluginDiscoveryProps & { provider: string }) {
   const initial = discoveryCache.peek(client, JSON.stringify([workspaceId, query, provider, 0]));
   const [items, setItems] = useState<PluginDiscoveryItem[]>(initial?.items ?? []);
@@ -132,7 +139,11 @@ function Results({
     <>
       {!loading && !error ? (
         <p role="status">
-          {total ? `${total} plugins` : "No matching plugins. Try another search or registry."}
+          {total
+            ? "Bundles of skills and connections"
+            : query.trim()
+              ? `No matches for “${query.trim()}”.`
+              : "No plugins in this registry."}
         </p>
       ) : null}
       <div className="og-plugin-discovery-grid">
@@ -140,17 +151,21 @@ function Results({
           <CapabilityCatalogRow
             key={item.id}
             data-plugin-id={item.id}
-            name={item.displayName.replace(/-/g, " ")}
+            name={formatName(item.displayName)}
             description={item.description}
             status={installedIds.has(item.id) ? "added" : "available"}
             statusLabel={installedIds.has(item.id) ? "Installed" : "Available to install"}
             onOpen={() => onOpen(item)}
             icon={
-              <ConnectionLogo
-                src={item.logoUrl}
-                name={item.displayName}
-                fallback={<BoxesIcon aria-hidden="true" />}
-              />
+              renderIcon ? (
+                renderIcon(item)
+              ) : (
+                <ConnectionLogo
+                  src={item.logoUrl}
+                  name={item.displayName}
+                  fallback={<BoxesIcon aria-hidden="true" />}
+                />
+              )
             }
           />
         ))}

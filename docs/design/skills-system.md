@@ -127,10 +127,38 @@ skill_read({ skill, paths?, listFiles? })
 - Proposed: return files with their paths; report missing paths explicitly.
   Never silently omit files or present truncation as complete content.
 - Resolve ambiguous names explicitly rather than choosing a source silently.
+- An identifier that resolves to no Skill returns an error listing the
+  available Skills by id and name only, the descriptors the index and
+  `skill_search` already show, so the caller can retry. Entries resembling the
+  requested identifier come first; the list is bounded (25 entries, 4 KiB) and
+  points to `skill_search` for the rest. `skill_checkout` resolves through the
+  same reader and returns the same list.
 - Set `listFiles: true` without `paths`: return only relative `paths` (at most
   1,024) and available revision identity, with no file bodies and no sandbox.
   Combining inventory with `paths` is rejected. Inventory is on demand, never
   part of the standing prompt; omitted/false `listFiles` preserves text reads.
+- Telemetry: every read is counted in `opengeni_skill_reads_total`, and a model
+  read's tool-output event carries a content-free `opengeni/skillUse` fact in
+  MCP `_meta` (see [run lifecycle](../run-lifecycle.md)). Neither changes what
+  the model receives.
+- The default read also returns a bounded `scripts` index (path plus first
+  usage line of each runnable file), so commands are visible without checkout.
+
+### Checkout
+
+```text
+skill_checkout({ skill, directory, paths? })
+```
+
+- Writes every missing file in one filesystem batch, normally one sandbox
+  command and one workspace mutation admission.
+- Never overwrites: identical files are kept and reported `unchanged`; any
+  different existing entry fails before anything is written, so repeating a
+  checkout into the same directory is safe and fast.
+- `paths` copies exactly those files, for example one script to run.
+- Only a complete checkout that created its directory returns the
+  `skill_publish` base (`revisionId`, `scopeVersion`); other results say
+  `publishable: false`.
 
 ### Search and install
 
@@ -308,8 +336,12 @@ including scheduled sessions, rather than introducing worker-only overrides.
 Persist the distinction between omitted and empty. Unknown explicit ids fail
 validation. Store the resolved choice in sanitized immutable session metadata,
 following the existing create-identity convention; expose it as a typed session
-field. Raw caller metadata cannot override it. Keyed create retries must retain
-the same effective selection. Agent-created schedules inherit or narrow their
+field. Reading that stored choice drops ids the running build does not know
+(for example, a row written by a newer release), so the read narrows the
+selection instead of failing; it never reverts to defaults. Raw caller
+metadata cannot override it. Keyed create retries must retain the same
+effective selection, and compare against the exact stored value rather than
+that narrowed read. Agent-created schedules inherit or narrow their
 creator's choice; an existing-session schedule cannot override its target.
 Adding a new bundled Skill must not expand an explicit host selection.
 

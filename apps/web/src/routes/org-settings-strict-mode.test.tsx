@@ -192,6 +192,13 @@ mock.module("@tanstack/react-router", () => ({
   ...RouterPackage,
   Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
   useNavigate: () => navigate,
+  useRouterState: (options?: { select?: (state: unknown) => unknown }) => {
+    const state = {
+      location: { pathname: "/", search: { section: "page" }, href: "/" },
+      matches: [],
+    };
+    return options?.select ? options.select(state) : state;
+  },
 }));
 mock.module("@/lib/analytics", () => ({ ...AnalyticsModule, captureAnalyticsEvent }));
 mock.module("sonner", () => ({
@@ -338,11 +345,11 @@ describe("organization billing StrictMode ownership", () => {
     expect(getBilling.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("$25.00 available");
-    expect(container.textContent).toContain("seats");
+    expect(container.textContent).toContain("Seats");
     expect(container.querySelector('section[aria-label="Credits and payments"]')).not.toBeNull();
-    expect(
-      container.querySelector('input[name="credit-amount"]')?.closest("label")?.textContent,
-    ).toContain("Amount to add (USD)");
+    expect(container.querySelector('input[name="credit-amount"]')?.getAttribute("aria-label")).toBe(
+      "Amount to add (USD)",
+    );
     expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
       accountId,
       period: "month",
@@ -350,20 +357,18 @@ describe("organization billing StrictMode ownership", () => {
     });
     expect(container.textContent).toContain("No visible usage recorded in this period.");
     expect(useBillingUsage).not.toHaveBeenCalled();
-    expect(container.textContent).toContain(
-      "View invoices and manage payment information in Stripe.",
-    );
+    expect(container.textContent).toContain("Invoices and payment details");
     expect(container.textContent).not.toContain("OG-0042");
 
     const usageSection = container.querySelector('[aria-label="Organization usage dashboard"]')!;
-    const periodSelect = usageSection.querySelector<HTMLSelectElement>(
-      '[aria-label="Usage period"]',
-    )!;
+    const period = (label: string) =>
+      Array.from(
+        usageSection.querySelectorAll<HTMLButtonElement>(
+          '[aria-label="Usage period"] [data-slot=segmented-control-item]',
+        ),
+      ).find((item) => item.textContent?.trim() === label)!;
     const readsBeforeChange = getOrganizationUsageSummary.mock.calls.length;
-    await act(async () => {
-      periodSelect.value = "today";
-      periodSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
-    });
+    await act(async () => period("Today").click());
     await flush();
     expect(getOrganizationUsageSummary.mock.calls.length).toBe(readsBeforeChange + 1);
     expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
@@ -373,7 +378,8 @@ describe("organization billing StrictMode ownership", () => {
     getOrganizationUsageSummary.mockImplementationOnce(async () => {
       throw new Error("usage unavailable");
     });
-    await act(async () => (usageSection.querySelector("button") as HTMLButtonElement).click());
+    // No Refresh button: another period reloads, and a failure offers Try again.
+    await act(async () => period("This month").click());
     await flush();
     expect(usageSection.textContent).toContain("Couldn't load period usage");
     expect(usageSection.textContent).not.toContain("No visible usage recorded");
@@ -436,7 +442,9 @@ describe("organization billing StrictMode ownership", () => {
       afterWorkspaceId: workspaceId,
     });
     expect(container.textContent).toContain("Second page workspace");
-    expect(container.textContent).toContain("$0.000100");
+    // Amounts read in cents; a sliver under a cent says so instead of $0.00.
+    expect(container.textContent).toContain("< $0.01");
+    expect(container.textContent).not.toContain("$0.000100");
     await act(async () => button(container, "First workspaces").click());
     expect(container.textContent).toContain("First page workspace");
     expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
@@ -464,7 +472,7 @@ describe("organization billing StrictMode ownership", () => {
     expect(
       listOrganizationApiKeys.mock.calls.every(([seenAccountId]) => seenAccountId === accountId),
     ).toBe(true);
-    expect(container.textContent).toContain("Organization API keys");
+    expect(container.textContent).toContain("API keys");
     expect(container.textContent).toContain("No organization API keys yet");
 
     await act(async () => root.unmount());
@@ -481,7 +489,7 @@ describe("organization billing StrictMode ownership", () => {
     await act(async () => {
       root.render(
         <StrictMode>
-          <OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />
+          <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
         </StrictMode>,
       );
     });
@@ -489,21 +497,16 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(
-      container.querySelector('section[aria-labelledby="organization-identity-heading"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('section[aria-labelledby="organization-documents-heading"]'),
-    ).not.toBeNull();
-    expect(
       Array.from(container.querySelectorAll("h2")).map((heading) => heading.textContent?.trim()),
-    ).toEqual(expect.arrayContaining(["Organization identity", "Organization documents"]));
-    expect(container.textContent).toContain("Agent-managed organization identity");
+    ).toEqual(expect.arrayContaining(["Identity and mission", "Agent changes", "Documents"]));
+    expect(container.textContent).toContain("Organization documents");
+    expect(container.textContent).not.toContain("Company");
     expect(container.textContent).toContain("Require approval");
     expect(container.textContent).not.toContain("Review first");
-    const automatic = container.querySelector<HTMLInputElement>(
-      'input[name="company-profile-agent-policy"][value="automatic"]',
+    const automatic = container.querySelector<HTMLButtonElement>(
+      'button[role="radio"][value="automatic"]',
     );
-    if (!automatic) throw new Error("Missing Autonomous policy option");
+    if (!automatic) throw new Error("Missing Automatic policy option");
     await act(async () => {
       automatic.click();
       await Promise.resolve();
@@ -520,7 +523,7 @@ describe("organization billing StrictMode ownership", () => {
       /^[0-9a-f-]{36}$/,
     );
     expect(container.textContent).toContain(
-      "Autonomous organization identity updates are enabled.",
+      "Agents can now apply identity changes an owner asks for.",
     );
 
     await act(async () => root.unmount());
@@ -552,7 +555,7 @@ describe("organization billing StrictMode ownership", () => {
 
     try {
       await act(async () => {
-        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />);
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="identity" />);
       });
       await flush();
       expect(getCompanyProfileAgentPolicy).toHaveBeenCalledWith(workspaceId);
@@ -563,14 +566,14 @@ describe("organization billing StrictMode ownership", () => {
       context.accessContext.defaultAccountId = otherAccountId;
       context.accessContext.defaultWorkspaceId = otherWorkspaceId;
       await act(async () => {
-        root.render(<OrgSettingsRoute workspaceId={otherWorkspaceId} section="knowledge" />);
+        root.render(<OrgSettingsRoute workspaceId={otherWorkspaceId} section="identity" />);
       });
       await flush();
 
       const selectedMode = () =>
-        container.querySelector<HTMLInputElement>(
-          'input[name="company-profile-agent-policy"]:checked',
-        )?.value;
+        container
+          .querySelector<HTMLButtonElement>('button[role="radio"][data-state="checked"]')
+          ?.getAttribute("value");
       expect(selectedMode()).toBe("automatic");
 
       await act(async () =>
@@ -584,9 +587,7 @@ describe("organization billing StrictMode ownership", () => {
       await flush();
       expect(selectedMode()).toBe("automatic");
 
-      const off = container.querySelector<HTMLInputElement>(
-        'input[name="company-profile-agent-policy"][value="off"]',
-      );
+      const off = container.querySelector<HTMLButtonElement>('button[role="radio"][value="off"]');
       if (!off) throw new Error("Missing Off policy option");
       await act(async () => {
         off.click();
@@ -620,7 +621,7 @@ describe("organization billing StrictMode ownership", () => {
       await act(async () => {
         root.render(
           <StrictMode>
-            <OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />
+            <OrgSettingsRoute workspaceId={workspaceId} section="identity" />
           </StrictMode>,
         );
       });
@@ -647,9 +648,11 @@ describe("organization billing StrictMode ownership", () => {
       await act(async () =>
         root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
       );
-      expect(container.textContent).toContain(
-        "Organization model subscriptions can be managed only by organization owners and admins",
-      );
+      // Models is hidden outside an organization administrator session, and a
+      // direct link lands on the first page this person can use.
+      expect(container.textContent).not.toContain("Models");
+      expect(container.textContent).toContain("Identity and mission");
+      expect(container.textContent).not.toContain("Connect account");
       expect(container.querySelector("#organization-model-connections-heading")).toBeNull();
       expect(
         container.querySelector('nav[aria-label="Organization settings"] a[aria-current="page"]'),

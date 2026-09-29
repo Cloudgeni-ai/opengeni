@@ -399,6 +399,7 @@ import type {
   WorkspaceVideoGenerationSettings,
   PreviewSkillImportRequest,
   ScheduledTask,
+  ScheduledTaskAccessAttention,
   ScheduledTaskRun,
   ForkSessionRequest,
   ForkSessionResponse,
@@ -508,6 +509,7 @@ import type {
   TranscriptionRecordingResponse,
   UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
+  RefreshScheduledTaskAccessRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   ApplySessionGoalRevisionRequest,
@@ -2229,6 +2231,23 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>(
       "GET",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`,
+    );
+  }
+
+  /**
+   * Channels a person may choose as a scheduled task's fixed Slack destination:
+   * active, non-shared channels the selected OpenGeni bot already belongs to.
+   */
+  async listScheduledTaskSlackChannels(
+    workspaceId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<SlackReactionChannelListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    if (cursor) query.set("cursor", cursor);
+    return await this.requestJson<SlackReactionChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/scheduled-task-slack-channels?${query}`,
     );
   }
 
@@ -5923,6 +5942,34 @@ export class OpenGeniClient {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );
+  }
+
+  /**
+   * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+   * with the signed-in caller's current authority. Pass the `executionDigest`
+   * of the task whose `policyDrift` was reviewed; a changed task returns 409.
+   */
+  async refreshScheduledTaskAccess(
+    workspaceId: string,
+    taskId: string,
+    request: RefreshScheduledTaskAccessRequest,
+  ): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/refresh-access`,
+      request,
+    );
+  }
+
+  /** Schedules the caller can act on whose latest run could not use a connector. */
+  async listScheduledTaskAccessAttention(
+    workspaceId: string,
+  ): Promise<ScheduledTaskAccessAttention[]> {
+    const response = await this.requestJson<{ tasks: ScheduledTaskAccessAttention[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`,
+    );
+    return response.tasks;
   }
 
   // --- VariableSets --------------------------------------------------------------

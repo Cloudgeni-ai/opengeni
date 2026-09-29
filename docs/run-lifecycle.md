@@ -45,6 +45,21 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Each accepted turn also freezes a content-free **surface**
+(`session_turns.surface`, `SessionTurnSurface` in
+`packages/contracts/src/product-analytics.ts`): the product surface its request
+entered through (`web`, `slack`, `api_key`, `embedded`, `scheduled`, `agent`,
+`voice`, `site`, `automation`, `mcp`, or `system`). It is an analytics label,
+never authority, and is immutable after admission (migration 0533). Entry points
+that know their surface pass it explicitly (Slack, realtime voice, automations,
+maintenance); core derives the rest once from the verified access path in
+`packages/core/src/turn-surface.ts`. A scheduled occurrence claims `scheduled`
+and another agent's message or Steer claims `agent`; every other internal turn
+(goal continuation, child results, command results, wait timeouts, compaction)
+inherits the surface of the session's latest started turn. `origin`
+(`session_turns.source`) keeps its existing meaning, so a scheduled turn still
+has origin `system`.
+
 After execution ends, every physical finalization stage has a five-minute
 containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
@@ -1030,6 +1045,54 @@ Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`
 and Codemode callers always receive content. The check reads only the acting
 session's active history and leaves the tool schema, instructions, and Skill index
 unchanged, so it does not move the cached prompt prefix.
+An identifier that resolves to no configured Skill fails with the available
+Skills listed by id and name only, the same set the index and `skill_search`
+show. Entries resembling the requested identifier come first, the list stops at
+25 entries or 4 KiB with a count that points to `skill_search`, and the requested
+identifier is not echoed. `skill_checkout` resolves through the same reader and
+fails the same way before starting a sandbox.
+Every `skill_read` increments `opengeni_skill_reads_total{source, skill, kind, caller}`.
+`source` is `builtin`, `session`, `workspace`, `organization`, `personal`, or
+`unknown` for a read refused before a Skill resolved; `skill` is the built-in id,
+or `custom` for every other Skill, so tenant ids, names, and requested identifiers
+never become labels; `kind` is `full` (default SKILL.md read), `already_in_context`,
+`files` (explicit paths), `list`, or `refused` (the read returned an error instead
+of Skill text); `caller` is `model` or `codemode`. A successful model read also
+carries a content-free `SkillUse` fact under MCP `_meta["opengeni/skillUse"]`:
+the resolved id and source, a ledger `revisionId` or, for a built-in or session
+artifact, the whole-artifact `contentSha256`, the kind, the UTF-8 `bytes` of the
+text returned, `inIndex` (listed in this turn's frozen, model-visible Skill
+index), and `searchedThisTurn` (returned by `skill_search` earlier in the same
+attempt). The model output is the text part alone, so `_meta` never reaches the
+model or model history; only the `agent.toolCall.output` event projection keeps
+it. It holds no Skill text, user text, or Skill title, and it is dropped rather
+than let a result cross the 1 MiB model-visible cap. Codemode results never carry
+it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
+stored event and drops fields a newer worker added instead of the whole fact.
+The default `skill_read` (no `paths`) also returns a bounded `scripts` index:
+each runnable file's path and first usage line (a shebang or script extension, or
+any file under `scripts/` or `bin/` that is not a document or data file such as
+JSON or YAML; at most 32 entries and 4 KiB,
+with `scriptsOmitted` for the rest), so the agent sees the commands without a
+checkout. Explicit `paths`, `listFiles`, and the tool schema are unchanged.
+`skill_checkout` writes the selected files through one Channel-A
+`fsWriteFiles` batch: normally one sandbox command, so one workspace mutation
+admission and one `fs.changed` event, instead of several commands per file. It
+never overwrites. A file already holding the same bytes is kept and reported
+`unchanged`; any other existing entry, a symbolic link on the directory path, or
+a path resolving outside the workspace fails before anything is written. A
+request too large for one command (about 88 KiB of encoded content) runs
+read-only checks first, then writes only missing files in batches, and reports a
+later-batch failure as a partial mutation; repeating the same checkout finishes
+it. A path whose directory chain alone cannot fit one check command is refused
+as invalid rather than skipped. Optional `paths` copies exactly those files, for example one script to run.
+Only a complete checkout that created its directory returns `revisionId` and
+`scopeVersion` as a `skill_publish` base; any other result says
+`publishable: false`, because a reused directory may hold files outside the
+revision. Each call records `opengeni_skill_checkouts_total{outcome, selection}`,
+`opengeni_skill_checkout_duration_seconds{phase, outcome}` (`resolve`,
+`sandbox`, `write`, `total`; lazy box start falls in `sandbox` when checkout is
+the turn's first sandbox use) and `opengeni_skill_checkout_files_total{result}`.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
@@ -1310,6 +1373,17 @@ prefix (the parent session row is locked with the child) and the worker delivers
 the row right after the producing commit; the reaper covers crashes. See
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
+Normal idle completion performs goal evaluation, a final durable peek, and the
+transactional `markSessionIdle` boundary without an unconditional five-second
+grace period. The transaction rejects stale active/queued work and pending
+runnable machine input before producing an episode-deduplicated parent result.
+A signal accepted during the close chain causes another peek; later input
+retains its durable wake and may start a new
+workflow run of the same session, rather than coalescing into the prior idle
+episode. The `session-normal-idle-no-grace-v1` patch preserves old recorded
+timer commands for replay. Held input-wait, goal backoff, cancellation,
+quiescence, and capacity timers are unchanged.
+
 A workflow run closing during a current input wait or an active goal is parked,
 not completed work. Idle settlement preserves that projection and durable wake
 without creating a child terminal result. Goal completion, explicit goal pause,
@@ -1329,13 +1403,21 @@ by itself. A result arriving while the parent turn is live remains available to
 that turn's ordinary loop.
 The provider-neutral coordination contract creates a child only for concrete,
 bounded, independently useful work with a defined integration point. Parent
-work must stay disjoint from the delegated scope. A child costs minutes and its
-own large context, so the contract prefers a direct answer for small work and a
-`session_send_message` follow-up to an existing child over another spawn. For
+work must stay disjoint from the delegated implementation. Independent review
+or comparison can examine the same subject with a distinct deliverable.
+Delegation has setup and coordination overhead, so the default prefers a direct
+answer for small work and a `session_send_message` follow-up to an existing child
+over another spawn. Explicit user requests and applicable Skill guidance for
+delegation, independent review, or fresh workers override that default within
+existing authority. For
 multi-minute work with nothing else to advance, the parent calls `wait_for_input`
 right after spawning; the child's terminal result wakes it and carries the
 bounded final answer (`payload.finalAnswer`), which the parent uses directly,
-reading the child's results only when that copy is absent or truncated. A
+reading the child's results when that copy is absent, truncated, or lacks needed
+detail. No short execution wait or preliminary status recheck is required. The
+out-of-turn deadline can span hours or days within the tool's limits, selected
+for the dependency or meaningful monitoring rather than unchanged reassurance;
+explicit user/task/Skill check or update cadences remain supported. A
 `session_get` snapshot between waits is not new evidence. A parent joining a
 short child inside its turn uses `session_wait` with `waitFor: "completion"`
 before committing or publishing dependent work. `goal.completed` is a durable goal fact, not proof that the

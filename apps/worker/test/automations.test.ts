@@ -116,6 +116,7 @@ describe("automation dispatch activity", () => {
       initialMessage: run.acceptedExecution.initialMessage,
       subjectId: run.acceptedExecution.serviceSubjectId,
       sandboxBackend: "none",
+      surface: "automation",
     });
     expect(createInput).not.toHaveProperty("requestedSessionId");
     expect(assertAuthority).toHaveBeenCalledWith(expect.anything(), {

@@ -1,12 +1,12 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { BarChart3Icon, XIcon } from "lucide-react";
+import { XIcon } from "lucide-react";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, DonutChart, UsageMeter, donutTone } from "@/components/insights/charts";
 import { CausalSheet } from "@/components/insights/causal-sheet";
 import { CountUp } from "@/components/insights/count-up";
-import { PageHeader } from "@/components/common";
+import { PageHeader } from "@/components/ui/page-header";
 import {
   RANGE_OPTIONS,
   backendLabel,
@@ -178,7 +178,6 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   });
   const heading = (
     <PageHeader
-      icon={<BarChart3Icon className="size-4" />}
       title="Insights"
       description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
     />
@@ -496,7 +495,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="Prompt context">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="max-w-2xl">
-            <h3 className="text-sm font-medium text-fg">Agent Knowledge contribution</h3>
+            <h3 className="text-sm font-medium text-fg">Knowledge contribution</h3>
             <p className="mt-1 text-xs leading-5 text-fg-muted">
               Estimated tokens added to model input by workspace instructions, company profile,
               memory, and Skill descriptors. Estimates use UTF-8 bytes ÷ 4 and stay separate from
@@ -513,7 +512,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <Metric
             label="Estimated prompt tokens"
             value={formatTokens(promptContributions.estimatedTokens)}
-            delta="Agent Knowledge material only"
+            delta="Knowledge material only"
           />
           <Metric
             label="Average per covered call"

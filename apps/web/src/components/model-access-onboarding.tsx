@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { formatMoneyMicros, validTopupAmount } from "@/lib/format";
+import { analyticsAction } from "@/lib/analytics-actions";
 import {
   applyConnectedModelToNewSessionDraft,
   creditCheckoutSuccessUrl,
@@ -355,24 +356,28 @@ export function ModelAccessOnboardingPanel({
       name: "Codex",
       description: "Use your ChatGPT plan",
       action: () => void startDeviceLogin("codex"),
+      analytics: "connect_codex" as const,
       disabled: !client,
     },
     {
       name: "SuperGrok",
       description: "Use your xAI subscription",
       action: () => void startDeviceLogin("supergrok"),
+      analytics: "connect_supergrok" as const,
       disabled: !client,
     },
     {
       name: "Vercel AI Gateway",
       description: "Use your own API key",
       action: () => toggleKeyProvider("gateway"),
+      analytics: "connect_ai_gateway" as const,
       key: "gateway",
     },
     {
       name: "OpenRouter",
       description: "Use your own API key",
       action: () => toggleKeyProvider("openrouter"),
+      analytics: "connect_openrouter" as const,
       key: "openrouter",
     },
   ].filter(
@@ -441,6 +446,7 @@ export function ModelAccessOnboardingPanel({
             aria-expanded={provider.key ? keyProvider === provider.key : undefined}
             disabled={busy || provider.disabled}
             onClick={provider.action}
+            {...analyticsAction(provider.analytics)}
           >
             <span className="grid gap-1 whitespace-normal">
               <span className="text-sm font-medium">{provider.name}</span>
@@ -527,6 +533,7 @@ export function ModelAccessOnboardingPanel({
           className="h-10 w-full"
           disabled={!client || busy || !!pending || !validAmount}
           onClick={() => void buyCredits()}
+          {...analyticsAction("buy_credits")}
         >
           {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
           {validAmount

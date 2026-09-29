@@ -87,27 +87,29 @@ async function change(select: HTMLSelectElement, value: string) {
     select.dispatchEvent(new Event("change", { bubbles: true }));
   });
 }
-test("compact settings show effective permission without a default badge or resource descriptions", async () => {
+test("compact settings use the one vocabulary and say when a value is the default", async () => {
   await render();
   const select = field("Knowledge");
   expect(select.value).toBe("inherit");
-  expect(select.parentElement?.querySelector("[aria-hidden]")?.textContent).toBe("Allow updates");
+  expect(select.parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
+    "Default (Automatic)",
+  );
   expect([...select.options].map((option) => option.textContent?.trim())).toEqual([
-    "Use default (Allow updates)",
-    "Allow updates",
+    "Default (Automatic)",
+    "Automatic",
     "Review first",
-    "Don’t allow updates",
+    "Off",
   ]);
-  expect(
-    field("Workspace instructions").parentElement?.querySelector("[aria-hidden]")?.textContent,
-  ).toBe("Review first");
+  expect(field("Instructions").parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
+    "Default (Review first)",
+  );
   expect(field("Skills").parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
-    "Don’t allow updates",
+    "Default (Off)",
   );
   expect(container.textContent).not.toContain("Retained sources");
   expect(container.textContent).not.toContain("Automatic saves become");
   expect(container.textContent).toContain(
-    "Agents can still use these resources when updates are off.",
+    "Off stops agent changes. Agents still use what's already there.",
   );
 });
 test("missing category defaults use automatic without persisting a choice", async () => {
@@ -119,10 +121,10 @@ test("missing category defaults use automatic without persisting a choice", asyn
   });
   getSettings.mockImplementationOnce(empty).mockImplementationOnce(empty);
   await render();
-  for (const label of ["Knowledge", "Workspace instructions", "Skills"]) {
+  for (const label of ["Knowledge", "Instructions", "Skills"]) {
     expect(field(label).value).toBe("inherit");
     expect(field(label).parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
-      "Allow updates",
+      "Default (Automatic)",
     );
   }
   expect(saveSettings).not.toHaveBeenCalled();
@@ -142,7 +144,7 @@ test("compact override and reset keep the sparse API semantics", async () => {
   });
   expect(field("Knowledge").value).toBe("inherit");
   expect(field("Knowledge").parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
-    "Allow updates",
+    "Default (Automatic)",
   );
 });
 test("read-only compact settings cannot save even if a change event is dispatched", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { MessageTimeline } from "../src";
+import recordedAnswerExchange from "./fixtures/exchange-answer-before-machine-turns.json";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -215,7 +216,7 @@ describe("compact exchange rows", () => {
     }
   });
 
-  test("a settled turn that grows into an exchange keeps its row through the next turn", async () => {
+  test("work after an answer opens its own row below it and keeps that row through the turn", async () => {
     sequence = 0;
     const answered = [
       event("user.message", { text: "Build and report" }, null),
@@ -240,21 +241,48 @@ describe("compact exchange rows", () => {
       "turn-2",
     );
     const next = [event("turn.started", {}, "turn-2"), ...tool("report", "exec_command", "turn-2")];
+    const done = [
+      event(
+        "agent.message.completed",
+        { text: "The build passed and the report is attached.", phase: "final_answer" },
+        "turn-2",
+      ),
+      event("turn.completed", {}, "turn-2"),
+    ];
     const timeline = (events: SessionEvent[]) => (
       <MessageTimeline events={events} turnSummary={{ rolling: true }} />
     );
+    const rows = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll("[data-og-exchange-status]")).map(
+        (status) => status.closest("button") as HTMLButtonElement,
+      );
     const r = await renderComponent(timeline(answered));
     try {
       await flush();
       await r.rerender(timeline([...answered, result]));
       await flush();
-      const trigger = statusTrigger(r.container);
-      await act(async () => trigger.click());
-      await r.rerender(timeline([...answered, result, ...next]));
-      await flush();
-      expect(statusTrigger(r.container)).toBe(trigger);
+      // The delivered input opens a new row at once; the answer stays in place.
+      expect(topLevelMessages(r.container)).toEqual(["The build is running in the background."]);
+      expect(rows(r.container)).toHaveLength(2);
+      const trigger = rows(r.container)[1]!;
       expect(trigger.textContent).toMatch(/^Working · /);
-      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      await act(async () => trigger.click());
+      const stages: [SessionEvent[], RegExp][] = [
+        [[...answered, result, ...next], /^Working · /],
+        [[...answered, result, ...next, ...done], /^Worked for /],
+      ];
+      for (const [events, status] of stages) {
+        await r.rerender(timeline(events));
+        await flush();
+        // Same element: the row never remounts between its live and settled forms.
+        expect(rows(r.container)[1]).toBe(trigger);
+        expect(trigger.textContent).toMatch(status);
+        expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      }
+      expect(topLevelMessages(r.container)).toEqual([
+        "The build is running in the background.",
+        "The build passed and the report is attached.",
+      ]);
     } finally {
       await r.unmount();
     }
@@ -361,6 +389,29 @@ describe("compact exchange rows", () => {
       await r.rerender(timeline([...streaming, ...done]));
       await flush();
       expect(statusTrigger(r.container).textContent).toMatch(/^Worked for 20s · 2 steps/);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("an answer stays a visible message when a machine-triggered turn follows it", async () => {
+    // Anonymized replay of a recorded exchange: the answer (bullets, an image,
+    // and a question) settles, then an agent message starts one more short
+    // turn that ends without prose.
+    const r = await renderComponent(
+      <MessageTimeline
+        events={recordedAnswerExchange as SessionEvent[]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      const question = "Do you approve this four-at-a-time layout?";
+      // The answer is not demoted to the row's muted two-line preview.
+      for (const note of r.container.querySelectorAll("[data-og-exchange-note]")) {
+        expect(note.textContent).not.toContain(question);
+      }
+      expect(topLevelMessages(r.container).some((text) => text.includes(question))).toBe(true);
     } finally {
       await r.unmount();
     }

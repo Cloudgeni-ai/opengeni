@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import { type SkillActor, type SkillWriteReceipt } from "@opengeni/contracts";
+import { type SkillActor, type SkillScope, type SkillWriteReceipt } from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
   getActiveSessionFunctionToolResults,
@@ -24,15 +24,19 @@ import {
 import {
   buildPortableSkillArtifact,
   loadSkillLibrarySkill,
+  skillArtifactContentSha256,
   skillLibraryRepositoryUrl,
   type SkillTextFile,
 } from "@opengeni/runtime/skill-library";
 import type { RuntimeSkillArtifact } from "@opengeni/runtime";
-import type { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import {
   createSkillReadAttemptToolDefinition,
   SKILL_READ_TOOL_NAME,
+  type SelectedSkillReadContent,
   type SkillReadContent,
+  type SkillReadObservation,
+  type SkillReadOrigin,
+  unavailableSkillError,
 } from "./skill-read";
 import { createSkillSearchAttemptToolDefinition } from "./skill-search";
 import { createSkillSaveAttemptToolDefinition, type SkillSaveRequest } from "./skill-save";
@@ -41,7 +45,9 @@ import { createSkillRemoveAttemptToolDefinition } from "./skill-remove";
 import {
   createSkillCheckoutAttemptToolDefinition,
   createSkillPublishAttemptToolDefinition,
+  type SkillCheckoutObservation,
 } from "./skill-checkout";
+import type { SkillFileSystem } from "./skill-transfer";
 
 export function createWorkspaceSkillTools(input: {
   db: Database;
@@ -51,12 +57,18 @@ export function createWorkspaceSkillTools(input: {
   subjectId?: string;
   actor: Extract<SkillActor, { kind: "agent" }>;
   selected: readonly { id: string; artifact: RuntimeSkillArtifact }[];
-  filesystem: () => Promise<
-    Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWrite" | "fsMkdir">
-  >;
+  filesystem: () => Promise<SkillFileSystem>;
+  /** Content-free skill_checkout timing; it never changes a result. */
+  observeSkillCheckout?: (observation: SkillCheckoutObservation) => void;
   /** The resolved model's bound, which `settings` does not carry. */
   modelToolOutputTruncationTokens: () => number;
   onSkillReadHistoryLookupFailed?: (error: unknown) => void;
+  /** Content-free skill_read telemetry; it never changes a result. */
+  skillReadTelemetry?: {
+    /** Ids in the Skill index the model sees this turn; null until known. */
+    indexedSkillIds: () => ReadonlySet<string> | null;
+    observe: (observation: SkillReadObservation) => void;
+  };
 }) {
   const context = {
     accountId: input.accountId,
@@ -65,15 +77,17 @@ export function createWorkspaceSkillTools(input: {
   };
   const authorize = () => assertSkillReadAttempt(input.db, { ...context, actor: input.actor });
   const selected = new Map(input.selected.map((entry) => [entry.id, entry.artifact]));
+  // Readable Skills that skill_search returned in this attempt.
+  const searchedSkillIds = new Set<string>();
   const list = async () =>
     (await listSkillDescriptors(input.db, context)).filter(
       (entry) => entry.activationMode === "workspace_managed",
     );
   // Both text reads and inventory resolve through this same authorized source.
   // Selected artifacts have no ledger revision identity; never synthesize one.
-  const load = async (identifier: string): Promise<readonly SkillTextFile[] | SkillReadContent> => {
+  const load = async (identifier: string): Promise<SkillReadContent | SelectedSkillReadContent> => {
     const exact = selected.get(identifier);
-    if (exact) return exact.files;
+    if (exact) return selectedSkillContent(identifier, exact);
     const descriptors = await list();
     const exactWorkspace = descriptors.find((entry) => entry.id === identifier);
     const matches = exactWorkspace
@@ -86,9 +100,15 @@ export function createWorkspaceSkillTools(input: {
       throw new Error(
         "Multiple Skills match that name. Use the Skill id from the index or search.",
       );
-    if (!matches.length && selectedMatches.length === 1) return selectedMatches[0]![1].files;
+    if (!matches.length && selectedMatches.length === 1)
+      return selectedSkillContent(selectedMatches[0]![0], selectedMatches[0]![1]);
     const match = matches[0];
-    if (!match) throw new Error("Skill is not available in this session.");
+    // skill_checkout resolves through this reader too, so both return the list.
+    if (!match)
+      throw unavailableSkillError(identifier, [
+        ...descriptors.map((entry) => ({ id: entry.id, name: entry.title })),
+        ...[...selected].map(([id, artifact]) => ({ id, name: artifact.name })),
+      ]);
     const record = await readSkill(input.db, context, match.id);
     if (
       !record ||
@@ -105,6 +125,7 @@ export function createWorkspaceSkillTools(input: {
         ? { installationVersion: match.installationVersion }
         : {}),
       files: record.files,
+      origin: { id: record.id, source: registrySkillSource(record.scope) },
     };
   };
   const withReviewState = async (receipt: SkillWriteReceipt) => {
@@ -156,6 +177,14 @@ export function createWorkspaceSkillTools(input: {
           ? { onLookupFailed: input.onSkillReadHistoryLookupFailed }
           : {}),
       },
+      ...(input.skillReadTelemetry
+        ? {
+            telemetry: {
+              ...input.skillReadTelemetry,
+              searched: (id: string) => searchedSkillIds.has(id),
+            },
+          }
+        : {}),
     }),
     createSkillSearchAttemptToolDefinition({
       authorize,
@@ -178,6 +207,9 @@ export function createWorkspaceSkillTools(input: {
         })),
       ],
       publicSearch: createPublicSkillSearchClient(input.settings),
+      onWorkspaceHits: (ids) => {
+        for (const id of ids) searchedSkillIds.add(id);
+      },
     }),
     createSkillSaveAttemptToolDefinition({
       authorize,
@@ -271,15 +303,47 @@ export function createWorkspaceSkillTools(input: {
     createSkillCheckoutAttemptToolDefinition({
       authorize,
       filesystem: input.filesystem,
+      ...(input.observeSkillCheckout ? { observe: input.observeSkillCheckout } : {}),
       load: async (skill) => {
         const content = await load(skill);
-        if (!("files" in content))
-          return { skillId: skill, revisionId: null, scopeVersion: null, files: content };
+        if (!("skillId" in content))
+          return { skillId: skill, revisionId: null, scopeVersion: null, files: content.files };
         return content;
       },
     }),
     createSkillPublishAttemptToolDefinition({ authorize, filesystem: input.filesystem, save }),
   ];
+}
+
+function registrySkillSource(scope: SkillScope): SkillReadOrigin["source"] {
+  return scope === "user" ? "personal" : scope;
+}
+
+// Artifacts are immutable, so each digest is computed once per loaded artifact.
+const selectedArtifactDigests = new WeakMap<RuntimeSkillArtifact, string | null>();
+
+function selectedSkillContent(
+  id: string,
+  artifact: RuntimeSkillArtifact,
+): SelectedSkillReadContent {
+  let digest = selectedArtifactDigests.get(artifact);
+  if (digest === undefined) {
+    try {
+      digest = skillArtifactContentSha256(artifact.files);
+    } catch {
+      // Telemetry identity only; an unhashable artifact still reads.
+      digest = null;
+    }
+    selectedArtifactDigests.set(artifact, digest);
+  }
+  return {
+    files: artifact.files,
+    origin: {
+      id,
+      source: id.startsWith("builtin:") ? "builtin" : "session",
+      ...(digest ? { contentSha256: digest } : {}),
+    },
+  };
 }
 
 function fileMetadata(files: readonly SkillTextFile[]) {

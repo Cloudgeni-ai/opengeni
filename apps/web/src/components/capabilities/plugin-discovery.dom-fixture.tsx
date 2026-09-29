@@ -2,9 +2,10 @@ import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { PluginDiscoveryItem, PluginInstallationSummary } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { act, type ReactNode } from "react";
+import { act, useMemo, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 let PluginDiscovery: typeof import("./plugin-discovery").PluginDiscovery;
+let SlotContext: typeof import("./capability-page-slot").CapabilityPageSlotContext;
 
 beforeAll(async () => {
   GlobalRegistrator.register();
@@ -13,6 +14,7 @@ beforeAll(async () => {
   ).IS_REACT_ACT_ENVIRONMENT = true;
   // Radix detects DOM availability at module initialization.
   ({ PluginDiscovery } = await import("./plugin-discovery"));
+  ({ CapabilityPageSlotContext: SlotContext } = await import("./capability-page-slot"));
 });
 afterAll(() => GlobalRegistrator.unregister());
 
@@ -69,15 +71,36 @@ function client() {
   return { calls, api: calls as unknown as OpenGeniBrowserClient };
 }
 
+/** The Capabilities route's page slot: the catalog hides while a page is open. */
+function SlotHarness({ children }: { children: ReactNode }) {
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  const value = useMemo(
+    () => ({
+      target,
+      openKey,
+      open: (key: string) => setOpenKey(key),
+      close: () => setOpenKey(null),
+    }),
+    [target, openKey],
+  );
+  return (
+    <SlotContext.Provider value={value}>
+      <div hidden={openKey !== null}>{children}</div>
+      <div ref={setTarget} />
+    </SlotContext.Provider>
+  );
+}
+
 async function render(node: ReactNode) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  await act(async () => root.render(node));
+  await act(async () => root.render(<SlotHarness>{node}</SlotHarness>));
   return {
     container,
     rerender: async (next: ReactNode) => {
-      await act(async () => root.render(next));
+      await act(async () => root.render(<SlotHarness>{next}</SlotHarness>));
     },
     unmount: async () => {
       await act(async () => root.unmount());
@@ -99,29 +122,37 @@ async function openDiscovery(container: HTMLElement) {
 }
 
 function button(label: string) {
-  return [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find(
+  return [...document.querySelectorAll<HTMLButtonElement>("[data-capability-page] button")].find(
     (candidate) => candidate.textContent === label,
   );
 }
 
-test("plugin opens in the shared centered dialog, closes to its opener, and is read-only without management authority", async () => {
+function page() {
+  return document.querySelector("[data-capability-page]");
+}
+
+async function back() {
+  await act(async () => button("Capabilities")!.click());
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+}
+
+test("plugin opens as a page, goes back to its opener, and is read-only without management authority", async () => {
   const { api, calls } = client();
   const rendered = await render(
     <PluginDiscovery client={api} workspaceId="workspace" query="" onOpenConnection={() => {}} />,
   );
   try {
     const row = await openDiscovery(rendered.container);
-    const dialog = document.querySelector('[role="dialog"]')!;
-    expect(dialog.getAttribute("data-slot")).toBe("dialog-content");
-    expect(dialog.className).toContain("sm:max-w-[42rem]");
-    expect(dialog.className).toContain("sm:top-1/2");
-    expect(dialog.querySelectorAll("h2:not(.sr-only)")).toHaveLength(1);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(page()?.querySelector("h1")?.textContent).toBe("Research suite");
+    expect(page()?.textContent).toContain("Adds 1 skill");
+    expect(page()?.textContent).toContain("Connections it needs");
     expect(button("Install plugin")).toBeUndefined();
     expect(button("Connect")).toBeUndefined();
     expect(calls.installPlugin).not.toHaveBeenCalled();
     expect(calls.createCapability).not.toHaveBeenCalled();
-    await act(async () => button("Close")!.click());
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await back();
+    expect(page()).toBeNull();
     expect(document.activeElement).toBe(row);
   } finally {
     await rendered.unmount();
@@ -164,9 +195,9 @@ test("installation stays explicit and digest-bound without authorizing connectio
     expect(onChanged).toHaveBeenCalledTimes(1);
     expect(calls.createCapability).not.toHaveBeenCalled();
     expect(onOpenConnection).not.toHaveBeenCalled();
-    expect(button("Installed")?.disabled).toBe(true);
+    expect(button("Install plugin")).toBeUndefined();
+    expect(page()?.querySelector("[data-slot=status-badge]")?.textContent).toBe("Installed");
     expect(row.querySelector('[data-status="added"]')).not.toBeNull();
-    await act(async () => button("Installed")!.click());
     expect(calls.installPlugin).toHaveBeenCalledTimes(1);
     await act(async () => button("Connect")!.click());
     expect(calls.createCapability).toHaveBeenCalledTimes(1);
@@ -206,9 +237,9 @@ test("installed rows use the same one-button presentation and discovery does not
       "workspace",
       installedPlugin.pluginKey,
     );
-    expect(button("Manage installation")).toBeUndefined();
+    expect(button("Check for update")).toBeUndefined();
     expect(onManageInstalled).not.toHaveBeenCalled();
-    await act(async () => button("Close")!.click());
+    await back();
     await openDiscovery(rendered.container);
     expect(
       rendered.container.querySelector('[data-plugin-id] [data-status="added"]'),
@@ -219,7 +250,7 @@ test("installed rows use the same one-button presentation and discovery does not
   }
 });
 
-test("the web catalog starts with OpenAI and clears installed badges after removal", async () => {
+test("the web catalog starts with every registry and clears installed badges after removal", async () => {
   const { api, calls } = client();
   const props = { client: api, workspaceId: "removal", query: "", canManage: true };
   const rendered = await render(
@@ -231,15 +262,15 @@ test("the web catalog starts with OpenAI and clears installed badges after remov
         .querySelector<HTMLButtonElement>(".og-connection-installed button")!
         .click(),
     );
-    await act(async () => button("Close")!.click());
+    await back();
     const row = await openDiscovery(rendered.container);
     expect(calls.discoverPlugins).toHaveBeenLastCalledWith("removal", {
       query: "",
-      provider: "openai",
+      provider: "",
       offset: 0,
     });
     expect(row.querySelector('[data-status="added"]')).not.toBeNull();
-    await act(async () => button("Close")!.click());
+    await back();
     await rendered.rerender(<PluginDiscovery {...props} installedPlugins={[]} />);
     expect(row.querySelector('[data-status="added"]')).toBeNull();
     expect(row.querySelector('[data-status="available"]')).not.toBeNull();
@@ -262,13 +293,13 @@ test("an imported plugin is installed in its details without permanently marking
         .click(),
     );
     expect(calls.getInstalledPluginDetails).toHaveBeenCalledWith("imported", plugin.pluginKey);
-    expect(button("Installed")?.disabled).toBe(true);
+    expect(page()?.querySelector("[data-slot=status-badge]")?.textContent).toBe("Installed");
     expect(button("Install plugin")).toBeUndefined();
     expect(calls.installPlugin).not.toHaveBeenCalled();
     // The selected installation must still exist in the authoritative list.
     await rendered.rerender(<PluginDiscovery {...props} installedPlugins={[]} />);
     expect(button("Install plugin")?.disabled).toBe(false);
-    await act(async () => button("Close")!.click());
+    await back();
     const row = await openDiscovery(rendered.container);
     expect(row.querySelector('[data-status="added"]')).toBeNull();
     expect(button("Install plugin")?.disabled).toBe(false);
@@ -301,15 +332,15 @@ test("installed attention state remains textual and management uses the exact in
       row.focus();
       row.click();
     });
-    expect(button("Installed")?.disabled).toBe(true);
-    await act(async () => button("Manage installation")!.click());
+    expect(page()?.querySelector("[data-slot=status-badge]")?.textContent).toBe("Needs attention");
+    await act(async () => button("Check for update")!.click());
     expect(onManageInstalled).toHaveBeenCalledWith(plugin, row);
   } finally {
     await rendered.unmount();
   }
 });
 
-test("install errors remain in the dialog and do not mark discovery as installed", async () => {
+test("install errors remain on the page and do not mark discovery as installed", async () => {
   const { api, calls } = client();
   calls.installPlugin.mockImplementation(async () => {
     throw new Error("Manifest changed; preview again.");
@@ -320,7 +351,7 @@ test("install errors remain in the dialog and do not mark discovery as installed
   try {
     const row = await openDiscovery(rendered.container);
     await act(async () => button("Install plugin")!.click());
-    expect(document.querySelector('[role="dialog"] [role="alert"]')?.textContent).toBe(
+    expect(document.querySelector('[data-capability-page] [role="alert"]')?.textContent).toBe(
       "Manifest changed; preview again.",
     );
     expect(row.querySelector('[data-status="available"]')).not.toBeNull();

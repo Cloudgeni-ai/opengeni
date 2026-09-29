@@ -551,11 +551,15 @@ function AuthorizedWorkspaceShell({
         }
       }}
     >
+      {/* Settings mode swaps the rail: organization settings and the workspace
+          management shell draw the settings rail, and "Back to sessions"
+          returns to the main rail. */}
       {usesOrganizationShell ? (
         children
       ) : managementLocation ? (
         <WorkspaceManagementShell
           workspaceId={workspaceId}
+          workspaceName={activeWorkspace?.name}
           organizationName={organizationName}
           location={managementLocation}
         >

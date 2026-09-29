@@ -744,7 +744,8 @@ export function RootRouteComponent() {
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
       pathname === "/dev/agent-topology" ||
-      pathname === "/dev/onboarding");
+      pathname === "/dev/onboarding" ||
+      pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
     pathname === "/setup-account" ||
@@ -2967,6 +2968,7 @@ export function RootRouteComponent() {
             analyticsAccountId={
               routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
             }
+            analyticsAccountResolved={accessContext !== null || accessError !== null}
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}

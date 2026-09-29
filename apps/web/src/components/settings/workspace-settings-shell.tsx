@@ -8,134 +8,129 @@ export {
   type WorkspaceSettingsSection,
   type WorkspaceManagementLocation,
 } from "@/lib/workspace-management-location";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   BarChart3Icon,
-  BrainCircuitIcon,
   BotIcon,
-  BoxIcon,
-  BoxesIcon,
   Building2Icon,
-  ChevronRightIcon,
+  ContainerIcon,
+  GraduationCapIcon,
   KeyRoundIcon,
   LaptopIcon,
-  PlugIcon,
-  Settings2Icon,
-  ShieldAlertIcon,
+  SlidersHorizontalIcon,
   SparklesIcon,
   UsersIcon,
+  VariableIcon,
   WebhookIcon,
 } from "lucide-react";
-import type { ComponentType, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import {
-  SettingsSidebar,
-  SETTINGS_SHELL_CLASS,
-  SETTINGS_NAV_CLASS,
-  settingsNavItemClass,
+  SettingsRailOutLink,
+  SettingsShell,
+  settingsHomeLink,
+  type SettingsRailGroup,
+  type SettingsShellPage,
 } from "./settings-sidebar";
+import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
-import { SETTINGS_SWITCHER_CLASS } from "@/components/ui/scope-switcher-trigger";
-import { ContentPage } from "@/components/ui/content-layout";
-import { SettingsPageHeader } from "./settings-layout";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import { cn } from "@/lib/utils";
 
-type SettingsItem = {
-  id: WorkspaceSettingsSection;
-  label: string;
-  icon: ComponentType<{ className?: string }>;
-};
-
-const SETTINGS_ITEMS: readonly SettingsItem[] = [
-  { id: "general", label: "General", icon: Settings2Icon },
-  { id: "learning", label: "Agent learning", icon: BotIcon },
-  { id: "members", label: "Members", icon: UsersIcon },
-  { id: "models", label: "Models", icon: SparklesIcon },
-  { id: "plugins", label: "Capabilities", icon: PlugIcon },
-  { id: "api-keys", label: "API keys", icon: KeyRoundIcon },
-  { id: "developer", label: "Developer", icon: WebhookIcon },
-  { id: "danger", label: "Danger zone", icon: ShieldAlertIcon },
-];
-
-const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; description: string }> = {
+/** One name, one icon and one description per settings page. */
+export const WORKSPACE_SETTINGS_COPY: Record<
+  WorkspaceSettingsSection,
+  {
+    title: string;
+    /** Omitted when it would only list what the page shows. */
+    description?: (names: { workspace: string; organization: string }) => string;
+  }
+> = {
   general: {
     title: "General",
-    description: "Workspace identity and defaults for new sessions.",
   },
-  learning: {
-    title: "Agent learning",
-    description: "Defaults for Knowledge, workspace instructions, and Skills.",
-  },
-  members: {
-    title: "Members",
-    description: "Manage who can access this workspace and what they can do.",
-  },
-  plugins: {
-    title: "Capabilities",
-    description: "Manage Plugins, Skills, and integrations for your workspace.",
+  access: {
+    title: "Access",
+    description: ({ workspace, organization }) =>
+      `People from ${organization} who can use ${workspace}.`,
   },
   models: {
     title: "Models",
-    description: "Control which models can run in this workspace.",
+    description: () => "Which models this workspace can use, and who pays for them.",
   },
   "api-keys": {
     title: "API keys",
-    description: "Create workspace-scoped credentials for other products.",
+    description: () => "Keys that let your own tools start work in this workspace.",
   },
   developer: {
     title: "Developer",
-    description: "Webhooks and a credential provider for products built on this workspace.",
+    description: () => "Webhooks and a credential provider for products built on this workspace.",
   },
-  danger: {
-    title: "Danger zone",
-    description: "Irreversible workspace actions.",
+  learning: {
+    title: "Agent learning",
+    description: () => "How agents save knowledge, instructions and skills.",
   },
 };
 
-const WORKSPACE_PAGE_GROUPS = [
+const SECTION_ICONS = {
+  general: SlidersHorizontalIcon,
+  access: UsersIcon,
+  models: SparklesIcon,
+  learning: GraduationCapIcon,
+  "api-keys": KeyRoundIcon,
+  developer: WebhookIcon,
+} as const;
+
+// Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
+const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
+  "general",
+  "access",
+  "models",
+  "api-keys",
+  "developer",
+];
+
+// Workspace dashboards in the settings rail. They open as their own pages.
+const ACTIVITY_PAGES = [
   {
-    label: "Workspace activity",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/agents" as const,
-        label: "Agents",
-        icon: BotIcon,
-      },
-      {
-        to: "/workspaces/$workspaceId/insights" as const,
-        label: "Insights",
-        icon: BarChart3Icon,
-      },
-      {
-        to: "/workspaces/$workspaceId/memory" as const,
-        label: "Memory",
-        icon: BrainCircuitIcon,
-      },
-    ],
+    to: "/workspaces/$workspaceId/agents" as const,
+    label: "Agents",
+    icon: BotIcon,
+    requiresAdmin: false,
   },
   {
-    label: "Runtime",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/variable-sets" as const,
-        label: "Credentials & variables",
-        icon: BoxesIcon,
-      },
-      {
-        to: "/workspaces/$workspaceId/rigs" as const,
-        label: "Sandbox Environments",
-        icon: BoxIcon,
-      },
-      {
-        to: "/workspaces/$workspaceId/machines" as const,
-        label: "Machines",
-        icon: LaptopIcon,
-      },
-    ],
+    to: "/workspaces/$workspaceId/insights" as const,
+    label: "Insights",
+    icon: BarChart3Icon,
+    requiresAdmin: true,
   },
 ] as const;
+
+const RUNTIME_PAGES = [
+  {
+    to: "/workspaces/$workspaceId/variable-sets" as const,
+    label: "Variable sets",
+    icon: VariableIcon,
+  },
+  {
+    to: "/workspaces/$workspaceId/rigs" as const,
+    label: "Sandbox environments",
+    icon: ContainerIcon,
+  },
+  {
+    to: "/workspaces/$workspaceId/machines" as const,
+    label: "Machines",
+    icon: LaptopIcon,
+  },
+] as const;
+
+/** Sub-pages (an account, a key, a form) bring their own back link and title. */
+function isSubPage(section: WorkspaceSettingsSection, search: Record<string, unknown>): boolean {
+  if (section === "models") return Boolean(search.account || search.view);
+  if (section === "api-keys") return Boolean(search.key);
+  if (section === "access") return Boolean(search.view);
+  return false;
+}
 
 export function WorkspaceManagementShell({
   workspaceId,
@@ -150,6 +145,10 @@ export function WorkspaceManagementShell({
   workspaceName?: string;
   organizationName: string;
   location: WorkspaceManagementLocation;
+  /**
+   * An organization administrator without access to this workspace: only its
+   * name, access and deletion.
+   */
   organizationManagementOnly?: boolean;
   organizationSettingsWorkspaceId?: string;
   children: ReactNode;
@@ -161,184 +160,167 @@ export function WorkspaceManagementShell({
     workspaceId,
     "workspace:admin",
   );
-  const settingsItems = organizationManagementOnly
-    ? SETTINGS_ITEMS.filter(
-        (item) => item.id === "general" || item.id === "members" || item.id === "danger",
-      )
-    : SETTINGS_ITEMS;
+  const search = useRouterState({
+    select: (state) => state.location.search as Record<string, unknown>,
+  });
+  const names = {
+    workspace: workspaceName ?? "this workspace",
+    organization: organizationName,
+  };
+  const sections = organizationManagementOnly
+    ? SECTION_ORDER.filter((section) => section === "general" || section === "access")
+    : SECTION_ORDER;
+
+  const groups: SettingsRailGroup[] = [
+    {
+      items: sections.map((section) => ({
+        id: section,
+        label: WORKSPACE_SETTINGS_COPY[section].title,
+        icon: SECTION_ICONS[section],
+        link: (
+          <Link
+            to="/workspaces/$workspaceId/settings"
+            params={{ workspaceId }}
+            search={{ section }}
+          />
+        ),
+      })),
+    },
+  ];
+  const activityPages = organizationManagementOnly
+    ? []
+    : ACTIVITY_PAGES.filter((page) => !page.requiresAdmin || canReadInsights);
+  if (!organizationManagementOnly) {
+    groups.push({
+      label: "Workspace activity",
+      items: activityPages.map((page) => ({
+        id: page.to,
+        label: page.label,
+        icon: page.icon,
+        link: <Link to={page.to} params={{ workspaceId }} />,
+      })),
+    });
+    groups.push({
+      label: "Runtime",
+      items: RUNTIME_PAGES.map((page) => ({
+        id: page.to,
+        label: page.label,
+        icon: page.icon,
+        link: <Link to={page.to} params={{ workspaceId }} />,
+      })),
+    });
+  }
+
   const organizationLinkWorkspaceId =
     organizationSettingsWorkspaceId ?? (organizationManagementOnly ? undefined : workspaceId);
-  const switcherWorkspaceId = organizationManagementOnly
-    ? (organizationSettingsWorkspaceId ?? context.workspaces[0]?.id)
-    : workspaceId;
 
-  function openManagementWorkspace(nextWorkspaceId: string) {
+  const section: WorkspaceSettingsSection | null =
+    location.kind === "settings" ? (location.section ?? "general") : null;
+  const page: SettingsShellPage | null =
+    section && !isSubPage(section, search)
+      ? {
+          title: WORKSPACE_SETTINGS_COPY[section].title,
+          description: WORKSPACE_SETTINGS_COPY[section].description?.(names),
+        }
+      : null;
+  const currentPage = section
+    ? WORKSPACE_SETTINGS_COPY[section].title
+    : ([...activityPages, ...RUNTIME_PAGES].find(
+        (candidate) => location.kind === "page" && candidate.to === location.target,
+      )?.label ?? "Settings");
+
+  function openWorkspace(nextWorkspaceId: string) {
     context.resetSessionView();
     if (location.kind === "settings") {
       void navigate({
         to: "/workspaces/$workspaceId/settings",
         params: { workspaceId: nextWorkspaceId },
-        search: { section: location.section },
+        search: location.section ? { section: location.section } : {},
       });
       return;
     }
-    void navigate({
-      to: location.target,
-      params: { workspaceId: nextWorkspaceId },
-    });
+    void navigate({ to: location.target, params: { workspaceId: nextWorkspaceId } });
   }
-  return (
-    <div className={SETTINGS_SHELL_CLASS}>
-      <SettingsSidebar
-        workspaceId={organizationManagementOnly ? undefined : workspaceId}
-        label="Workspace settings"
-        currentPage={
-          location.kind === "settings"
-            ? SECTION_COPY[location.section].title
-            : (WORKSPACE_PAGE_GROUPS.map(
-                (group) => group.items.find((item) => item.to === location.target)?.label,
-              ).find(Boolean) ?? "Workspace settings")
-        }
-        identity={
-          organizationManagementOnly ? (
-            <>
-              <div className="mt-2 flex min-w-0 items-center gap-2.5">
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
-                  {workspaceName?.trim().charAt(0).toUpperCase() || "W"}
-                </span>
-                <div className="min-w-0">
-                  <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
-                    {workspaceName ?? "Workspace"}
-                  </p>
-                  <p className="mt-0.5 text-2xs text-fg-subtle">Organization management</p>
-                </div>
-              </div>
-              {switcherWorkspaceId ? (
-                <div className="mt-3 min-w-0">
-                  <p className="mb-1 px-1 text-2xs text-fg-subtle">Open another workspace</p>
-                  <WorkspaceSwitcherMenu
-                    workspaceId={switcherWorkspaceId}
-                    collapsed={false}
-                    align="start"
-                    onSelect={openManagementWorkspace}
-                    className="w-full"
-                  />
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="mt-2 min-w-0">
-              <WorkspaceSwitcherMenu
-                workspaceId={workspaceId}
-                collapsed={false}
-                align="start"
-                onSelect={openManagementWorkspace}
-                className={SETTINGS_SWITCHER_CLASS}
-              />
-              <p className="mt-1.5 px-1 text-2xs text-fg-subtle">Settings and controls</p>
-            </div>
-          )
-        }
-      >
-        <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-          Settings
-        </p>
-        <nav aria-label="Workspace settings" className={SETTINGS_NAV_CLASS}>
-          {settingsItems.map((item) => {
-            const Icon = item.icon;
-            const selected = location.kind === "settings" && item.id === location.section;
-            return (
-              <Link
-                key={item.id}
-                to="/workspaces/$workspaceId/settings"
-                params={{ workspaceId }}
-                search={{ section: item.id }}
-                aria-current={selected ? "page" : undefined}
-                className={cn(
-                  settingsNavItemClass(selected),
-                  item.id === "danger" && selected ? "text-danger" : "",
-                )}
-              >
-                <Icon className="size-4 shrink-0" />
-                <span className="truncate">{item.label}</span>
-              </Link>
-            );
-          })}
-        </nav>
 
-        {!organizationManagementOnly
-          ? WORKSPACE_PAGE_GROUPS.map((group) => (
-              <div key={group.label}>
-                <p className="mt-4 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-                  {group.label}
-                </p>
-                <nav aria-label={group.label} className={SETTINGS_NAV_CLASS}>
-                  {group.items
-                    .filter(
-                      (item) => item.to !== "/workspaces/$workspaceId/insights" || canReadInsights,
-                    )
-                    .map((item) => {
-                      const Icon = item.icon;
-                      const selected = location.kind === "page" && item.to === location.target;
-                      return (
-                        <Link
-                          key={item.to}
-                          to={item.to}
-                          params={{ workspaceId }}
-                          aria-current={selected ? "page" : undefined}
-                          className={cn(settingsNavItemClass(selected))}
-                        >
-                          <Icon className="size-4 shrink-0" />
-                          <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                        </Link>
-                      );
-                    })}
-                </nav>
-              </div>
-            ))
-          : null}
-
-        <div className="mt-4 border-t border-border pt-3">
-          <p className="px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-            Organization
-          </p>
-          {organizationLinkWorkspaceId ? (
+  // An organization administrator without workspace access has no sessions
+  // here: the way back is organization settings (or OpenGeni).
+  const back =
+    organizationManagementOnly && organizationSettingsWorkspaceId
+      ? {
+          label: "Organization settings",
+          link: (
             <Link
               to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId: organizationLinkWorkspaceId }}
-              aria-label={`Organization settings for ${organizationName}`}
-              className="mt-1 flex min-h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-            >
-              <Building2Icon className="size-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{organizationName}</span>
-              <ChevronRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
-            </Link>
-          ) : (
-            <div className="mt-1 flex min-h-9 min-w-0 items-center gap-2 px-2.5 text-sm text-fg-muted">
-              <Building2Icon className="size-4 shrink-0" />
-              <span className="truncate">{organizationName}</span>
-            </div>
-          )}
-        </div>
-      </SettingsSidebar>
+              params={{ workspaceId: organizationSettingsWorkspaceId }}
+            />
+          ),
+        }
+      : organizationManagementOnly
+        ? { label: "Back to OpenGeni", link: <Link to="/" /> }
+        : {
+            label: "Back to sessions",
+            link: <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} />,
+          };
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
-    </div>
+  return (
+    <SettingsShell
+      label="Workspace settings"
+      back={back}
+      home={settingsHomeLink(
+        organizationManagementOnly ? organizationSettingsWorkspaceId : workspaceId,
+      )}
+      scope={
+        organizationManagementOnly ? (
+          <div className="min-w-0 px-2.5">
+            <p className="truncate text-sm leading-5 font-semibold text-fg">
+              {workspaceName ?? "Workspace"}
+            </p>
+            <p className="text-xs leading-4.5 text-fg-subtle">Organization management</p>
+          </div>
+        ) : (
+          <WorkspaceSwitcherMenu
+            workspaceId={workspaceId}
+            collapsed={false}
+            align="start"
+            onSelect={openWorkspace}
+            className="w-full"
+          />
+        )
+      }
+      groups={groups}
+      activeId={location.kind === "settings" ? section : location.target}
+      footer={
+        <SettingsRailOutLink
+          groupLabel="Organization"
+          label={organizationName}
+          icon={Building2Icon}
+          link={
+            organizationLinkWorkspaceId ? (
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId: organizationLinkWorkspaceId }}
+                aria-label={`Organization settings for ${organizationName}`}
+              />
+            ) : undefined
+          }
+        />
+      }
+      currentPage={currentPage}
+      page={page}
+      layout={location.kind === "page" ? "page" : "settings"}
+      notice={
+        organizationManagementOnly ? undefined : <WorkspacePausedBanner workspaceId={workspaceId} />
+      }
+    >
+      {children}
+    </SettingsShell>
   );
 }
 
-export function WorkspaceSettingsContent({
-  section,
-  children,
-}: {
-  section: WorkspaceSettingsSection;
-  children: ReactNode;
-}) {
-  const copy = SECTION_COPY[section];
-  return (
-    <ContentPage width="standard">
-      <SettingsPageHeader title={copy.title} description={copy.description} />
-      <div className="py-7">{children}</div>
-    </ContentPage>
-  );
+/**
+ * The body of one workspace settings page. The page header lives in the
+ * settings shell (`WorkspaceManagementShell`), so the body is only the content.
+ */
+export function WorkspaceSettingsContent({ children }: { children: ReactNode }) {
+  return <div className="min-w-0">{children}</div>;
 }

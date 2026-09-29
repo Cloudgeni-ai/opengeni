@@ -19,12 +19,10 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is a self-hostable session agent runtime. Postgres owns durable truth;
-Temporal coordinates execution; NATS transports reconstructible events. The
-control plane owns identity, tenancy, sessions, intervention, goals, recovery,
-compute, files, artifacts, usage, and observability. The API authorizes clients
-and bounded browser access to storage, sandboxes, relays, Codex WebRTC, and
-Gateway realtime WebSockets. Workers run in sandboxes or Connected Machines.
+OpenGeni is a self-hostable agent runtime: Postgres persists state, Temporal
+coordinates execution, and NATS transports reconstructible events. The API
+authorizes clients and browser access; workers use sandboxes or Connected Machines.
+Subsystem ownership and access boundaries follow below.
 
 External users require live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
@@ -102,6 +100,8 @@ Control observation is not settlement: unavailable scoped reads and owned
 attempts retain bounded, signal-interruptible waits without marking work idle,
 revoking writers, or dispatching successors. Temporal metadata cannot prove
 physical-writer quiescence.
+
+Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
@@ -807,12 +807,15 @@ These producers all converge on the ordinary session/turn runtime:
   trigger revision, and creates an ordinary session/run; and
 - a **child session** is a normal session with explicit lineage, depth, compute,
   visibility, and initiating-authority rules. Omitted child resources inherit
-  repositories only; file attachments require explicit selection (see
+  repositories only; file attachments require explicit selection, and an
+  omitted Sandbox Environment or Variable Set selection resolves like any new
+  session rather than copying the parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
-Schedule indicators derive from authorized, non-deleted reusable-session targets,
-including paused schedules, through existing lineage refreshes. Creation metadata
-is historical provenance; the schedules API filters by `sessionId`.
+Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
+Schedules API filtering uses `sessionId`.
+
+Connection-account refusals retain immutable [diagnostic-only run receipts](scheduled-admission-diagnostics.md), never execution authority.
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;
 `tools: []` remains an empty override. Standalone scheduler-owned turns use a
@@ -949,9 +952,9 @@ and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
 See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
 
 Knowledge is the product destination for retained sources and findings, with
-Files, Instructions and Skills as persistent tabs on the Agent Knowledge page.
-`apps/web/src/components/knowledge/agent-knowledge-page.tsx` owns that shared
-page navigation, including historical Memory and Documents links. Groups appear
+Library, Instructions and Review tabs on the Knowledge page (`/state`).
+`apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
+navigation, including old Files, Skills, Memory and Documents links. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
 changing its ownership. Connector ingestion runs through ordinary scheduled
@@ -1499,7 +1502,10 @@ deadline batch selects interaction-held leases, including already-draining ones;
 unrelated overdue leases cannot starve it. Lease-free Connected Machine/device
 transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
 fences before mutation visibility. Healthy interactions have no independent age
-limit. See `docs/run-lifecycle.md` for rotation and capture ordering.
+limit. Existing browser/computer control, including suspension, retains its provider across
+image updates. Admission locks and checks provider identity; replacements and
+capture/rotation bypasses are forbidden. New work enforces the deployment image.
+See `docs/run-lifecycle.md` for rotation and capture ordering.
 
 Modal commands use authenticated task-router byte offsets owned by the retained
 process. Output and cursor commit atomically under an expected-cursor fence;
@@ -1656,7 +1662,7 @@ Subsystem routing; complete topic map: [`README.md`](README.md).
 | Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
-| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
+| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
 | Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |

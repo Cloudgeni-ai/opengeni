@@ -1,3 +1,5 @@
+import { formatToolGatewayInputIssues, type ToolGatewayInputIssue } from "./input-issues";
+
 export class ToolGatewayCatalogStaleError extends Error {
   readonly code = "catalog_stale";
 
@@ -58,10 +60,24 @@ export class ToolGatewayPathCollisionError extends Error {
 
 export class ToolGatewayInputValidationError extends Error {
   readonly code = "invalid_tool_arguments";
+  /** Value-free problems, capped at `TOOL_GATEWAY_INPUT_ISSUES_MAX`. */
+  readonly issues: readonly ToolGatewayInputIssue[];
+  /** Distinct problems found beyond the reported cap. */
+  readonly omittedIssueCount: number;
+  /** One-line summary of `issues`, or an empty string when none were captured. */
+  readonly summary: string;
 
-  constructor() {
-    super("Tool arguments do not match the gateway catalog input schema");
+  constructor(issues: readonly ToolGatewayInputIssue[] = [], omittedIssueCount = 0) {
+    const summary = formatToolGatewayInputIssues(issues, omittedIssueCount);
+    super(
+      summary
+        ? `Tool arguments do not match the tool's input schema: ${summary}`
+        : "Tool arguments do not match the tool's input schema",
+    );
     this.name = "ToolGatewayInputValidationError";
+    this.issues = issues;
+    this.omittedIssueCount = omittedIssueCount;
+    this.summary = summary;
   }
 }
 

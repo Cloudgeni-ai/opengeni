@@ -16,6 +16,7 @@ import {
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
+  SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimeTablePosture,
@@ -637,6 +638,49 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("scheduled Slack bot messages stay behind their two capabilities", () => {
+    const posture = safePosture();
+    const table = {
+      name: "scheduled_slack_bot_messages",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(
+      ...SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain("scheduled_slack_bot_messages");
+    table.update = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden direct scheduled Slack bot message authority",
+    );
+    table.update = false;
+    table.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "scheduled Slack bot message relation lacks active FORCE-RLS isolation",
+    );
+    table.rlsForced = true;
+    posture.privateRoutines.at(-1)!.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "scheduled Slack bot message capability read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
+    );
+  });
+
   test("requires the 0352 session Variable Set runtime receipt", () => {
     const posture = safePosture();
     posture.sessionVariableSetAttachmentsCutoverPresent = false;
@@ -738,7 +782,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 0528 adds the workspace credential provider, webhook, and delivery tables.
+          // 0535 adds the workspace credential provider, webhook, and delivery tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES

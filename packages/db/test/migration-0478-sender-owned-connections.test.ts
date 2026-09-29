@@ -11,6 +11,8 @@ const migration = "0478_sender_owned_connections.sql";
 // has actually applied the sender cutover rather than merely marked it applied.
 const accountBindingsMigration = "0494_mcp_account_bindings.sql";
 const sharingMigration = "0501_session_sharing_execution.sql";
+// Replaces the owner trigger installed by this cutover.
+const admissionDiagnosticsMigration = "0534_scheduled_admission_diagnostics.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
@@ -31,9 +33,9 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
     await owner.unsafe(
       `CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
     );
-    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration})`;
+    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration}), (${admissionDiagnosticsMigration})`;
     await migrate(db.ownerUrl);
-    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration})`;
+    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration}, ${admissionDiagnosticsMigration})`;
     const [posture] =
       await owner`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
     expect(posture).toMatchObject({ rolsuper: false, rolbypassrls: false });

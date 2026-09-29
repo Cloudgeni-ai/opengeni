@@ -140,6 +140,15 @@ export type ModelPolicyPickerProps = {
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
   contentStyle?: CSSProperties | undefined;
   className?: string | undefined;
+  /**
+   * "pill" (default) is the composer's quiet rounded trigger with the effort.
+   * "field" is a settings control: a bordered rectangle with the model name
+   * and `triggerMeta` (for example the payer) in muted text. The effort stays
+   * in the menu.
+   */
+  triggerStyle?: "pill" | "field" | undefined;
+  /** Muted text after the model name in the "field" trigger. */
+  triggerMeta?: ReactNode;
   messages?: Partial<ModelPolicyPickerMessages> | undefined;
   onModelChange: (modelId: string) => void;
   onEffortChange: (effort: ReasoningEffort) => void;
@@ -386,11 +395,68 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
       <span
         className={cn(
           "og-root inline-flex h-8 w-40 shrink-0 animate-pulse rounded-full bg-og-surface-2",
+          props.triggerStyle === "field" && "w-[180px] rounded-og-md",
           props.className,
         )}
         aria-label={messages.loading}
         data-testid="model-picker-loading"
       />
+    );
+  }
+  if (props.triggerStyle === "field") {
+    return (
+      <>
+        <button
+          ref={trigger.ref}
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={open ? contentId : undefined}
+          data-state={open ? "open" : "closed"}
+          data-trigger-style="field"
+          onClick={() => setOpen(!open)}
+          disabled={props.disabled}
+          aria-label={messages.label}
+          className={cn(
+            "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+            props.className,
+          )}
+        >
+          {needsModel ? (
+            <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
+          ) : (
+            <BillingClassMark
+              billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
+              presentation={
+                props.groupPresentation?.[
+                  selected?.billingClass ?? billingClassForMissingSelection(props.model)
+                ]
+              }
+              className="text-og-fg"
+            />
+          )}
+          <span className="min-w-0 truncate font-medium">
+            {needsModel ? messages.connectTitle : (selected?.label ?? props.model)}
+          </span>
+          {props.triggerMeta && !needsModel ? (
+            <span className="min-w-0 shrink-[9999] truncate text-og-fg-muted">
+              {props.triggerMeta}
+            </span>
+          ) : null}
+          <ChevronDownIcon className="ml-auto size-3.5 shrink-0 text-og-fg-muted" />
+        </button>
+        {open ? (
+          <Suspense fallback={null}>
+            <LazyModelPolicyPickerMenu
+              {...props}
+              anchor={trigger.currentRef}
+              contentId={contentId}
+              portalStyle={portalStyle}
+              onOpenChange={setOpen}
+            />
+          </Suspense>
+        ) : null}
+      </>
     );
   }
   return (
