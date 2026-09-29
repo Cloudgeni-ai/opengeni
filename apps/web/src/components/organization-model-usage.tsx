@@ -67,7 +67,9 @@ export function formatTokenCount(value: bigint): string {
 
 export function cacheHitLabel(summary: Pick<Summary, "cachedTokens" | "cacheInputTokens">): string {
   if (summary.cacheInputTokens === 0n) return "Unknown";
-  return `${Number((summary.cachedTokens * 100n) / summary.cacheInputTokens)}%`;
+  const halfUp =
+    (summary.cachedTokens * 200n + summary.cacheInputTokens) / (summary.cacheInputTokens * 2n);
+  return `${Number(halfUp)}%`;
 }
 
 /** Credits are charged; external spend is only an estimate, and only when priced. */
@@ -75,6 +77,15 @@ export function externalSpendLabel(summary: Summary): string {
   if (summary.externalCalls === 0n) return formatMicrosUsd(0n);
   if (summary.externalPricedCalls === 0n) return "Unknown";
   return `~${formatMicrosUsd(summary.externalEstimateMicros)}`;
+}
+
+/** Table cells have no detail line, so a partial estimate names its coverage inline. */
+export function externalSpendCellLabel(summary: Summary): string {
+  const label = externalSpendLabel(summary);
+  if (summary.externalPricedCalls === 0n || summary.externalPricedCalls === summary.externalCalls) {
+    return label;
+  }
+  return `${label} · ${summary.externalPricedCalls.toLocaleString("en-US")}/${summary.externalCalls.toLocaleString("en-US")} priced`;
 }
 
 /**
@@ -127,7 +138,7 @@ function WorkspaceRow(props: { name: string; detail?: string; billing: readonly 
       <td className="py-3 text-right tabular-nums">{formatTokenCount(summary.totalTokens)}</td>
       <td className="py-3 text-right tabular-nums">{cacheHitLabel(summary)}</td>
       <td className="py-3 text-right tabular-nums">{formatMicrosUsd(summary.creditMicros)}</td>
-      <td className="py-3 text-right tabular-nums">{externalSpendLabel(summary)}</td>
+      <td className="py-3 text-right tabular-nums">{externalSpendCellLabel(summary)}</td>
     </tr>
   );
 }
@@ -300,7 +311,9 @@ function ModelUsageBody(props: {
           </tbody>
         </table>
         {data.modelsTruncated ? (
-          <p className="pt-2 text-xs text-fg-subtle">Top 50 models by tokens; more exist.</p>
+          <p className="pt-2 text-xs text-fg-subtle">
+            Top 50 model and billing rows by tokens; more exist.
+          </p>
         ) : null}
       </div>
 

@@ -3,6 +3,7 @@ import type { OrganizationModelUsageTotals } from "@opengeni/contracts/organizat
 
 import {
   cacheHitLabel,
+  externalSpendCellLabel,
   externalSpendLabel,
   formatMicrosUsd,
   formatTokenCount,
@@ -54,7 +55,10 @@ describe("organization model usage view", () => {
     expect(summary.externalPricedCalls).toBe(3n);
     expect(formatMicrosUsd(summary.creditMicros)).toBe("$9,007,199,254.74");
     expect(externalSpendLabel(summary)).toBe("~$2.50");
+    expect(externalSpendCellLabel(summary)).toBe("~$2.50 · 3/4 priced");
     expect(cacheHitLabel(summary)).toBe("25%");
+    expect(cacheHitLabel({ cachedTokens: 999n, cacheInputTokens: 1000n })).toBe("100%");
+    expect(cacheHitLabel({ cachedTokens: 994n, cacheInputTokens: 1000n })).toBe("99%");
     expect(formatTokenCount(summary.totalTokens)).toBe("200");
   });
 

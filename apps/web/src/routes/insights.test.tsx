@@ -167,12 +167,12 @@ beforeEach(() => {
 
 const { InsightsRoute } = await import("./insights");
 
-async function renderRoute() {
+async function renderRoute(props: Partial<Parameters<typeof InsightsRoute>[0]> = {}) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<InsightsRoute workspaceId={workspaceId} />);
+    root.render(<InsightsRoute workspaceId={workspaceId} {...props} />);
   });
   return {
     container,
@@ -318,7 +318,15 @@ describe("Insights route presentation", () => {
     };
     nextSnapshot = snapshot({
       projects: [
-        { ...row, id: "project:billing", kind: "project", label: "Billing", tokens: 750 },
+        {
+          ...row,
+          id: "project:billing",
+          kind: "project",
+          label: "Billing",
+          tokens: 750,
+          estimatedProviderUsd: 1.25,
+          estimatedProviderCostKnownCalls: 1,
+        },
         { ...row, id: "unfiled", kind: "unfiled", label: "No project", tokens: 250 },
       ],
     });
@@ -329,9 +337,57 @@ describe("Insights route presentation", () => {
         [...tr.querySelectorAll("td")].map((td) => td.textContent),
       );
       expect(rows.map((cells) => [cells[0], cells[4], cells[7]])).toEqual([
-        ["Billing", "75%", "Unknown"],
+        ["Billing", "75%", "~$1.25 · 1/2 priced"],
         ["No project", "25%", "Unknown"],
       ]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("pushes filter changes to history and replaces only an invalid URL", async () => {
+    const onSearchChange = mock((..._args: unknown[]) => undefined);
+    const rendered = await renderRoute({
+      search: { range: "bogus", provider: "openai", root: "not-a-uuid" },
+      onSearchChange,
+    });
+    try {
+      expect(onSearchChange).toHaveBeenCalledWith({ provider: "openai" }, { replace: true });
+      onSearchChange.mockClear();
+      await click(
+        rendered.container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Filter by gpt-5 from OpenAI"]',
+        ),
+      );
+      expect(onSearchChange).toHaveBeenCalledTimes(1);
+      expect(onSearchChange.mock.calls[0]).toEqual([{ provider: "openai", model: "gpt-5" }]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("shows unknown token and cache columns instead of zero", async () => {
+    nextSnapshot = snapshot({
+      models: [
+        {
+          ...snapshot().models[0]!,
+          totalTokens: 0,
+          outputTokens: 0,
+          cacheWriteTokens: 0,
+          tokenKnownCalls: 0,
+          cacheKnownCalls: 0,
+        },
+      ],
+    });
+    const rendered = await renderRoute();
+    try {
+      const cells = [
+        ...(rendered.container
+          .querySelector('[aria-label="Usage by model"]')
+          ?.querySelectorAll("tbody tr:first-child td") ?? []),
+      ].map((td) => td.textContent ?? "");
+      expect(cells.filter((text) => text.includes("Unknown")).length).toBeGreaterThanOrEqual(5);
+      expect(cells.some((text) => /^0(%)?$/.test(text.trim()))).toBe(false);
     } finally {
       await rendered.unmount();
     }

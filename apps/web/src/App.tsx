@@ -801,7 +801,9 @@ function Insights() {
     <LazyInsightsRoute
       workspaceId={workspaceId}
       search={search}
-      onSearchChange={(next) => void navigate({ search: next, replace: true })}
+      onSearchChange={(next, options) =>
+        void navigate({ search: next, replace: options?.replace ?? false })
+      }
     />
   );
 }

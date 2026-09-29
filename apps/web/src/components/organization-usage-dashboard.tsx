@@ -347,9 +347,11 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
           period={period}
           revision={revision}
           ledgerCreditMicros={
-            data?.totals.find(
-              (total) => total.eventType === "model.cost" && total.unit === "usd_micros",
-            )?.quantity
+            data
+              ? (data.totals.find(
+                  (total) => total.eventType === "model.cost" && total.unit === "usd_micros",
+                )?.quantity ?? "0")
+              : undefined
           }
         />
       ) : null}

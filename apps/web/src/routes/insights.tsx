@@ -105,6 +105,15 @@ function sameFilters(a: InsightsFilters, b: InsightsFilters): boolean {
 
 type SelectionChange = Parameters<typeof nextInsightsSearch>[1];
 
+function sameSearch(raw: Record<string, unknown>, parsed: InsightsSearch): boolean {
+  const rawKeys = Object.keys(raw).filter((key) => raw[key] !== undefined);
+  const parsedEntries = Object.entries(parsed).filter(([, value]) => value !== undefined);
+  return (
+    rawKeys.length === parsedEntries.length &&
+    parsedEntries.every(([key, value]) => raw[key] === value)
+  );
+}
+
 /**
  * Workspace Insights — live rollups from usage_events + model_call_facts.
  * The selection (range, chart, provider, model, root session, session) lives in the URL.
@@ -116,7 +125,8 @@ export function InsightsRoute({
 }: {
   workspaceId: string;
   search?: Record<string, unknown>;
-  onSearchChange?: (next: InsightsSearch) => void;
+  /** Filter changes push history; `replace` only normalizes an invalid URL. */
+  onSearchChange?: (next: InsightsSearch, options?: { replace?: boolean }) => void;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((w) => w.id === workspaceId);
@@ -142,6 +152,11 @@ export function InsightsRoute({
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
   const [scopeLabels, setScopeLabels] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!onSearchChange || sameSearch(search ?? {}, routedSelection)) return;
+    onSearchChange(routedSelection, { replace: true });
+  }, [onSearchChange, routedSelection, search]);
 
   const update = (change: SelectionChange) => {
     const next = nextInsightsSearch(selection, change);
@@ -461,855 +476,270 @@ export function InsightsRoute({
         </div>
       ) : null}
 
-      {snap.modelCalls === 0 ? (
-        <EmptyState
-          title={filtered ? "No calls match these filters" : "No model calls in this window"}
-          description={
-            filtered
-              ? "Choose another provider, model, or session to see usage."
-              : "Model usage will appear here after this workspace makes a call. Other workspace activity may still appear below."
-          }
-          action={
-            filtered ? (
-              <Button type="button" variant="outline" size="sm" onClick={clearFilters}>
-                Clear filters
-              </Button>
-            ) : undefined
-          }
-        />
-      ) : null}
-
-      <Section
-        title="Overview"
-        aside={
-          <p>
-            {formatUtcTimestamp(snap.windowStart)} – {formatUtcTimestamp(snap.windowEnd)}
-          </p>
-        }
+      <div
+        data-insights-results
+        aria-busy={loading}
+        className={cn(
+          "flex min-w-0 flex-col gap-7 transition-opacity sm:gap-9",
+          showingPreviousSelection && "opacity-60",
+        )}
       >
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)]">
-          <Metric
-            featured
-            label="Credits spent"
-            value={formatUsd(totals.creditUsd)}
-            delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · ${totals.creditPaidCalls.toLocaleString()} credit-paid calls`}
+        {snap.modelCalls === 0 ? (
+          <EmptyState
+            title={filtered ? "No calls match these filters" : "No model calls in this window"}
+            description={
+              filtered
+                ? "Choose another provider, model, or session to see usage."
+                : "Model usage will appear here after this workspace makes a call. Other workspace activity may still appear below."
+            }
+            action={
+              filtered ? (
+                <Button type="button" variant="outline" size="sm" onClick={clearFilters}>
+                  Clear filters
+                </Button>
+              ) : undefined
+            }
           />
-          <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            <Metric
-              label="External spend · estimate"
-              value={externalValue}
-              delta={externalDetail}
-            />
-            <Metric
-              label="Tokens"
-              value={formatTokens(totals.totalTokens)}
-              delta={`${formatPctDelta(deltas.tokensPct, snap.priorLabel)} · ${snap.modelCalls.toLocaleString()} calls${totals.tokenCoveragePct < 100 ? ` · ${totals.tokenCoveragePct}% reported` : ""}`}
-            />
-            <Metric
-              label="Cache hit"
-              value={formatCachePct(totals.cacheHitPct)}
-              delta={`${cacheDelta}${totals.cacheHitPct !== null && totals.cacheCoveragePct < 100 ? ` · ${totals.cacheCoveragePct}% of calls reported` : ""}`}
-              tone={totals.cacheHitPct !== null && totals.cacheHitPct >= 60 ? "good" : "neutral"}
-            />
-          </div>
-        </div>
-        {totals.ledgerGapUsd !== null && Math.abs(totals.ledgerGapUsd) >= 0.01 ? (
-          <div data-insights-ledger-gap>
-            <Notice tone="waiting" title="Breakdown coverage">
-              {totals.ledgerGapUsd > 0
-                ? `Per-model breakdowns cover ${formatUsd(totals.creditPaidUsd, 2)} of the ${formatUsd(totals.creditUsd, 2)} charged. ${formatUsd(totals.ledgerGapUsd, 2)} has no per-call record yet; recent gaps are rebuilt automatically from each call's usage event.`
-                : `Per-call records exceed the ${formatUsd(totals.creditUsd, 2)} charged in this window by ${formatUsd(-totals.ledgerGapUsd, 2)}.`}
-            </Notice>
-          </div>
-        ) : null}
-        {filtered ? (
-          <p className="text-2xs text-fg-subtle">
-            Filters narrow model usage, spend, and diagnostics. Sandbox time, live sessions, caps,
-            and session depth stay workspace-wide.
-          </p>
         ) : null}
 
-        <div className="mt-2 grid gap-4 lg:grid-cols-[1.35fr_1fr]">
-          <div className="rounded-lg border border-border bg-surface/35 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-medium text-fg">
-                  {inputSeriesHeading(snap.seriesLabel, measure === "tokens" ? "Tokens" : "Spend")}
-                </h3>
-                <p className="mt-0.5 text-2xs text-fg-subtle">
-                  {measure === "tokens"
-                    ? "Gaps mark buckets where calls reported no token counts"
-                    : "Provider-rate estimate covers every priced call, credit-paid or external"}
+        <Section
+          title="Overview"
+          aside={
+            <p>
+              {formatUtcTimestamp(snap.windowStart)} – {formatUtcTimestamp(snap.windowEnd)}
+            </p>
+          }
+        >
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)]">
+            <Metric
+              featured
+              label="Credits spent"
+              value={formatUsd(totals.creditUsd)}
+              delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · ${totals.creditPaidCalls.toLocaleString()} credit-paid calls`}
+            />
+            <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <Metric
+                label="External spend · estimate"
+                value={externalValue}
+                delta={externalDetail}
+              />
+              <Metric
+                label="Tokens"
+                value={formatTokens(totals.totalTokens)}
+                delta={`${formatPctDelta(deltas.tokensPct, snap.priorLabel)} · ${snap.modelCalls.toLocaleString()} calls${totals.tokenCoveragePct < 100 ? ` · ${totals.tokenCoveragePct}% reported` : ""}`}
+              />
+              <Metric
+                label="Cache hit"
+                value={formatCachePct(totals.cacheHitPct)}
+                delta={`${cacheDelta}${totals.cacheHitPct !== null && totals.cacheCoveragePct < 100 ? ` · ${totals.cacheCoveragePct}% of calls reported` : ""}`}
+                tone={totals.cacheHitPct !== null && totals.cacheHitPct >= 60 ? "good" : "neutral"}
+              />
+            </div>
+          </div>
+          {totals.ledgerGapUsd !== null && Math.abs(totals.ledgerGapUsd) >= 0.01 ? (
+            <div data-insights-ledger-gap>
+              <Notice tone="waiting" title="Breakdown coverage">
+                {totals.ledgerGapUsd > 0
+                  ? `Per-model breakdowns cover ${formatUsd(totals.creditPaidUsd, 2)} of the ${formatUsd(totals.creditUsd, 2)} charged. ${formatUsd(totals.ledgerGapUsd, 2)} has no per-call record yet; recent gaps are rebuilt automatically from each call's usage event.`
+                  : `Per-call records exceed the ${formatUsd(totals.creditUsd, 2)} charged in this window by ${formatUsd(-totals.ledgerGapUsd, 2)}.`}
+              </Notice>
+            </div>
+          ) : null}
+          {filtered ? (
+            <p className="text-2xs text-fg-subtle">
+              Filters narrow model usage, spend, and diagnostics. Sandbox time, live sessions, caps,
+              and session depth stay workspace-wide.
+            </p>
+          ) : null}
+
+          <div className="mt-2 grid gap-4 lg:grid-cols-[1.35fr_1fr]">
+            <div className="rounded-lg border border-border bg-surface/35 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-medium text-fg">
+                    {inputSeriesHeading(
+                      snap.seriesLabel,
+                      measure === "tokens" ? "Tokens" : "Spend",
+                    )}
+                  </h3>
+                  <p className="mt-0.5 text-2xs text-fg-subtle">
+                    {measure === "tokens"
+                      ? "Gaps mark buckets where calls reported no token counts"
+                      : "Provider-rate estimate covers every priced call, credit-paid or external"}
+                  </p>
+                </div>
+                <MeasureControl value={measure} onChange={(next) => update({ measure: next })} />
+              </div>
+              <AreaChart
+                key={`${measure}-${range}-${filters.provider}-${filters.model}-${filters.rootSessionId}-${filters.sessionId}`}
+                className="mt-3"
+                labels={series.map((p) => p.label)}
+                formatValue={measure === "tokens" ? formatTokens : formatUsd}
+                formatAxisValue={measure === "tokens" ? formatTokens : formatUsdTick}
+                height={210}
+                series={
+                  measure === "tokens"
+                    ? [
+                        {
+                          id: "total",
+                          label: "Total",
+                          values: series.map((d) =>
+                            tokenSeriesValue(d.tokenKnownCalls, d.calls, d.totalTokens),
+                          ),
+                          className: "text-brand",
+                        },
+                        {
+                          id: "input",
+                          label: "Input",
+                          values: series.map((d) =>
+                            tokenSeriesValue(d.tokenKnownCalls, d.calls, d.inputTokens),
+                          ),
+                          className: "text-status-running",
+                        },
+                        {
+                          id: "output",
+                          label: "Output",
+                          values: series.map((d) =>
+                            tokenSeriesValue(d.tokenKnownCalls, d.calls, d.outputTokens),
+                          ),
+                          className: "text-status-waiting",
+                        },
+                      ]
+                    : [
+                        {
+                          id: "credits",
+                          label: "Credits spent",
+                          values: series.map((d) => d.modelCostUsd),
+                          className: "text-brand",
+                        },
+                        {
+                          id: "estimated",
+                          label: "Provider-rate estimate",
+                          values: series.map((d) =>
+                            d.calls > 0 && d.estimatedProviderCostKnownCalls === 0
+                              ? null
+                              : d.estimatedProviderUsd,
+                          ),
+                          className: "text-status-running",
+                        },
+                      ]
+                }
+              />
+            </div>
+
+            <div className="rounded-lg border border-border bg-surface/35 p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-sm font-medium text-fg">{snap.cacheSeriesLabel}</h3>
+                <p className="font-mono text-xs tabular-nums text-fg-muted">
+                  {formatCachePct(totals.cacheHitPct)}
                 </p>
               </div>
-              <MeasureControl value={measure} onChange={(next) => update({ measure: next })} />
+              <p className="mt-0.5 text-2xs text-fg-subtle">
+                Share of reported input served from cache · gaps mean no cache detail
+              </p>
+              <AreaChart
+                key={`cache-${range}-${filters.provider}-${filters.model}-${filters.rootSessionId}-${filters.sessionId}`}
+                className="mt-3"
+                labels={series.map((p) => p.label)}
+                valueSuffix="%"
+                valueDigits={0}
+                yMax={100}
+                height={210}
+                series={[
+                  {
+                    id: "cache",
+                    label: "Cache hit",
+                    values: series.map((d) => d.cacheHitPct),
+                    className: "text-status-running",
+                  },
+                ]}
+              />
             </div>
-            <AreaChart
-              key={`${measure}-${range}-${filters.provider}-${filters.model}-${filters.rootSessionId}-${filters.sessionId}`}
-              className="mt-3"
-              labels={series.map((p) => p.label)}
-              formatValue={measure === "tokens" ? formatTokens : formatUsd}
-              formatAxisValue={measure === "tokens" ? formatTokens : formatUsdTick}
-              height={210}
-              series={
-                measure === "tokens"
-                  ? [
-                      {
-                        id: "total",
-                        label: "Total",
-                        values: series.map((d) =>
-                          tokenSeriesValue(d.tokenKnownCalls, d.calls, d.totalTokens),
-                        ),
-                        className: "text-brand",
-                      },
-                      {
-                        id: "input",
-                        label: "Input",
-                        values: series.map((d) =>
-                          tokenSeriesValue(d.tokenKnownCalls, d.calls, d.inputTokens),
-                        ),
-                        className: "text-status-running",
-                      },
-                      {
-                        id: "output",
-                        label: "Output",
-                        values: series.map((d) =>
-                          tokenSeriesValue(d.tokenKnownCalls, d.calls, d.outputTokens),
-                        ),
-                        className: "text-status-waiting",
-                      },
-                    ]
-                  : [
-                      {
-                        id: "credits",
-                        label: "Credits spent",
-                        values: series.map((d) => d.modelCostUsd),
-                        className: "text-brand",
-                      },
-                      {
-                        id: "estimated",
-                        label: "Provider-rate estimate",
-                        values: series.map((d) =>
-                          d.calls > 0 && d.estimatedProviderCostKnownCalls === 0
-                            ? null
-                            : d.estimatedProviderUsd,
-                        ),
-                        className: "text-status-running",
-                      },
-                    ]
-              }
-            />
           </div>
 
-          <div className="rounded-lg border border-border bg-surface/35 p-4">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h3 className="text-sm font-medium text-fg">{snap.cacheSeriesLabel}</h3>
-              <p className="font-mono text-xs tabular-nums text-fg-muted">
-                {formatCachePct(totals.cacheHitPct)}
-              </p>
-            </div>
-            <p className="mt-0.5 text-2xs text-fg-subtle">
-              Share of reported input served from cache · gaps mean no cache detail
+          <TokenComposition segments={composition} reduceMotion={reduceMotion ?? false} />
+        </Section>
+
+        <Section
+          title="Diagnostics"
+          aside={
+            <p>
+              Among the {diagnostics.sampleSize.toLocaleString()} most recent calls
+              {diagnostics.sampleTruncated ? " (older calls not sampled)" : ""}
             </p>
-            <AreaChart
-              key={`cache-${range}-${filters.provider}-${filters.model}-${filters.rootSessionId}-${filters.sessionId}`}
-              className="mt-3"
-              labels={series.map((p) => p.label)}
-              valueSuffix="%"
-              valueDigits={0}
-              yMax={100}
-              height={210}
-              series={[
-                {
-                  id: "cache",
-                  label: "Cache hit",
-                  values: series.map((d) => d.cacheHitPct),
-                  className: "text-status-running",
-                },
-              ]}
+          }
+        >
+          <div className="grid gap-4 lg:grid-cols-2">
+            <DiagnosticCard
+              title="Outlier calls"
+              body={
+                diagnostics.medianTotalTokens === null
+                  ? "Needs calls that reported token totals."
+                  : `At least ${OUTLIER_MEDIAN_MULTIPLE}× the median of ${formatTokens(Math.round(diagnostics.medianTotalTokens))} tokens per call.`
+              }
+              empty="No call stands out from the rest of the sample."
+              rows={diagnostics.outliers.map(({ call, ratio }) => ({
+                id: call.id,
+                title: call.sessionTitle,
+                meta: `${call.model} · ${formatUtcTimestamp(call.occurredAt)}`,
+                value: formatTokens(call.totalTokens ?? 0),
+                badge: `${ratio.toFixed(1)}×`,
+                onSelect: () => scopeToSession(call.sessionId, call.sessionTitle),
+              }))}
+            />
+            <DiagnosticCard
+              title="Cache misses"
+              body={`Calls with no cache read and at least ${formatTokens(CACHE_MISS_MIN_INPUT_TOKENS)} uncached input tokens.`}
+              empty="Every large prompt in the sample reused cache."
+              rows={diagnostics.cacheMisses.map(({ call, uncachedInputTokens }) => ({
+                id: call.id,
+                title: call.sessionTitle,
+                meta: `${call.model} · ${formatUtcTimestamp(call.occurredAt)}`,
+                value: formatTokens(uncachedInputTokens),
+                badge: "0% cached",
+                onSelect: () => scopeToSession(call.sessionId, call.sessionTitle),
+              }))}
             />
           </div>
-        </div>
-
-        <TokenComposition segments={composition} reduceMotion={reduceMotion ?? false} />
-      </Section>
-
-      <Section
-        title="Diagnostics"
-        aside={
-          <p>
-            Among the {diagnostics.sampleSize.toLocaleString()} most recent calls
-            {diagnostics.sampleTruncated ? " (older calls not sampled)" : ""}
-          </p>
-        }
-      >
-        <div className="grid gap-4 lg:grid-cols-2">
-          <DiagnosticCard
-            title="Outlier calls"
-            body={
-              diagnostics.medianTotalTokens === null
-                ? "Needs calls that reported token totals."
-                : `At least ${OUTLIER_MEDIAN_MULTIPLE}× the median of ${formatTokens(Math.round(diagnostics.medianTotalTokens))} tokens per call.`
-            }
-            empty="No call stands out from the rest of the sample."
-            rows={diagnostics.outliers.map(({ call, ratio }) => ({
-              id: call.id,
-              title: call.sessionTitle,
-              meta: `${call.model} · ${formatUtcTimestamp(call.occurredAt)}`,
-              value: formatTokens(call.totalTokens ?? 0),
-              badge: `${ratio.toFixed(1)}×`,
-              onSelect: () => scopeToSession(call.sessionId, call.sessionTitle),
-            }))}
-          />
-          <DiagnosticCard
-            title="Cache misses"
-            body={`Calls with no cache read and at least ${formatTokens(CACHE_MISS_MIN_INPUT_TOKENS)} uncached input tokens.`}
-            empty="Every large prompt in the sample reused cache."
-            rows={diagnostics.cacheMisses.map(({ call, uncachedInputTokens }) => ({
-              id: call.id,
-              title: call.sessionTitle,
-              meta: `${call.model} · ${formatUtcTimestamp(call.occurredAt)}`,
-              value: formatTokens(uncachedInputTokens),
-              badge: "0% cached",
-              onSelect: () => scopeToSession(call.sessionId, call.sessionTitle),
-            }))}
-          />
-        </div>
-        {diagnostics.lowCacheRoots.length > 0 ? (
-          <DiagnosticCard
-            title="Root sessions with low cache reuse"
-            body="Large root sessions where under a quarter of reported input came from cache."
-            empty=""
-            rows={diagnostics.lowCacheRoots.map((driver) => {
-              const rootId = driverRootSessionId(driver.id);
-              return {
-                id: driver.id,
-                title: driver.label,
-                meta: `${formatTokens(driver.tokens)} tokens`,
-                value: formatCachePct(driver.cacheHitPct),
-                badge: "cache hit",
-                onSelect: rootId ? () => scopeToRoot(rootId, driver.label) : undefined,
-              };
-            })}
-          />
-        ) : null}
-      </Section>
-
-      <Section
-        title="By model"
-        aside={<p>Click a row to filter · credit-paid rows show charged credits</p>}
-      >
-        <DataScroller aria-label="Usage by model" className="border border-border">
-          <table className="min-w-full text-left text-xs">
-            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-              <tr>
-                {[
-                  "Model",
-                  "Billing",
-                  "Calls",
-                  "Tokens",
-                  "Cache read",
-                  "Uncached input",
-                  "Cache write",
-                  "Output",
-                  "Cost",
-                ].map((h) => (
-                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {models.map((row, index) => {
-                const share = totals.totalTokens > 0 ? row.totalTokens / totals.totalTokens : 0;
-                return (
-                  <tr
-                    key={row.id}
-                    className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/60"
-                    onClick={() => update({ provider: row.provider, model: row.model })}
-                  >
-                    <td className="whitespace-nowrap px-3 py-2.5">
-                      <button
-                        type="button"
-                        aria-label={`Filter by ${row.model} from ${providerLabel(row.provider)}`}
-                        className="rounded text-left font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          update({ provider: row.provider, model: row.model });
-                        }}
-                      >
-                        {row.model}
-                      </button>
-                      <p className="text-2xs text-fg-subtle">{providerLabel(row.provider)}</p>
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2.5">
-                      <BillingPill billing={row.billing} />
-                    </td>
-                    <Num>{row.calls.toLocaleString()}</Num>
-                    <td className="whitespace-nowrap px-3 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <span className="w-12 font-mono tabular-nums text-fg">
-                          {formatTokens(row.totalTokens)}
-                        </span>
-                        <span className="h-1.5 w-20 overflow-hidden rounded-full bg-surface-2">
-                          <motion.span
-                            className="block h-full rounded-full bg-brand"
-                            initial={reduceMotion ? false : { width: 0 }}
-                            animate={{ width: `${Math.max(2, share * 100)}%` }}
-                            transition={{ delay: index * 0.04, duration: 0.4 }}
-                          />
-                        </span>
-                        <span className="w-8 text-right font-mono text-2xs tabular-nums text-fg-subtle">
-                          {Math.round(share * 100)}%
-                        </span>
-                      </div>
-                    </td>
-                    <Num>
-                      {row.cacheKnownCalls === 0
-                        ? "Unknown"
-                        : `${formatTokens(row.cachedTokens)} · ${formatCachePct(hitPct(row.cachedTokens, row.cacheInputTokens))}`}
-                    </Num>
-                    <Num>
-                      {row.cacheKnownCalls === 0
-                        ? "Unknown"
-                        : formatTokens(
-                            Math.max(
-                              0,
-                              row.cacheInputTokens - row.cachedTokens - row.cacheWriteTokens,
-                            ),
-                          )}
-                    </Num>
-                    <Num>{formatTokens(row.cacheWriteTokens)}</Num>
-                    <Num>{formatTokens(row.outputTokens)}</Num>
-                    <Num>{costLabel(row)}</Num>
-                  </tr>
-                );
-              })}
-              {models.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-fg-subtle">
-                    No model calls match this window and filter.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </DataScroller>
-
-        {providers.length > 1 ? (
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            {providers.map((p) => {
-              const active = filters.provider === p.provider;
-              return (
-                <button
-                  key={p.provider}
-                  type="button"
-                  onClick={() => setProvider(active ? "all" : p.provider)}
-                  className={cn(
-                    "rounded-lg border px-3.5 py-3 text-left transition-colors",
-                    active
-                      ? "border-brand/40 bg-brand/5"
-                      : "border-border bg-surface/35 hover:bg-surface-2/60",
-                  )}
-                >
-                  <div className="flex items-baseline justify-between gap-2">
-                    <p className="text-sm font-medium text-fg">{providerLabel(p.provider)}</p>
-                    <p className="font-mono text-xs tabular-nums text-fg-muted">
-                      {formatCachePct(p.cacheHitPct)} cache
-                    </p>
-                  </div>
-                  <p className="mt-1.5 font-mono text-xs tabular-nums text-fg-muted">
-                    {formatTokens(p.totalTokens)} · {p.calls.toLocaleString()} calls ·{" "}
-                    {formatUsd(p.creditUsd)} credits
-                  </p>
-                  <p className="mt-1 text-2xs text-fg-subtle">
-                    {p.creditsPathCalls} credit-paid · {p.externalCalls} external · {p.models} model
-                    {p.models === 1 ? "" : "s"}
-                  </p>
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-      </Section>
-
-      <Section
-        title="By project"
-        aside={<p>Each session tree counts under its root session's current project</p>}
-      >
-        <DataScroller aria-label="Usage by project" className="border border-border">
-          <table className="min-w-full text-left text-xs">
-            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-              <tr>
-                {[
-                  "Project",
-                  "Root sessions",
-                  "Calls",
-                  "Tokens",
-                  "Share",
-                  "Cache",
-                  "Credits",
-                  "Provider-rate est.",
-                ].map((h) => (
-                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((project) => (
-                <tr key={project.id} className="border-b border-border/70 last:border-0">
-                  <td
-                    className={cn(
-                      "max-w-72 truncate px-3 py-2.5 font-medium",
-                      project.kind === "project" ? "text-fg" : "text-fg-muted",
-                    )}
-                  >
-                    {project.label}
-                  </td>
-                  <Num>{project.rootSessions.toLocaleString()}</Num>
-                  <Num>{project.calls.toLocaleString()}</Num>
-                  <Num>{formatTokens(project.tokens)}</Num>
-                  <Num>
-                    {projectTokenTotal > 0
-                      ? `${Math.round((project.tokens / projectTokenTotal) * 100)}%`
-                      : "—"}
-                  </Num>
-                  <Num>{formatCachePct(project.cacheHitPct)}</Num>
-                  <Num>{formatUsd(project.creditUsd)}</Num>
-                  <Num>
-                    {project.estimatedProviderCostKnownCalls > 0
-                      ? `~${formatUsd(project.estimatedProviderUsd)}`
-                      : "Unknown"}
-                  </Num>
-                </tr>
-              ))}
-              {projects.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-fg-subtle">
-                    No attributed model usage in this window.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </DataScroller>
-      </Section>
-
-      <Section
-        title="By root session"
-        aside={
-          <p>
-            {snap.driversTruncated
-              ? `Top ${snap.drivers.length} of ${snap.driverGroups.toLocaleString()} root sessions by tokens`
-              : `${snap.drivers.length} root session${snap.drivers.length === 1 ? "" : "s"} by tokens`}
-          </p>
-        }
-      >
-        <DataScroller aria-label="Usage by root session" className="border border-border">
-          <table className="min-w-full text-left text-xs">
-            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-              <tr>
-                {[
-                  "Root session",
-                  "Tokens",
-                  "Share",
-                  "Cache",
-                  "Credits",
-                  "Credit Δ",
-                  "Provider-rate est.",
-                  "",
-                ].map((h, i) => (
-                  <th key={h || i} className="whitespace-nowrap px-3 py-2 font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {snap.drivers.map((driver) => {
+          {diagnostics.lowCacheRoots.length > 0 ? (
+            <DiagnosticCard
+              title="Root sessions with low cache reuse"
+              body="Large root sessions where under a quarter of reported input came from cache."
+              empty=""
+              rows={diagnostics.lowCacheRoots.map((driver) => {
                 const rootId = driverRootSessionId(driver.id);
-                const selected = rootId !== null && rootId === filters.rootSessionId;
-                return (
-                  <tr
-                    key={driver.id}
-                    className={cn(
-                      "border-b border-border/70 last:border-0",
-                      rootId && !selected && "cursor-pointer hover:bg-surface-2/60",
-                      selected && "bg-brand/5",
-                    )}
-                    onClick={() => {
-                      if (rootId && !selected) scopeToRoot(rootId, driver.label);
-                    }}
-                  >
-                    <td className="max-w-72 truncate px-3 py-2.5 font-medium text-fg">
-                      {rootId && !selected ? (
-                        <button
-                          type="button"
-                          aria-label={`Scope to root session ${driver.label}`}
-                          className="max-w-full truncate rounded text-left text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            scopeToRoot(rootId, driver.label);
-                          }}
-                        >
-                          {driver.label}
-                        </button>
-                      ) : (
-                        driver.label
-                      )}
-                    </td>
-                    <Num>{formatTokens(driver.tokens)}</Num>
-                    <Num>{driver.pctOfTokens}%</Num>
-                    <Num>{formatCachePct(driver.cacheHitPct)}</Num>
-                    <Num>{formatUsd(driver.creditUsd)}</Num>
-                    <td
-                      className={cn(
-                        "px-3 py-2.5 font-mono tabular-nums",
-                        driver.deltaUsdVsPrior > 0 ? "text-status-failed" : "text-fg-muted",
-                      )}
-                    >
-                      {formatDeltaUsd(driver.deltaUsdVsPrior)}
-                    </td>
-                    <Num>
-                      {driver.estimatedProviderCostKnownCalls > 0
-                        ? `~${formatUsd(driver.estimatedProviderUsd)}`
-                        : "Unknown"}
-                    </Num>
-                    <td className="px-3 py-2.5 text-right">
-                      <button
-                        type="button"
-                        aria-label={`Trace ${driver.label}`}
-                        title="Trace cost path"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          openTrace(driver.id);
-                        }}
-                        className="inline-flex size-6 items-center justify-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
-                      >
-                        <RouteIcon className="size-3.5" />
-                      </button>
-                    </td>
-                  </tr>
-                );
+                return {
+                  id: driver.id,
+                  title: driver.label,
+                  meta: `${formatTokens(driver.tokens)} tokens`,
+                  value: formatCachePct(driver.cacheHitPct),
+                  badge: "cache hit",
+                  onSelect: rootId ? () => scopeToRoot(rootId, driver.label) : undefined,
+                };
               })}
-              {snap.drivers.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-fg-subtle">
-                    No attributed model usage in this window.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </DataScroller>
-      </Section>
-
-      <Section
-        title="Recent model calls"
-        aside={
-          <p>
-            {snap.recentCallsTruncated
-              ? `Latest ${snap.recentCalls.length} calls · older calls not shown`
-              : `${snap.recentCalls.length} call${snap.recentCalls.length === 1 ? "" : "s"}`}
-          </p>
-        }
-      >
-        <DataScroller aria-label="Recent model calls" className="border border-border">
-          <table className="min-w-full text-left text-xs">
-            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-              <tr>
-                {[
-                  "Time (UTC)",
-                  "Session",
-                  "Model",
-                  "Billing",
-                  "Tokens",
-                  "Cache read",
-                  "Cache write",
-                  "Output",
-                  "Cost",
-                ].map((h) => (
-                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {snap.recentCalls.map((call) => (
-                <tr key={call.id} className="border-b border-border/70 last:border-0">
-                  <td
-                    className="whitespace-nowrap px-3 py-2.5 font-mono text-2xs text-fg-muted"
-                    title={call.occurredAt}
-                  >
-                    {formatUtcTimestamp(call.occurredAt)}
-                  </td>
-                  <td className="max-w-56 px-3 py-2.5">
-                    {call.sessionId === filters.sessionId ? (
-                      <span className="block truncate font-medium text-fg">
-                        {call.sessionTitle}
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => scopeToSession(call.sessionId, call.sessionTitle)}
-                        className="block max-w-full truncate text-left font-medium text-fg hover:text-brand hover:underline"
-                      >
-                        {call.sessionTitle}
-                      </button>
-                    )}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2.5">
-                    <p className="font-mono text-2xs text-fg">{call.model}</p>
-                    <p className="text-2xs text-fg-subtle">
-                      {providerLabel(call.provider)} · {call.providerApi}
-                    </p>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <BillingPill billing={call.billing} />
-                  </td>
-                  <Num>{call.totalTokens == null ? "Unknown" : formatTokens(call.totalTokens)}</Num>
-                  <Num>
-                    {call.cachedTokens == null || call.inputTokens == null
-                      ? "Unknown"
-                      : `${formatTokens(call.cachedTokens)} · ${formatCachePct(hitPct(call.cachedTokens, call.inputTokens))}`}
-                  </Num>
-                  <Num>
-                    {call.cacheWriteTokens == null
-                      ? "Unknown"
-                      : formatTokens(call.cacheWriteTokens)}
-                  </Num>
-                  <Num>
-                    {call.outputTokens == null ? "Unknown" : formatTokens(call.outputTokens)}
-                  </Num>
-                  <Num>
-                    {call.billing === "opengeni_credits"
-                      ? formatUsd(call.creditUsd)
-                      : call.estimatedProviderUsd == null
-                        ? "Unknown"
-                        : `~${formatUsd(call.estimatedProviderUsd)} est.`}
-                  </Num>
-                </tr>
-              ))}
-              {snap.recentCalls.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-fg-subtle">
-                    No model calls match this window and filter.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </DataScroller>
-      </Section>
-
-      <Section title="Schedules">
-        <p className="text-2xs text-fg-subtle">
-          Attribution covers turns whose initiator carried a scheduled run id. Goal continuations
-          without that lineage remain session usage rather than schedule usage.
-        </p>
-        <DataScroller aria-label="Schedule usage" className="border border-border">
-          <table className="min-w-full text-left text-xs">
-            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-              <tr>
-                {[
-                  "Schedule",
-                  "Fires",
-                  "Tokens",
-                  "Cache",
-                  "Credits",
-                  "External est.",
-                  "Billing",
-                ].map((h) => (
-                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {snap.schedules.map((row) => (
-                <tr key={row.id} className="border-b border-border/70 last:border-0">
-                  <td className="px-3 py-2.5 font-medium text-fg">{row.name}</td>
-                  <Num>{row.fires.toLocaleString()}</Num>
-                  <Num>{row.tokens == null ? "—" : formatTokens(row.tokens)}</Num>
-                  <Num>
-                    {row.tokens == null || row.tokens === 0 ? "—" : formatCachePct(row.cacheHitPct)}
-                  </Num>
-                  <Num>{row.creditUsd == null ? "—" : formatUsd(row.creditUsd)}</Num>
-                  <Num>
-                    {row.billing !== "external"
-                      ? "—"
-                      : row.estimatedProviderUsd == null || !row.estimatedProviderCostKnownCalls
-                        ? "Unknown"
-                        : `~${formatUsd(row.estimatedProviderUsd)}`}
-                  </Num>
-                  <td className="px-3 py-2.5">
-                    {row.billing == null ? "—" : <BillingPill billing={row.billing} />}
-                  </td>
-                </tr>
-              ))}
-              {snap.schedules.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-fg-subtle">
-                    No schedules in this workspace.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </DataScroller>
-      </Section>
-
-      <Section
-        title="Prompt context"
-        aside={
-          <p>
-            {promptContributions.coveredCalls.toLocaleString()} /{" "}
-            {promptContributions.totalCalls.toLocaleString()} calls covered
-          </p>
-        }
-      >
-        <p className="max-w-2xl text-xs leading-5 text-fg-muted">
-          Estimated tokens that workspace instructions, company profile, memory, and Skill
-          descriptors add to model input (UTF-8 bytes ÷ 4). Kept separate from provider-reported
-          input tokens.
-        </p>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Metric
-            label="Estimated prompt tokens"
-            value={formatTokens(promptContributions.estimatedTokens)}
-            delta="Knowledge material only"
-          />
-          <Metric
-            label="Average per covered call"
-            value={
-              promptContributions.coveredCalls > 0
-                ? formatTokens(
-                    Math.round(
-                      promptContributions.estimatedTokens / promptContributions.coveredCalls,
-                    ),
-                  )
-                : "Unknown"
-            }
-            delta="Content-free receipt estimate"
-          />
-          <Metric
-            label="Receipt coverage"
-            value={
-              promptContributions.totalCalls > 0
-                ? `${Math.round((promptContributions.coveredCalls / promptContributions.totalCalls) * 100)}%`
-                : "Unknown"
-            }
-            delta="Historical calls may be unavailable"
-          />
-        </div>
-        <DataScroller aria-label="Prompt context sources" className="border border-border">
-          <table className="min-w-full text-left text-xs">
-            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-              <tr>
-                <th className="px-3 py-2 font-medium">Source</th>
-                <th className="px-3 py-2 text-right font-medium">Est. tokens</th>
-                <th className="px-3 py-2 text-right font-medium">Share</th>
-                <th className="px-3 py-2 text-right font-medium">Calls</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {promptContributions.sources.map((row) => (
-                <tr key={row.source}>
-                  <td className="px-3 py-2 text-fg">{PROMPT_SOURCE_LABELS[row.source]}</td>
-                  <td className="px-3 py-2 text-right font-mono tabular-nums text-fg">
-                    {formatTokens(row.estimatedTokens)}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono tabular-nums text-fg-muted">
-                    {promptContributions.estimatedTokens > 0
-                      ? Math.round(
-                          (row.estimatedTokens / promptContributions.estimatedTokens) * 100,
-                        )
-                      : 0}
-                    %
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono tabular-nums text-fg-muted">
-                    {row.calls.toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-              {promptContributions.sources.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="px-3 py-5 text-center text-fg-subtle">
-                    No contribution receipts are available in this selection yet.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </DataScroller>
-      </Section>
-
-      <Section title="Sandbox usage" aside={filtered ? <p>Workspace-wide</p> : undefined}>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Metric
-            label="Warm time"
-            value={formatWarmHours(snap.warmSeconds)}
-            delta={formatPctDelta(deltas.warmPct, snap.priorLabel)}
-          />
-          <Metric
-            label="Top warm groups"
-            value={<CountUp value={snap.warmGroups.length} key={`groups-${range}`} />}
-            delta="Highest warm-second groups in range (top 24)"
-          />
-          <Metric
-            label="Live warm"
-            value={<CountUp value={snap.liveWarm.length} />}
-            delta={`${snap.warmIdleNow} idle · ${snap.liveWarm.length - snap.warmIdleNow} in use`}
-            tone={snap.warmIdleNow > 0 ? "warn" : "neutral"}
-          />
-          <Metric
-            label="Machines"
-            value={<CountUp value={snap.machinesOnline} />}
-            delta={
-              snap.selfhostedEnabled
-                ? "Connected Machines online · no warm meter"
-                : "Connected Machines disabled"
-            }
-          />
-        </div>
-
-        <div className="mt-2 grid gap-4 lg:grid-cols-2">
-          <div className="rounded-lg border border-border bg-surface/35 p-4">
-            <h3 className="text-sm font-medium text-fg">Warm hours</h3>
-            <AreaChart
-              key={`warm-${range}`}
-              className="mt-3"
-              labels={snap.series.map((p) => p.label)}
-              valueSuffix="h"
-              valueDigits={1}
-              height={200}
-              series={[
-                {
-                  id: "warm",
-                  label: "Warm hours",
-                  values: snap.series.map((d) => Math.round((d.warmSeconds / 3600) * 10) / 10),
-                  className: "text-status-waiting",
-                },
-              ]}
             />
-          </div>
+          ) : null}
+        </Section>
 
-          <div className="overflow-hidden rounded-lg border border-border">
-            <div className="border-b border-border px-3 py-2">
-              <h3 className="text-sm font-medium text-fg">By sandbox group</h3>
-              <p className="text-2xs text-fg-subtle">
-                Top 24 by warm seconds · sessions share the group
-              </p>
-            </div>
+        <Section
+          title="By model"
+          aside={<p>Click a row to filter · credit-paid rows show charged credits</p>}
+        >
+          <DataScroller aria-label="Usage by model" className="border border-border">
             <table className="min-w-full text-left text-xs">
               <thead className="border-b border-border bg-surface/50 text-fg-subtle">
                 <tr>
-                  {["Group", "Backend", "Warm", "Sessions"].map((h) => (
+                  {[
+                    "Model",
+                    "Billing",
+                    "Calls",
+                    "Tokens",
+                    "Cache read",
+                    "Uncached input",
+                    "Cache write",
+                    "Output",
+                    "Cost",
+                  ].map((h) => (
                     <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                       {h}
                     </th>
@@ -1317,256 +747,870 @@ export function InsightsRoute({
                 </tr>
               </thead>
               <tbody>
-                {[...snap.warmGroups]
-                  .sort((a, b) => b.warmSeconds - a.warmSeconds)
-                  .map((group) => (
-                    <tr key={group.id} className="border-b border-border/70 last:border-0">
-                      <td className="px-3 py-2.5">
-                        <p className="font-medium text-fg">{group.label}</p>
-                        <p className="font-mono text-2xs text-fg-subtle">{group.groupId}</p>
+                {models.map((row, index) => {
+                  const share = totals.totalTokens > 0 ? row.totalTokens / totals.totalTokens : 0;
+                  return (
+                    <tr
+                      key={row.id}
+                      className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/60"
+                      onClick={() => update({ provider: row.provider, model: row.model })}
+                    >
+                      <td className="whitespace-nowrap px-3 py-2.5">
+                        <button
+                          type="button"
+                          aria-label={`Filter by ${row.model} from ${providerLabel(row.provider)}`}
+                          className="rounded text-left font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            update({ provider: row.provider, model: row.model });
+                          }}
+                        >
+                          {row.model}
+                        </button>
+                        <p className="text-2xs text-fg-subtle">{providerLabel(row.provider)}</p>
                       </td>
-                      <td className="px-3 py-2.5 text-fg-muted">{backendLabel(group.backend)}</td>
-                      <Num>{formatWarmHours(group.warmSeconds)}</Num>
-                      <Num>{group.sessionsAttached}</Num>
+                      <td className="whitespace-nowrap px-3 py-2.5">
+                        <BillingPill billing={row.billing} />
+                      </td>
+                      <Num>{row.calls.toLocaleString()}</Num>
+                      <td className="whitespace-nowrap px-3 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <span className="w-12 font-mono tabular-nums text-fg">
+                            {row.tokenKnownCalls === 0 ? "Unknown" : formatTokens(row.totalTokens)}
+                          </span>
+                          <span className="h-1.5 w-20 overflow-hidden rounded-full bg-surface-2">
+                            <motion.span
+                              className="block h-full rounded-full bg-brand"
+                              initial={reduceMotion ? false : { width: 0 }}
+                              animate={{ width: `${Math.max(2, share * 100)}%` }}
+                              transition={{ delay: index * 0.04, duration: 0.4 }}
+                            />
+                          </span>
+                          <span className="w-8 text-right font-mono text-2xs tabular-nums text-fg-subtle">
+                            {Math.round(share * 100)}%
+                          </span>
+                        </div>
+                      </td>
+                      <Num>
+                        {row.cacheKnownCalls === 0
+                          ? "Unknown"
+                          : `${formatTokens(row.cachedTokens)} · ${formatCachePct(hitPct(row.cachedTokens, row.cacheInputTokens))}`}
+                      </Num>
+                      <Num>
+                        {row.cacheKnownCalls === 0
+                          ? "Unknown"
+                          : formatTokens(
+                              Math.max(
+                                0,
+                                row.cacheInputTokens - row.cachedTokens - row.cacheWriteTokens,
+                              ),
+                            )}
+                      </Num>
+                      <Num>
+                        {row.cacheKnownCalls === 0 ? "Unknown" : formatTokens(row.cacheWriteTokens)}
+                      </Num>
+                      <Num>
+                        {row.tokenKnownCalls === 0 ? "Unknown" : formatTokens(row.outputTokens)}
+                      </Num>
+                      <Num>{costLabel(row)}</Num>
                     </tr>
-                  ))}
-                {snap.warmGroups.length === 0 ? (
+                  );
+                })}
+                {models.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-3 py-6 text-center text-fg-subtle">
-                      No warm sandbox time in this window.
+                    <td colSpan={9} className="px-3 py-8 text-center text-fg-subtle">
+                      No model calls match this window and filter.
                     </td>
                   </tr>
                 ) : null}
               </tbody>
             </table>
-          </div>
-        </div>
+          </DataScroller>
 
-        {snap.liveWarm.length > 0 ? (
-          <div className="overflow-hidden rounded-lg border border-border">
-            <div className="border-b border-border px-3 py-2">
-              <h3 className="text-sm font-medium text-fg">Live warm boxes</h3>
-              <p className="text-2xs text-fg-subtle">Idle = warm with no active turn</p>
-            </div>
-            <ul className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3">
-              {snap.liveWarm.map((lease) => {
-                const idle = lease.turnHolders === 0;
+          {providers.length > 1 ? (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              {providers.map((p) => {
+                const active = filters.provider === p.provider;
                 return (
-                  <li
-                    key={lease.id}
-                    className="flex items-center justify-between gap-3 border-b border-border/70 px-3 py-2.5 last:border-0"
+                  <button
+                    key={p.provider}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setProvider(active ? "all" : p.provider)}
+                    className={cn(
+                      "rounded-lg border px-3.5 py-3 text-left transition-colors",
+                      active
+                        ? "border-brand/40 bg-brand/5"
+                        : "border-border bg-surface/35 hover:bg-surface-2/60",
+                    )}
                   >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={cn(
-                            "size-1.5 shrink-0 rounded-full",
-                            idle ? "bg-status-waiting" : "bg-status-running",
-                          )}
-                        />
-                        <p className="truncate font-mono text-xs text-fg">{lease.groupId}</p>
-                      </div>
-                      <p className="mt-0.5 text-2xs text-fg-subtle">
-                        {backendLabel(lease.backend)} ·{" "}
-                        {idle
-                          ? lease.viewerHolders > 0
-                            ? `idle · ${lease.viewerHolders} viewer`
-                            : "idle warm"
-                          : `${lease.turnHolders} turn · ${lease.viewerHolders} viewer`}
-                      </p>
-                    </div>
-                    <div className="shrink-0 text-right">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <p className="text-sm font-medium text-fg">{providerLabel(p.provider)}</p>
                       <p className="font-mono text-xs tabular-nums text-fg-muted">
-                        {lease.warmForLabel}
-                      </p>
-                      <p className="font-mono text-2xs tabular-nums text-fg-subtle">
-                        {formatWarmHours(lease.warmSeconds)} this window
+                        {formatCachePct(p.cacheHitPct)} cache
                       </p>
                     </div>
-                  </li>
+                    <p className="mt-1.5 font-mono text-xs tabular-nums text-fg-muted">
+                      {formatTokens(p.totalTokens)} · {p.calls.toLocaleString()} calls ·{" "}
+                      {formatUsd(p.creditUsd)} credits
+                    </p>
+                    <p className="mt-1 text-2xs text-fg-subtle">
+                      {p.creditsPathCalls} credit-paid · {p.externalCalls} external · {p.models}{" "}
+                      model
+                      {p.models === 1 ? "" : "s"}
+                    </p>
+                  </button>
                 );
               })}
-            </ul>
-          </div>
-        ) : null}
-      </Section>
+            </div>
+          ) : null}
+        </Section>
 
-      <Section title="Live now" aside={<p>Workspace-wide · click a session to scope</p>}>
-        <div className="flex w-fit gap-1 rounded-md border border-border p-0.5">
-          {(
-            [
-              ["all", "All"],
-              ["active", "Active"],
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setFloorFilter(id)}
-              className={cn(
-                "rounded px-2.5 py-1 text-2xs font-medium transition-colors",
-                floorFilter === id ? "bg-surface-2 text-fg" : "text-fg-muted hover:text-fg",
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <DataScroller aria-label="Live sessions" className="border border-border">
-          <table className="min-w-full text-left text-xs">
-            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
-              <tr>
-                {["Session", "Model", "Route", "State", "Age", "Cache"].map((h) => (
-                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              <AnimatePresence initial={false}>
-                {floor.map((row) => (
-                  <tr
-                    key={row.id}
-                    className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/50"
-                    onClick={() => scopeToSession(row.id, row.title)}
-                  >
-                    <td className="px-3 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <StateDot state={row.state} />
-                        <button
-                          type="button"
-                          aria-label={`Scope to session ${row.title}`}
-                          className="rounded text-left font-medium text-fg hover:text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            scopeToSession(row.id, row.title);
-                          }}
-                        >
-                          {row.title}
-                        </button>
-                      </div>
+        <Section
+          title="By project"
+          aside={<p>Each session tree counts under its root session's current project</p>}
+        >
+          <DataScroller aria-label="Usage by project" className="border border-border">
+            <table className="min-w-full text-left text-xs">
+              <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+                <tr>
+                  {[
+                    "Project",
+                    "Root sessions",
+                    "Calls",
+                    "Tokens",
+                    "Share",
+                    "Cache",
+                    "Credits",
+                    "Provider-rate est.",
+                  ].map((h) => (
+                    <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {projects.map((project) => (
+                  <tr key={project.id} className="border-b border-border/70 last:border-0">
+                    <td
+                      className={cn(
+                        "max-w-72 truncate px-3 py-2.5 font-medium",
+                        project.kind === "project" ? "text-fg" : "text-fg-muted",
+                      )}
+                    >
+                      {project.label}
                     </td>
-                    <td className="px-3 py-2.5 font-mono text-2xs text-fg-muted">
-                      {row.model ?? "—"}
-                    </td>
-                    <td className="px-3 py-2.5 text-fg-muted">{backendLabel(row.route)}</td>
-                    <td className="px-3 py-2.5">
-                      <StatePill state={row.state} />
-                    </td>
-                    <Num>{row.ageLabel}</Num>
-                    <Num>{formatCachePct(row.cacheHitPct)}</Num>
+                    <Num>{project.rootSessions.toLocaleString()}</Num>
+                    <Num>{project.calls.toLocaleString()}</Num>
+                    <Num>{formatTokens(project.tokens)}</Num>
+                    <Num>
+                      {projectTokenTotal > 0
+                        ? `${Math.round((project.tokens / projectTokenTotal) * 100)}%`
+                        : "—"}
+                    </Num>
+                    <Num>{formatCachePct(project.cacheHitPct)}</Num>
+                    <Num>{formatUsd(project.creditUsd)}</Num>
+                    <Num>
+                      {project.estimatedProviderCostKnownCalls === 0
+                        ? "Unknown"
+                        : project.estimatedProviderCostKnownCalls < project.calls
+                          ? `~${formatUsd(project.estimatedProviderUsd)} · ${project.estimatedProviderCostKnownCalls.toLocaleString()}/${project.calls.toLocaleString()} priced`
+                          : `~${formatUsd(project.estimatedProviderUsd)}`}
+                    </Num>
                   </tr>
                 ))}
-              </AnimatePresence>
-              {floor.length === 0 ? (
+                {projects.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-8 text-center text-fg-subtle">
+                      No attributed model usage in this window.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </DataScroller>
+        </Section>
+
+        <Section
+          title="By root session"
+          aside={
+            <p>
+              {snap.driversTruncated
+                ? `Top ${snap.drivers.length} of ${snap.driverGroups.toLocaleString()} root sessions by tokens`
+                : `${snap.drivers.length} root session${snap.drivers.length === 1 ? "" : "s"} by tokens`}
+            </p>
+          }
+        >
+          <DataScroller aria-label="Usage by root session" className="border border-border">
+            <table className="min-w-full text-left text-xs">
+              <thead className="border-b border-border bg-surface/50 text-fg-subtle">
                 <tr>
-                  <td colSpan={6} className="px-3 py-6 text-center text-fg-subtle">
-                    No sessions to show.
-                  </td>
+                  {[
+                    "Root session",
+                    "Tokens",
+                    "Share",
+                    "Cache",
+                    "Credits",
+                    "Credit Δ",
+                    "Provider-rate est.",
+                    "",
+                  ].map((h, i) => (
+                    <th key={h || i} className="whitespace-nowrap px-3 py-2 font-medium">
+                      {h}
+                    </th>
+                  ))}
                 </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </DataScroller>
-      </Section>
+              </thead>
+              <tbody>
+                {snap.drivers.map((driver) => {
+                  const rootId = driverRootSessionId(driver.id);
+                  const selected = rootId !== null && rootId === filters.rootSessionId;
+                  return (
+                    <tr
+                      key={driver.id}
+                      className={cn(
+                        "border-b border-border/70 last:border-0",
+                        rootId && !selected && "cursor-pointer hover:bg-surface-2/60",
+                        selected && "bg-brand/5",
+                      )}
+                      onClick={() => {
+                        if (rootId && !selected) scopeToRoot(rootId, driver.label);
+                      }}
+                    >
+                      <td className="max-w-72 truncate px-3 py-2.5 font-medium text-fg">
+                        {rootId && !selected ? (
+                          <button
+                            type="button"
+                            aria-label={`Scope to root session ${driver.label}`}
+                            className="max-w-full truncate rounded text-left text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              scopeToRoot(rootId, driver.label);
+                            }}
+                          >
+                            {driver.label}
+                          </button>
+                        ) : (
+                          driver.label
+                        )}
+                      </td>
+                      <Num>{formatTokens(driver.tokens)}</Num>
+                      <Num>{driver.pctOfTokens}%</Num>
+                      <Num>{formatCachePct(driver.cacheHitPct)}</Num>
+                      <Num>{formatUsd(driver.creditUsd)}</Num>
+                      <td
+                        className={cn(
+                          "px-3 py-2.5 font-mono tabular-nums",
+                          driver.deltaUsdVsPrior > 0 ? "text-status-failed" : "text-fg-muted",
+                        )}
+                      >
+                        {formatDeltaUsd(driver.deltaUsdVsPrior)}
+                      </td>
+                      <Num>
+                        {driver.estimatedProviderCostKnownCalls > 0
+                          ? `~${formatUsd(driver.estimatedProviderUsd)}`
+                          : "Unknown"}
+                      </Num>
+                      <td className="px-3 py-2.5 text-right">
+                        <button
+                          type="button"
+                          aria-label={`Trace ${driver.label}`}
+                          title="Trace cost path"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openTrace(driver.id);
+                          }}
+                          className="inline-flex size-6 items-center justify-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
+                        >
+                          <RouteIcon className="size-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {snap.drivers.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-8 text-center text-fg-subtle">
+                      No attributed model usage in this window.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </DataScroller>
+        </Section>
 
-      <Section title="Caps" aside={filtered ? <p>Workspace-wide</p> : undefined}>
-        <p className="text-2xs text-fg-subtle">
-          Credit-paid billable tokens and agent runs since the start of this UTC month. Externally
-          paid usage is not counted against the token meter.
-        </p>
-        <div className="grid gap-4 rounded-lg border border-border bg-surface/35 p-4 sm:grid-cols-2">
-          {snap.billableTokenCap != null ? (
-            <UsageMeter
-              key={`tok-cap-${range}`}
-              label="Billable tokens (credits path)"
-              detail={`${formatTokens(snap.billableTokensUsed)} / ${formatTokens(snap.billableTokenCap)}`}
-              total={snap.billableTokenCap}
-              segments={[
-                {
-                  id: "billable",
-                  value: snap.billableTokensUsed,
-                  className: "bg-brand",
-                  label: "model.tokens",
-                },
-              ]}
-            />
-          ) : (
-            <Metric
-              label="Billable tokens (credits path)"
-              value={formatTokens(snap.billableTokensUsed)}
-              delta="No workspace token cap configured"
-            />
-          )}
-          {snap.agentRunCap != null ? (
-            <UsageMeter
-              key={`run-cap-${range}`}
-              label="Agent runs"
-              detail={`${snap.agentRunsUsed.toLocaleString()} / ${snap.agentRunCap.toLocaleString()}`}
-              total={snap.agentRunCap}
-              segments={[
-                {
-                  id: "runs",
-                  value: Math.min(snap.agentRunCap, snap.agentRunsUsed),
-                  className: "bg-status-running",
-                  label: "agent_run.created",
-                },
-              ]}
-            />
-          ) : (
-            <Metric
-              label="Agent runs"
-              value={<CountUp value={snap.agentRunsUsed} key={`runs-${range}`} />}
-              delta="No workspace run cap configured"
-            />
-          )}
-        </div>
-      </Section>
+        <Section
+          title="Recent model calls"
+          aside={
+            <p>
+              {snap.recentCallsTruncated
+                ? `Latest ${snap.recentCalls.length} calls · older calls not shown`
+                : `${snap.recentCalls.length} call${snap.recentCalls.length === 1 ? "" : "s"}`}
+            </p>
+          }
+        >
+          <DataScroller aria-label="Recent model calls" className="border border-border">
+            <table className="min-w-full text-left text-xs">
+              <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+                <tr>
+                  {[
+                    "Time (UTC)",
+                    "Session",
+                    "Model",
+                    "Billing",
+                    "Tokens",
+                    "Cache read",
+                    "Cache write",
+                    "Output",
+                    "Cost",
+                  ].map((h) => (
+                    <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {snap.recentCalls.map((call) => (
+                  <tr key={call.id} className="border-b border-border/70 last:border-0">
+                    <td
+                      className="whitespace-nowrap px-3 py-2.5 font-mono text-2xs text-fg-muted"
+                      title={call.occurredAt}
+                    >
+                      {formatUtcTimestamp(call.occurredAt)}
+                    </td>
+                    <td className="max-w-56 px-3 py-2.5">
+                      {call.sessionId === filters.sessionId ? (
+                        <span className="block truncate font-medium text-fg">
+                          {call.sessionTitle}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => scopeToSession(call.sessionId, call.sessionTitle)}
+                          className="block max-w-full truncate text-left font-medium text-fg hover:text-brand hover:underline"
+                        >
+                          {call.sessionTitle}
+                        </button>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2.5">
+                      <p className="font-mono text-2xs text-fg">{call.model}</p>
+                      <p className="text-2xs text-fg-subtle">
+                        {providerLabel(call.provider)} · {call.providerApi}
+                      </p>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <BillingPill billing={call.billing} />
+                    </td>
+                    <Num>
+                      {call.totalTokens == null ? "Unknown" : formatTokens(call.totalTokens)}
+                    </Num>
+                    <Num>
+                      {call.cachedTokens == null || call.inputTokens == null
+                        ? "Unknown"
+                        : `${formatTokens(call.cachedTokens)} · ${formatCachePct(hitPct(call.cachedTokens, call.inputTokens))}`}
+                    </Num>
+                    <Num>
+                      {call.cacheWriteTokens == null
+                        ? "Unknown"
+                        : formatTokens(call.cacheWriteTokens)}
+                    </Num>
+                    <Num>
+                      {call.outputTokens == null ? "Unknown" : formatTokens(call.outputTokens)}
+                    </Num>
+                    <Num>
+                      {call.billing === "opengeni_credits"
+                        ? formatUsd(call.creditUsd)
+                        : call.estimatedProviderUsd == null
+                          ? "Unknown"
+                          : `~${formatUsd(call.estimatedProviderUsd)} est.`}
+                    </Num>
+                  </tr>
+                ))}
+                {snap.recentCalls.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="px-3 py-8 text-center text-fg-subtle">
+                      No model calls match this window and filter.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </DataScroller>
+        </Section>
 
-      <Section title="Session depth" aside={<p>All-time workspace topology</p>}>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Metric
-            label="Sessions"
-            value={<CountUp value={snap.sessionsTouched} key={`sess-${range}`} />}
-            delta={`${snap.rootSessions} roots · avg ${snap.avgDepth.toFixed(2)}`}
-          />
-          <Metric label="Deepest" value={snap.deepestDepth} delta={snap.deepestSessionTitle} />
-          <Metric
-            label="Goals done"
-            value={<CountUp value={snap.goalsCompleted} key={`goals-${range}`} />}
-            delta={`${snap.goalsActive} active now`}
-          />
-        </div>
-        <ul className="grid gap-2.5 rounded-lg border border-border bg-surface/35 p-4">
-          {snap.depth.map((bucket, index) => {
-            const widthPct = Math.max(4, (bucket.sessions / maxDepthSessions) * 100);
-            return (
-              <li key={bucket.depth} className="grid gap-1">
-                <div className="flex items-baseline justify-between gap-3 text-xs">
-                  <span className="font-medium text-fg">
-                    Depth {bucket.depth}
-                    {bucket.depth === 0 ? (
-                      <span className="ml-1.5 font-normal text-fg-subtle">· roots</span>
-                    ) : null}
-                  </span>
-                  <span className="font-mono tabular-nums text-fg-muted">
-                    {bucket.sessions.toLocaleString()} sessions
-                  </span>
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
-                  <motion.div
-                    className="h-full rounded-full bg-fg-muted"
-                    initial={reduceMotion ? false : { width: 0 }}
-                    animate={{ width: `${widthPct}%` }}
-                    transition={{ delay: index * 0.04, duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-                  />
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      </Section>
+        <Section title="Schedules">
+          <p className="text-2xs text-fg-subtle">
+            Attribution covers turns whose initiator carried a scheduled run id. Goal continuations
+            without that lineage remain session usage rather than schedule usage.
+          </p>
+          <DataScroller aria-label="Schedule usage" className="border border-border">
+            <table className="min-w-full text-left text-xs">
+              <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+                <tr>
+                  {[
+                    "Schedule",
+                    "Fires",
+                    "Tokens",
+                    "Cache",
+                    "Credits",
+                    "External est.",
+                    "Billing",
+                  ].map((h) => (
+                    <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {snap.schedules.map((row) => (
+                  <tr key={row.id} className="border-b border-border/70 last:border-0">
+                    <td className="px-3 py-2.5 font-medium text-fg">{row.name}</td>
+                    <Num>{row.fires.toLocaleString()}</Num>
+                    <Num>{row.tokens == null ? "—" : formatTokens(row.tokens)}</Num>
+                    <Num>
+                      {row.tokens == null || row.tokens === 0
+                        ? "—"
+                        : formatCachePct(row.cacheHitPct)}
+                    </Num>
+                    <Num>{row.creditUsd == null ? "—" : formatUsd(row.creditUsd)}</Num>
+                    <Num>
+                      {row.billing !== "external"
+                        ? "—"
+                        : row.estimatedProviderUsd == null || !row.estimatedProviderCostKnownCalls
+                          ? "Unknown"
+                          : `~${formatUsd(row.estimatedProviderUsd)}`}
+                    </Num>
+                    <td className="px-3 py-2.5">
+                      {row.billing == null ? "—" : <BillingPill billing={row.billing} />}
+                    </td>
+                  </tr>
+                ))}
+                {snap.schedules.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-3 py-8 text-center text-fg-subtle">
+                      No schedules in this workspace.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </DataScroller>
+        </Section>
+
+        <Section
+          title="Prompt context"
+          aside={
+            <p>
+              {promptContributions.coveredCalls.toLocaleString()} /{" "}
+              {promptContributions.totalCalls.toLocaleString()} calls covered
+            </p>
+          }
+        >
+          <p className="max-w-2xl text-xs leading-5 text-fg-muted">
+            Estimated tokens that workspace instructions, company profile, memory, and Skill
+            descriptors add to model input (UTF-8 bytes ÷ 4). Kept separate from provider-reported
+            input tokens.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Metric
+              label="Estimated prompt tokens"
+              value={formatTokens(promptContributions.estimatedTokens)}
+              delta="Knowledge material only"
+            />
+            <Metric
+              label="Average per covered call"
+              value={
+                promptContributions.coveredCalls > 0
+                  ? formatTokens(
+                      Math.round(
+                        promptContributions.estimatedTokens / promptContributions.coveredCalls,
+                      ),
+                    )
+                  : "Unknown"
+              }
+              delta="Content-free receipt estimate"
+            />
+            <Metric
+              label="Receipt coverage"
+              value={
+                promptContributions.totalCalls > 0
+                  ? `${Math.round((promptContributions.coveredCalls / promptContributions.totalCalls) * 100)}%`
+                  : "Unknown"
+              }
+              delta="Historical calls may be unavailable"
+            />
+          </div>
+          <DataScroller aria-label="Prompt context sources" className="border border-border">
+            <table className="min-w-full text-left text-xs">
+              <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Source</th>
+                  <th className="px-3 py-2 text-right font-medium">Est. tokens</th>
+                  <th className="px-3 py-2 text-right font-medium">Share</th>
+                  <th className="px-3 py-2 text-right font-medium">Calls</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {promptContributions.sources.map((row) => (
+                  <tr key={row.source}>
+                    <td className="px-3 py-2 text-fg">{PROMPT_SOURCE_LABELS[row.source]}</td>
+                    <td className="px-3 py-2 text-right font-mono tabular-nums text-fg">
+                      {formatTokens(row.estimatedTokens)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono tabular-nums text-fg-muted">
+                      {promptContributions.estimatedTokens > 0
+                        ? Math.round(
+                            (row.estimatedTokens / promptContributions.estimatedTokens) * 100,
+                          )
+                        : 0}
+                      %
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono tabular-nums text-fg-muted">
+                      {row.calls.toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+                {promptContributions.sources.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-3 py-5 text-center text-fg-subtle">
+                      No contribution receipts are available in this selection yet.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </DataScroller>
+        </Section>
+
+        <Section title="Sandbox usage" aside={filtered ? <p>Workspace-wide</p> : undefined}>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Metric
+              label="Warm time"
+              value={formatWarmHours(snap.warmSeconds)}
+              delta={formatPctDelta(deltas.warmPct, snap.priorLabel)}
+            />
+            <Metric
+              label="Top warm groups"
+              value={<CountUp value={snap.warmGroups.length} key={`groups-${range}`} />}
+              delta="Highest warm-second groups in range (top 24)"
+            />
+            <Metric
+              label="Live warm"
+              value={<CountUp value={snap.liveWarm.length} />}
+              delta={`${snap.warmIdleNow} idle · ${snap.liveWarm.length - snap.warmIdleNow} in use`}
+              tone={snap.warmIdleNow > 0 ? "warn" : "neutral"}
+            />
+            <Metric
+              label="Machines"
+              value={<CountUp value={snap.machinesOnline} />}
+              delta={
+                snap.selfhostedEnabled
+                  ? "Connected Machines online · no warm meter"
+                  : "Connected Machines disabled"
+              }
+            />
+          </div>
+
+          <div className="mt-2 grid gap-4 lg:grid-cols-2">
+            <div className="rounded-lg border border-border bg-surface/35 p-4">
+              <h3 className="text-sm font-medium text-fg">Warm hours</h3>
+              <AreaChart
+                key={`warm-${range}`}
+                className="mt-3"
+                labels={snap.series.map((p) => p.label)}
+                valueSuffix="h"
+                valueDigits={1}
+                height={200}
+                series={[
+                  {
+                    id: "warm",
+                    label: "Warm hours",
+                    values: snap.series.map((d) => Math.round((d.warmSeconds / 3600) * 10) / 10),
+                    className: "text-status-waiting",
+                  },
+                ]}
+              />
+            </div>
+
+            <div className="overflow-hidden rounded-lg border border-border">
+              <div className="border-b border-border px-3 py-2">
+                <h3 className="text-sm font-medium text-fg">By sandbox group</h3>
+                <p className="text-2xs text-fg-subtle">
+                  Top 24 by warm seconds · sessions share the group
+                </p>
+              </div>
+              <table className="min-w-full text-left text-xs">
+                <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+                  <tr>
+                    {["Group", "Backend", "Warm", "Sessions"].map((h) => (
+                      <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...snap.warmGroups]
+                    .sort((a, b) => b.warmSeconds - a.warmSeconds)
+                    .map((group) => (
+                      <tr key={group.id} className="border-b border-border/70 last:border-0">
+                        <td className="px-3 py-2.5">
+                          <p className="font-medium text-fg">{group.label}</p>
+                          <p className="font-mono text-2xs text-fg-subtle">{group.groupId}</p>
+                        </td>
+                        <td className="px-3 py-2.5 text-fg-muted">{backendLabel(group.backend)}</td>
+                        <Num>{formatWarmHours(group.warmSeconds)}</Num>
+                        <Num>{group.sessionsAttached}</Num>
+                      </tr>
+                    ))}
+                  {snap.warmGroups.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="px-3 py-6 text-center text-fg-subtle">
+                        No warm sandbox time in this window.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {snap.liveWarm.length > 0 ? (
+            <div className="overflow-hidden rounded-lg border border-border">
+              <div className="border-b border-border px-3 py-2">
+                <h3 className="text-sm font-medium text-fg">Live warm boxes</h3>
+                <p className="text-2xs text-fg-subtle">Idle = warm with no active turn</p>
+              </div>
+              <ul className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3">
+                {snap.liveWarm.map((lease) => {
+                  const idle = lease.turnHolders === 0;
+                  return (
+                    <li
+                      key={lease.id}
+                      className="flex items-center justify-between gap-3 border-b border-border/70 px-3 py-2.5 last:border-0"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={cn(
+                              "size-1.5 shrink-0 rounded-full",
+                              idle ? "bg-status-waiting" : "bg-status-running",
+                            )}
+                          />
+                          <p className="truncate font-mono text-xs text-fg">{lease.groupId}</p>
+                        </div>
+                        <p className="mt-0.5 text-2xs text-fg-subtle">
+                          {backendLabel(lease.backend)} ·{" "}
+                          {idle
+                            ? lease.viewerHolders > 0
+                              ? `idle · ${lease.viewerHolders} viewer`
+                              : "idle warm"
+                            : `${lease.turnHolders} turn · ${lease.viewerHolders} viewer`}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <p className="font-mono text-xs tabular-nums text-fg-muted">
+                          {lease.warmForLabel}
+                        </p>
+                        <p className="font-mono text-2xs tabular-nums text-fg-subtle">
+                          {formatWarmHours(lease.warmSeconds)} this window
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
+        </Section>
+
+        <Section title="Live now" aside={<p>Workspace-wide · click a session to scope</p>}>
+          <div
+            role="group"
+            aria-label="Live sessions shown"
+            className="flex w-fit gap-1 rounded-md border border-border p-0.5"
+          >
+            {(
+              [
+                ["all", "All"],
+                ["active", "Active"],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={floorFilter === id}
+                onClick={() => setFloorFilter(id)}
+                className={cn(
+                  "rounded px-2.5 py-1 text-2xs font-medium transition-colors",
+                  floorFilter === id ? "bg-surface-2 text-fg" : "text-fg-muted hover:text-fg",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <DataScroller aria-label="Live sessions" className="border border-border">
+            <table className="min-w-full text-left text-xs">
+              <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+                <tr>
+                  {["Session", "Model", "Route", "State", "Age", "Cache"].map((h) => (
+                    <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                <AnimatePresence initial={false}>
+                  {floor.map((row) => (
+                    <tr
+                      key={row.id}
+                      className="cursor-pointer border-b border-border/70 last:border-0 hover:bg-surface-2/50"
+                      onClick={() => scopeToSession(row.id, row.title)}
+                    >
+                      <td className="px-3 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <StateDot state={row.state} />
+                          <button
+                            type="button"
+                            aria-label={`Scope to session ${row.title}`}
+                            className="rounded text-left font-medium text-fg hover:text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              scopeToSession(row.id, row.title);
+                            }}
+                          >
+                            {row.title}
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-2xs text-fg-muted">
+                        {row.model ?? "—"}
+                      </td>
+                      <td className="px-3 py-2.5 text-fg-muted">{backendLabel(row.route)}</td>
+                      <td className="px-3 py-2.5">
+                        <StatePill state={row.state} />
+                      </td>
+                      <Num>{row.ageLabel}</Num>
+                      <Num>{formatCachePct(row.cacheHitPct)}</Num>
+                    </tr>
+                  ))}
+                </AnimatePresence>
+                {floor.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-6 text-center text-fg-subtle">
+                      No sessions to show.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </DataScroller>
+        </Section>
+
+        <Section title="Caps" aside={filtered ? <p>Workspace-wide</p> : undefined}>
+          <p className="text-2xs text-fg-subtle">
+            Credit-paid billable tokens and agent runs since the start of this UTC month. Externally
+            paid usage is not counted against the token meter.
+          </p>
+          <div className="grid gap-4 rounded-lg border border-border bg-surface/35 p-4 sm:grid-cols-2">
+            {snap.billableTokenCap != null ? (
+              <UsageMeter
+                key={`tok-cap-${range}`}
+                label="Billable tokens (credits path)"
+                detail={`${formatTokens(snap.billableTokensUsed)} / ${formatTokens(snap.billableTokenCap)}`}
+                total={snap.billableTokenCap}
+                segments={[
+                  {
+                    id: "billable",
+                    value: snap.billableTokensUsed,
+                    className: "bg-brand",
+                    label: "model.tokens",
+                  },
+                ]}
+              />
+            ) : (
+              <Metric
+                label="Billable tokens (credits path)"
+                value={formatTokens(snap.billableTokensUsed)}
+                delta="No workspace token cap configured"
+              />
+            )}
+            {snap.agentRunCap != null ? (
+              <UsageMeter
+                key={`run-cap-${range}`}
+                label="Agent runs"
+                detail={`${snap.agentRunsUsed.toLocaleString()} / ${snap.agentRunCap.toLocaleString()}`}
+                total={snap.agentRunCap}
+                segments={[
+                  {
+                    id: "runs",
+                    value: Math.min(snap.agentRunCap, snap.agentRunsUsed),
+                    className: "bg-status-running",
+                    label: "agent_run.created",
+                  },
+                ]}
+              />
+            ) : (
+              <Metric
+                label="Agent runs"
+                value={<CountUp value={snap.agentRunsUsed} key={`runs-${range}`} />}
+                delta="No workspace run cap configured"
+              />
+            )}
+          </div>
+        </Section>
+
+        <Section title="Session depth" aside={<p>All-time workspace topology</p>}>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Metric
+              label="Sessions"
+              value={<CountUp value={snap.sessionsTouched} key={`sess-${range}`} />}
+              delta={`${snap.rootSessions} roots · avg ${snap.avgDepth.toFixed(2)}`}
+            />
+            <Metric label="Deepest" value={snap.deepestDepth} delta={snap.deepestSessionTitle} />
+            <Metric
+              label="Goals done"
+              value={<CountUp value={snap.goalsCompleted} key={`goals-${range}`} />}
+              delta={`${snap.goalsActive} active now`}
+            />
+          </div>
+          <ul className="grid gap-2.5 rounded-lg border border-border bg-surface/35 p-4">
+            {snap.depth.map((bucket, index) => {
+              const widthPct = Math.max(4, (bucket.sessions / maxDepthSessions) * 100);
+              return (
+                <li key={bucket.depth} className="grid gap-1">
+                  <div className="flex items-baseline justify-between gap-3 text-xs">
+                    <span className="font-medium text-fg">
+                      Depth {bucket.depth}
+                      {bucket.depth === 0 ? (
+                        <span className="ml-1.5 font-normal text-fg-subtle">· roots</span>
+                      ) : null}
+                    </span>
+                    <span className="font-mono tabular-nums text-fg-muted">
+                      {bucket.sessions.toLocaleString()} sessions
+                    </span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
+                    <motion.div
+                      className="h-full rounded-full bg-fg-muted"
+                      initial={reduceMotion ? false : { width: 0 }}
+                      animate={{ width: `${widthPct}%` }}
+                      transition={{ delay: index * 0.04, duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                    />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </Section>
+      </div>
 
       <CausalSheet
         open={trace !== null}
