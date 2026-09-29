@@ -79,7 +79,14 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import {
+  isRequestBodyValidationError,
+  requestBodyValidationHttpError,
+  tagRequestJsonParseErrors,
+} from "./http/request-body";
+import { invalidPathIdentifierHttpError } from "./http/path-identifier";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
+import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   boundedRegisteredRouteLabel,
@@ -717,12 +724,53 @@ export function createAppComposition(deps: AppDependencies): {
     return await accessKeyBoundary(c, next);
   });
 
+  // Malformed JSON in a client request body is a 400 wherever a route reads it.
+  app.use("/v1/*", async (c, next) => {
+    tagRequestJsonParseErrors(c);
+    await next();
+  });
+
+  // A request no registered handler answers is a 404 (or a 405 when the path
+  // exists for other methods) before any authentication, authorization, or
+  // contract middleware can turn it into a misleading 401/409/503. This runs
+  // after the deployment perimeter so an unauthenticated caller of a
+  // key-protected deployment learns nothing new.
+  app.use("/v1/*", async (c, next) => {
+    const unmatched = unmatchedRoute(app, c);
+    if (!unmatched) {
+      await next();
+      return;
+    }
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    if (unmatched.status === 405) c.header("allow", unmatched.allow.join(", "));
+    return c.json(
+      ErrorEnvelope.parse({
+        error: {
+          status: unmatched.status,
+          code: "not_found",
+          message:
+            unmatched.status === 405
+              ? `Method ${c.req.method} is not supported for this resource. Allowed: ${unmatched.allow.join(", ")}.`
+              : "Resource not found.",
+          retryable: false,
+          requestId,
+        },
+      }),
+      unmatched.status,
+    );
+  });
+
   app.use("/v1/*", async (c, next) => {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (
       deps.settings.environment !== "test" &&
-      isApiContractProtectedMutation(c.req.method, new URL(c.req.url).pathname) &&
-      c.req.header(OPENGENI_API_CONTRACT_HEADER) !== OPENGENI_API_CONTRACT_REVISION
+      apiContractAdmission({
+        method: c.req.method,
+        pathname: new URL(c.req.url).pathname,
+        authorization: c.req.header("authorization"),
+        claimedRevision: c.req.header(OPENGENI_API_CONTRACT_HEADER),
+      }) === "reject"
     ) {
       return c.json(
         {
@@ -1470,7 +1518,10 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (workspaceControlBusyHttpError(rawError) ?? rawError);
+        : (workspaceControlBusyHttpError(rawError) ??
+          requestBodyValidationHttpError(rawError) ??
+          invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+          rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
@@ -1750,6 +1801,9 @@ export function httpStatusForError(error: unknown): number {
   if (workspaceControlBusyHttpError(error)) {
     return 503;
   }
+  if (isRequestBodyValidationError(error)) {
+    return 400;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }
@@ -1763,7 +1817,7 @@ export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 401) return "unauthenticated";
   if (status === 402) return "payment_required";
   if (status === 403) return "forbidden";
-  if (status === 404) return "not_found";
+  if (status === 404 || status === 405) return "not_found";
   if (status === 409) return "conflict";
   if (status === 413 || status === 422 || status === 400) return "validation_failed";
   if (status === 429) return "limit_exceeded";
@@ -2773,6 +2827,54 @@ export function routeLabel(pathname: string, registeredRoutePath?: string | null
   const registered = boundedRegisteredRouteLabel(registeredRoutePath);
   if (registered) return registered;
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
+}
+
+/**
+ * API contract revisions no longer admitted from ANY caller, including bearer
+ * integrations that would otherwise be accepted across revisions. Add a
+ * revision here only for a truly breaking wire change (which also requires a
+ * major release-train change); ordinary revision bumps stay additive.
+ */
+export const REFUSED_API_CONTRACT_REVISIONS: ReadonlySet<string> = new Set<string>([]);
+
+const BEARER_AUTHORIZATION = /^bearer\s+\S/i;
+
+/**
+ * The rollout fence for state-changing product calls.
+ *
+ * The exact-revision check exists to stop a stale first-party browser tab
+ * (cookie session, or unauthenticated local mode) from writing with an old
+ * request shape after a deployment; it answers 409 so the page reloads onto
+ * the matching bundle. That tab never sends `Authorization`, so this is not a
+ * header a stale bundle can choose to bypass it with.
+ *
+ * Bearer-authenticated callers (organization/workspace API keys, delegated
+ * tokens, the deployment key sent as a bearer) are integrations pinned to an
+ * SDK version: reloading cannot upgrade them, and the API is additive within a
+ * major release train. They are admitted with an older revision or with no
+ * revision claim at all. Only a revision listed in
+ * `REFUSED_API_CONTRACT_REVISIONS` is refused for them.
+ *
+ * This is a compatibility fence, not an authorization boundary: every route
+ * still authenticates and authorizes the request independently.
+ */
+export function apiContractAdmission(
+  input: {
+    method: string;
+    pathname: string;
+    authorization: string | undefined;
+    claimedRevision: string | undefined;
+  },
+  refusedRevisions: ReadonlySet<string> = REFUSED_API_CONTRACT_REVISIONS,
+): "admit" | "reject" {
+  if (!isApiContractProtectedMutation(input.method, input.pathname)) return "admit";
+  if (input.claimedRevision === OPENGENI_API_CONTRACT_REVISION) return "admit";
+  if (input.claimedRevision !== undefined && refusedRevisions.has(input.claimedRevision)) {
+    return "reject";
+  }
+  return input.authorization !== undefined && BEARER_AUTHORIZATION.test(input.authorization)
+    ? "admit"
+    : "reject";
 }
 
 /**

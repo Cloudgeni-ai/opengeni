@@ -586,6 +586,27 @@ describe("API Integration routes", () => {
     expect(drifted.status).toBe(409);
 
     sourceVersion = "1.0.0";
+    // allowedTools names preview tool ids. A preview operationKey is a client
+    // error that names the matching id, never an unhandled 500.
+    const freshPreview = (await (
+      await request("/integrations/preview", { method: "POST", body: JSON.stringify({ source }) })
+    ).json()) as { tools: Array<{ id: string; operationKey: string }> };
+    const listTool = freshPreview.tools.find((tool) => tool.id === "inventory_listitems")!;
+    expect(listTool.operationKey).not.toBe(listTool.id);
+    const byOperationKey = await request("/integrations/install", {
+      method: "POST",
+      body: JSON.stringify({
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+        allowedTools: [listTool.operationKey, "no_such_tool"],
+      }),
+    });
+    expect(byOperationKey.status).toBe(422);
+    const byOperationKeyMessage = await byOperationKey.text();
+    expect(byOperationKeyMessage).toContain("no_such_tool");
+    expect(byOperationKeyMessage).toContain(`${listTool.operationKey} -> inventory_listitems`);
+
     const optionalConnection = await createConnection(client!.db, {
       accountId,
       workspaceId,

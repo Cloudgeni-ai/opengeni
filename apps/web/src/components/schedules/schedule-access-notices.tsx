@@ -5,6 +5,7 @@ import { Notice } from "@/components/ui/notice";
 import { cn } from "@/lib/utils";
 import {
   scheduledTaskAccessFailuresText,
+  scheduledTaskAwaitingHumanText,
   scheduledTaskDriftIsDismissible,
   scheduledTaskPolicyDriftLines,
   scheduledTaskUnavailableAccountsText,
@@ -18,6 +19,7 @@ export function scheduledTaskAttentionText(
   const parts = [
     scheduledTaskUnavailableAccountsText(attention?.unavailableAccounts),
     scheduledTaskAccessFailuresText(attention?.failures),
+    scheduledTaskAwaitingHumanText(attention?.awaitingHuman),
   ].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(" ") : null;
 }
@@ -40,6 +42,7 @@ export function ScheduledTaskAccessNotices(props: {
 }) {
   const blockedText = scheduledTaskUnavailableAccountsText(props.attention?.unavailableAccounts);
   const failuresText = scheduledTaskAccessFailuresText(props.attention?.failures);
+  const awaitingHumanText = scheduledTaskAwaitingHumanText(props.attention?.awaitingHuman);
   // The blocked-account sentence is said once, in the louder notice.
   const driftLines = scheduledTaskPolicyDriftLines(props.policyDrift, {
     omitUnavailableAccounts: Boolean(blockedText),
@@ -47,7 +50,7 @@ export function ScheduledTaskAccessNotices(props: {
   const canRefreshAccess = Boolean(props.policyDrift?.canRefresh) && props.ownsTask;
   const dismissible =
     Boolean(props.onDismissDrift) && scheduledTaskDriftIsDismissible(props.policyDrift);
-  if (!blockedText && !failuresText && driftLines.length === 0) return null;
+  if (!blockedText && !failuresText && !awaitingHumanText && driftLines.length === 0) return null;
   const refreshButton = canRefreshAccess ? (
     <Button
       type="button"
@@ -71,6 +74,11 @@ export function ScheduledTaskAccessNotices(props: {
       : "Check the connection in Capabilities, then run the schedule again.";
   return (
     <div className={cn("grid gap-2", props.className)} data-scheduled-task-access>
+      {awaitingHumanText ? (
+        <Notice tone="waiting" title="The latest run is waiting for a person">
+          {awaitingHumanText} Open the run's session to decide.
+        </Notice>
+      ) : null}
       {blockedText || failuresText ? (
         <Notice
           tone="failed"

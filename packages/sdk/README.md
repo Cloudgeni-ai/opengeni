@@ -273,7 +273,9 @@ Use the service client—not an `asUser` client—to call
 `addExternalWorkspaceMember(workspaceId, { identity: { externalId, source? }, permissions })`
 for explicit onboarding. It requires `members:manage`, cannot grant more than
 the key permits, excludes Personal workspaces, and refuses to overwrite an
-existing membership with different permissions. Ordinary `asUser` calls never
+existing membership with different permissions; change an existing member's permissions with the keyed
+`updateExternalWorkspaceMember(organizationId, workspaceId, organizationMembershipId,
+{ operationId, permissions })`, which never tears down work. Ordinary `asUser` calls never
 restore removed workspace membership or reactivate disabled identities.
 
 Service `removeWorkspaceMember` supports external members through the existing

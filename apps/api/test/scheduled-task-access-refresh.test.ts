@@ -270,6 +270,7 @@ describe("scheduled task access drift and refresh", () => {
         firedAt: null,
         failures: [],
         unavailableAccounts: [{ id: "linear", name: "Linear" }],
+        awaitingHuman: null,
       },
     ]);
     expect(await attention(grant(workspace, workspace.member))).toEqual([]);
@@ -576,6 +577,7 @@ describe("scheduled task access drift and refresh", () => {
           firedAt: null,
           failures: [],
           unavailableAccounts: [{ id: "linear", name: "Linear" }],
+          awaitingHuman: null,
         },
       ],
     });

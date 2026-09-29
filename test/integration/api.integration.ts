@@ -6475,9 +6475,11 @@ describe("API component integration", () => {
     expect(compact.goal).toEqual({ status: "active", summary: "staging deployed" });
     expect(compact).not.toHaveProperty("effectiveToolPolicy");
     expect(compact).not.toHaveProperty("initialMessage");
+    // A missing session is refused exactly like an invisible one, so the
+    // manager tools cannot distinguish "absent" from "not yours".
     await expect(
       callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() }),
-    ).rejects.toThrow("session not found");
+    ).rejects.toThrow("Session not found or access denied");
 
     const conversation = await callMcpTool<{ view: string; events: unknown[] }>(
       mcp,

@@ -2911,6 +2911,8 @@ export type ScheduledTaskAgentConfig = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /** Seconds a run may wait on a person before the scheduler answers for it. */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type ScopedKnowledgeScope =
@@ -4007,7 +4009,12 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export type ClientConfig = {
   deploymentRevision: string;
-  apiContractRevision: typeof OPENGENI_API_CONTRACT_REVISION;
+  /**
+   * The API's contract revision. Equals `OPENGENI_API_CONTRACT_REVISION` for a
+   * `"strict"` client (it throws otherwise); a `"compatible"` client may
+   * receive a newer revision from an additive deployment within its major.
+   */
+  apiContractRevision: string;
   serverVersion?: string | undefined;
   defaultModel: string;
   allowedModels: string[];
@@ -4794,7 +4801,12 @@ export type CreateWorkspaceRequest = {
 };
 
 export type EnsureWorkspaceRequest = {
-  accountId: string;
+  /**
+   * Owning organization id. An organization API key may omit it and the
+   * workspace is created in the key's own organization; every other caller
+   * must send it.
+   */
+  accountId?: string | undefined;
   externalSource: string;
   externalId: string;
   name: string;
@@ -5532,6 +5544,12 @@ export type ScheduledTaskAgentConfigInput = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /**
+   * Seconds a run's own turn may wait on a person (tool approval or structured
+   * question, 60 s - 30 days) before the scheduler rejects the approval / skips
+   * the question as a labelled system decision. Omitted: waits indefinitely.
+   */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -5677,10 +5695,43 @@ export type ScheduledTaskRun = {
       }
     | null
     | undefined;
+  /**
+   * Why the scheduler refused this occurrence before running it; `error`
+   * equals `reason`. `retryable: true` (status `skipped`): a later occurrence
+   * runs once the condition clears. `retryable: false` (status `failed`):
+   * every occurrence is refused until the task or a resource it names changes.
+   */
+  admissionRefusal?: ScheduledTaskAdmissionRefusal | null | undefined;
+  /**
+   * This dispatched run's own turn is waiting on a person (tool approval or
+   * structured question) since `since`; `expiresAt` is when the task's
+   * `approvalTimeoutSeconds` answers for it (null: waits indefinitely).
+   */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
   createdAt: string;
   updatedAt: string;
   /** Connectors this run could not use; projected only for a viewer who can act on the task. */
   accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+};
+
+export type ScheduledTaskRunAwaitingHuman = {
+  since: string;
+  expiresAt: string | null;
+};
+
+export type ScheduledTaskAdmissionRefusal = {
+  version: 1;
+  reason:
+    | "scheduled_authority_unavailable"
+    | "machine_target_unavailable"
+    | "machine_enrollment_inactive"
+    | "variable_set_unavailable"
+    | "rig_version_unavailable"
+    | "insufficient_credits"
+    | "monthly_model_cost_limit"
+    | "monthly_agent_run_limit"
+    | (string & {});
+  retryable: boolean;
 };
 
 export type ScheduledTaskAccessFailureReason =
@@ -5717,6 +5768,8 @@ export type ScheduledTaskAccessAttention = {
   firedAt: string | null;
   failures: ScheduledTaskRunAccessFailure[];
   unavailableAccounts: ScheduledTaskAccessConnector[];
+  /** The latest run is waiting on a person (tool approval or question) right now. */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
 };
 
 export type ListScheduledTaskAccessAttentionResponse = {

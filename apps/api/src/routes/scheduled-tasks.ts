@@ -58,6 +58,7 @@ import {
   verifyScheduledTaskSlackChannel,
 } from "../integrations/slack-bot";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
+import { parseRequestBody, readRequestJson } from "../http/request-body";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient, objectStorage } = deps;
@@ -183,7 +184,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       "scheduled_tasks:manage",
     );
     const grant = authorization.grant;
-    const rawPayload = await c.req.json();
+    const rawPayload = await readRequestJson(c);
     const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
     if (!parsedPayload.success) {
       throw new HTTPException(400, {
@@ -318,7 +319,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const taskId = c.req.param("taskId");
     const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
     const previous = await captureScheduledTaskRestoreState(db, existing);
-    const rawPayload = await c.req.json();
+    const rawPayload = await readRequestJson(c);
     const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
     if (!parsedPayload.success) {
       throw new HTTPException(400, {
@@ -453,7 +454,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // Body is optional (a bare POST is still a valid trigger); only a present,
     // non-empty body must parse against the contract.
     const body = await c.req.json().catch(() => ({}));
-    const { triggerId } = TriggerScheduledTaskRequest.parse(body ?? {});
+    const { triggerId } = parseRequestBody(TriggerScheduledTaskRequest, body ?? {});
     const triggerToken = scheduledTaskTriggerToken(triggerId);
     const agentRunUsageIdempotencyKey =
       task.action.kind === "agent_turn"

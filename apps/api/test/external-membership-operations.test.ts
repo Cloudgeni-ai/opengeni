@@ -486,3 +486,113 @@ test("keyed cancellation tears down private, child, live and scheduled work only
     await shared.admin`select count(*)::int as n from session_workflow_wake_outbox where session_id = ${target.sessionId}`;
   expect(wake!.n).toBeGreaterThan(0);
 });
+
+test("keyed permission updates widen, narrow, and replay without teardown", async () => {
+  const f = await fixture();
+  await f.add();
+  await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+    values (${f.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'external-membership-update-test')`;
+  await shared.admin`insert into organization_private_session_settings (account_id, enabled, version, updated_by_membership_id)
+    values (${f.accountId}, true, 1, null) on conflict (account_id) do update set enabled = true`;
+  const privateSession = await withSessionRlsActorContext({ subjectId: f.identity.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Member work",
+      resources: [],
+      metadata: {},
+      visibility: "user_private",
+      createdBy: { kind: "subject", subjectId: f.identity.subjectId },
+      subjectId: f.identity.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    }),
+  );
+  const membershipId = f.identity.organizationMembershipId;
+  const update = (operationId: string, permissions: string[]) =>
+    f.service.updateExternalWorkspaceMember(f.accountId, f.workspace.id, membershipId, {
+      operationId,
+      permissions: permissions as never,
+    });
+  const permissionsNow = async () =>
+    [
+      ...((await f.members()).find((member) => member.subjectId === f.identity.subjectId)
+        ?.permissions ?? []),
+    ].sort();
+  const revision = async () =>
+    (
+      (await f.service.lookupExternalIdentity(f.accountId, f.reference)) as {
+        membershipAuthorizationRevision: number;
+        identityAuthorizationRevision: number;
+      }
+    ).membershipAuthorizationRevision;
+
+  // Widening only rewrites the set.
+  const widenId = crypto.randomUUID();
+  expect(await update(widenId, ["sessions:read", "workspace:read"])).toEqual({
+    subjectId: f.identity.subjectId,
+    organizationMembershipId: membershipId,
+    permissions: ["sessions:read", "workspace:read"],
+    narrowed: false,
+    replay: false,
+  });
+  expect(await permissionsNow()).toEqual(["sessions:read", "workspace:read"]);
+  expect(await revision()).toBe(1);
+
+  // An exact replay returns the stored receipt; a changed body is refused.
+  expect(await update(widenId, ["workspace:read", "sessions:read"])).toMatchObject({
+    narrowed: false,
+    replay: true,
+  });
+  await expect(update(widenId, ["workspace:read"])).rejects.toMatchObject({ status: 409 });
+
+  // Narrowing advances the authorization revision but tears nothing down.
+  const narrowId = crypto.randomUUID();
+  expect(await update(narrowId, ["workspace:read"])).toMatchObject({
+    permissions: ["workspace:read"],
+    narrowed: true,
+    replay: false,
+  });
+  expect(await permissionsNow()).toEqual(["workspace:read"]);
+  expect(await revision()).toBe(2);
+  const [identityRow] =
+    await shared.admin`select authorization_revision::int as revision, status from external_identities where organization_membership_id = ${membershipId}`;
+  expect(identityRow).toEqual({ revision: 2, status: "active" });
+  const [sessionRow] =
+    await shared.admin`select status, authority_epoch::int as epoch from sessions where id = ${privateSession.id}`;
+  expect(sessionRow).toEqual({ status: privateSession.status, epoch: 1 });
+
+  // A replay after a later change still answers the original receipt.
+  expect(await update(widenId, ["sessions:read", "workspace:read"])).toMatchObject({
+    permissions: ["sessions:read", "workspace:read"],
+    replay: true,
+  });
+  expect(await permissionsNow()).toEqual(["workspace:read"]);
+
+  const [events] =
+    await shared.admin`select count(*)::int as n from organization_workspace_lifecycle_events where account_id = ${f.accountId} and kind = 'update'`;
+  expect(events!.n).toBe(2);
+
+  // Authority, target, and membership failures are client errors.
+  await expect(update(crypto.randomUUID(), ["secrets:write"])).rejects.toMatchObject({
+    status: 403,
+  });
+  await expect(
+    f.service.updateExternalWorkspaceMember(f.accountId, f.workspace.id, crypto.randomUUID(), {
+      operationId: crypto.randomUUID(),
+      permissions: ["workspace:read"],
+    }),
+  ).rejects.toMatchObject({ status: 404 });
+  const otherWorkspace = await createWorkspace(db.db, {
+    accountId: f.accountId,
+    name: "Workspace without the member",
+  });
+  await expect(
+    f.service.updateExternalWorkspaceMember(f.accountId, otherWorkspace.id, membershipId, {
+      operationId: crypto.randomUUID(),
+      permissions: ["workspace:read"],
+    }),
+  ).rejects.toMatchObject({ status: 404 });
+}, 180_000);
