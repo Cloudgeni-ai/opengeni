@@ -100,6 +100,15 @@ Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
 the product needs a materially different interaction model. These components do
 not consume the text-only `@opengeni/sdk/chat` fallback protocol.
 
+`OpenGeniChat` adds the user's chat list to the conversation: a sidebar when
+the component is wide and a drawer behind a menu button when narrow (measured on
+its own container, so it works inside panels), a new-chat composer that creates
+the session from its first message, and inline rename and archive. It is
+composed from `SessionList` and `SessionConversation`, which you can also mount
+separately. Pass `conversationProps` for message rendering and tool renderers,
+`createSession` to create chats through your own endpoint, or `sessionId` /
+`onSessionChange` to control the selection (for example from the URL).
+
 `SessionConversation` hides its model picker when the client config reports
 `modelSelection: false` (a proxy that fixes the model policy); pass
 `modelPicker={false}` or `modelPicker` to override. Attachments appear when the
