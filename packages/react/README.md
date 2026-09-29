@@ -117,7 +117,9 @@ approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
 
 Highlighted diffs use the optional `@pierre/diffs` peer only after an explicit
 opt-in, so a host without it still builds with any bundler (Turbopack resolves
-every reachable `import()`). Hosts that install it call, once at startup:
+every reachable `import()`). Hosts that install it call `enablePierreDiffs()`
+once; call it from the lazily loaded route that renders diffs to keep the peer
+out of your initial bundle. Views already on screen upgrade when it registers:
 
 ```ts
 import { enablePierreDiffs } from "@opengeni/react/diffs";

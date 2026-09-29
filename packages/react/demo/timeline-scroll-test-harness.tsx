@@ -4,6 +4,10 @@ import { createRoot } from "react-dom/client";
 
 import { MessageTimeline, type TimelineItem, type TimelineSearchTarget } from "@opengeni/react";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 type VisibleRow = { id: string | null; top: number | null };
 const VISIBLE_ROW_EDGE_TOLERANCE_PX = 2;

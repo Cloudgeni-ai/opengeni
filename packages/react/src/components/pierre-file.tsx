@@ -6,9 +6,14 @@ import {
   Suspense,
   useEffect,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { cn } from "../lib/cn";
-import { loadPierreDiffs } from "../lib/pierre-diffs-loader";
+import {
+  loadPierreDiffs,
+  pierreDiffsRevision,
+  subscribePierreDiffs,
+} from "../lib/pierre-diffs-loader";
 
 /** Pierre `File` props subset we drive — the single-file, syntax-highlighted view
  *  (Shiki), the read counterpart of `PatchDiff`. */
@@ -70,8 +75,14 @@ export function PierreFile({
 
   // Probe the import once so a hard failure (peer missing) shows `fallback`
   // rather than a Suspense boundary that never resolves.
+  const loaderRevision = useSyncExternalStore(
+    subscribePierreDiffs,
+    pierreDiffsRevision,
+    pierreDiffsRevision,
+  );
   useEffect(() => {
     let cancelled = false;
+    setFailed(false);
     loadPierreDiffs().then(
       () => {
         if (!cancelled) setReady(true);
@@ -83,7 +94,7 @@ export function PierreFile({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loaderRevision]);
 
   const name = path.split("/").filter(Boolean).pop() ?? path;
 

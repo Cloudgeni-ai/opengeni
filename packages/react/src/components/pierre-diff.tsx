@@ -7,10 +7,15 @@ import {
   Suspense,
   useEffect,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { cn } from "../lib/cn";
 import { gitFileDiffToPatch } from "../lib/git-patch";
-import { loadPierreDiffs } from "../lib/pierre-diffs-loader";
+import {
+  loadPierreDiffs,
+  pierreDiffsRevision,
+  subscribePierreDiffs,
+} from "../lib/pierre-diffs-loader";
 
 /** Pierre `PatchDiff` props subset we drive. */
 type PatchDiffComponent = ComponentType<{
@@ -97,9 +102,15 @@ export function PierreDiff({
 
   // Probe the import once so a hard failure (peer missing) shows `fallback`
   // rather than a Suspense boundary that never resolves. Skipped when `plain`.
+  const loaderRevision = useSyncExternalStore(
+    subscribePierreDiffs,
+    pierreDiffsRevision,
+    pierreDiffsRevision,
+  );
   useEffect(() => {
     if (plain) return;
     let cancelled = false;
+    setFailed(false);
     // Mount the lazy renderer only after the peer loaded, so a missing peer
     // never poisons React.lazy's cached result for the rest of the page.
     loadPierreDiffs().then(
@@ -113,7 +124,7 @@ export function PierreDiff({
     return () => {
       cancelled = true;
     };
-  }, [plain]);
+  }, [plain, loaderRevision]);
 
   if (plain || failed || forcedColors) {
     // `plain` opts out of highlighting; `failed` = `@pierre/diffs` not installed.
