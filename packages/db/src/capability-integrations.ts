@@ -1971,9 +1971,6 @@ function autoApprovedToolIds(
   selectedTools: readonly string[],
 ): Set<string> {
   const requested = normalizedStrings(input.autoApprovedTools ?? [], 2_000);
-  if (requested.length > 0 && input.definitionProvenance !== "workspace") {
-    throw new Error("Curated API Integration approval requirements cannot be removed");
-  }
   if (requested.some((tool) => !selectedTools.includes(tool))) {
     throw new Error("API Integration auto-approved a tool that is not selected");
   }

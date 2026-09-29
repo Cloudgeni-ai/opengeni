@@ -7372,8 +7372,8 @@ export type InstallApiIntegrationRequest = {
   /**
    * Selected tools whose preview `approvalMode` is `"ask"` that should run
    * without per-call human approval (for example in scheduled or other
-   * unattended sessions). Custom Integrations only; needs
-   * `capabilities:manage`. Declarative: omit it and every write tool asks
+   * unattended sessions). Needs `capabilities:manage`; a curated definition
+   * may forbid exempting specific operations (422). Declarative: omit it and every write tool asks
    * again. Connector Block and session approval policies still apply.
    */
   autoApprovedTools?: string[] | undefined;

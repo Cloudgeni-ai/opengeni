@@ -12289,9 +12289,10 @@ export const InstallApiIntegrationRequest = z
     expectedInstanceVersion: z.number().int().positive().optional(),
     allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
     // Selected write/destructive tools (preview approvalMode "ask") that run
-    // without per-call human approval, for unattended/scheduled work. Custom
-    // (workspace-provenance) Integrations only; requires capabilities:manage and
-    // re-passes organization acquisition policy. Declarative: omission restores
+    // without per-call human approval, for unattended/scheduled work. Custom and
+    // curated Integrations alike; requires capabilities:manage and re-passes
+    // organization acquisition policy. A curated definition may forbid it per
+    // operation (IntegrationDefinition.autoApproval). Declarative: omission restores
     // approval for every "ask" tool. Session approval policy, connector Block,
     // and action policies still apply.
     autoApprovedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
