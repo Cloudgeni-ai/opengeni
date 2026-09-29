@@ -34,8 +34,9 @@ export function orgLabel(accountId: string, grants: AccountGrant[]): string {
 
 /**
  * The organizations the subject belongs to, in a stable order (default org
- * first). Derived from account grants, unioned with the accounts that own the
- * accessible workspaces so an org always shows even without an explicit grant.
+ * first, then by name). Derived from account grants, unioned with the accounts
+ * that own the accessible workspaces so an org always shows even without an
+ * explicit grant.
  */
 export function organizationsForSubject(
   context: AccessContext,
@@ -49,20 +50,20 @@ export function organizationsForSubject(
   for (const workspace of workspaces) {
     ids.add(workspace.accountId);
   }
-  const ordered = [...ids].sort((a, b) => {
-    if (a === context.defaultAccountId) {
-      return -1;
-    }
-    if (b === context.defaultAccountId) {
-      return 1;
-    }
-    return a.localeCompare(b);
-  });
-  return ordered.map((accountId) => ({
+  const options = [...ids].map((accountId) => ({
     accountId,
     label: orgLabel(accountId, context.accountGrants),
     canManage: administeredIds.has(accountId),
   }));
+  return options.sort((a, b) => {
+    if (a.accountId === context.defaultAccountId) {
+      return -1;
+    }
+    if (b.accountId === context.defaultAccountId) {
+      return 1;
+    }
+    return a.label.localeCompare(b.label) || a.accountId.localeCompare(b.accountId);
+  });
 }
 
 /** Workspaces that belong to a given organization, ordered by name. */
@@ -83,5 +84,19 @@ export function organizationSettingsWorkspaceId(
     candidates.find((workspace) => workspace.id === activeWorkspaceId)?.id ??
     candidates[0]?.id ??
     null
+  );
+}
+
+/**
+ * Where switching to an organization lands: its first shared workspace, else
+ * the person's Personal workspace there. Null when nothing in it is open to them.
+ */
+export function organizationLandingWorkspaceId(
+  workspaces: Workspace[],
+  accountId: string,
+): string | null {
+  const candidates = workspacesInOrg(workspaces, accountId);
+  return (
+    candidates.find((workspace) => workspace.kind !== "personal")?.id ?? candidates[0]?.id ?? null
   );
 }

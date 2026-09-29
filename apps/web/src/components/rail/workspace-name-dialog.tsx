@@ -16,6 +16,8 @@ import { Label } from "@/components/ui/label";
 
 export function WorkspaceNameDialog(props: {
   mode: "create" | "rename" | null;
+  /** The organization a new workspace is created in, named in the title. */
+  organizationName?: string;
   name: string;
   busy: boolean;
   onNameChange: (name: string) => void;
@@ -33,10 +35,18 @@ export function WorkspaceNameDialog(props: {
           }}
         >
           <DialogHeader>
-            <DialogTitle>{creating ? "New workspace" : "Rename workspace"}</DialogTitle>
+            <DialogTitle>
+              {creating
+                ? props.organizationName
+                  ? `New workspace in ${props.organizationName}`
+                  : "New workspace"
+                : "Rename workspace"}
+            </DialogTitle>
             <DialogDescription>
               {creating
-                ? "A separate space with its own sessions, environments, Plugins, and API keys."
+                ? props.organizationName
+                  ? `A separate space in ${props.organizationName} with its own sessions, environments, Plugins, and API keys.`
+                  : "A separate space with its own sessions, environments, Plugins, and API keys."
                 : "The new name shows everywhere this workspace appears."}
             </DialogDescription>
           </DialogHeader>

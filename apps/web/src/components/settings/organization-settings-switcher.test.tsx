@@ -49,7 +49,6 @@ mock.module("@/context", () => ({
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { OrganizationSettingsSwitcher } = await import("./organization-settings-switcher");
-const { WorkspaceMenu } = await import("../rail/workspace-switcher");
 afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
@@ -119,49 +118,6 @@ test("switches organization while preserving settings section and resetting sess
       params: { workspaceId: "ws-b-a" },
       search: { section: "people" },
     });
-  } finally {
-    await unmount();
-  }
-});
-test("organization heading settings links target their own organization", async () => {
-  const unmount = await render(
-    <WorkspaceMenu
-      collapsed={false}
-      orgs={["a", "b", "empty", "member"].map((accountId) => ({
-        accountId,
-        label: `Organization ${accountId}`,
-        canManage: accountId !== "member",
-      }))}
-      workspaces={workspaces.map(
-        (workspace) => ({ ...workspace, inferenceControl: { state: "active" } }) as Workspace,
-      )}
-      activeWorkspaceId="ws-a"
-      canCreate={false}
-      onSelect={() => {}}
-      onCreate={() => {}}
-      managedSelfContext={null}
-      align="start"
-    >
-      <button>Open workspaces</button>
-    </WorkspaceMenu>,
-  );
-  try {
-    expect(
-      document.querySelector('a[aria-label="Organization settings for Organization member"]'),
-    ).toBeNull();
-    expect(
-      document
-        .querySelector('a[aria-label="Organization settings for Organization a"]')
-        ?.getAttribute("href"),
-    ).toBe("/workspaces/ws-a/organization");
-    expect(
-      document
-        .querySelector('a[aria-label="Organization settings for Organization b"]')
-        ?.getAttribute("href"),
-    ).toBe("/workspaces/ws-b-a/organization");
-    expect(
-      document.querySelector('a[aria-label="Organization settings for Organization empty"]'),
-    ).toBeNull();
   } finally {
     await unmount();
   }

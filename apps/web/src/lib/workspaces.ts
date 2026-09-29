@@ -29,6 +29,18 @@ export function workspaceCreationAccountId(
   );
 }
 
+/**
+ * Whether a new workspace can be created in this exact organization. The
+ * switcher names the organization it creates in and never falls back to
+ * another one.
+ */
+export function canCreateWorkspaceInOrganization(
+  context: AccessContext,
+  accountId: string | null,
+): accountId is string {
+  return Boolean(accountId && hasAccountPermission(context, accountId, "workspace:create"));
+}
+
 /** Replace-or-append a workspace in the cached list (create + rename share it). */
 export function upsertWorkspace(workspaces: Workspace[], workspace: Workspace): Workspace[] {
   if (workspaces.some((candidate) => candidate.id === workspace.id)) {
