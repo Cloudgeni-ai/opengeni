@@ -1,12 +1,4 @@
-// Real-browser regression for the compact exchange presentation (the web
-// app's mode): a delegated question folds behind one status row, following
-// the tip stops once the answer pushes the question to the top, the next
-// question resumes following, "Your question" returns a reader to the question
-// they are reading, a short answer never leaves a stale stop behind, progress
-// notes streamed without a phase never read as the answer, loading older
-// history keeps the reader in place, and an answer stays a visible message
-// that keeps its reader in place when a machine-triggered turn follows it.
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
@@ -62,7 +54,7 @@ async function nextPaint(page: Page): Promise<void> {
   );
 }
 
-describe("timeline exchange fold browser regression", () => {
+describe("readable timeline browser regression", () => {
   let web: StartedProcess;
   let browser: Browser;
   let baseUrl: string;
@@ -100,8 +92,12 @@ describe("timeline exchange fold browser regression", () => {
     }
   });
 
-  async function openHarness(scenario = "delegated"): Promise<Page> {
-    const context = await browser.newContext({ viewport: { width: 390, height: 560 } });
+  async function openHarness(scenario = "delegated", width = 390, touch = false): Promise<Page> {
+    const context = await browser.newContext({
+      viewport: { width, height: 560 },
+      hasTouch: touch,
+      isMobile: touch,
+    });
     const page = await context.newPage();
     page.on("pageerror", (error) => browserErrors.push(`pageerror: ${error.message}`));
     page.on("console", (message) => {
@@ -114,65 +110,446 @@ describe("timeline exchange fold browser regression", () => {
     return page;
   }
 
-  test("the answer stops following at its question and the next question resumes", async () => {
-    const page = await openHarness();
+  for (const mode of [
+    "pending",
+    "started",
+    "withdrawn",
+    "legacy-running",
+    "legacy-settled",
+  ] as const) {
+    for (const width of [390, 1280]) {
+      test(`Latest question reaches ${mode} through the production conversation at ${width}px`, async () => {
+        const page = await openHarness(`question-${mode}`, width, width === 390);
+        try {
+          await page.waitForSelector("[data-og-conversation]");
+          await page.waitForSelector("[data-og-wide-table-message]");
+          if (mode === "pending") {
+            const queue = page.getByRole("button", { name: /1 queued/ });
+            if ((await queue.getAttribute("aria-expanded")) === "true") await queue.click();
+          }
+          const latest = page.locator("[data-og-jump-to-question]");
+          await latest.waitFor({ state: "visible" });
+          expect(await latest.count()).toBe(1);
+          const resolverRequests = () =>
+            page.evaluate(() =>
+              performance
+                .getEntriesByType("resource")
+                .filter((entry) =>
+                  new URL(entry.name).pathname.endsWith("/hooks/latest-question.ts"),
+                )
+                .map((entry) => entry.name),
+            );
+          expect(await resolverRequests()).toEqual([]);
+          await latest.click();
+          if (mode === "pending") {
+            await page.waitForFunction(
+              () =>
+                (document.activeElement as HTMLElement)?.dataset.queueTurnId ===
+                "newest-queued-turn",
+            );
+            expect(await page.locator("[data-og-timeline-scroller]").innerText()).not.toContain(
+              "Newest queued question",
+            );
+          } else {
+            const label =
+              mode === "withdrawn" ? "Previous valid question" : "Newest queued question";
+            await page.waitForFunction((text) => {
+              const scroller = document.querySelector("[data-og-timeline-scroller]")!;
+              const prompt = [...scroller.querySelectorAll("[data-og-prompt]")].find((row) =>
+                row.textContent?.includes(text),
+              );
+              if (!prompt) return false;
+              const bounds = prompt.getBoundingClientRect();
+              const viewport = scroller.getBoundingClientRect();
+              return bounds.top >= viewport.top && bounds.top < viewport.bottom - 20;
+            }, label);
+            // The target must survive automatic later-page loading and row
+            // settlement, not merely cross the viewport for one animation frame.
+            await page.waitForTimeout(1000);
+            const parked = await page.evaluate((text) => {
+              const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+              const prompt = [...scroller.querySelectorAll("[data-og-prompt]")].find((row) =>
+                row.textContent?.includes(text),
+              );
+              const bounds = prompt?.getBoundingClientRect();
+              const viewport = scroller.getBoundingClientRect();
+              return {
+                visible:
+                  !!bounds && bounds.top >= viewport.top && bounds.top < viewport.bottom - 20,
+                following: scroller.dataset.ogBottomFollow,
+                top: scroller.scrollTop,
+                promptTop: bounds ? bounds.top - viewport.top : null,
+              };
+            }, label);
+            expect(parked).toMatchObject({ visible: true, following: "false" });
+            expect(
+              await page.evaluate(() => document.activeElement?.hasAttribute("data-og-prompt")),
+            ).toBe(true);
+            if (mode === "withdrawn")
+              expect(await page.locator("[data-og-timeline-scroller]").innerText()).not.toContain(
+                "Newest queued question",
+              );
+          }
+          expect(await resolverRequests()).toHaveLength(1);
+          const directory = process.env.TIMELINE_QUESTION_PREVIEW_DIR;
+          if (directory) {
+            mkdirSync(directory, { recursive: true });
+            await page.screenshot({ path: `${directory}/question-${mode}-${width}-dark.png` });
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+            await nextPaint(page);
+            await page.screenshot({ path: `${directory}/question-${mode}-${width}-light.png` });
+          }
+          if (mode === "started") {
+            const scroller = page.locator("[data-og-timeline-scroller]");
+            const beforeScroll = await scroller.evaluate((node) => node.scrollTop);
+            await scroller.hover();
+            await page.mouse.wheel(0, 250);
+            await page.waitForTimeout(300);
+            expect(await scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(
+              beforeScroll + 100,
+            );
+            expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("false");
+          }
+        } finally {
+          await page.context().close();
+        }
+      }, 30_000);
+    }
+  }
+
+  test("a long answer follows normally and every progress message remains readable", async () => {
+    const page = await openHarness("notes");
     try {
       const total = await page.evaluate(() => window.exchangeFoldHarness!.total);
-      let answered = false;
-      let released: Sample | null = null;
       for (let count = 1; count <= total; count += 1) {
         await page.evaluate((value) => window.exchangeFoldHarness!.show(value), count);
         await nextPaint(page);
-        await page.waitForTimeout(80);
-        const state = await sample(page);
-        if (state.lastText.startsWith("312 new users")) answered = true;
-        if (!answered) {
-          // Work never unpins the reader: one status row, always following.
-          expect(state.following).toBe(true);
-        } else if (!released && !state.following) {
-          released = state;
-        }
-        if (state.lastText.includes("And yesterday alone?")) break;
+        await page.waitForTimeout(60);
+        expect((await sample(page)).following).toBe(true);
       }
-      expect(released).not.toBeNull();
-      // Following stopped with the question parked at the top of the viewport.
-      expect(Math.abs(released!.promptTop! - 12)).toBeLessThanOrEqual(2);
-      expect(released!.jumpToLatest).toBe(true);
-      // Prompt, one status row, then the answer.
-      expect(released!.rowsBetween).toBe(1);
-      // The next question returns the reader to the tip.
-      await page.waitForFunction(
-        () =>
-          document.querySelector<HTMLElement>("[data-og-timeline-scroller]")?.dataset
-            .ogBottomFollow === "true",
-        undefined,
-        { timeout: 4_000 },
-      );
+      const messages = page.locator("[data-og-wide-table-message]");
+      expect(await messages.count()).toBeGreaterThanOrEqual(4);
+      expect(await page.locator("[data-og-exchange-note]").count()).toBe(0);
+      expect(await page.locator('[data-og-exchange-status="worked"]').count()).toBe(1);
+      expect((await sample(page)).lastText).toContain("171 in total");
     } finally {
       await page.context().close();
     }
   }, 60_000);
 
-  test("Your question returns a reader to the question they are reading", async () => {
-    const page = await openHarness();
+  for (const scenario of ["review-maintenance", "review-approval"]) {
+    test(`${scenario} has truthful live status and preserved history`, async () => {
+      const page = await openHarness(scenario, 390, true);
+      try {
+        await page.setViewportSize({ width: 390, height: 900 });
+        await page.getByRole("button", { name: "Dark", exact: true }).click();
+        await page.evaluate(() =>
+          window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+        );
+        await page.waitForTimeout(350);
+        if (scenario === "review-maintenance") {
+          expect(await page.locator("[data-og-exchange-status]").count()).toBe(0);
+          await page
+            .getByText("Conversation history compacted", { exact: false })
+            .waitFor({ state: "visible" });
+          expect(await page.locator("[data-og-fold-content]").count()).toBe(0);
+        } else {
+          expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);
+          expect(await page.locator('[data-og-exchange-status="waiting"]').count()).toBe(0);
+          await page
+            .getByText("Approval was needed.", { exact: true })
+            .waitFor({ state: "visible" });
+          expect(await page.getByText("waiting on you", { exact: false }).count()).toBe(0);
+          await page
+            .getByText("reconciling the source breakdown", { exact: false })
+            .waitFor({ state: "visible" });
+        }
+        const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+        if (output) {
+          mkdirSync(output, { recursive: true });
+          await page.screenshot({ path: `${output}/timeline-${scenario}-390-light.png` });
+        }
+      } finally {
+        await page.context().close();
+      }
+    }, 60_000);
+  }
+
+  for (const width of [320, 390, 1280]) {
+    test(`history controls keep separate real pointer targets at ${width}px`, async () => {
+      const page = await openHarness("history", width, width < 600);
+      try {
+        await page.evaluate(() => {
+          const driver = window.exchangeFoldHarness!;
+          driver.showWindow(driver.indexOf("user.message")[1]!, driver.total);
+        });
+        const scroller = page.locator("[data-og-timeline-scroller]");
+        await page.waitForFunction(() => {
+          const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
+          return (
+            !!node && node.style.visibility !== "hidden" && node.scrollHeight > node.clientHeight
+          );
+        });
+        await scroller.hover();
+        await page.mouse.wheel(0, -20000);
+        const start = page.locator("[data-og-jump-to-start]");
+        const latest = page.locator("[data-og-jump-to-question]");
+        await start.waitFor({ state: "visible" });
+        await latest.waitFor({ state: "visible" });
+        await page.waitForTimeout(200);
+        const targets = await page.evaluate(() => {
+          const startButton = document.querySelector<HTMLElement>("[data-og-jump-to-start]")!;
+          const latestButton = document.querySelector<HTMLElement>("[data-og-jump-to-question]")!;
+          const a = startButton.getBoundingClientRect();
+          const b = latestButton.getBoundingClientRect();
+          const clickable = (element: HTMLElement, bounds: DOMRect) =>
+            element.contains(
+              document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+            );
+          return {
+            separate:
+              a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top,
+            start: clickable(startButton, a),
+            latest: clickable(latestButton, b),
+          };
+        });
+        expect(targets).toEqual({ separate: true, start: true, latest: true });
+        expect(await latest.count()).toBe(1);
+        const directory = process.env.TIMELINE_NAVIGATION_PREVIEW_DIR;
+        if (directory) {
+          mkdirSync(directory, { recursive: true });
+          await page.screenshot({ path: `${directory}/navigation-${width}-dark.png` });
+          await page.getByRole("button", { name: "Dark", exact: true }).click();
+          await nextPaint(page);
+          await page.waitForTimeout(250);
+          await page.screenshot({ path: `${directory}/navigation-${width}-light.png` });
+        }
+        await start.click();
+        await page.waitForFunction(() =>
+          document.querySelector("[data-og-prompt]")?.textContent?.includes("Question 1:"),
+        );
+        await latest.click();
+        await page.waitForFunction(() =>
+          document.activeElement?.textContent?.includes("Question 4:"),
+        );
+        expect((await sample(page)).following).toBe(false);
+      } finally {
+        await page.context().close();
+      }
+    }, 20_000);
+  }
+
+  test("one Latest question button targets the newest user message from an older bounded window", async () => {
+    const page = await openHarness("history");
     try {
-      const total = await page.evaluate(() => window.exchangeFoldHarness!.total);
-      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), total);
-      await page.waitForTimeout(400);
       await page.evaluate(() => {
-        const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-        scroller.scrollTop = 220;
+        const driver = window.exchangeFoldHarness!;
+        const questions = driver.indexOf("user.message");
+        driver.showWindow(questions[1]!, questions[2]!);
       });
-      await page.waitForSelector("[data-og-jump-to-question]", { timeout: 4_000 });
-      await page.locator("[data-og-jump-to-question]").click();
-      await nextPaint(page);
-      const state = await sample(page);
-      expect(Math.abs(state.promptTop! - 12)).toBeLessThanOrEqual(2);
-      expect(state.following).toBe(false);
+      await page.waitForSelector("[data-og-jump-to-question]");
+      expect(await page.getByRole("button", { name: "Latest question", exact: true }).count()).toBe(
+        1,
+      );
+      expect(
+        await page.getByRole("button", { name: /Previous question|Next question/ }).count(),
+      ).toBe(0);
+      await page.getByRole("button", { name: "Latest question", exact: true }).click();
+      await page.waitForFunction(() => {
+        const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+        const prompt = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")].find((item) =>
+          item.textContent?.includes("Question 4:"),
+        );
+        return (
+          prompt &&
+          Math.abs(prompt.getBoundingClientRect().top - node.getBoundingClientRect().top - 12) <= 2
+        );
+      });
+      expect((await sample(page)).following).toBe(false);
     } finally {
       await page.context().close();
     }
   }, 60_000);
+
+  test("manual scrolling during a long answer stays unpinned through subsequent machine work", async () => {
+    const page = await openHarness("machine-follow-up");
+    try {
+      const total = await page.evaluate(() => {
+        const driver = window.exchangeFoldHarness!;
+        driver.show(driver.indexOf("system.update.delivered").at(-1)!);
+        return driver.total;
+      });
+      await page.waitForTimeout(400);
+      const scroller = page.locator("[data-og-timeline-scroller]");
+      await scroller.hover();
+      await page.mouse.wheel(0, -220);
+      await page.waitForTimeout(200);
+      expect((await sample(page)).following).toBe(false);
+      const before = await scroller.evaluate((node) => node.scrollTop);
+      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), total);
+      await nextPaint(page);
+      await page.waitForTimeout(300);
+      expect((await sample(page)).following).toBe(false);
+      expect(
+        Math.abs((await scroller.evaluate((node) => node.scrollTop)) - before),
+      ).toBeLessThanOrEqual(2);
+    } finally {
+      await page.context().close();
+    }
+  }, 60_000);
+
+  for (const width of [1280, 390]) {
+    for (const theme of ["dark", "light"]) {
+      test(`expanded work sticks only through its section: ${width}px ${theme}`, async () => {
+        const page = await openHarness("sticky", width, width === 390);
+        try {
+          await page.setViewportSize({ width, height: 900 });
+          if (theme === "light")
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+          await page.evaluate(() => {
+            const driver = window.exchangeFoldHarness!;
+            driver.show(driver.indexOf("turn.completed")[0]! + 1);
+          });
+          await page.waitForTimeout(350);
+          const header = page.locator('[data-og-work-header="outer"]').first();
+          await header.click();
+          await page.waitForTimeout(300);
+          const scroller = page.locator("[data-og-timeline-scroller]");
+          await scroller.hover();
+          await page.mouse.wheel(0, -100);
+          await page.waitForTimeout(150);
+          const scrollInside = async () => {
+            await page.evaluate(() => {
+              const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+              const section = node.querySelector<HTMLElement>("[data-og-work-section]")!;
+              node.scrollTop +=
+                section.getBoundingClientRect().top - node.getBoundingClientRect().top + 280;
+            });
+            await page.waitForTimeout(200);
+          };
+          await scrollInside();
+          const geometry = await page.evaluate(() => {
+            const viewport = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+            const trigger = viewport.querySelector<HTMLElement>('[data-og-work-header="outer"]')!;
+            const rect = trigger.getBoundingClientRect();
+            const question = document
+              .querySelector("[data-og-jump-to-question]")!
+              .getBoundingClientRect();
+            const host = document.querySelector("header")!.getBoundingClientRect();
+            const questionSpace =
+              3.5 * parseFloat(getComputedStyle(document.documentElement).fontSize);
+            return {
+              position: getComputedStyle(trigger).position,
+              top: rect.top,
+              expectedTop: viewport.getBoundingClientRect().top + questionSpace,
+              questionBottom: question.bottom,
+              hostBottom: host.bottom,
+              hit: trigger.contains(
+                document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2),
+              ),
+              following: viewport.dataset.ogBottomFollow,
+              overflow: document.documentElement.scrollWidth > window.innerWidth,
+            };
+          });
+          expect(geometry.position).toBe("sticky");
+          expect(Math.abs(geometry.top - geometry.expectedTop)).toBeLessThanOrEqual(2);
+          expect(geometry.top).toBeGreaterThanOrEqual(geometry.questionBottom);
+          expect(geometry.top).toBeGreaterThanOrEqual(geometry.hostBottom);
+          expect(geometry.hit).toBe(true);
+          expect(geometry.following).toBe("false");
+          expect(geometry.overflow).toBe(false);
+          expect(await header.textContent()).toContain("42 steps");
+          expect(
+            await page.locator('[data-og-recorded-outcome="wait"] summary').textContent(),
+          ).toContain("Waiting for 2 agents");
+          const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+          if (output) {
+            mkdirSync(output, { recursive: true });
+            await page.screenshot({ path: `${output}/timeline-${width}-${theme}-sticky.png` });
+          }
+          // The pinned hit target remains the real collapse control.
+          await header.click();
+          expect(await header.getAttribute("aria-expanded")).toBe("false");
+          expect(await header.evaluate((node) => getComputedStyle(node).position)).not.toBe(
+            "sticky",
+          );
+          await header.click();
+          await page.evaluate(() =>
+            window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+          );
+          await page.waitForTimeout(350);
+          await scrollInside();
+          await page.evaluate(() => {
+            const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+            const section = node.querySelector<HTMLElement>("[data-og-work-section]")!;
+            node.scrollTop +=
+              section.getBoundingClientRect().bottom - node.getBoundingClientRect().top + 100;
+          });
+          await page.waitForTimeout(200);
+          expect(
+            await header.evaluate((node) => node.getBoundingClientRect().bottom),
+          ).toBeLessThanOrEqual(
+            await scroller.evaluate((node) => node.getBoundingClientRect().top),
+          );
+          // Classic nested cluster disclosures also stay ordinary in-flow rows.
+          await page.getByRole("button", { name: "Readable", exact: true }).click();
+          await page.waitForTimeout(350);
+          await page.locator('[data-og-work-header="outer"]').first().click();
+          await page.waitForTimeout(300);
+          const nested = page.locator('[data-og-work-header="nested"]');
+          expect(await nested.count()).toBeGreaterThan(0);
+          expect(
+            await nested.evaluateAll((nodes) =>
+              nodes.every((node) => getComputedStyle(node).position !== "sticky"),
+            ),
+          ).toBe(true);
+        } finally {
+          await page.context().close();
+        }
+      }, 60_000);
+
+      test(`actual component ${width}px ${theme}: readable messages, disclosure and preview`, async () => {
+        const page = await openHarness();
+        try {
+          await page.setViewportSize({ width, height: 900 });
+          if (theme === "light")
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+          await page.getByRole("button", { name: "Working", exact: true }).click();
+          await page.waitForTimeout(350);
+          expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);
+          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(1);
+          const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+          if (output) {
+            mkdirSync(output, { recursive: true });
+            await page.screenshot({ path: `${output}/timeline-${width}-${theme}-working.png` });
+          }
+          await page.getByRole("button", { name: "Done", exact: true }).click();
+          await page.waitForTimeout(350);
+          expect(await page.locator('[data-og-exchange-status="worked"]').count()).toBe(2);
+          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(3);
+          expect(await page.locator("[data-og-machine-input-batch][open]").count()).toBe(0);
+          const worked = page
+            .locator('[data-og-exchange-status="worked"]')
+            .last()
+            .locator("..")
+            .locator("..");
+          await worked.click();
+          expect(await worked.getAttribute("aria-expanded")).toBe("true");
+          await worked.click();
+          expect(await worked.getAttribute("aria-expanded")).toBe("false");
+          await page.waitForTimeout(250);
+          const overflow = await page.evaluate(
+            () => document.documentElement.scrollWidth > window.innerWidth,
+          );
+          expect(overflow).toBe(false);
+          if (output)
+            await page.screenshot({ path: `${output}/timeline-${width}-${theme}-settled.png` });
+        } finally {
+          await page.context().close();
+        }
+      }, 60_000);
+    }
+  }
 
   test("a short answer leaves no stop behind for the next question", async () => {
     const page = await openHarness("follow-up");
@@ -198,56 +575,6 @@ describe("timeline exchange fold browser regression", () => {
       }
       // The earlier question scrolled away instead of parking at the top.
       expect(samples.at(-1)!.promptTops[0]!).toBeLessThan(0);
-    } finally {
-      await page.context().close();
-    }
-  }, 60_000);
-
-  test("progress notes streamed without a phase never read as the answer", async () => {
-    const page = await openHarness("notes");
-    try {
-      const harness = await page.evaluate(() => {
-        const driver = window.exchangeFoldHarness!;
-        return {
-          total: driver.total,
-          oversized: driver.indexOf("agent.message.delta", { messageId: "note-oversized" }),
-          verify: driver.indexOf("agent.toolCall.created", { id: "verify" })[0]!,
-          settle: driver.indexOf("agent.message.completed")[0]!,
-        };
-      });
-      for (let count = 3; count <= harness.settle; count += 1) {
-        await page.evaluate((value) => window.exchangeFoldHarness!.show(value), count);
-        await nextPaint(page);
-        await page.waitForTimeout(60);
-        const index = count - 1;
-        if (index === harness.verify) {
-          // Let the jump control finish its exit once following resumes.
-          await page
-            .waitForFunction(() => !document.querySelector("[data-og-jump-to-latest]"), undefined, {
-              timeout: 2_000,
-            })
-            .catch(() => undefined);
-        }
-        const state = await sample(page);
-        if (index < harness.oversized[0]!) {
-          // Typical notes (a few sentences) stay in the status row while they stream.
-          expect(state).toMatchObject({ status: "working", following: true, jumpToLatest: false });
-          expect(state.rowsBetween).toBeNull();
-        } else if (index >= harness.verify) {
-          // A note long enough to read as an answer folds back once work
-          // follows it, and following resumes where it stopped.
-          expect(state).toMatchObject({ status: "working", following: true, jumpToLatest: false });
-          expect(state.rowsBetween).toBeNull();
-        }
-      }
-      // Only the settled turn shows its answer below the separator.
-      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), harness.total);
-      await nextPaint(page);
-      await page.waitForTimeout(80);
-      const done = await sample(page);
-      expect(done.status).toBe("worked");
-      expect(done.rowsBetween).toBe(1);
-      expect(done.lastText).toContain("171 in total");
     } finally {
       await page.context().close();
     }
@@ -280,79 +607,6 @@ describe("timeline exchange fold browser regression", () => {
         };
       });
       expect(state).toEqual({ answerVisible: true, inStatusNote: false });
-    } finally {
-      await page.context().close();
-    }
-  }, 60_000);
-
-  test("work after an answer never pulls a reader away from it", async () => {
-    const page = await openHarness("machine-follow-up");
-    try {
-      const harness = await page.evaluate(() => {
-        const driver = window.exchangeFoldHarness!;
-        return {
-          total: driver.total,
-          answer: driver.indexOf("agent.message.delta").at(-1)!,
-          input: driver.indexOf("system.update.delivered").at(-1)!,
-        };
-      });
-      // Everything up to the answer, with the reader following the tip.
-      await page.evaluate((value) => window.exchangeFoldHarness!.show(value), harness.answer);
-      await nextPaint(page);
-      await page.waitForTimeout(300);
-      await page
-        .locator("[data-og-jump-to-latest]")
-        .click({ timeout: 1_000 })
-        .catch(() => undefined);
-      await page.waitForFunction(
-        () =>
-          document.querySelector<HTMLElement>("[data-og-timeline-scroller]")?.dataset
-            .ogBottomFollow === "true",
-        undefined,
-        { timeout: 4_000 },
-      );
-      const read = () =>
-        page.evaluate(() => {
-          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-          const message = [
-            ...scroller.querySelectorAll<HTMLElement>("[data-og-wide-table-message]"),
-          ].find(
-            (candidate) =>
-              candidate.textContent?.includes("The layout preview is ready.") &&
-              !candidate.closest("[data-og-fold-content]"),
-          );
-          return {
-            following: scroller.dataset.ogBottomFollow === "true",
-            answerTop: message
-              ? Math.round(
-                  message.getBoundingClientRect().top - scroller.getBoundingClientRect().top,
-                )
-              : null,
-            status:
-              [...scroller.querySelectorAll<HTMLElement>("[data-og-exchange-status]")]
-                .at(-1)
-                ?.getAttribute("data-og-exchange-status") ?? null,
-          };
-        });
-      let stopped: Awaited<ReturnType<typeof read>> | null = null;
-      for (let count = harness.answer + 1; count <= harness.total; count += 1) {
-        await page.evaluate((value) => window.exchangeFoldHarness!.show(value), count);
-        await nextPaint(page);
-        await page.waitForTimeout(120);
-        const state = await read();
-        if (!stopped) {
-          if (!state.following) stopped = state;
-          continue;
-        }
-        // The next machine-triggered turn works and settles in a row below the
-        // answer; the reader stays exactly where following stopped.
-        expect(state).toMatchObject({ following: false, answerTop: stopped.answerTop });
-        if (count === harness.input + 1) expect(state.status).toBe("working");
-      }
-      expect(stopped).not.toBeNull();
-      // Following stopped with the answer on screen.
-      expect(stopped!.answerTop).toBeGreaterThanOrEqual(0);
-      expect(stopped!.answerTop).toBeLessThan(560);
     } finally {
       await page.context().close();
     }

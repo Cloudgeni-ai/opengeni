@@ -13,6 +13,26 @@ import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
+test("only the expanded outer work header is sticky; nested folds remain in flow", async () => {
+  const view = await renderComponent(
+    <TurnSummary items={[]} defaultOpen>
+      <TurnSummary items={[]} defaultOpen bare>
+        <p>Nested detail</p>
+      </TurnSummary>
+    </TurnSummary>,
+  );
+  try {
+    const outer = view.container.querySelector('[data-og-work-header="outer"]')!;
+    const nested = view.container.querySelector('[data-og-work-header="nested"]')!;
+    expect(outer.classList.contains("sticky")).toBe(true);
+    expect(nested.classList.contains("sticky")).toBe(false);
+    expect(view.container.querySelectorAll("[data-og-work-section]")).toHaveLength(1);
+    expect(outer.parentElement).toBe(view.container.querySelector("[data-og-work-section]"));
+  } finally {
+    await view.unmount();
+  }
+});
+
 function toolCall(
   id: string,
   name: string,
@@ -298,23 +318,24 @@ describe("TurnSummary status line", () => {
     await r.unmount();
   });
 
-  test("a live exchange keeps one short line and previews its note while closed", async () => {
+  test("live work keeps one short line and previews only its current step", async () => {
     const r = await renderComponent(
       <TurnSummary
         items={[toolCall("1", "exec_command"), toolCall("2", "exec_command", "running")]}
         status={{
           kind: "working",
           since: new Date(Date.now() - 134_000).toISOString(),
-          note: "Checking the second file.",
+          preview: <span>Checking the second file.</span>,
         }}
       >
         details
       </TurnSummary>,
     );
     expect(summaryText(r.container)).toMatch(/^Working · 2m 1[3-5]s · 2 steps$/);
-    expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
+    expect(r.container.querySelector("[data-og-exchange-preview]")?.textContent).toBe(
       "Checking the second file.",
     );
+    expect(r.container.querySelector("[data-og-exchange-note]")).toBeNull();
     await r.unmount();
   });
 });

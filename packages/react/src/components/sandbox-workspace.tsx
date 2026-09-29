@@ -58,10 +58,23 @@ import { useWorkspaceCapture } from "../hooks/use-workspace-capture";
 import { useMachineChip, type MachineChip } from "../hooks/use-machine-chip";
 import { MACHINES_SESSION_POLL_MS, useMachines } from "../hooks/use-machines";
 import type { MachineView } from "../types/machines";
-import { SandboxFiles } from "./sandbox-files";
+import type { SandboxFilesProps } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
+
+const LazySandboxFiles = lazy(async () => {
+  const { SandboxFiles } = await import("./sandbox-files");
+  return { default: SandboxFiles };
+});
+
+function FilesTabBody(props: SandboxFilesProps) {
+  return (
+    <Suspense fallback={<WorkbenchSurfaceLoading name="Files" />}>
+      <LazySandboxFiles {...props} />
+    </Suspense>
+  );
+}
 
 const LazyBrowserViewer = lazy(async () => {
   const { BrowserViewer } = await import("./browser-viewer");
@@ -119,7 +132,7 @@ function sourceDrivenDefaultTab(
   return null;
 }
 
-function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Desktop" }) {
+function WorkbenchSurfaceLoading({ name }: { name: "Files" | "Browser" | "Desktop" }) {
   return (
     <CenteredState
       icon={
@@ -741,7 +754,7 @@ export function useSandboxWorkspaceTabs(
         label: "Files",
         icon: <FileCode2Icon />,
         content: (
-          <SandboxFiles
+          <FilesTabBody
             key={sessionId}
             files={files}
             git={git}

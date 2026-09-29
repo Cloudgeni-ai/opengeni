@@ -1,4 +1,4 @@
-import { ChevronRightIcon, CircleSlashIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronRightIcon, CircleSlashIcon, ShrinkIcon, TriangleAlertIcon } from "lucide-react";
 import {
   Component,
   createContext,
@@ -119,11 +119,9 @@ export type TurnSummaryFacetConfiguration = ModifyTurnSummaryFacets | ReplaceTur
 
 export type TurnSummaryOptions = Readonly<{
   /**
-   * Compact progress presentation. Each exchange folds behind one status row
-   * ("Working · 2m 14s · 12 steps" with the latest progress note and a rolling
-   * preview of the current step), settled work reads as a "Worked for …"
-   * separator above the answer, and following the tip stops once the answer
-   * starts so the question and answer stay on screen together.
+   * Readable per-turn presentation. Assistant progress stays fully formatted;
+   * each turn has its own Working / Worked row and rolling latest step.
+   * Ordinary tip-follow and manual scrolling are unchanged.
    */
   rolling?: boolean;
   facets?: TurnSummaryFacetConfiguration;
@@ -141,8 +139,6 @@ export type TurnSummaryStatus = Readonly<{
   since?: string | undefined;
   /** Settled span for `worked`. */
   durationMs?: number | undefined;
-  /** Latest progress note, previewed muted under the row while it is collapsed. */
-  note?: string | undefined;
   /** Live step preview under the row while it is collapsed. */
   preview?: ReactNode;
 }>;
@@ -463,6 +459,7 @@ export function TurnSummary({
     <TurnSettleChromeContext.Provider value={settleChrome}>
       <div className={cn(copyable && "group/copy relative")}>
         <Collapsible.Root
+          data-og-work-section={bare ? undefined : ""}
           open={open}
           onOpenChange={onOpenChange}
           // History-only entrance. Never toggle this on after mount — see
@@ -470,7 +467,12 @@ export function TurnSummary({
           className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
         >
           <Collapsible.Trigger
+            data-og-work-header={bare ? "nested" : "outer"}
             className={cn(
+              // The section, not the viewport, bounds this sticky row. Content
+              // is a sibling: its disclosure overflow never traps the header.
+              // Nested rail folds must never stack additional sticky headers.
+              !bare && open && "sticky top-[var(--og-work-header-top,0px)] z-10 bg-og-bg",
               settling && "animate-og-settle-chip",
               // Top-level turn fold and (when used) nested cluster folds render as
               // FLAT rail rows — chevron + glyph + facets on the page background, no
@@ -564,27 +566,14 @@ export function TurnSummary({
             {status?.kind === "worked" ? (
               <span aria-hidden className="ml-1 h-px min-w-0 flex-1 bg-og-border" />
             ) : null}
-            {/* The disclosure hint. Calm at rest on fine pointers (revealed on hover
-            and keyboard focus), but always present on coarse pointers where there
-            is no hover to lean on — so the fold never reads as a static status
-            line. Purely visual: the trigger's aria-expanded already conveys state
-            to assistive tech, so the hint is hidden from the accessible name. */}
-            <span
-              aria-hidden
-              className={cn(
-                "ml-auto shrink-0 pl-2 text-og-xs text-og-fg-subtle transition-opacity duration-150",
-                // A status line needs the width on phones; its chevron still signals the fold.
-                status && "max-sm:hidden",
-                // Leave a sliver so a collapsed-chip copy icon can sit outside.
-                copyable ? "pr-8" : null,
-                "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
-                "pointer-coarse:opacity-100",
-              )}
-            >
-              {open ? "hide steps" : "show steps"}
-            </span>
+            {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
+              <ShrinkIcon
+                className="size-3.5 shrink-0"
+                aria-label="Context compacted; expand for details"
+              />
+            ) : null}
           </Collapsible.Trigger>
-          {status && !open && (status.note || status.preview) ? (
+          {status && !open && status.preview ? (
             // Readable progress under the status line; the line above stays
             // the one disclosure control, so a click here is a mouse shortcut.
             <div
@@ -592,14 +581,6 @@ export function TurnSummary({
               className="flex min-w-0 cursor-pointer flex-col gap-0.5 pb-1 pl-6"
               onClick={() => onOpenChange(true)}
             >
-              {status.note ? (
-                <p
-                  data-og-exchange-note=""
-                  className="line-clamp-2 text-og-sm leading-5 text-og-fg-muted [overflow-wrap:anywhere]"
-                >
-                  {status.note}
-                </p>
-              ) : null}
               {status.preview ? <div className="min-w-0">{status.preview}</div> : null}
             </div>
           ) : null}
