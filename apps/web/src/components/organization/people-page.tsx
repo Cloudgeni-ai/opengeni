@@ -337,7 +337,9 @@ function WorkspaceChips({
             <button
               type="button"
               aria-label={`Show all ${sorted.length} workspaces for ${name}`}
-              className="inline-flex h-5.5 shrink-0 items-center rounded-full border border-border bg-surface px-1.5 text-2xs font-medium text-fg-muted tabular-nums transition-colors duration-[120ms] hover:border-border-strong hover:text-fg data-[state=open]:border-border-strong data-[state=open]:text-fg pointer-coarse:h-8 pointer-coarse:px-2.5"
+              // 22px on the row's 18px line without making it taller; touch
+              // gets a larger invisible target instead of a taller chip.
+              className="relative -my-0.5 inline-flex h-5.5 shrink-0 items-center rounded-full border border-border bg-surface px-1.5 text-2xs font-medium text-fg-muted tabular-nums transition-colors duration-[120ms] after:absolute after:-inset-x-1 after:-inset-y-2.5 after:content-[''] hover:border-border-strong hover:text-fg data-[state=open]:border-border-strong data-[state=open]:text-fg"
             >
               +{rest.length}
             </button>
@@ -376,10 +378,10 @@ function WorkspaceChips({
 
 function RoleCell({ role, soleOwner }: { role: OrganizationMembershipRole; soleOwner?: boolean }) {
   return (
-    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5">
-      <span className="truncate text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
+    <span className="flex min-w-0 items-center gap-x-1.5">
+      <span className="shrink-0 text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
       {soleOwner ? (
-        <span className="text-xs whitespace-nowrap text-fg-subtle">Only owner</span>
+        <span className="min-w-0 truncate text-xs text-fg-subtle">Only owner</span>
       ) : null}
     </span>
   );

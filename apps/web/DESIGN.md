@@ -191,7 +191,9 @@ opacity-muted text.
   facts share it and truncate; a row without them centers its title in the same 64px. A status
   ("Suspended", "Invited · expires in 14 days", "Revoked") goes in `ListRow`'s `status` slot, at
   the right of the name area on wide lists and on the secondary line on narrow ones, never on an
-  extra line. Only a disabled reason may wrap. A short list of accounts on a settings
+  extra line. On a phone-width list the line keeps the description and one folded fact, or
+  the status instead of the facts; a chip on the line never makes the row taller. Only a
+  disabled reason may wrap. A short list of accounts on a settings
   page may use the 40px tile. Inside an open section a resource list is `flush`: tiles and titles
   line up with the section title, the hover bleeds 12px out with a 10px radius, and the hairlines
   stay inside the content edge.

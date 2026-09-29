@@ -565,7 +565,12 @@ export function ListRow({
       <MetaPart
         key={column.id}
         order={metaItems.length + index}
-        className={hasColumns ? "@[640px]/list:hidden" : undefined}
+        className={cn(
+          hasColumns && "@[640px]/list:hidden",
+          // A phone-width line has room for one folded fact (none next to a
+          // status); more would only be cut to a dot and a few letters.
+          (index > 0 || status) && "@max-[479px]/list:hidden",
+        )}
       >
         {column.hideLabel ? null : <span className="text-fg-subtle">{column.label} </span>}
         <span className="text-fg-muted">{cells[column.id]}</span>
