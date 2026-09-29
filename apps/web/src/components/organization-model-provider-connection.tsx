@@ -12,6 +12,7 @@ import type {
   ProviderConnectionView,
   ProviderPresentation,
 } from "@/components/ai-gateway-connection";
+import { userErrorText } from "@/lib/api-error";
 
 // Organization API-key providers (Vercel AI Gateway, OpenRouter) shared with
 // the organization's workspaces. Returns the same view as the workspace hook,
@@ -62,8 +63,9 @@ const META: Record<ProviderKind, ProviderPresentation & { shortName: string }> =
   },
 };
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** A failed read, kept whole so the page can show advice and its API facts. */
+function readError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export function useOrganizationProviderConnection({
@@ -81,8 +83,8 @@ export function useOrganizationProviderConnection({
   const [slug, setSlug] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<Error | null>(null);
+  const [modelsError, setModelsError] = useState<Error | null>(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -138,7 +140,7 @@ export function useOrganizationProviderConnection({
       return result;
     } catch (error) {
       if (!activeRef.current || generation !== connectionGenerationRef.current) return undefined;
-      setConnectionError(errorText(error));
+      setConnectionError(readError(error));
       setLoaded(true);
       return undefined;
     }
@@ -158,7 +160,7 @@ export function useOrganizationProviderConnection({
       return result.models;
     } catch (error) {
       if (!activeRef.current || generation !== modelsGenerationRef.current) return undefined;
-      setModelsError(errorText(error));
+      setModelsError(readError(error));
       setModelsLoaded(true);
       return undefined;
     }
@@ -217,7 +219,7 @@ export function useOrganizationProviderConnection({
         return true;
       }
       toast.error(`Couldn't connect ${meta.title}`, {
-        description: errorText(finalError),
+        description: userErrorText(finalError),
       });
       return false;
     } finally {
@@ -254,7 +256,7 @@ export function useOrganizationProviderConnection({
         return true;
       }
       toast.error(`Couldn't disconnect ${meta.title}`, {
-        description: errorText(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -307,7 +309,7 @@ export function useOrganizationProviderConnection({
       if (committed) commit(committed);
       else
         toast.error(`Couldn't add ${meta.title} model`, {
-          description: errorText(error),
+          description: userErrorText(error),
         });
     } finally {
       if (activeRef.current) {
@@ -349,7 +351,7 @@ export function useOrganizationProviderConnection({
         return true;
       }
       toast.error(`Couldn't remove ${meta.title} model`, {
-        description: errorText(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {

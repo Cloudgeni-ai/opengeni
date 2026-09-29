@@ -7,6 +7,7 @@ import type { SelectOption } from "@/components/ui/select-menu";
 import { SettingRow, SettingRowLink } from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 
 const SEEDANCE_2_5 = "bytedance/seedance-2.5";
 const GROK_IMAGINE_VIDEO_1_5 = "xai/grok-imagine-video-1.5";
@@ -87,9 +88,7 @@ export function VideoGenerationPreferenceRow({
           : "Video generation is on for new sessions",
       );
     } catch (error) {
-      toast.error("Couldn't update video generation", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Couldn't update video generation", { description: userErrorText(error) });
     }
   }
 
@@ -106,7 +105,7 @@ export function VideoGenerationPreferenceRow({
       );
     } catch (error) {
       toast.error("Couldn't update video generation funding", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     }
   }

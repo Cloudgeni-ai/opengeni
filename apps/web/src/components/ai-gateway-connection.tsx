@@ -54,6 +54,7 @@ import { SecretInput } from "@/components/ui/secret-field";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { AnalyticsAction } from "@/lib/analytics-actions";
+import { apiErrorAdvice, apiErrorDetails, userErrorText } from "@/lib/api-error";
 
 // Workspace API-key providers (Vercel AI Gateway, OpenRouter) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list
@@ -275,8 +276,10 @@ export interface ProviderConnectionView {
   connected: boolean;
   settled: boolean;
   hidden: boolean;
-  error: string | null;
-  customModelsError: string | null;
+  /** The connection read failed. Shown as advice, its API facts in Technical details. */
+  error: Error | null;
+  /** The custom models read failed. Shown like `error`. */
+  customModelsError: Error | null;
   customModels: readonly CustomModelLike[];
   customModelsLoaded: boolean;
   busy: boolean;
@@ -322,8 +325,8 @@ export function useProviderConnection(
   const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [customModelsLoaded, setCustomModelsLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [customModelsError, setCustomModelsError] = useState<string | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [customModelsError, setCustomModelsError] = useState<Error | null>(null);
   const [busy, setBusy] = useState(false);
   const [modelSlug, setModelSlug] = useState("");
   const [modelBusy, setModelBusy] = useState(false);
@@ -393,7 +396,7 @@ export function useProviderConnection(
       if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
         return null;
       }
-      setCustomModelsError(caught instanceof Error ? caught.message : String(caught));
+      setCustomModelsError(caught instanceof Error ? caught : new Error(String(caught)));
       setCustomModelsLoaded(true);
       return null;
     }
@@ -432,7 +435,7 @@ export function useProviderConnection(
       }
       if (props.canManageConnection) setConnections([]);
       setReadOnlyConnected(false);
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
       setLoaded(true);
       return null;
     }
@@ -536,7 +539,7 @@ export function useProviderConnection(
       if (!activeRef.current) return false;
       recordOutcome("outcome_unknown");
       toast.error(`Couldn't save ${config.credentialLabel} key`, {
-        description: finalError instanceof Error ? finalError.message : String(finalError),
+        description: userErrorText(finalError),
       });
       return false;
     } finally {
@@ -586,7 +589,7 @@ export function useProviderConnection(
         return true;
       }
       toast.error(`Couldn't disconnect ${config.credentialLabel}`, {
-        description: caught instanceof Error ? caught.message : String(caught),
+        description: userErrorText(caught),
       });
       return false;
     } finally {
@@ -652,7 +655,7 @@ export function useProviderConnection(
         return;
       }
       toast.error(`Couldn't confirm ${config.modelToastName} add`, {
-        description: caught instanceof Error ? caught.message : String(caught),
+        description: userErrorText(caught),
       });
     } finally {
       if (activeRef.current) setModelBusy(false);
@@ -712,7 +715,7 @@ export function useProviderConnection(
         }
       }
       toast.error(`Couldn't confirm ${config.modelToastName} removal`, {
-        description: caught instanceof Error ? caught.message : String(caught),
+        description: userErrorText(caught),
       });
       return false;
     } finally {
@@ -927,8 +930,9 @@ function CustomModels({ state }: { state: ProviderConnection }) {
                 Try again
               </Button>
             }
+            {...apiErrorDetails(state.customModelsError)}
           >
-            {state.customModelsError}
+            {apiErrorAdvice(state.customModelsError)}
           </ErrorMessage>
         ) : null}
 
@@ -1213,8 +1217,9 @@ export function ProviderConnectionPage({
                   Try again
                 </Button>
               }
+              {...apiErrorDetails(state.error)}
             >
-              {state.error}
+              {apiErrorAdvice(state.error)}
             </ErrorMessage>
           </DetailSection>
         ) : null}

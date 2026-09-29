@@ -7,6 +7,7 @@ import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
+import { userErrorText } from "@/lib/api-error";
 import type { ModelsView } from "@/lib/models-route";
 import { returnToSearch, type ReturnTo } from "@/lib/return-to";
 
@@ -106,8 +107,9 @@ export function resetsLabel(count: number | null | undefined): string | null {
   return count === 1 ? "1 usage limit reset" : `${count} usage limit resets`;
 }
 
+/** One line for a failed action: advice for an API error, never its raw message. */
 export function errorText(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  return userErrorText(error, fallback);
 }
 
 /* Which page of Settings > Models is showing lives in the URL (lib/models-route). */

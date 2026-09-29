@@ -1,15 +1,23 @@
 import type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { ModelsFormPage } from "@/components/models/models-ui";
 import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { ErrorMessage } from "@/components/ui/error-message";
+import { ErrorMessage, TechnicalDetails } from "@/components/ui/error-message";
 import { CheckboxField, FieldStack } from "@/components/ui/field";
+import { Notice } from "@/components/ui/notice";
 import { SettingNavRow, SettingRow } from "@/components/ui/setting-row";
+import {
+  apiErrorAdvice,
+  apiErrorDetails,
+  apiErrorTechnicalFacts,
+  isPermissionDenied,
+  userErrorText,
+} from "@/lib/api-error";
 
 /* ----------------------------------------------------------------------------
    What one model connection can serve: its models, and at organization scope
@@ -32,7 +40,7 @@ export interface ConnectionAccessTarget {
 export function useConnectionAccess(props: ConnectionAccessTarget) {
   const { client } = props;
   const [data, setData] = useState<ModelConnectionAccessResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Error | null>(null);
   const generation = useRef(0);
   const target = useMemo(
     () => ({
@@ -53,7 +61,9 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
     } catch (caught) {
       if (generation.current === current)
         setError(
-          caught instanceof Error ? caught.message : "Couldn't load what this account can serve",
+          caught instanceof Error
+            ? caught
+            : new Error("Couldn't load what this account can serve", { cause: caught }),
         );
     }
   }, [target, client]);
@@ -67,19 +77,16 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
     if (enabled) void load();
     return invalidate;
   }, [load, enabled, invalidate]);
-  /** Saves and re-reads. Throws with a user-facing message. */
+  /** Saves and re-reads. Throws the failure; an API error keeps its facts for Technical details. */
   const save = useCallback(
     async (draft: ModelConnectionAccessPolicy) => {
       const current = generation.current;
       try {
         await client.updateModelConnectionAccess(target, draft);
       } catch (caught) {
-        throw new Error(
-          caught instanceof Error && caught.message
-            ? caught.message
-            : "Couldn't save. Nothing was changed.",
-          { cause: caught },
-        );
+        throw caught instanceof Error && caught.message
+          ? caught
+          : new Error("Couldn't save. Nothing was changed.", { cause: caught });
       }
       if (generation.current !== current) return;
       await load();
@@ -92,6 +99,32 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
 }
 
 export type ConnectionAccess = ReturnType<typeof useConnectionAccess>;
+
+/**
+ * Who can see what an account serves, for a viewer the API refused. At
+ * organization scope that is its owners and admins; in a workspace, a private
+ * account is visible only to the person who connected it.
+ */
+function accessRefusedText(organization: boolean): string {
+  return organization
+    ? "Only organization owners and admins can see this."
+    : "Only the person who connected this account can see this.";
+}
+
+/** A failed save: what to do, then an API error's facts behind Technical details. */
+function saveFailure(caught: unknown): ReactNode {
+  const facts = apiErrorTechnicalFacts(caught);
+  const advice = userErrorText(caught, "Couldn't save. Nothing was changed.");
+  if (facts.length === 0) return advice;
+  return (
+    <>
+      {advice}
+      <div className="mt-1">
+        <TechnicalDetails facts={facts} />
+      </div>
+    </>
+  );
+}
 
 export function modelsSummary(policy: ModelConnectionAccessPolicy): string {
   if (policy.allowedModels === null) return "All models, including new ones";
@@ -138,6 +171,10 @@ export function ConnectionAccessRows({
   canManage: boolean;
   onEdit: () => void;
 }) {
+  if (access.error && isPermissionDenied(access.error)) {
+    // A refusal, not a failure: say who can see it, calmly and without Try again.
+    return <SettingRow label="Models it can serve" description={accessRefusedText(organization)} />;
+  }
   if (access.error) {
     return (
       <SettingRow
@@ -206,7 +243,7 @@ export function ConnectionAccessFormPage({
 }) {
   const { data } = access;
   const [draft, setDraft] = useState<ModelConnectionAccessPolicy | null>(data?.policy ?? null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ReactNode>(null);
   useEffect(() => {
     if (data && !draft) setDraft(data.policy);
   }, [data, draft]);
@@ -215,16 +252,23 @@ export function ConnectionAccessFormPage({
 
   const body =
     access.error && !data ? (
-      <ErrorMessage
-        title="Couldn't load what this account can serve."
-        action={
-          <Button type="button" size="sm" variant="outline" onClick={() => void access.reload()}>
-            Try again
-          </Button>
-        }
-      >
-        Nothing was changed.
-      </ErrorMessage>
+      isPermissionDenied(access.error) ? (
+        <Notice tone="muted" title="You can't see what this account can serve.">
+          {accessRefusedText(organization)}
+        </Notice>
+      ) : (
+        <ErrorMessage
+          title="Couldn't load what this account can serve."
+          action={
+            <Button type="button" size="sm" variant="outline" onClick={() => void access.reload()}>
+              Try again
+            </Button>
+          }
+          {...apiErrorDetails(access.error)}
+        >
+          {apiErrorAdvice(access.error)}
+        </ErrorMessage>
+      )
     ) : draft && data ? (
       <FieldStack>
         {organization ? (
@@ -372,7 +416,7 @@ export function ConnectionAccessFormPage({
         try {
           await access.save(draft);
         } catch (caught) {
-          setError(caught instanceof Error ? caught.message : "Couldn't save.");
+          setError(saveFailure(caught));
           return false;
         }
       }}

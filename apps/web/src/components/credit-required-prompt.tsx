@@ -17,6 +17,7 @@ import {
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
 import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { validTopupAmount } from "@/lib/format";
 import { analyticsAction } from "@/lib/analytics-actions";
 
@@ -78,9 +79,7 @@ export function CreditRequiredPromptView({
       });
       window.location.assign(session.url);
     } catch (error) {
-      toast.error("Checkout failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Checkout failed", { description: userErrorText(error) });
       setBusy(false);
     }
   }

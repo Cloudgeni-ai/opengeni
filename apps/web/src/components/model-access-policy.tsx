@@ -152,7 +152,7 @@ export function useModelAccessPolicy(workspaceId: string) {
 
   /**
    * Saves, then re-reads. Resolves false when the page moved to another
-   * workspace meanwhile (the result is ignored). Throws a user-facing error.
+   * workspace meanwhile (the result is ignored). Throws the failure for the form page to show.
    */
   const save = useCallback(
     async (draft: ModelAccessPolicyDraft): Promise<boolean> => {
@@ -169,10 +169,10 @@ export function useModelAccessPolicy(workspaceId: string) {
         await client.updateWorkspaceModelAccessPolicy(workspaceId, modelAccessPolicyRequest(draft));
       } catch (caught) {
         if (!isCurrentScope()) return false;
-        throw new Error(
-          `Couldn't save Allowed models. ${caught instanceof Error ? caught.message : String(caught)}`,
-          { cause: caught },
-        );
+        // The form page says what to do and keeps an API error's facts in Technical details.
+        throw caught instanceof Error && caught.message
+          ? caught
+          : new Error("Couldn't save Allowed models. Try again.", { cause: caught });
       }
       if (!isCurrentScope()) return false;
       await load();

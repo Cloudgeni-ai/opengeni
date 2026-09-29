@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { formatMoneyMicros, validTopupAmount } from "@/lib/format";
+import { userErrorText } from "@/lib/api-error";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
   applyConnectedModelToNewSessionDraft,
@@ -177,7 +178,7 @@ export function ModelAccessOnboardingPanel({
       } catch (error) {
         setSelectionRetry(family);
         toast.error("Model connected, but your new-chat selection could not be saved", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
         return false;
       } finally {
@@ -233,7 +234,7 @@ export function ModelAccessOnboardingPanel({
       }
     } catch (error) {
       setPending(null);
-      toast.error(error instanceof Error ? error.message : `Failed to start ${label} login`);
+      toast.error(`Couldn't start the ${label} sign-in`, { description: userErrorText(error) });
       return;
     } finally {
       setBusy(false);
@@ -271,11 +272,7 @@ export function ModelAccessOnboardingPanel({
       if (controller.signal.aborted || cancelled.current) return;
       pollAbort.current = null;
       setPending(null);
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : `Failed to verify ${label} authorization. Try again.`,
-      );
+      toast.error(`Couldn't confirm the ${label} sign-in`, { description: userErrorText(error) });
     }
   }
 
@@ -310,7 +307,7 @@ export function ModelAccessOnboardingPanel({
       toast.success(`${config.label} connected`);
       if (await finishWithConnectedModel(config.family)) providerKeyOperation.current = null;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Failed to connect ${config.label}`);
+      toast.error(`Couldn't connect ${config.label}`, { description: userErrorText(error) });
     } finally {
       setBusy(false);
     }
@@ -334,9 +331,7 @@ export function ModelAccessOnboardingPanel({
       });
       window.location.assign(session.url);
     } catch (error) {
-      toast.error("Checkout failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Checkout failed", { description: userErrorText(error) });
       setBusy(false);
     }
   }
