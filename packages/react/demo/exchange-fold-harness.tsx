@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { MessageTimeline } from "@opengeni/react/session-ui";
+import { MessageTimeline, SessionConversation } from "@opengeni/react/session-ui";
+import { latestQuestionClient } from "../test/fixtures/latest-question-client";
+import { SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
 import type { SessionEvent } from "@opengeni/sdk";
 import recordedAnswerExchange from "../test/fixtures/exchange-answer-before-machine-turns.json";
 import "./styles.css";
@@ -391,6 +393,18 @@ const BUTTON =
 
 function App() {
   const scenarioName = new URLSearchParams(window.location.search).get("scenario") ?? "delegated";
+  const questionMode =
+    scenarioName === "question-pending"
+      ? "pending"
+      : scenarioName === "question-started"
+        ? "started"
+        : scenarioName === "question-withdrawn"
+          ? "withdrawn"
+          : null;
+  const questionClient = useMemo(
+    () => (questionMode ? latestQuestionClient(questionMode).client : null),
+    [questionMode],
+  );
   const drafts = useMemo(() => (SCENARIOS[scenarioName] ?? delegatedScenario)(), [scenarioName]);
   const [count, setCount] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
@@ -514,31 +528,39 @@ function App() {
         </span>
       </header>
       <section aria-label="Conversation" className="min-h-0 flex-1">
-        <MessageTimeline
-          key={compact ? "compact" : "classic"}
-          className="h-full"
-          events={events}
-          turnSummary={{ rolling: compact }}
-          hasOlder={windowStart > 0}
-          hasNewer={historyMode && count < drafts.length}
-          onJumpToLatestQuestion={async () => {
-            const end = historyMode ? drafts.length : count;
-            const target =
-              drafts
-                .slice(0, end)
-                .flatMap((draft, index) => (draft.type === "user.message" ? [index] : []))
-                .at(-1) ?? -1;
-            if (target < 0) return null;
-            setWindowStart(Math.max(0, target - 2));
-            setCount(end);
-            return target + 1;
-          }}
-          onLoadOlder={() => {
-            olderRequested.current = true;
-            if (!deferOlder.current) setWindowStart(0);
-          }}
-          onOpenSession={() => undefined}
-        />
+        {questionClient ? (
+          <SessionConversation
+            client={questionClient}
+            workspaceId={WORKSPACE_ID}
+            sessionId={SESSION_ID}
+          />
+        ) : (
+          <MessageTimeline
+            key={compact ? "compact" : "classic"}
+            className="h-full"
+            events={events}
+            turnSummary={{ rolling: compact }}
+            hasOlder={windowStart > 0}
+            hasNewer={historyMode && count < drafts.length}
+            onJumpToLatestQuestion={async () => {
+              const end = historyMode ? drafts.length : count;
+              const target =
+                drafts
+                  .slice(0, end)
+                  .flatMap((draft, index) => (draft.type === "user.message" ? [index] : []))
+                  .at(-1) ?? -1;
+              if (target < 0) return null;
+              setWindowStart(Math.max(0, target - 2));
+              setCount(end);
+              return target + 1;
+            }}
+            onLoadOlder={() => {
+              olderRequested.current = true;
+              if (!deferOlder.current) setWindowStart(0);
+            }}
+            onOpenSession={() => undefined}
+          />
+        )}
       </section>
     </div>
   );

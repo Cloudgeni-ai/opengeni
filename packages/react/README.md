@@ -927,6 +927,7 @@ Wire the newest-question resolver when history can be unloaded:
 const events = useSessionEvents(sessionId);
 <MessageTimeline
   events={events.events}
+  items={events.timeline}
   turnSummary={{ rolling: true }}
   hasNewer={events.hasNewer}
   onJumpToLatest={events.jumpToLatest}
@@ -936,10 +937,36 @@ const events = useSessionEvents(sessionId);
 
 The single **Latest question** button targets the newest durable user message,
 not the viewport-relative question or the newest message in an older loaded page.
-The resolver normally uses one filtered forensic lookup and, if needed, two bounded
-context reads. It pages past legacy worker-completion records using the same
-classification as the timeline, without scanning the intervening activity log.
-Without that callback, local navigation is available only at the live history
+The resolver checks the authoritative queue and normally uses one filtered forensic
+lookup plus, if needed, two bounded context reads. It pages past legacy worker
+completions and withdrawn/cancelled-before-start prompts, never substituting an
+arbitrary question from a loaded old page. Queued/legacy admission uses filtered
+lifecycle evidence to locate its real turn start. A distant prompt is retained as
+one projection-only witness in `events.timeline`; `events.events` remains the
+bounded contiguous raw window, so pass `items` as above.
+
+`SessionConversation` also opens and focuses the newest pending prompt in
+`SessionChrome`. Custom hosts can provide the same destination without changing
+the existing `Promise<number | null>` timeline callback:
+
+```tsx
+onJumpToLatestQuestion={() => events.jumpToLatestQuestion({
+  onQueuedQuestion: async (turn) => {
+    await queue.refresh();
+    // Fence this callback if the host can replace its session while awaiting.
+    setQueueFocusTarget((previous) => ({
+      turnId: turn.id,
+      requestId: (previous?.requestId ?? 0) + 1,
+    }));
+  },
+})}
+// Pass queueFocusTarget to SessionChrome; each new request opens/focuses once.
+```
+
+A queue destination returns `null`, not an invisible transcript sequence. Without
+`onQueuedQuestion`, a pending prompt produces explicit queue guidance in the
+timeline; transitional queue state can be retried rather than silently no-oping.
+Without `onJumpToLatestQuestion`, local navigation is available only at the live history
 window; the component never guesses from an older page. `onJumpToLatest` retains
 its separate bottom-follow behavior. `groupTimeline(items)` retains classic
 grouping; `{ readableTurns: true }` selects the new projection. The deprecated
