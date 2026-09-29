@@ -8783,7 +8783,7 @@ export class OpenGeniClient {
     method: string,
     path: string,
     query: Record<string, string> = {},
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { accept?: string } = {},
   ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
     let response: FetchResponse;
@@ -8792,7 +8792,7 @@ export class OpenGeniClient {
         method,
         headers: {
           ...this.headers(correlationId),
-          Accept: "application/octet-stream",
+          Accept: options.accept ?? "application/octet-stream",
         },
         ...(options.signal ? { signal: options.signal } : {}),
       });

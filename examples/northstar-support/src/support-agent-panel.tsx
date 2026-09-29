@@ -6,35 +6,14 @@ import {
   ShieldCheckIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import {
-  OpenGeniProvider,
-  Markdown,
-  MessageTimeline,
-  ModelPolicyPicker,
-  SessionStatus,
-  useComposer,
-  useFileAttachments,
-  useSession,
-  useSessionEvents,
-  useVideoArtifactPlaybackLoader,
-  useWorkspaceModelCatalog,
-  type ComposerState,
-  type UseFileAttachmentsResult,
-} from "@opengeni/react";
-import * as Composer from "@opengeni/react/composer";
-import { SessionRealtimeControl } from "@opengeni/react/realtime";
-import {
-  OpenGeniClient,
-  type EffectiveSessionControl,
-  type LatencyMode,
-  type ReasoningEffort,
-} from "@opengeni/sdk";
+import { useState } from "react";
+import { Markdown, OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniClient } from "@opengeni/sdk";
 import type { DemoHealth, SupportCase } from "./types";
 import { createDemoSession } from "./use-support-demo";
 import { supportToolRegistry } from "./support-tool-renderers";
 
-const DEFAULT_CODEX_MODEL = "codex/gpt-5.6-luna";
+// The unmodified SDK client, pointed at the product backend's packaged proxy.
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
 function demoPrompt(supportCase: SupportCase): string {
@@ -75,57 +54,19 @@ function SupportAgentPanelView({
 }: SupportAgentPanelProps) {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<Error | null>(null);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("medium");
-  const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
-  const modelCatalog = useWorkspaceModelCatalog({
-    workspaceId: health?.workspaceId ?? null,
-    pollIntervalMs: 30_000,
-  });
-  const codexModelRows = useMemo(
-    () =>
-      modelCatalog.rows
-        .filter((row) => row.billingClass === "codex_subscription")
-        .map((row) => ({
-          ...row,
-          // Keep the SDK's catalog label in the menu data, but use its compact
-          // label for this narrow embedded composer surface.
-          label: row.shortLabel ?? row.label,
-        })),
-    [modelCatalog.rows],
-  );
-  const selectableModelIds = useMemo(
-    () => codexModelRows.filter((row) => row.selectable).map((row) => row.id),
-    [codexModelRows],
-  );
-  const defaultSelectableModel = useMemo(() => {
-    if (selectableModelIds.includes(DEFAULT_CODEX_MODEL)) {
-      return DEFAULT_CODEX_MODEL;
-    }
-    if (modelCatalog.defaultModel && selectableModelIds.includes(modelCatalog.defaultModel)) {
-      return modelCatalog.defaultModel;
-    }
-    return selectableModelIds[0] ?? null;
-  }, [modelCatalog.defaultModel, selectableModelIds]);
-
-  useEffect(() => {
-    if (!selectedModel || !selectableModelIds.includes(selectedModel)) {
-      setSelectedModel(defaultSelectableModel);
-    }
-  }, [defaultSelectableModel, selectableModelIds, selectedModel]);
+  // One id per intentional start, so a retried request returns the same session.
+  const [runId, setRunId] = useState(() => crypto.randomUUID());
 
   async function startDemo() {
-    if (!selectedModel) {
-      setStartError(new Error("Choose an available model before starting the agent."));
-      return;
-    }
     setStarting(true);
     setStartError(null);
     try {
-      const session = await createDemoSession(supportCase.ticket.id, demoPrompt(supportCase), {
-        model: selectedModel,
-        reasoningEffort,
-      });
+      const session = await createDemoSession(
+        supportCase.ticket.id,
+        demoPrompt(supportCase),
+        runId,
+      );
+      setRunId(crypto.randomUUID());
       onSessionCreated(session.id);
     } catch (cause) {
       setStartError(cause instanceof Error ? cause : new Error(String(cause)));
@@ -181,16 +122,14 @@ function SupportAgentPanelView({
       </header>
 
       {sessionId ? (
-        <LiveAgentSession
-          sessionId={sessionId}
-          modelCatalog={modelCatalog}
-          selectedModel={selectedModel}
-          onModelChange={setSelectedModel}
-          reasoningEffort={reasoningEffort}
-          onReasoningEffortChange={setReasoningEffort}
-          latencyMode={latencyMode}
-          onLatencyModeChange={setLatencyMode}
-        />
+        <div className="min-h-0 flex-1 px-3 pb-3 pt-2">
+          <SessionConversation
+            sessionId={sessionId}
+            toolRegistry={supportToolRegistry}
+            renderMessageText={renderNorthstarMessage}
+            className="northstar-agent-conversation"
+          />
+        </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col justify-between overflow-y-auto bg-[#f7f7f7] px-7 py-7">
           <div>
@@ -248,28 +187,10 @@ function SupportAgentPanelView({
               </div>
             </div>
 
-            <div className="mt-5 rounded-xl border border-[#dedce8] bg-white px-4 py-3.5">
-              <p className="text-[11px] font-semibold text-[#514d59]">Start with Codex Luna</p>
-              <p className="mt-1 text-[10px] leading-4 text-[#96929c]">
-                Luna is the default first run. Once the session is live, switch between all
-                available Codex models directly from the composer.
-              </p>
-              {modelCatalog.loading ? (
-                <p className="mt-2 text-[10px] text-[#96929c]">Loading workspace models…</p>
-              ) : modelCatalog.error ? (
-                <p className="mt-2 text-[10px] text-[#b44835]">
-                  Could not load the workspace model catalog.
-                </p>
-              ) : selectableModelIds.length === 0 ? (
-                <p className="mt-2 text-[10px] text-[#b44835]">
-                  No model is currently available for this workspace.
-                </p>
-              ) : (
-                <p className="mt-2 text-[10px] text-[#96929c]">
-                  Reasoning: medium · model choices come from OpenGeni.
-                </p>
-              )}
-            </div>
+            <p className="mt-5 text-[10px] leading-4 text-[#96929c]">
+              Runs on the workspace&apos;s default model. Change model and reasoning per turn from
+              the composer.
+            </p>
           </div>
 
           <div className="sticky bottom-0 z-10 mt-8 border-t border-[#dedde2] bg-[#f7f7f7] pb-1 pt-4">
@@ -281,13 +202,7 @@ function SupportAgentPanelView({
             <button
               type="button"
               onClick={() => void startDemo()}
-              disabled={
-                starting ||
-                !health?.ok ||
-                modelCatalog.loading ||
-                selectableModelIds.length === 0 ||
-                !selectedModel
-              }
+              disabled={starting || !health?.ok}
               className="group flex w-full items-center justify-between rounded-lg bg-[#5f52c5] px-4 py-3 text-left text-[12px] font-semibold text-white transition hover:bg-[#5448b2] disabled:cursor-not-allowed disabled:opacity-45"
             >
               <span className="flex items-center gap-2.5">
@@ -301,7 +216,7 @@ function SupportAgentPanelView({
               <ArrowRightIcon className="size-4 transition-transform group-hover:translate-x-0.5" />
             </button>
             <p className="mt-3.5 text-center text-[10px] text-[#9792a1]">
-              Authenticated session · model picker · MCP tools · live product updates
+              Scoped session proxy · MCP tools · live product updates
             </p>
           </div>
         </div>
@@ -327,218 +242,5 @@ function McpIndicator({ health }: { health: DemoHealth | null }) {
       />
       {connected ? "Ready" : "Setup required"}
     </span>
-  );
-}
-
-function LiveAgentSession({
-  sessionId,
-  modelCatalog,
-  selectedModel,
-  onModelChange,
-  reasoningEffort,
-  onReasoningEffortChange,
-  latencyMode,
-  onLatencyModeChange,
-}: {
-  sessionId: string;
-  modelCatalog: ReturnType<typeof useWorkspaceModelCatalog>;
-  selectedModel: string | null;
-  onModelChange: (modelId: string) => void;
-  reasoningEffort: ReasoningEffort;
-  onReasoningEffortChange: (effort: ReasoningEffort) => void;
-  latencyMode: LatencyMode;
-  onLatencyModeChange: (mode: LatencyMode) => void;
-}) {
-  const { session } = useSession(sessionId, { pollIntervalMs: 4_000 });
-  const {
-    events,
-    timeline,
-    sessionStatus,
-    initialLoading,
-    connectionState,
-    hasOlder,
-    loadingOlder,
-    loadOlder,
-    error,
-  } = useSessionEvents(sessionId);
-  const attachments = useFileAttachments();
-  const loadVideoArtifactPlayback = useVideoArtifactPlaybackLoader();
-  const composer = useComposer(sessionId, {
-    sendExtras: () => ({
-      resources: attachments.readyResources,
-      ...(selectedModel ? { model: selectedModel } : {}),
-      reasoningEffort,
-      latencyMode,
-    }),
-    sendBlocked: () => attachments.hasUnresolved,
-    onSent: (_text, input) =>
-      attachments.removeReadyFiles(
-        (input.resources ?? []).flatMap((resource) =>
-          resource.kind === "file" ? [resource.fileId] : [],
-        ),
-      ),
-  });
-  const status = sessionStatus ?? session?.status ?? null;
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center justify-between border-b border-og-border/70 px-5 py-2.5">
-        <span
-          className="inline-flex items-center gap-1.5 text-[10px] text-og-fg-subtle"
-          data-stream-error={error?.message}
-          title={error?.message}
-        >
-          <span
-            className={
-              connectionState === "live"
-                ? "size-1.5 rounded-full bg-og-status-idle"
-                : "size-1.5 rounded-full bg-og-status-waiting"
-            }
-          />
-          {connectionState === "live"
-            ? "Live session"
-            : connectionState === "error"
-              ? "Reconnecting timeline"
-              : connectionState}
-        </span>
-        {status ? <SessionStatus status={status} size="sm" /> : null}
-      </div>
-
-      <MessageTimeline
-        items={timeline}
-        status={status}
-        toolRegistry={supportToolRegistry}
-        hasOlder={hasOlder}
-        loadingOlder={loadingOlder}
-        onLoadOlder={loadOlder}
-        renderMessageText={renderNorthstarMessage}
-        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-        className="northstar-agent-timeline min-h-0 flex-1"
-      />
-
-      <div className="shrink-0 border-t border-og-border/70 bg-white px-4 pb-3 pt-3">
-        <NorthstarComposer
-          composer={composer}
-          effectiveControl={session?.effectiveControl}
-          events={events}
-          eventsReady={!initialLoading}
-          sessionId={sessionId}
-          sessionStatus={status}
-          attachments={attachments}
-          modelCatalog={modelCatalog}
-          selectedModel={selectedModel}
-          onModelChange={onModelChange}
-          reasoningEffort={reasoningEffort}
-          onReasoningEffortChange={onReasoningEffortChange}
-          latencyMode={latencyMode}
-          onLatencyModeChange={onLatencyModeChange}
-        />
-      </div>
-    </div>
-  );
-}
-
-function NorthstarComposer({
-  composer,
-  effectiveControl,
-  events,
-  eventsReady,
-  sessionId,
-  sessionStatus,
-  attachments,
-  modelCatalog,
-  selectedModel,
-  onModelChange,
-  reasoningEffort,
-  onReasoningEffortChange,
-  latencyMode,
-  onLatencyModeChange,
-}: {
-  composer: ComposerState;
-  effectiveControl: EffectiveSessionControl | null | undefined;
-  events: Parameters<typeof SessionRealtimeControl>[0]["events"];
-  eventsReady: boolean;
-  sessionId: string;
-  sessionStatus: Parameters<typeof SessionRealtimeControl>[0]["sessionStatus"] | null;
-  attachments: UseFileAttachmentsResult;
-  modelCatalog: ReturnType<typeof useWorkspaceModelCatalog>;
-  selectedModel: string | null;
-  onModelChange: (modelId: string) => void;
-  reasoningEffort: ReasoningEffort;
-  onReasoningEffortChange: (effort: ReasoningEffort) => void;
-  latencyMode: LatencyMode;
-  onLatencyModeChange: (mode: LatencyMode) => void;
-}) {
-  const codexModelRows = useMemo(
-    () =>
-      modelCatalog.rows
-        .filter((row) => row.billingClass === "codex_subscription")
-        .map((row) => ({
-          ...row,
-          label: row.shortLabel ?? row.label,
-        })),
-    [modelCatalog.rows],
-  );
-  const controller = Composer.useChatComposerController({
-    delivery: composer,
-    draft: composer,
-    control: composer,
-    effectiveControl,
-    attachments,
-  });
-
-  return (
-    <Composer.Root controller={controller} className="northstar-agent-composer">
-      <Composer.Frame>
-        <Composer.CommandPalette />
-        <Composer.Surface className="rounded-[11px] border-[#dedce5] shadow-none focus-within:border-[#8b7fe1] focus-within:shadow-[0_0_0_3px_rgba(103,89,206,0.10)]">
-          <Composer.PausedState />
-          <Composer.RestoredResources />
-          <Composer.Attachments />
-          <Composer.Input placeholder="Ask OpenGeni…" className="min-h-[42px] px-3.5 pb-1 pt-2.5" />
-          {controller.confirmState ? (
-            <Composer.Confirmation />
-          ) : (
-            <Composer.Footer className="items-center px-2.5 pb-2 pt-0.5">
-              <Composer.Controls className="flex-nowrap gap-1">
-                <Composer.AttachButton className="size-7 rounded-lg pointer-coarse:size-10" />
-                <ModelPolicyPicker
-                  rows={codexModelRows}
-                  model={selectedModel ?? ""}
-                  effort={reasoningEffort}
-                  latencyMode={latencyMode}
-                  loading={modelCatalog.loading}
-                  error={modelCatalog.error?.message}
-                  sessionKey={sessionId}
-                  menuSide="top"
-                  onModelChange={onModelChange}
-                  onEffortChange={onReasoningEffortChange}
-                  onLatencyModeChange={onLatencyModeChange}
-                  className="max-w-[180px] rounded-lg bg-[#f6f4fc] px-1"
-                />
-              </Composer.Controls>
-              <Composer.Actions className="gap-1">
-                {sessionStatus && effectiveControl ? (
-                  <SessionRealtimeControl
-                    sessionId={sessionId}
-                    sessionStatus={sessionStatus}
-                    effectiveControl={effectiveControl}
-                    events={events}
-                    eventsReady={eventsReady}
-                    // The component resolves the workspace's live catalog itself;
-                    // fail closed until that authoritative response says voice is ready.
-                    codexConnected={false}
-                  />
-                ) : null}
-                <Composer.PauseButton className="size-7 rounded-lg pointer-coarse:size-10" />
-                <Composer.SendButton className="size-7 rounded-lg pointer-coarse:size-10" />
-              </Composer.Actions>
-            </Composer.Footer>
-          )}
-        </Composer.Surface>
-      </Composer.Frame>
-      <Composer.Help />
-      <Composer.Status />
-    </Composer.Root>
   );
 }

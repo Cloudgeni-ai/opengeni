@@ -4,6 +4,7 @@ import {
   chatIdempotencyKey,
   chatIdentityName,
   chatSessionId,
+  formatImportedHistory,
   OpenGeniChatError,
   uuidV5,
   type ChatChunk,
@@ -187,6 +188,49 @@ describe("Chat.send", () => {
     const empty = await server.og.chat({ tenant: "acme", conversation: "c_11" });
     await empty.send("hello", { importedHistory: [] });
     expect(server.creates[2]!.modelContext).toBeUndefined();
+  });
+
+  test("per-message model policy and modelContext reach create, send, and steer", async () => {
+    const server = fakeServer();
+    const chat = await server.og.chat({ tenant: "acme", conversation: "c_ctx", model: "base" });
+    await chat.send("hello", {
+      model: "fast-model",
+      reasoningEffort: "low",
+      modelContext: "Page: /dashboards/42",
+      importedHistory: [{ role: "user", text: "Earlier" }],
+    });
+    expect(server.creates[0]).toMatchObject({
+      model: "fast-model",
+      reasoningEffort: "low",
+      initialMessage: "hello",
+    });
+    expect(server.creates[0]!.modelContext).toBe(
+      [
+        "Earlier conversation imported from the product, oldest first:",
+        "user: Earlier",
+        "",
+        "Page: /dashboards/42",
+      ].join("\n"),
+    );
+
+    await chat.send("next", { model: "deep-model", modelContext: "Page: /dashboards/43" });
+    expect(server.requestsTo("POST", "/events")[0]!.json()).toEqual({
+      type: "user.message",
+      payload: { text: "next", model: "deep-model", modelContext: "Page: /dashboards/43" },
+    });
+
+    await chat.steer("now", { reasoningEffort: "high", modelContext: "Page: /x" });
+    expect(server.requestsTo("POST", "/steer")[0]!.json()).toEqual({
+      text: "now",
+      reasoningEffort: "high",
+      modelContext: "Page: /x",
+    });
+  });
+
+  test("formatImportedHistory is exported and honors a tighter budget", () => {
+    const text = formatImportedHistory([{ role: "user", text: "x".repeat(500) }], 200);
+    expect(text!.length).toBeLessThanOrEqual(200);
+    expect(formatImportedHistory([])).toBeUndefined();
   });
 
   test("a later send posts user.message and streams after the accepted sequence", async () => {

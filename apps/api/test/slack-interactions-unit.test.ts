@@ -12,6 +12,7 @@ import {
   isSlackInfoCommand,
   normalizedBlockActionInteraction,
   slackDeliveryTextsCoalesce,
+  slackDefaultsLinePostSeed,
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
   slackInvocationModelContext,
@@ -24,6 +25,20 @@ import {
 
 const signingSecret = "slack-signing-secret-for-tests";
 const now = new Date("2026-08-01T12:00:00.000Z");
+
+describe("Slack acknowledgement legacy line identity", () => {
+  test("new interactions keep the original post seed; historical frozen lines keep their seed", () => {
+    expect(slackDefaultsLinePostSeed({ sessionDefaultsLine: null }, "slack-ack:example")).toBe(
+      "slack-ack:example",
+    );
+    expect(
+      slackDefaultsLinePostSeed(
+        { sessionDefaultsLine: "Using connectors: Linear; repos: project." },
+        "slack-ack:example",
+      ),
+    ).toBe("slack-ack:example:defaults");
+  });
+});
 
 function signature(rawBody: string, timestamp = Math.floor(now.getTime() / 1000)) {
   return `v0=${createHmac("sha256", signingSecret)

@@ -3,71 +3,11 @@ import type { GitHubRepository, RepositoryResourceRef } from "@opengeni/contract
 import {
   otherDeploymentLinkContext,
   otherDeploymentLinks,
-  renderSlackSessionDefaultsLine,
   selectRecentRepositoryResources,
-  slackConnectorReachable,
 } from "../src/integrations/slack-session-defaults";
 
 const workspaceId = "0f9a4c1e-2b3d-4e5f-8a9b-0c1d2e3f4a5b";
 const sessionId = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
-
-describe("Slack acknowledgement defaults line", () => {
-  test("names connectors, repositories and the environment in one line", () => {
-    expect(
-      renderSlackSessionDefaultsLine({
-        connectors: ["Gmail", "Linear"],
-        repositories: ["opengeni"],
-        environment: "Build box",
-      }),
-    ).toBe("Using connectors: Gmail, Linear; repos: opengeni; environment: Build box.");
-  });
-
-  test("says none instead of leaving a list out, and omits a missing environment", () => {
-    expect(
-      renderSlackSessionDefaultsLine({ connectors: [], repositories: [], environment: null }),
-    ).toBe("Using connectors: none; repos: none.");
-  });
-
-  test("names the first five and counts the rest", () => {
-    expect(
-      renderSlackSessionDefaultsLine({
-        connectors: [],
-        repositories: ["a", "b", "c", "d", "e", "f", "g"],
-        environment: null,
-      }),
-    ).toBe("Using connectors: none; repos: a, b, c, d, e and 2 more.");
-  });
-
-  test("escapes Slack control characters so a name cannot become a link or mention", () => {
-    const line = renderSlackSessionDefaultsLine({
-      connectors: ["<!channel> & <https://example.test|click>"],
-      repositories: [],
-      environment: null,
-    });
-    expect(line).toContain("&lt;!channel&gt; &amp; &lt;https://example.test|click&gt;");
-    expect(line).not.toMatch(/<[^ ]/u);
-  });
-
-  test("stays within the stored byte budget without splitting a character or an entity", () => {
-    const wide = "界".repeat(200);
-    const line = renderSlackSessionDefaultsLine({
-      connectors: [wide, wide, wide, wide, wide],
-      repositories: ["&".repeat(200), "&".repeat(200)],
-      environment: wide,
-    });
-    expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(480);
-    expect(line.endsWith("…")).toBe(true);
-    expect(line).not.toContain("�");
-    expect(line).not.toMatch(/&[a-z]*…$/u);
-    const entities = renderSlackSessionDefaultsLine({
-      connectors: [],
-      repositories: Array.from({ length: 5 }, () => "&".repeat(47)),
-      environment: null,
-    });
-    expect(Buffer.byteLength(entities, "utf8")).toBeLessThanOrEqual(480);
-    expect(entities).not.toMatch(/&[a-z]*…$/u);
-  });
-});
 
 describe("links to another OpenGeni deployment", () => {
   const production = "https://app.opengeni.ai";
@@ -237,58 +177,5 @@ describe("Slack task repositories from recent use", () => {
 
   test("attaches nothing without recent use", () => {
     expect(selectRecentRepositoryResources([], [catalogEntry(1, "project")])).toEqual([]);
-  });
-});
-
-describe("Slack defaults line connector reachability", () => {
-  const personal = {
-    id: "example-mail",
-    connectionRef: {
-      providerDomain: "mail.example.test",
-      kind: "oauth2" as const,
-      subjectScope: "subject" as const,
-    },
-  };
-  const delegation = {
-    serverId: "example-mail",
-    connectionId: "5b0c2b7e-9f64-4a5e-9f2e-3b8c3f0d1a22",
-    ownerSubjectId: "user:caller",
-    providerDomain: "mail.example.test",
-  };
-
-  test("a connector without a connection reference needs no account", () => {
-    expect(slackConnectorReachable({ id: "example-tracker" }, null)).toBe(true);
-  });
-
-  test("a personal connector counts only through the first turn's frozen authority", () => {
-    expect(
-      slackConnectorReachable(personal, {
-        mcpAccountBindings: [],
-        personalConnectionDelegations: [],
-      }),
-    ).toBe(false);
-    expect(
-      slackConnectorReachable(personal, {
-        mcpAccountBindings: [],
-        personalConnectionDelegations: [delegation],
-      }),
-    ).toBe(true);
-    expect(slackConnectorReachable(personal, null)).toBe(false);
-  });
-
-  test("host-owned references are never claimed", () => {
-    expect(
-      slackConnectorReachable(
-        {
-          id: "hosted",
-          connectionRef: {
-            providerDomain: "hosted.example.test",
-            authoritySource: "host" as const,
-            connectionId: "hosted-connection",
-          },
-        },
-        { mcpAccountBindings: null, personalConnectionDelegations: [] },
-      ),
-    ).toBe(false);
   });
 });

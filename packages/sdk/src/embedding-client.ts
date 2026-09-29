@@ -40,6 +40,19 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
+  /** Contract-checked successful JSON GET with its headers intact, for same-origin
+   * proxies that must forward paging metadata. Non-2xx responses throw. */
+  async requestJsonResponse(
+    path: string,
+    query: Record<string, string> = {},
+    options: import("./client").OpenGeniRequestOptions = {},
+  ): Promise<import("./client").FetchResponse> {
+    return await this.requestResponse("GET", path, query, {
+      ...options,
+      accept: "application/json",
+    });
+  }
+
   /** Server-side organization-key client scoped to one host-authenticated user.
    * Does not mutate this client, provision workspace membership, or link native
    * identities. The API verifies key and membership authority on each request. */

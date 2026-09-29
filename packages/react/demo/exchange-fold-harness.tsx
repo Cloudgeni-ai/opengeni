@@ -6,6 +6,10 @@ import { SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
 import type { SessionEvent } from "@opengeni/sdk";
 import recordedAnswerExchange from "../test/fixtures/exchange-answer-before-machine-turns.json";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 /*
  * Readable timeline studio: scripted turns replayed through the production
