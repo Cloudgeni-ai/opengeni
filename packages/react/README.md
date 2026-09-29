@@ -951,9 +951,10 @@ the existing `Promise<number | null>` timeline callback:
 
 ```tsx
 onJumpToLatestQuestion={() => events.jumpToLatestQuestion({
-  onQueuedQuestion: async (turn) => {
+  onQueuedQuestion: async (turn, navigation) => {
     await queue.refresh();
-    // Fence this callback if the host can replace its session while awaiting.
+    if (!navigation.isCurrent()) return;
+    // Check the host's latest queue/error state before applying its focus request.
     setQueueFocusTarget((previous) => ({
       turnId: turn.id,
       requestId: (previous?.requestId ?? 0) + 1,
@@ -966,6 +967,11 @@ onJumpToLatestQuestion={() => events.jumpToLatestQuestion({
 A queue destination returns `null`, not an invisible transcript sequence. Without
 `onQueuedQuestion`, a pending prompt produces explicit queue guidance in the
 timeline; transitional queue state can be retried rather than silently no-oping.
+Check `navigation.isCurrent()` after awaits and immediately before queue UI effects:
+an explicit history jump can supersede a queued lookup without changing the session.
+The shared projection predicate supplies execution evidence for older queued turns
+without `turn.started`, including tools, agent/sandbox activity, startup, recovery,
+and capacity events. Compact cursor coverage skips coalesced delta runs.
 Without `onJumpToLatestQuestion`, local navigation is available only at the live history
 window; the component never guesses from an older page. `onJumpToLatest` retains
 its separate bottom-follow behavior. `groupTimeline(items)` retains classic

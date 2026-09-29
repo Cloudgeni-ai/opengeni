@@ -400,7 +400,11 @@ function App() {
         ? "started"
         : scenarioName === "question-withdrawn"
           ? "withdrawn"
-          : null;
+          : scenarioName === "question-legacy-running"
+            ? "legacy-running"
+            : scenarioName === "question-legacy-settled"
+              ? "legacy-settled"
+              : null;
   const questionClient = useMemo(
     () => (questionMode ? latestQuestionClient(questionMode).client : null),
     [questionMode],

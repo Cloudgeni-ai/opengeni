@@ -13,6 +13,7 @@ import {
   groupTimeline,
   isTimelineUserQuestion,
   timelineQuestionPlacement,
+  TIMELINE_TURN_ANCHOR_EVENT_TYPES,
   sessionStatusFromEvents,
 } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
@@ -28,6 +29,14 @@ export type UseSessionEventsOptions = EmbeddedSessionClientOverride & {
   replay?: "windowed" | "full" | undefined;
   /** Pause the stream without unmounting (e.g. hidden tab). Defaults to true. */
   enabled?: boolean | undefined;
+};
+
+type LatestQuestionOptions = {
+  /** Check navigation.isCurrent() after awaits and immediately before UI effects. */
+  onQueuedQuestion?: (
+    turn: SessionTurn,
+    navigation: { isCurrent: () => boolean },
+  ) => void | Promise<void>;
 };
 
 export type UseSessionEventsResult = {
@@ -87,9 +96,7 @@ export type UseSessionEventsResult = {
   /** Resolve the newest eligible durable human question. Pending prompts use the
    * optional queue destination and return null; started prompts load their actual
    * turn context (pass `timeline` to MessageTimeline as `items`). */
-  jumpToLatestQuestion: (options?: {
-    onQueuedQuestion?: (turn: SessionTurn) => void | Promise<void>;
-  }) => Promise<number | null>;
+  jumpToLatestQuestion: (options?: LatestQuestionOptions) => Promise<number | null>;
   /** Replace history with a bounded window containing this exact durable event. */
   jumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   loadingTarget: boolean;
@@ -698,7 +705,9 @@ export function useSessionEvents(
     if (!sessionId || navigationBusy() || !hasOlderRef.current) {
       return false;
     }
-    const generation = navigationGenerationRef.current;
+    // Explicit window replacement supersedes unresolved question destinations.
+    const generation = ++navigationGenerationRef.current;
+    setQuestionEvidence(null);
     loadingOldestRef.current = true;
     setLoadingOldest(true);
     let published = false;
@@ -964,9 +973,7 @@ export function useSessionEvents(
   );
 
   const jumpToLatestQuestion = useCallback(
-    async (questionOptions?: {
-      onQueuedQuestion?: (turn: SessionTurn) => void | Promise<void>;
-    }): Promise<number | null> => {
+    async (questionOptions?: LatestQuestionOptions): Promise<number | null> => {
       if (
         !sessionId ||
         navigationIdentityRef.current.client !== client ||
@@ -1019,7 +1026,7 @@ export function useSessionEvents(
                 reason.name = "LatestQuestionQueuedError";
                 throw reason;
               }
-              await questionOptions.onQueuedQuestion(pending);
+              await questionOptions.onQueuedQuestion(pending, { isCurrent: current });
               if (!current()) return null;
               // Queue refresh/focus can race a claim or withdrawal. Resolve that
               // transition below instead of settling on a row that just vanished.
@@ -1051,20 +1058,16 @@ export function useSessionEvents(
                   direction: "after",
                   after: lifecycleAfter,
                   limit: 128,
+                  compact: true,
                   mode: "forensic",
                   payloadMode: "full",
-                  includeTypes: [
-                    "turn.queued",
-                    "turn.started",
-                    "turn.cancelled",
-                    "turn.completed",
-                    "turn.failed",
-                    "session.queue.changed",
-                    "session.control.steer_requested",
-                  ],
+                  includeTypes: TIMELINE_TURN_ANCHOR_EVENT_TYPES,
                 });
                 if (!current()) return null;
-                const next = Math.max(lifecycleAfter, ...page.map((event) => event.sequence));
+                const next = Math.max(
+                  lifecycleAfter,
+                  maxResumeSequenceOrNull(page) ?? lifecycleAfter,
+                );
                 if (next === lifecycleAfter) break;
                 const queued =
                   page.find(
@@ -1159,6 +1162,8 @@ export function useSessionEvents(
     if (!sessionId || navigationBusy()) {
       return;
     }
+    navigationGenerationRef.current += 1;
+    setQuestionEvidence(null);
     loadingLatestRef.current = true;
     setLoadingLatest(true);
     setNewerError(null);

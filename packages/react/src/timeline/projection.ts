@@ -1,6 +1,7 @@
 import {
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
+  SESSION_EVENT_TYPES,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -1956,6 +1957,18 @@ type TurnAnchorPrescan = {
   explicitQueuedTriggers: Set<string>;
   startedTurnIds: Set<string>;
 };
+
+/** The filtered navigation index includes every canonical execution fallback,
+ * not just turn.started. Keep classification shared with prescanTurnAnchors. */
+export const TIMELINE_TURN_ANCHOR_EVENT_TYPES = SESSION_EVENT_TYPES.filter(
+  (type) =>
+    isTurnExecutionEvidence(type) ||
+    type === "turn.queued" ||
+    type === "turn.started" ||
+    type === "turn.cancelled" ||
+    type === "session.queue.changed" ||
+    type === "session.control.steer_requested",
+);
 
 /** Navigation uses the same queue/start/withdrawal rules as transcript ordering. */
 export function timelineQuestionPlacement(question: SessionEvent, evidence: SessionEvent[]) {

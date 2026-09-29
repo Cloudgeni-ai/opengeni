@@ -104,9 +104,10 @@ function Conversation({
         onJumpToLatest={feed.jumpToLatest}
         onJumpToLatestQuestion={() =>
           feed.jumpToLatestQuestion({
-            onQueuedQuestion: async (turn) => {
+            onQueuedQuestion: async (turn, navigation) => {
               await queue.refresh();
               if (
+                !navigation.isCurrent() ||
                 scopeRef.current.client !== context.client ||
                 scopeRef.current.workspaceId !== context.workspaceId
               )
