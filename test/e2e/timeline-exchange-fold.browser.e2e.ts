@@ -110,7 +110,13 @@ describe("readable timeline browser regression", () => {
     return page;
   }
 
-  for (const mode of ["pending", "started", "withdrawn"] as const) {
+  for (const mode of [
+    "pending",
+    "started",
+    "withdrawn",
+    "legacy-running",
+    "legacy-settled",
+  ] as const) {
     for (const width of [390, 1280]) {
       test(`Latest question reaches ${mode} through the production conversation at ${width}px`, async () => {
         const page = await openHarness(`question-${mode}`, width, width === 390);
@@ -135,7 +141,8 @@ describe("readable timeline browser regression", () => {
               "Newest queued question",
             );
           } else {
-            const label = mode === "started" ? "Newest queued question" : "Previous valid question";
+            const label =
+              mode === "withdrawn" ? "Previous valid question" : "Newest queued question";
             await page.waitForFunction((text) => {
               const scroller = document.querySelector("[data-og-timeline-scroller]")!;
               const prompt = [...scroller.querySelectorAll("[data-og-prompt]")].find((row) =>

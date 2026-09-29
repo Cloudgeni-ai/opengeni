@@ -19,6 +19,11 @@ import {
 } from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
 import {
+  TIMELINE_TURN_ANCHOR_EVENT_TYPES,
+  timelineQuestionPlacement,
+} from "../src/timeline/projection";
+import { SESSION_EVENT_TYPES } from "@opengeni/sdk";
+import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
 } from "../src/older-history";
@@ -114,6 +119,161 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  test("navigation evidence includes every registry type accepted by canonical queued-turn projection", () => {
+    const question = event(1, "user.message", { text: "queued" });
+    const queued = {
+      ...event(2, "turn.queued", { triggerEventId: question.id, turnId: "turn" }),
+      turnId: "turn",
+    };
+    const expected = SESSION_EVENT_TYPES.filter((type) => {
+      const placement = timelineQuestionPlacement(question, [
+        queued,
+        { ...event(3, type, {}), turnId: "turn" },
+      ]);
+      return placement.kind === "visible" && placement.sequence === 3;
+    });
+    expect(expected).toContain("agent.toolCall.created");
+    expect(expected).toContain("turn.capacity_waiting");
+    expect(expected.every((type) => TIMELINE_TURN_ANCHOR_EVENT_TYPES.includes(type))).toBe(true);
+    expect(TIMELINE_TURN_ANCHOR_EVENT_TYPES.length).toBeLessThanOrEqual(100);
+  });
+
+  for (const executionType of [
+    "agent.toolCall.created",
+    "agent.toolCall.output",
+    "agent.message.delta",
+    "sandbox.operation.started",
+    "turn.startup.phase.started",
+    "rig.setup.started",
+    "turn.recovery.requested",
+    "turn.capacity_waiting",
+    "codex.capacity.waiting",
+    "turn.completed",
+  ] as const) {
+    test(`Latest question uses canonical ${executionType} fallback without turn.started`, async () => {
+      const store = [
+        event(1, "user.message", { text: "Legacy queued prompt" }),
+        { ...event(2, "turn.queued", { triggerEventId: "evt-1", turnId: "turn" }), turnId: "turn" },
+        {
+          ...event(3, executionType, {
+            id: "tool",
+            name: "exec_command",
+            arguments: {},
+            text: "Running",
+            output: "Done",
+          }),
+          turnId: "turn",
+        },
+      ];
+      expect(
+        buildTimeline(store).some((item) => item.kind === "user-message" && item.id === "evt-1"),
+      ).toBe(true);
+      const { client, listCalls } = scriptedClient({ store });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+        expect(
+          hook.result.current.timeline.some(
+            (item) => item.kind === "user-message" && item.id === "evt-1",
+          ),
+        ).toBe(true);
+        expect(
+          listCalls.some((call) => call.compact && call.includeTypes?.includes(executionType)),
+        ).toBe(true);
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  for (const target of ["sequence", "latest"] as const) {
+    test(`queued callback guard revokes focus permission during host refresh when navigating to ${target}`, async () => {
+      const turn = fakeTurn({ triggerEventId: "evt-2" });
+      let release!: () => void;
+      const refresh = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { client } = scriptedClient({
+        store: [event(1), event(2)],
+        getQueue: async () => ({ items: [turn] }) as unknown as SessionQueueSnapshot,
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        let focus = false;
+        let navigation: { isCurrent: () => boolean } | undefined;
+        const lookup = hook.result.current.jumpToLatestQuestion({
+          onQueuedQuestion: async (_turn, guard) => {
+            navigation = guard;
+            await refresh;
+            if (guard.isCurrent()) focus = true;
+          },
+        });
+        await flush(20);
+        expect(navigation?.isCurrent()).toBe(true);
+        await actRun(async () => {
+          if (target === "sequence") await hook.result.current.jumpToSequence(1);
+          else await hook.result.current.jumpToLatest();
+        });
+        expect(navigation?.isCurrent()).toBe(false);
+        release();
+        await actRun(async () => expect(await lookup).toBeNull());
+        expect(focus).toBe(false);
+      } finally {
+        release();
+        await hook.unmount();
+      }
+    });
+  }
+
+  test("canonical evidence paging advances through compact delta coverage", async () => {
+    const store = [
+      event(1, "user.message", { text: "queued" }),
+      { ...event(2, "turn.queued", { triggerEventId: "evt-1", turnId: "turn" }), turnId: "turn" },
+      {
+        ...event(3, "agent.reasoning.delta", { text: "Other turn", coalescedUntil: 9000 }),
+        turnId: "other",
+      },
+      {
+        ...event(9001, "agent.toolCall.created", {
+          id: "tool",
+          name: "exec_command",
+          arguments: {},
+        }),
+        turnId: "turn",
+      },
+    ];
+    const { client, listCalls } = scriptedClient({
+      store,
+      listEvents: async (options) =>
+        options.includeTypes?.includes("turn.queued")
+          ? listPage(store, { ...options, limit: 1 })
+          : listPage(store, options),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+      expect(
+        listCalls
+          .filter((call) => call.includeTypes?.includes("turn.queued"))
+          .map((call) => call.after),
+      ).toEqual([1, 2, 9000]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("Latest question resolves durable newest user input beyond both old and live-tail windows", async () => {
     const store = Array.from({ length: 12000 }, (_, index) => {
       const sequence = index + 1;
