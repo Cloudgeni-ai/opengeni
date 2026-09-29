@@ -441,3 +441,238 @@ export const USAGE_MODELS = [
     costPerKToken: 3.2,
   },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// Workspace integrations (Developer page): credential provider and webhooks
+// ---------------------------------------------------------------------------
+
+/**
+ * Endpoints use the reserved `.example` TLD, so nothing is ever reachable:
+ * a real turn would get a `refresh_failed` notice from the credential
+ * provider, and a live webhook delivery fails at DNS. Seeded delivery history
+ * is inserted already settled, so the delivery pump never picks it up.
+ */
+export type WebhookSeed = {
+  url: string;
+  description: string;
+  eventTypes: string[];
+  enabled?: boolean;
+  /** Seeded delivery history. */
+  history: "healthy" | "failing" | "none";
+};
+
+export const INTEGRATIONS: Record<
+  string,
+  { credentialProvider?: { url: string; timeoutMs: number }; webhooks: WebhookSeed[] }
+> = {
+  "Platform engineering": {
+    credentialProvider: {
+      url: "https://platform-api.acme.example/opengeni/credentials",
+      timeoutMs: 8000,
+    },
+    webhooks: [
+      {
+        url: "https://ops-dashboard.acme.example/hooks/opengeni",
+        description: "Ops dashboard: every finished, failed or stopped turn.",
+        eventTypes: ["turn.completed", "turn.failed", "turn.cancelled"],
+        history: "healthy",
+      },
+      {
+        url: "https://pager-bridge.acme.example/opengeni/attention",
+        description: "On-call bridge: session status, approvals and questions waiting on a person.",
+        eventTypes: [
+          "session.status.changed",
+          "session.requiresAction",
+          "session.humanInput.requested",
+          "turn.failed",
+        ],
+        history: "failing",
+      },
+      {
+        url: "https://warehouse.acme.example/ingest/opengeni-status",
+        description: "Session status stream for the analytics warehouse (paused during migration).",
+        eventTypes: ["session.status.changed"],
+        enabled: false,
+        history: "none",
+      },
+    ],
+  },
+  "Customer success": {
+    webhooks: [
+      {
+        url: "https://helpdesk-sync.acme.example/opengeni",
+        description: "Post agent results back to the Zendesk ticket.",
+        eventTypes: ["turn.completed", "turn.failed"],
+        history: "healthy",
+      },
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Variable sets beyond the workspace-scoped ones in the main seed
+// ---------------------------------------------------------------------------
+
+export type VariableSetSeed = {
+  name: string;
+  description: string;
+  scope: "workspace" | "user" | "organization";
+  vars: Record<string, string>;
+  updates?: Record<string, string[]>;
+};
+
+/** All values are fake. `user` sets are the owner's own; `organization` sets are shared. */
+export const EXTRA_VARIABLE_SETS: Record<string, VariableSetSeed[]> = {
+  Personal: [
+    {
+      name: "My GitHub",
+      description: "Personal access token for my forks and draft pull requests.",
+      scope: "user",
+      vars: {
+        MY_GITHUB_PAT: "ghp_fakepersonaltoken0001",
+        MY_GITHUB_USER: "bendik-acme",
+        FORK_REMOTE: "git@github.com:bendik-acme/platform.git",
+      },
+      updates: { MY_GITHUB_PAT: ["ghp_fakepersonaltoken0002"] },
+    },
+    {
+      name: "Home lab",
+      description: "Tailscale and Proxmox access for side projects.",
+      scope: "user",
+      vars: {
+        TAILSCALE_AUTHKEY: "tskey-auth-fake-0001",
+        PROXMOX_URL: "https://pve.home.example:8006",
+        PROXMOX_TOKEN_ID: "bendik@pve!seed",
+        PROXMOX_TOKEN_SECRET: "fake-proxmox-secret",
+      },
+    },
+    {
+      name: "Scratch",
+      description: "Throwaway values for trying things out.",
+      scope: "workspace",
+      vars: { FEATURE_FLAG_OVERRIDES: "new-checkout-summary=off", LOG_LEVEL: "debug" },
+    },
+  ],
+  "Platform engineering": [
+    {
+      name: "Acme shared: Sentry",
+      description: "Organization-wide Sentry read access for every workspace.",
+      scope: "organization",
+      vars: {
+        SENTRY_ORG: "acme-robotics",
+        SENTRY_AUTH_TOKEN: "sntrys_fake_0001",
+        SENTRY_URL: "https://sentry.acme.example",
+      },
+      updates: { SENTRY_AUTH_TOKEN: ["sntrys_fake_0002"] },
+    },
+    {
+      name: "Terraform state",
+      description: "Backend credentials for the shared Terraform state bucket.",
+      scope: "workspace",
+      vars: {
+        TF_STATE_BUCKET: "acme-tfstate-eu-north-1",
+        TF_STATE_LOCK_TABLE: "acme-tf-locks",
+      },
+    },
+  ],
+};
+
+/** Variable sets attached to seeded sessions, by workspace and session title. */
+export const SESSION_VARIABLE_SETS: Record<string, Record<string, string[]>> = {
+  "Platform engineering": {
+    "Upgrade Kubernetes to 1.31 in staging": ["AWS production", "Terraform state"],
+    "Break down September AWS spend": ["AWS production"],
+    "Triage disk pressure alert on db-2": ["Staging database", "Datadog"],
+    "Plan the Q4 reliability sprint": ["Acme shared: Sentry"],
+  },
+  Personal: {
+    "Migrate billing worker to the Postgres queue": ["My GitHub"],
+    "Refactor auth middleware to session handles": ["My GitHub", "Scratch"],
+  },
+  "Customer success": { "Weekly escalation review": ["Zendesk", "HubSpot"] },
+  "Finance ops": { "Build the Q3 spend overview": ["Accounting system"] },
+};
+
+// ---------------------------------------------------------------------------
+// Sandbox environments (rigs)
+// ---------------------------------------------------------------------------
+
+export type RigSeed = {
+  name: string;
+  description: string;
+  scope?: "workspace" | "organization" | "user";
+  setupScript: string;
+  checks: { name: string; command: string }[];
+  credentialHooks?: string[];
+  variableSets?: string[];
+  /** A later version, to show version history. */
+  nextVersion?: { setupScript: string; changelog: string };
+};
+
+/**
+ * Creating one starts the ordinary verification workflow. With no sandbox
+ * backend configured it records an unsupported provider-image build instead of
+ * provisioning anything. The Personal workspace grant lacks `rigs:manage`, so
+ * environments live in shared workspaces only.
+ */
+export const RIGS: Record<string, RigSeed[]> = {
+  "Platform engineering": [
+    {
+      name: "Node 22 + pnpm",
+      description: "Web and API services: Node 22, pnpm and Playwright browsers.",
+      setupScript: [
+        "corepack enable",
+        "corepack prepare pnpm@9.12.0 --activate",
+        "pnpm config set store-dir /workspace/.pnpm-store",
+        "npx --yes playwright@1.48.0 install --with-deps chromium",
+      ].join("\n"),
+      checks: [
+        { name: "Node version", command: "node --version | grep -q '^v22'" },
+        { name: "pnpm available", command: "pnpm --version" },
+      ],
+      variableSets: ["GitHub automation"],
+      nextVersion: {
+        setupScript: [
+          "corepack enable",
+          "corepack prepare pnpm@9.15.0 --activate",
+          "pnpm config set store-dir /workspace/.pnpm-store",
+          "npx --yes playwright@1.49.1 install --with-deps chromium",
+        ].join("\n"),
+        changelog: "Bump pnpm to 9.15 and Playwright to 1.49.",
+      },
+    },
+    {
+      name: "Terraform toolbox",
+      description: "Terraform, tflint, terraform-docs and the AWS CLI for infra work.",
+      setupScript: [
+        "curl -fsSL https://github.com/terraform-linters/tflint/releases/download/v0.53.0/tflint_linux_amd64.zip -o /tmp/tflint.zip",
+        "unzip -o /tmp/tflint.zip -d /usr/local/bin",
+        "pip install --quiet awscli==1.35.0",
+      ].join("\n"),
+      checks: [
+        { name: "Terraform", command: "terraform version" },
+        { name: "tflint", command: "tflint --version" },
+      ],
+      credentialHooks: ["aws-sso-login"],
+      variableSets: ["AWS production", "Terraform state"],
+    },
+    {
+      name: "Python analytics",
+      description: "Polars, DuckDB and Jupyter for cost and telemetry analysis.",
+      setupScript: "pip install --quiet polars==1.9.0 duckdb==1.1.1 jupyterlab==4.2.5",
+      checks: [{ name: "Imports", command: "python -c 'import polars, duckdb'" }],
+      variableSets: ["Datadog"],
+    },
+    {
+      name: "Acme base: security tools",
+      description: "Organization-wide scanners every workspace can use.",
+      scope: "organization",
+      setupScript:
+        "pip install --quiet semgrep==1.90.0 && curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.56.2",
+      checks: [
+        { name: "Semgrep", command: "semgrep --version" },
+        { name: "Trivy", command: "trivy --version" },
+      ],
+    },
+  ],
+};

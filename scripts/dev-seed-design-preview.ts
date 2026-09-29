@@ -47,9 +47,13 @@ import {
   CAPABILITIES,
   DISPLAY_ACTIVE_SCHEDULES,
   EXTRA_SCHEDULES,
+  EXTRA_VARIABLE_SETS,
+  INTEGRATIONS,
   PENDING_KNOWLEDGE,
   PERSONAL_KNOWLEDGE,
+  RIGS,
   SCHEDULE_RUNS,
+  SESSION_VARIABLE_SETS,
   USAGE_MODELS,
   scheduledRunSessions,
   type ScheduleSeed,
@@ -1479,6 +1483,45 @@ const conversationPlan: ConversationPlan[] = [];
 /** Scheduled task ids by workspace name ("Personal" for the owner's workspace). */
 const taskIdsByWorkspace: Record<string, Record<string, string>> = {};
 
+/** Variable sets by name, created through the API with their edit history. */
+async function seedVariableSets(
+  base: string,
+  sets: (WorkspaceSeed["variableSets"][number] & {
+    scope?: "workspace" | "user" | "organization";
+  })[],
+): Promise<Record<string, string>> {
+  const existingSets = await owner.get<any>(`${base}/variable-sets`);
+  const setList: any[] = Array.isArray(existingSets)
+    ? existingSets
+    : (existingSets.variableSets ?? []);
+  const setIds: Record<string, string> = {};
+  for (const set of setList) setIds[set.name] = set.id;
+  for (const set of sets) {
+    const scope = set.scope ?? "workspace";
+    let found = setList.find((s) => s.name === set.name && s.scope === scope);
+    if (!found) {
+      found = await owner.post(`${base}/variable-sets`, {
+        scope,
+        name: set.name,
+        description: set.description,
+        variables: Object.entries(set.vars).map(([name, value]) => ({
+          name,
+          value,
+        })),
+      });
+      for (const [name, values] of Object.entries(set.updates ?? {})) {
+        for (const value of values) {
+          await owner.put(`${base}/variable-sets/${found.id}/variables/${name}`, { value });
+        }
+      }
+    }
+    setIds[set.name] = found.id;
+  }
+  return setIds;
+}
+/** Variable set ids by workspace name, then set name. */
+const variableSetIdsByWorkspace: Record<string, Record<string, string>> = {};
+
 // Schedules. Every task is created paused through the API except `manual`
 // ones (no Temporal schedule exists; only Run now fires them). "Display
 // active" tasks are flipped to active in the database later, so the UI shows
@@ -1634,31 +1677,11 @@ for (const seed of WORKSPACES) {
   }
 
   // Variable sets
-  const existingSets = await owner.get<any>(`${base}/variable-sets`);
-  const setList: any[] = Array.isArray(existingSets)
-    ? existingSets
-    : (existingSets.variableSets ?? []);
-  const setIds: Record<string, string> = {};
-  for (const set of seed.variableSets) {
-    let found = setList.find((s) => s.name === set.name && s.scope === "workspace");
-    if (!found) {
-      found = await owner.post(`${base}/variable-sets`, {
-        scope: "workspace",
-        name: set.name,
-        description: set.description,
-        variables: Object.entries(set.vars).map(([name, value]) => ({
-          name,
-          value,
-        })),
-      });
-      for (const [name, values] of Object.entries(set.updates ?? {})) {
-        for (const value of values) {
-          await owner.put(`${base}/variable-sets/${found.id}/variables/${name}`, { value });
-        }
-      }
-    }
-    setIds[set.name] = found.id;
-  }
+  const setIds = await seedVariableSets(base, [
+    ...seed.variableSets,
+    ...(EXTRA_VARIABLE_SETS[seed.name] ?? []),
+  ]);
+  variableSetIdsByWorkspace[seed.name] = setIds;
 
   // Schedules
   taskIdsByWorkspace[seed.name] = await seedSchedules(
@@ -1753,11 +1776,15 @@ for (const seed of WORKSPACES) {
 const personalWs = ownerMembership.personalWorkspaceId;
 {
   const base = `/v1/workspaces/${personalWs}`;
+  variableSetIdsByWorkspace.Personal = await seedVariableSets(
+    base,
+    EXTRA_VARIABLE_SETS.Personal ?? [],
+  );
   taskIdsByWorkspace.Personal = await seedSchedules(
     base,
     "Personal",
     EXTRA_SCHEDULES.Personal ?? [],
-    {},
+    variableSetIdsByWorkspace.Personal,
   );
   await seedKnowledgeGroups(base, "Bendik's notes", PERSONAL_KNOWLEDGE, "personal");
   conversationPlan.push({
@@ -1834,6 +1861,8 @@ await seedRailOrganization();
 await seedAgentLearning();
 await seedCapabilities();
 await refreshScheduleAccess();
+await seedIntegrations();
+await seedRigs();
 
 log("\nDone. Workspaces:");
 for (const line of workspaceUrls) log(`  ${line}`);
@@ -2054,6 +2083,7 @@ async function seedConversations(
       await tx`update sessions set created_at = ${startAt}, updated_at = ${lastAt}, status = ${builder.outcome}
         where workspace_id = ${ws} and id = ${sessionId}`;
       if (builder.requiresActionTurnId) await seedWaitingTurn(sessionId, builder, startAt, lastAt);
+
       if (!seed.unread) await acknowledge(sessionId, lastSequence);
       if (seed.goal) {
         await tx`insert into session_goals (account_id, workspace_id, session_id, status, text,
@@ -2078,6 +2108,17 @@ async function seedConversations(
     for (const { id, seed } of all) {
       if ((await cursor(id)) > 2) continue;
       await writeSession(id, seed, new Date(Date.now() - seed.hoursAgo * 3_600_000));
+    }
+
+    // Variable sets the conversation used, as the session composer shows them.
+    for (const { id, seed } of all) {
+      const attach = (SESSION_VARIABLE_SETS[plan.name]?.[seed.title] ?? [])
+        .map((name) => variableSetIdsByWorkspace[plan.name]?.[name])
+        .filter((setId): setId is string => Boolean(setId));
+      if (!attach.length) continue;
+      await tx`update sessions set variable_set_ids = ${JSON.stringify(attach)}::text::jsonb,
+          variable_set_id = ${attach.at(-1)!}
+        where workspace_id = ${ws} and id = ${id} and variable_set_ids = '[]'::jsonb`;
     }
 
     // Finalize the session-activity gate exactly as the API does.
@@ -2565,6 +2606,149 @@ async function refreshScheduleAccess() {
       });
     }
   }
+}
+
+/**
+ * Developer page: a credential provider and webhook endpoints through the
+ * API (no outbound call happens on create), then settled delivery history by
+ * SQL, keyed to real seeded session events. Needs workspace admin, so the
+ * Personal workspace is skipped.
+ */
+async function seedIntegrations() {
+  if (!migrationsUrl) return;
+  const db = new SQL(migrationsUrl);
+  let deliveries = 0;
+  try {
+    for (const [name, integration] of Object.entries(INTEGRATIONS)) {
+      const ws = workspaceIdByName[name];
+      if (!ws) continue;
+      const base = `/v1/workspaces/${ws}`;
+      const accountId = conversationPlan.find((plan) => plan.workspaceId === ws)!.accountId;
+      if (integration.credentialProvider) {
+        const current = await owner.request<any>("GET", `${base}/credential-provider`, undefined, {
+          allow: [404],
+        });
+        if (current.status === 404 || !current.body?.provider) {
+          await owner.put(`${base}/credential-provider`, integration.credentialProvider);
+        }
+      }
+      const existing: any[] = (await owner.get<any>(`${base}/webhooks`)).webhooks ?? [];
+      for (const webhook of integration.webhooks) {
+        let row = existing.find((candidate) => candidate.url === webhook.url);
+        if (
+          row &&
+          (row.description !== webhook.description ||
+            [...row.eventTypes].sort().join() !== [...webhook.eventTypes].sort().join())
+        ) {
+          row =
+            (
+              await owner.patch<any>(`${base}/webhooks/${row.id}`, {
+                description: webhook.description,
+                eventTypes: webhook.eventTypes,
+              })
+            ).webhook ?? row;
+        }
+        if (!row) {
+          row = (
+            await owner.post<any>(`${base}/webhooks`, {
+              url: webhook.url,
+              description: webhook.description,
+              eventTypes: webhook.eventTypes,
+              enabled: webhook.enabled ?? true,
+            })
+          ).webhook;
+        }
+        if (webhook.history === "none") continue;
+        const [seeded] = await db`select 1 from workspace_webhook_deliveries
+          where workspace_id = ${ws} and webhook_id = ${row.id} limit 1`;
+        if (seeded) continue;
+        // Settled deliveries are pruned after seven days; keep history inside that.
+        // A few of each subscribed type, newest first.
+        const events = await db`select * from (
+            select id, session_id, turn_id, sequence, type, payload, occurred_at,
+              row_number() over (partition by type order by occurred_at desc) as rank
+            from session_events
+            where workspace_id = ${ws} and type in ${db(webhook.eventTypes)}
+              and occurred_at > now() - interval '6 days') recent
+          where rank <= 6 order by occurred_at desc limit 18`;
+        for (const [index, event] of events.entries()) {
+          const occurredAt = new Date(event.occurred_at);
+          const payload = {
+            id: event.id,
+            type: event.type,
+            workspaceId: ws,
+            sessionId: event.session_id,
+            turnId: event.turn_id,
+            sequence: Number(event.sequence),
+            occurredAt: occurredAt.toISOString(),
+            data:
+              event.type === "session.status.changed"
+                ? { status: event.payload?.status ?? null }
+                : {},
+          };
+          const failing = webhook.history === "failing" && index < 6;
+          const retried = webhook.history === "healthy" && index % 7 === 3;
+          const settledAt = new Date(
+            occurredAt.getTime() + (failing ? 5.5 * 3_600_000 : retried ? 6_000 : 400),
+          );
+          await db`insert into workspace_webhook_deliveries (account_id, workspace_id, webhook_id,
+              event_id, event_type, payload, attempts, next_attempt_at, delivered_at, failed_at,
+              last_status, last_error, created_at)
+            values (${accountId}, ${ws}, ${row.id}, ${event.id}, ${event.type}, ${payload},
+              ${failing ? 12 : retried ? 2 : 1}, ${settledAt}, ${failing ? null : settledAt},
+              ${failing ? settledAt : null}, ${failing ? 502 : 200},
+              ${failing ? "502 Bad Gateway from pager-bridge.acme.example (upstream PagerDuty integration disabled)" : null},
+              ${occurredAt})
+            on conflict (webhook_id, event_id) do nothing`;
+          deliveries++;
+        }
+      }
+    }
+  } finally {
+    await db.close();
+  }
+  if (deliveries) log(`Wrote ${deliveries} webhook deliveries`);
+}
+
+/** Sandbox environments with a second version for one of them. */
+async function seedRigs() {
+  let created = 0;
+  for (const [name, rigs] of Object.entries(RIGS)) {
+    const ws = workspaceIdByName[name];
+    if (!ws) continue;
+    const base = `/v1/workspaces/${ws}`;
+    const existing = await owner.get<any>(`${base}/rigs`);
+    const list: any[] = Array.isArray(existing)
+      ? existing
+      : (existing.rigs ?? existing.items ?? []);
+    for (const rig of rigs) {
+      if (list.some((candidate) => candidate.name === rig.name)) continue;
+      const setIds = (rig.variableSets ?? [])
+        .map((set) => variableSetIdsByWorkspace[name]?.[set])
+        .filter((id): id is string => Boolean(id));
+      try {
+        const createdRig = await owner.post<any>(`${base}/rigs`, {
+          ...(rig.scope ? { scope: rig.scope } : {}),
+          name: rig.name,
+          description: rig.description,
+          setupScript: rig.setupScript,
+          checks: rig.checks,
+          credentialHooks: rig.credentialHooks ?? [],
+          defaultVariableSetIds: setIds,
+        });
+        if (rig.nextVersion) {
+          await owner.post(`${base}/rigs/${createdRig.id}/versions`, {
+            setupScript: rig.nextVersion.setupScript,
+            changelog: rig.nextVersion.changelog,
+          });
+        }
+        created++;
+      } catch (error) {
+        log(`  sandbox environment ${rig.name} skipped: ${(error as Error).message.slice(0, 200)}`);
+      }
+    }
+  }
+  if (created) log(`Created ${created} sandbox environments`);
 }
 
 async function seedAgentLearning() {
