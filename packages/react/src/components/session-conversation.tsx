@@ -1,4 +1,4 @@
-import { useRef, type CSSProperties } from "react";
+import { useRef, useState, type CSSProperties } from "react";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
 import { ModelPolicyPicker } from "./model-policy-picker";
@@ -48,6 +48,8 @@ function Conversation({
 }: SessionConversationProps) {
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
+  const scopeRef = useRef(context);
+  scopeRef.current = context;
   const catalog = useWorkspaceModelCatalog({
     client: context.client,
     workspaceId: context.workspaceId,
@@ -56,6 +58,10 @@ function Conversation({
   const options = { ...scope, events: feed.events };
   const detail = useSession(sessionId, options);
   const queue = useTurnQueue(sessionId, options);
+  const [queueFocusTarget, setQueueFocusTarget] = useState<{
+    turnId: string;
+    requestId: number;
+  }>();
   const human = useHumanInputRequests(sessionId, options);
   const status = feed.sessionStatus ?? detail.session?.status;
   const terminal = status === "cancelled";
@@ -96,7 +102,22 @@ function Conversation({
         }}
         loadingOldest={feed.loadingOldest}
         onJumpToLatest={feed.jumpToLatest}
-        onJumpToLatestQuestion={feed.jumpToLatestQuestion}
+        onJumpToLatestQuestion={() =>
+          feed.jumpToLatestQuestion({
+            onQueuedQuestion: async (turn) => {
+              await queue.refresh();
+              if (
+                scopeRef.current.client !== context.client ||
+                scopeRef.current.workspaceId !== context.workspaceId
+              )
+                return;
+              setQueueFocusTarget((previous) => ({
+                turnId: turn.id,
+                requestId: (previous?.requestId ?? 0) + 1,
+              }));
+            },
+          })
+        }
         onAnnotate={composer.addAnnotation}
       />
       <div className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto" data-og-conversation-inputs="">
@@ -111,10 +132,16 @@ function Conversation({
           autoFocus={false}
         />
         {terminal ? (
-          <SessionChrome queue={queue} sessionStatus={status} readOnly />
+          <SessionChrome
+            queue={queue}
+            queueFocusTarget={queueFocusTarget}
+            sessionStatus={status}
+            readOnly
+          />
         ) : (
           <SessionChrome
             queue={queue}
+            queueFocusTarget={queueFocusTarget}
             composer={composer}
             sessionStatus={status}
             onComposerFocus={() =>

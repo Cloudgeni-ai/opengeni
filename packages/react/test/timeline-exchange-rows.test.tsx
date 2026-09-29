@@ -7,6 +7,34 @@ import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
+test("Latest question explains a pending queue destination when the host provides no queue focus", async () => {
+  const reason = new Error("Queued");
+  reason.name = "LatestQuestionQueuedError";
+  const view = await renderComponent(
+    <MessageTimeline
+      events={[]}
+      turnSummary={{ rolling: true }}
+      hasNewer
+      onJumpToLatestQuestion={async () => {
+        throw reason;
+      }}
+    />,
+  );
+  try {
+    await flush(50);
+    const button = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
+    expect(button).not.toBeNull();
+    await act(async () => button!.click());
+    await flush(30);
+    expect(view.container.querySelector('[role="status"]')?.textContent).toContain(
+      "The latest question is in the prompt queue.",
+    );
+    expect(button?.disabled).toBe(false);
+  } finally {
+    await view.unmount();
+  }
+});
+
 const WORKER = "0d4f6a8b-2c3e-4f5a-8b9c-1d2e3f4a5b6c";
 let sequence = 0;
 // Anchored in the past so live clocks read a realistic elapsed time.
