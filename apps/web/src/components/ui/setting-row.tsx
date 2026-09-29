@@ -136,9 +136,11 @@ export interface SettingRowProps extends Omit<ComponentProps<"div">, "title" | "
   error?: ReactNode;
   /**
    * Dependent rows (more SettingRows) that apply only while this row's setting
-   * is on. They render as ordinary sibling rows below this one, split by the
-   * same hairline and with the same indentation: never an indented sub-block.
-   * Render them only when they apply (hide them while the parent is off).
+   * is on: a sub-selection indented under this row, with no hairline between
+   * the parent and its children or between the children, and no guide line.
+   * They keep the ordinary row type (title, description, control on the
+   * right) with tighter spacing, and the next hairline comes after the whole
+   * group. Render them only while the parent is on.
    */
   children?: ReactNode;
 }
@@ -210,7 +212,7 @@ export function SettingRow({
           : "responsive";
   // Control left keeps one text column: rows without a leading switch leave its
   // column empty, so every label on the list starts at the same edge.
-  const gutter = variant === "control-left" && placement !== "left";
+  const gutter = variant === "control-left" && placement !== "left" && !nested;
 
   // With the control under the text (stacked), the hint and error follow the control.
   const trailingNotes = placement === "below";
@@ -282,7 +284,7 @@ export function SettingRow({
         <div
           className={cn(
             "grid min-w-0 gap-x-6 gap-y-3",
-            "min-h-14 py-3",
+            nested ? "min-h-11 py-2" : "min-h-14 py-3",
             gutter
               ? `${LEFT_COLUMNS} content-center *:col-start-2`
               : [
@@ -311,9 +313,15 @@ export function SettingRow({
           <SettingRowDepthContext.Provider value={depth + 1}>
             <div
               data-slot="setting-row-children"
-              // Dependent rows are siblings, not an indented block: the same
-              // hairline as the rows around them and the same left edge.
-              className="flex min-w-0 flex-col divide-y divide-border border-t border-border"
+              // One group with the parent: indented, no hairlines inside it and
+              // no guide line; the next hairline follows the whole group.
+              className={cn(
+                "-mt-1 mb-2 flex min-w-0 flex-col",
+                variant === "control-left"
+                  ? // Line up with the parent's label, past the switch column.
+                    "pl-12"
+                  : "pl-5",
+              )}
             >
               {children}
             </div>

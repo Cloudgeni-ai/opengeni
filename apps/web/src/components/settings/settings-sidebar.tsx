@@ -13,7 +13,7 @@ import { BrandMark, Wordmark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { SectionVariantProvider } from "@/components/ui/section";
+import { SectionVariantProvider } from "@/components/ui/section-variant";
 import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
 import {
   Sheet,

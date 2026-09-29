@@ -31,7 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LogoTileSizeProvider, type LogoTileSize } from "@/components/ui/logo-tile";
-import { useSectionListFrame } from "@/components/ui/section";
+import { useSectionListFrame } from "@/components/ui/section-variant";
 import { RelativeTimeDefaultsContext } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";

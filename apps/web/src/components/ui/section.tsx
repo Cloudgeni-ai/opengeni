@@ -1,4 +1,4 @@
-import { createContext, useContext, useId, type ComponentProps, type ReactNode } from "react";
+import { useContext, useId, type ComponentProps, type ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -26,40 +26,13 @@ import { cn } from "@/lib/utils";
 /** The section title type. Shared by every heading that sits above setting rows. */
 export const SECTION_TITLE_CLASS = "text-base leading-6 font-semibold tracking-[-0.2px] text-fg";
 
-export type SectionVariant = "open" | "group" | "tiles";
+import { SectionCardContext, SectionVariantContext, type SectionVariant } from "./section-variant";
 
-const SectionVariantContext = createContext<SectionVariant | null>(null);
-
-/** True inside a grouped Section's card, so nested lists don't draw a second card. */
-const SectionCardContext = createContext(false);
-
-/**
- * How a resource list should hold itself here: `card` when the page groups its
- * sections into cards but the list is not already inside one, `inside` when it
- * sits in a grouped Section's card, `open` otherwise.
- */
-export function useSectionListFrame(): "card" | "inside" | "open" {
-  const variant = useContext(SectionVariantContext);
-  const inCard = useContext(SectionCardContext);
-  if (inCard) return "inside";
-  return variant === "group" ? "card" : "open";
-}
-
-/**
- * Sets the default variant for every SectionStack and Section below it. The
- * settings shell provides `group`, so every settings page gets grouped cards.
- */
-export function SectionVariantProvider({
-  variant,
-  children,
-}: {
-  variant: SectionVariant;
-  children?: ReactNode;
-}) {
-  return (
-    <SectionVariantContext.Provider value={variant}>{children}</SectionVariantContext.Provider>
-  );
-}
+export {
+  SectionVariantProvider,
+  useSectionListFrame,
+  type SectionVariant,
+} from "./section-variant";
 
 export interface SectionStackProps extends ComponentProps<"div"> {
   /**

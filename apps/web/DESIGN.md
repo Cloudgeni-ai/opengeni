@@ -166,11 +166,14 @@ opacity-muted text.
   no empty card. The settings shell sets this (`SectionVariantProvider variant="group"`); pages
   don't choose it. Outside settings, sections stay open: one hairline with 24 above and below,
   no boxes.
-- **No nested or indented sub-rows.** A setting that only applies while another is on (Voice
-  input > Transcription provider > Try another provider) is an ordinary sibling row in the same
-  card: same left edge, same hairline, same type. Hide dependent rows while the parent is off
-  (preferred), or disable them with the reason. A large group of dependent rows becomes its own
-  card with its own heading instead. `SettingRow` children render this way.
+- **Dependent settings are a sub-selection under their parent.** A setting that only applies
+  while another is on (Voice input > Transcription provider, Try another provider) appears only
+  while the parent is on, indented 20px under it (48px under a control-left row, in line with its
+  label), with no hairline between the parent and its children or between the children, and no
+  guide line; the hairline comes after the whole group. Children keep the ordinary row type
+  (title, description, control on the right) with tighter spacing (44px rows, 8px padding). A
+  large group of dependent rows becomes its own card with its own heading instead.
+  `SettingRow` children render this way.
 - A block that is not a SettingRow list (e.g. "Linked product access") takes the same heading
   plus card treatment; its empty or loading line is a row inside the card.
 - Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 56-64px (32px
