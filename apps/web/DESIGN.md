@@ -176,8 +176,13 @@ opacity-muted text.
   `SettingRow` children render this way.
 - A block that is not a SettingRow list (e.g. "Linked product access") takes the same heading
   plus card treatment; its empty or loading line is a row inside the card.
-- Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 56-64px (32px
-  tile, one column, hairline dividers, for things you own). A short list of accounts on a settings
+- Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 64px (32px
+  tile, one column, hairline dividers, for things you own). **Every row in a list has the same
+  height.** A resource row is its title plus ONE secondary line: the description and the meta
+  facts share it and truncate; a row without them centers its title in the same 64px. A status
+  ("Suspended", "Invited · expires in 14 days", "Revoked") goes in `ListRow`'s `status` slot, at
+  the right of the name area on wide lists and on the secondary line on narrow ones, never on an
+  extra line. Only a disabled reason may wrap. A short list of accounts on a settings
   page may use the 40px tile. Inside an open section a resource list is `flush`: tiles and titles
   line up with the section title, the hover bleeds 12px out with a 10px radius, and the hairlines
   stay inside the content edge.

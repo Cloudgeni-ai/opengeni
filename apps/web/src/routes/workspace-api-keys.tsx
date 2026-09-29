@@ -269,8 +269,8 @@ function KeyRows({
             key={key.id}
             leading={<KeyTile />}
             title={key.name}
-            titleAddon={
-              live ? null : (
+            status={
+              live ? undefined : (
                 <StatusBadge status={status} variant="dot">
                   {statusLabel(key, status)}
                 </StatusBadge>

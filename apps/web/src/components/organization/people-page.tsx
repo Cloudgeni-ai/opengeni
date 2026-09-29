@@ -538,18 +538,15 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
                     title={name}
                     titleAddon={you ? <MetaChip variant="outline">You</MetaChip> : undefined}
                     description={member.email && member.email !== name ? member.email : undefined}
-                    meta={
-                      status
-                        ? [
-                            <StatusBadge
-                              key="status"
-                              variant="dot"
-                              status={member.status === "suspended" ? "suspended" : "queued"}
-                            >
-                              {status}
-                            </StatusBadge>,
-                          ]
-                        : undefined
+                    status={
+                      status ? (
+                        <StatusBadge
+                          variant="dot"
+                          status={member.status === "suspended" ? "suspended" : "queued"}
+                        >
+                          {status}
+                        </StatusBadge>
+                      ) : undefined
                     }
                     cells={{
                       role: (
@@ -587,15 +584,11 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
                 leading={<PersonAvatar name={name} pending />}
                 title={name}
                 description={invitation.targetName ? invitation.targetEmail : undefined}
-                meta={[
-                  <StatusBadge
-                    key="status"
-                    variant="dot"
-                    status={failed ? "invite_failed" : "invited"}
-                  >
+                status={
+                  <StatusBadge variant="dot" status={failed ? "invite_failed" : "invited"}>
                     {invitationStatusLabel(invitation)}
-                  </StatusBadge>,
-                ]}
+                  </StatusBadge>
+                }
                 cells={{
                   role: <RoleCell role={invitation.role} />,
                   workspaces: (

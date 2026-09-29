@@ -226,8 +226,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                 key={apiKey.id}
                 leading={<LogoTile icon={<KeyRoundIcon />} />}
                 title={apiKey.name}
-                titleAddon={
-                  keyStatus === "active" ? null : (
+                status={
+                  keyStatus === "active" ? undefined : (
                     <StatusBadge variant="dot" status={keyStatus}>
                       {keyStatus === "revoked" ? "Revoked" : "Expired"}
                     </StatusBadge>
