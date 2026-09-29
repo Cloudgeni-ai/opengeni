@@ -17217,6 +17217,12 @@ export async function scheduledTaskMutationOwnerMatches(
     createdBy?: TurnInitiator;
     createdByContext?: TurnInitiatorContext;
     createdByActor?: AgentSessionCreationActor | null;
+    /**
+     * The exact machine-principal subject (API key / configured key) whose
+     * pre-machine-principal schedule froze it as owner. Matches only that
+     * owner; never a person's schedule.
+     */
+    legacyMachineOwnerSubjectId?: string;
   },
 ): Promise<boolean> {
   return withWorkspaceRls(db, input.workspaceId, async (tx) => {
@@ -17236,7 +17242,12 @@ export async function scheduledTaskMutationOwnerMatches(
     const subject =
       actor.initiatingHumanSubjectId ??
       (actor.initiator.kind === "subject" ? actor.initiator.subjectId : null);
-    return task.owner === null || task.owner === subject;
+    return (
+      task.owner === null ||
+      task.owner === subject ||
+      (input.legacyMachineOwnerSubjectId !== undefined &&
+        task.owner === input.legacyMachineOwnerSubjectId)
+    );
   });
 }
 
@@ -17969,6 +17980,19 @@ export async function deleteScheduledTask(
 }
 
 /** A terminal refusal is evidence, not accepted execution or permission to retry. */
+/** Terminal refusal codes a diagnostic scheduled-run receipt may carry. */
+export type ScheduledTaskAdmissionRefusalError =
+  | "connection_account_unavailable"
+  | "scheduled_authority_unavailable";
+
+/** The fixed diagnostic of an authority refusal: it names no account. */
+export const SCHEDULED_AUTHORITY_REFUSAL_DIAGNOSTIC: ConnectionAccountSelectionDiagnostic =
+  Object.freeze({
+    version: 1 as const,
+    reason: "owner_access_unavailable" as const,
+    accounts: [],
+  });
+
 export async function recordScheduledTaskAdmissionFailure(
   db: Database,
   input: {
@@ -17979,10 +18003,23 @@ export async function recordScheduledTaskAdmissionFailure(
     triggerType: ScheduledTaskTriggerType;
     producerKey: string;
     scheduledAt?: Date | null;
+    /**
+     * Which refusal this is. A connection-account refusal names the refused
+     * accounts; an authority refusal (the schedule's frozen owner authority
+     * cannot be proven) always carries the fixed owner diagnostic.
+     */
+    error?: ScheduledTaskAdmissionRefusalError;
     diagnostic: ConnectionAccountSelectionDiagnostic;
   },
 ): Promise<ScheduledTaskRun> {
   const diagnostic = ConnectionAccountSelectionDiagnostic.parse(input.diagnostic);
+  const error = input.error ?? "connection_account_unavailable";
+  if (
+    error === "scheduled_authority_unavailable" &&
+    (diagnostic.reason !== "owner_access_unavailable" || diagnostic.accounts.length > 0)
+  ) {
+    throw new Error("scheduled authority refusal carries only the owner diagnostic");
+  }
   if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
   return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     // Same task lock as accepted admission; both outcomes share the existing
@@ -18041,7 +18078,7 @@ export async function recordScheduledTaskAdmissionFailure(
         completedAt: now,
         actionKind: "agent_turn",
         status: "failed",
-        error: "connection_account_unavailable",
+        error,
         admissionDiagnostic: diagnostic,
       })
       .onConflictDoNothing({

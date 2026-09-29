@@ -40,6 +40,7 @@ import {
   bindScheduledTaskRunSessionInTransaction,
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
+  SCHEDULED_AUTHORITY_REFUSAL_DIAGNOSTIC,
   createSession,
   createSessionWithIdempotencyKeyResult,
   enqueueSessionWorkflowWakeIfRunnable,
@@ -287,12 +288,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       });
       if (priorRun?.actionKind === "agent_turn") {
         if (priorRun.admissionDiagnostic) {
-          return {
-            action: "blocked",
-            reason: "connection_account_unavailable",
-            runId: priorRun.id,
-            diagnostic: priorRun.admissionDiagnostic,
-          };
+          return scheduledAdmissionRefusalResult(priorRun);
         }
         const acceptedExecution = await getScheduledTaskRunAcceptedExecution(db, {
           workspaceId: input.workspaceId,
@@ -419,6 +415,32 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskAuthorityRevision: task.authorityRevision,
       });
       const taskAuthoritySubjectId = task.ownerSubjectId;
+      // Every authority check below is deterministic for this exact task
+      // revision and digest, so a failure can never succeed on retry. Record
+      // it as a terminal, visible run receipt under this producer identity
+      // instead of throwing: a thrown activity is retried to exhaustion and
+      // leaves no run or error anyone can see.
+      const refuseAuthority = async (detail: string): Promise<DispatchScheduledTaskRunResult> => {
+        console.warn(
+          `[scheduled-task] refused occurrence of ${task.id} (revision ${task.authorityRevision}): ${detail}`,
+        );
+        const receipt = await recordScheduledTaskAdmissionFailure(db, {
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          taskAuthorityRevision: task.authorityRevision,
+          taskExecutionDigest: task.executionDigest,
+          triggerType: input.triggerType,
+          producerKey: stableProducerKey,
+          error: "scheduled_authority_unavailable",
+          diagnostic: SCHEDULED_AUTHORITY_REFUSAL_DIAGNOSTIC,
+        });
+        if (!receipt.admissionDiagnostic) {
+          // A concurrent delivery accepted this producer first. Follow the
+          // existing exact-receipt recovery path, never replace its outcome.
+          return createScheduledTaskActivities(services).dispatchScheduledTaskRun(input);
+        }
+        return scheduledAdmissionRefusalResult(receipt);
+      };
       if (
         task.action.kind === "agent_turn" &&
         ((taskRevisionAuthority?.subjectId ?? null) !== taskAuthoritySubjectId ||
@@ -426,7 +448,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             (subject) => subject !== null && subject !== taskAuthoritySubjectId,
           ))
       ) {
-        throw new Error("scheduled authority differs from its immutable execution owner");
+        // Includes a schedule written before API keys were machine principals:
+        // its immutable owner is the key subject, which is not a person and so
+        // has no human revision authority. It cannot run; recreate it.
+        return await refuseAuthority(
+          "scheduled authority differs from its immutable execution owner",
+        );
       }
       const acceptedTargetSessionId =
         task.runMode === "existing_session"
@@ -547,12 +574,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           // existing exact-receipt recovery path, never replace its outcome.
           return createScheduledTaskActivities(services).dispatchScheduledTaskRun(input);
         }
-        return {
-          action: "blocked",
-          reason: "connection_account_unavailable",
-          runId: receipt.id,
-          diagnostic: receipt.admissionDiagnostic,
-        };
+        return scheduledAdmissionRefusalResult(receipt);
       }
       const {
         personalConnectionDelegations: taskPersonalConnectionDelegations,
@@ -803,21 +825,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? task.createdBy.subjectId
           : null;
       if (taskXaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-        throw new Error("scheduled user-scoped xAI authority has no causal human");
+        return await refuseAuthority("scheduled user-scoped xAI authority has no causal human");
       }
       if (
         xaiAuthoritySubjectId &&
         taskAuthoritySubjectId &&
         xaiAuthoritySubjectId !== taskAuthoritySubjectId
       ) {
-        throw new Error("scheduled authority classes have different causal humans");
+        return await refuseAuthority("scheduled authority classes have different causal humans");
       }
       const causalHumanSubjectId = taskAuthoritySubjectId ?? xaiAuthoritySubjectId;
       if (
         task.agentConfig.knowledgeSource &&
         causalHumanSubjectId !== task.agentConfig.knowledgeSource.initiatingSubjectId
       ) {
-        throw new Error(
+        return await refuseAuthority(
           "Source schedule requires its connection owner's current human authorization; update the source schedule to authorize it",
         );
       }
@@ -829,7 +851,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         (acceptedVariableSet?.scope === "user" || acceptedRig?.scope === "user") &&
         !causalHumanSubjectId
       ) {
-        throw new Error("scheduled personal-resource execution has no causal human");
+        return await refuseAuthority("scheduled personal-resource execution has no causal human");
       }
       const admissionDenial = await agentRunAdmissionDenial(
         { ...baseService, settings },
@@ -1852,6 +1874,21 @@ function scheduledRunRecoveryTerminalError(
     );
   }
   return null;
+}
+
+/** The blocked result of a diagnostic (refused) run receipt, fresh or replayed. */
+function scheduledAdmissionRefusalResult(
+  run: Pick<ScheduledTaskRun, "id" | "error" | "admissionDiagnostic">,
+): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
+  return {
+    action: "blocked",
+    reason:
+      run.error === "scheduled_authority_unavailable"
+        ? "scheduled_authority_unavailable"
+        : "connection_account_unavailable",
+    runId: run.id,
+    ...(run.admissionDiagnostic ? { diagnostic: run.admissionDiagnostic } : {}),
+  };
 }
 
 function scheduledRunTerminalResult(
