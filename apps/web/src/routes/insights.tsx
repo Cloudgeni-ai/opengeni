@@ -828,7 +828,11 @@ export function InsightsRoute({
           </DataScroller>
 
           {providers.length > 1 ? (
-            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div
+              role="group"
+              aria-label="Filter by provider"
+              className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4"
+            >
               {providers.map((p) => {
                 const active = filters.provider === p.provider;
                 return (
@@ -838,7 +842,7 @@ export function InsightsRoute({
                     aria-pressed={active}
                     onClick={() => setProvider(active ? "all" : p.provider)}
                     className={cn(
-                      "rounded-lg border px-3.5 py-3 text-left transition-colors",
+                      "rounded-lg border px-3.5 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       active
                         ? "border-brand/40 bg-brand/5"
                         : "border-border bg-surface/35 hover:bg-surface-2/60",
