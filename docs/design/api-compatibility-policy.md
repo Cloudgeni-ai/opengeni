@@ -215,6 +215,21 @@ impact.
 - SDKs from an older major (for example 6.x, whose contract revision predates
   this policy) are outside the default run and are expected to be refused.
 
+## Follow-ups
+
+- **Refusals name the minimum SDK version.** `REFUSED_API_CONTRACT_REVISIONS`
+  and the bearer admission of older revisions ship with the contract-fence
+  scoping change, not with this ADR. When that lands, the refusal body for a
+  listed revision must carry a typed field (for example `minimumSdkVersion`)
+  and a message of the form "upgrade `@opengeni/sdk` to ≥ X". The generic
+  "Reload this client" text only suits stale stock-web tabs. Each refused
+  revision is paired with the minimum SDK release that no longer sends it.
+- **Pinned-SDK header omission depends on bearer admission.** The response-header
+  rule in (e) keeps published SDKs from throwing on a newer revision. Their
+  mutations are still refused with `409 API_CONTRACT_CHANGED` until bearer
+  callers are admitted across revisions. Until then, a contract revision bump
+  fails `bun run test:sdk-compat`, and that failure is deliberate.
+
 ## Exception log
 
 | Date | Change | Reason | Minimum SDK | Integrators notified |

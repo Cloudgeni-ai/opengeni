@@ -2591,6 +2591,39 @@
       "response": []
     },
     {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/credential-provider",
+      "sdk": [
+        "OpenGeniClient.deleteWorkspaceCredentialProvider"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/credential-provider",
+      "sdk": [
+        "OpenGeniClient.getWorkspaceCredentialProvider"
+      ],
+      "request": [],
+      "response": [
+        "GetWorkspaceCredentialProviderResponse"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/credential-provider",
+      "sdk": [
+        "OpenGeniClient.putWorkspaceCredentialProvider"
+      ],
+      "request": [
+        "PutWorkspaceCredentialProviderRequest"
+      ],
+      "response": [
+        "PutWorkspaceCredentialProviderResponse"
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/default-rig",
       "sdk": [
@@ -4743,6 +4776,15 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/sandbox-images",
+      "sdk": [
+        "OpenGeniClient.listWorkspaceSandboxImages"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/scheduled-task-slack-channels",
       "sdk": [
         "OpenGeniClient.listScheduledTaskSlackChannels"
@@ -6576,6 +6618,74 @@
       ],
       "response": [
         "VideoGenerationPolicy"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/webhooks",
+      "sdk": [
+        "OpenGeniClient.listWorkspaceWebhooks"
+      ],
+      "request": [],
+      "response": [
+        "ListWorkspaceWebhooksResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/webhooks",
+      "sdk": [
+        "OpenGeniClient.createWorkspaceWebhook"
+      ],
+      "request": [
+        "CreateWorkspaceWebhookRequest"
+      ],
+      "response": [
+        "CreateWorkspaceWebhookResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId",
+      "sdk": [
+        "OpenGeniClient.deleteWorkspaceWebhook"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId",
+      "sdk": [
+        "OpenGeniClient.updateWorkspaceWebhook"
+      ],
+      "request": [
+        "UpdateWorkspaceWebhookRequest"
+      ],
+      "response": [
+        "WorkspaceWebhook"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId/deliveries",
+      "sdk": [
+        "OpenGeniClient.listWorkspaceWebhookDeliveries"
+      ],
+      "request": [],
+      "response": [
+        "ListWorkspaceWebhookDeliveriesResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId/deliveries/:deliveryId/redeliver",
+      "sdk": [
+        "OpenGeniClient.redeliverWorkspaceWebhookDelivery"
+      ],
+      "request": [],
+      "response": [
+        "WorkspaceWebhookDelivery"
       ]
     },
     {
@@ -10862,6 +10972,29 @@
         "$.slug": "string?"
       }
     },
+    "CreateWorkspaceWebhookRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.description": "string? null",
+        "$.enabled": "boolean?",
+        "$.eventTypes": "array!",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.url": "string!"
+      }
+    },
+    "CreateWorkspaceWebhookResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.secret": "string!",
+        "$.webhook": "ref(WorkspaceWebhook)!"
+      }
+    },
     "DeactivatePreferenceRegistryRequest": {
       "io": [
         "input"
@@ -11996,6 +12129,15 @@
         "$|available=true.sizeBytes": "integer!",
         "$|available=true.stats": "ref(WorkspaceCaptureStats)!",
         "$|available=true.turnId": "string! null"
+      }
+    },
+    "GetWorkspaceCredentialProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.provider": "ref(WorkspaceCredentialProvider)! null"
       }
     },
     "GitCommit": {
@@ -14239,6 +14381,26 @@
         "$": "object",
         "$.members": "array!",
         "$.members[]": "ref(WorkspaceMember)"
+      }
+    },
+    "ListWorkspaceWebhookDeliveriesResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deliveries": "array!",
+        "$.deliveries[]": "ref(WorkspaceWebhookDelivery)"
+      }
+    },
+    "ListWorkspaceWebhooksResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.webhooks": "array!",
+        "$.webhooks[]": "ref(WorkspaceWebhook)"
       }
     },
     "MachineConnectionAuthority": {
@@ -16625,6 +16787,27 @@
         "$|role=custom.permissions": "array!",
         "$|role=custom.permissions[]": "ref(Permission)",
         "$|role=custom.role": "const!=[\"\\\"custom\\\"\"]"
+      }
+    },
+    "PutWorkspaceCredentialProviderRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.enabled": "boolean?",
+        "$.timeoutMs": "integer?",
+        "$.url": "string!"
+      }
+    },
+    "PutWorkspaceCredentialProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.provider": "ref(WorkspaceCredentialProvider)!",
+        "$.secret": "string?"
       }
     },
     "ReasoningEffort": {
@@ -20564,6 +20747,7 @@
         "$.agentHumanInputEnabled": "boolean?",
         "$.codeSearchEnabled": "boolean? null",
         "$.codexCompactionDefault": "ref(CodexCompactionMode)?",
+        "$.defaultSandboxImage": "string? null",
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
@@ -20574,6 +20758,19 @@
         "$.transcription": "ref(WorkspaceTranscriptionPolicy)?",
         "$.voiceInput": "ref(WorkspaceVoiceInputSettings)?",
         "${}": "unknown"
+      }
+    },
+    "UpdateWorkspaceWebhookRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.description": "string? null",
+        "$.enabled": "boolean?",
+        "$.eventTypes": "array?",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.url": "string?"
       }
     },
     "UploadTranscriptionRecordingChunkResponse": {
@@ -21348,6 +21545,20 @@
         "$.totalBytes": "integer!",
         "$.treeEntryCount": "integer!",
         "$.treeTruncated": "boolean!"
+      }
+    },
+    "WorkspaceCredentialProvider": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.enabled": "boolean!",
+        "$.timeoutMs": "integer!",
+        "$.updatedAt": "string!",
+        "$.url": "string!",
+        "$.workspaceId": "string!"
       }
     },
     "WorkspaceGatewayCustomModel": {
@@ -22332,6 +22543,60 @@
         "$.fallbackEnabled": "boolean?",
         "$.preferredProvider": "ref(VoiceInputProviderId)? null"
       }
+    },
+    "WorkspaceWebhook": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.description": "string! null",
+        "$.enabled": "boolean!",
+        "$.eventTypes": "array!",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.id": "string!",
+        "$.updatedAt": "string!",
+        "$.url": "string!",
+        "$.workspaceId": "string!"
+      }
+    },
+    "WorkspaceWebhookDelivery": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.attempts": "integer!",
+        "$.createdAt": "string!",
+        "$.deliveredAt": "string! null",
+        "$.eventId": "string!",
+        "$.eventType": "string!",
+        "$.failedAt": "string! null",
+        "$.id": "string!",
+        "$.lastError": "string! null",
+        "$.lastStatus": "integer! null",
+        "$.nextAttemptAt": "string! null",
+        "$.status": "ref(WorkspaceWebhookDeliveryStatus)!",
+        "$.webhookId": "string!"
+      }
+    },
+    "WorkspaceWebhookDeliveryStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"delivered\\\"\",\"\\\"failed\\\"\",\"\\\"pending\\\"\"]"
+      }
+    },
+    "WorkspaceWebhookEventType": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"session.humanInput.requested\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\"]"
+      }
     }
   },
   "exports": {
@@ -22680,7 +22945,11 @@
       "CreateWorkspaceLearningPolicyRevisionRequest": "type",
       "CreateWorkspaceOpenRouterCustomModelRequest": "type",
       "CreateWorkspaceRequest": "type",
+      "CreateWorkspaceWebhookRequest": "type",
+      "CreateWorkspaceWebhookResponse": "type",
       "createXaiSubscriptionRealtimeTransportStarter": "value",
+      "CredentialProviderRequest": "type",
+      "CredentialProviderResponse": "type",
       "CurrentOrOpenBrowserOptions": "type",
       "CurrentOrOpenComputerOptions": "type",
       "DeactivatePreferenceRegistryRequest": "type",
@@ -22802,6 +23071,7 @@
       "GetSessionOptions": "type",
       "GetWorkspaceCaptureFileResponse": "type",
       "GetWorkspaceCaptureResponse": "type",
+      "GetWorkspaceCredentialProviderResponse": "type",
       "GitCapability": "type",
       "GitChangedPayload": "type",
       "GitCommit": "type",
@@ -22996,6 +23266,8 @@
       "ListUserResourceAuthoritiesResponse": "type",
       "ListWorkspaceMemberCandidatesResponse": "type",
       "ListWorkspaceMembersResponse": "type",
+      "ListWorkspaceWebhookDeliveriesResponse": "type",
+      "ListWorkspaceWebhooksResponse": "type",
       "MachineConnectionAuthority": "type",
       "MachineKind": "type",
       "MachineMetricsSeriesResponse": "type",
@@ -23079,6 +23351,7 @@
       "OPENGENI_SITE_BRIDGE_REQUEST": "value",
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
+      "OPENGENI_WEBHOOK_HEADERS": "value",
       "OpenGeniApiContractMismatchError": "value",
       "OpenGeniApiError": "value",
       "OpenGeniClient": "value",
@@ -23093,6 +23366,7 @@
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
+      "OpenGeniSignatureError": "value",
       "OpenGeniSiteBridgeCancelMessage": "type",
       "OpenGeniSiteBridgeConnectMessage": "type",
       "OpenGeniSiteBridgeError": "value",
@@ -23238,6 +23512,8 @@
       "PublishSandboxFileArtifactRequest": "type",
       "PublishWorkspaceArtifactVersionRequest": "type",
       "PutOrganizationWorkspaceMemberRequest": "type",
+      "PutWorkspaceCredentialProviderRequest": "type",
+      "PutWorkspaceCredentialProviderResponse": "type",
       "ReadEditableArtifactMaterializationOptions": "type",
       "ReadEditableArtifactResourceOptions": "type",
       "RealtimeControllerTransportStarter": "type",
@@ -23416,6 +23692,7 @@
       "SessionVisibility": "type",
       "SetWorkspaceArtifactStatusRequest": "type",
       "SetWorkspaceEnvironmentVariableRequest": "type",
+      "signOpenGeniPayload": "value",
       "SiteAuthAuthority": "type",
       "SiteAuthConnection": "type",
       "SiteAuthConnectionCollection": "value",
@@ -23588,6 +23865,7 @@
       "UpdateWorkspaceModelAccessPolicyRequest": "type",
       "UpdateWorkspaceRequest": "type",
       "UpdateWorkspaceSettingsRequest": "type",
+      "UpdateWorkspaceWebhookRequest": "type",
       "UploadFileInput": "type",
       "UpsertIntegrationFacetRequest": "type",
       "UpsertOrganizationModelProviderConnectionRequest": "type",
@@ -23604,9 +23882,12 @@
       "VariableSetSecret": "type",
       "VariableSetVariableMetadata": "type",
       "VerifyAuthRunRequest": "type",
+      "verifyCredentialProviderRequest": "value",
+      "verifyOpenGeniSignature": "value",
       "VerifyPersonalGitHubRepositorySelectionsRequest": "type",
       "VerifyPublicGitHubRepositoryRefRequest": "type",
       "VerifyPublicGitHubRepositoryRefResponse": "type",
+      "verifyWebhookEvent": "value",
       "VideoArtifactPlaybackSource": "type",
       "VideoGenerationAspectRatio": "type",
       "VideoGenerationCapabilities": "type",
@@ -23625,6 +23906,7 @@
       "VoiceInputProviderId": "type",
       "Workspace": "type",
       "WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS": "value",
+      "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
       "WorkspaceArtifact": "type",
       "WorkspaceArtifactContentResponse": "type",
       "WorkspaceArtifactDetailResponse": "type",
@@ -23646,6 +23928,7 @@
       "WorkspaceControlEvent": "type",
       "WorkspaceControlEventPage": "type",
       "WorkspaceControlStreamTransport": "type",
+      "WorkspaceCredentialProvider": "type",
       "WorkspaceEnvironment": "type",
       "WorkspaceEnvironmentVariableMetadata": "type",
       "WorkspaceGatewayCustomModel": "type",
@@ -23711,6 +23994,7 @@
       "WorkspaceRealtimeModelCatalogResponse": "type",
       "WorkspaceRevisionCapturedPayload": "type",
       "WorkspaceRevisionDegradedPayload": "type",
+      "WorkspaceSandboxImages": "type",
       "WorkspaceSessionDefaults": "type",
       "WorkspaceSettings": "type",
       "WorkspaceSlackReactionSummonSettings": "type",
@@ -23723,7 +24007,11 @@
       "WorkspaceTranscriptionPolicy": "type",
       "WorkspaceTranscriptionTarget": "type",
       "WorkspaceVideoGenerationSettings": "type",
-      "WorkspaceVoiceInputSettings": "type"
+      "WorkspaceVoiceInputSettings": "type",
+      "WorkspaceWebhook": "type",
+      "WorkspaceWebhookDelivery": "type",
+      "WorkspaceWebhookEvent": "type",
+      "WorkspaceWebhookEventType": "type"
     },
     "@opengeni/sdk/accounts": {
       "BeginManagedAuthLoginTransactionRequest": "type",
@@ -26176,6 +26464,7 @@
       "createWorkspaceInstructionPolicyDraft",
       "createWorkspaceInstructionPolicyOnboardingProposal",
       "createWorkspaceOpenRouterCustomModel",
+      "createWorkspaceWebhook",
       "deactivatePreferenceRegistry",
       "deleteApiKey",
       "deleteChannel",
@@ -26194,8 +26483,10 @@
       "deleteVariableSet",
       "deleteVariableSetVariable",
       "deleteWorkspace",
+      "deleteWorkspaceCredentialProvider",
       "deleteWorkspaceGatewayCustomModel",
       "deleteWorkspaceOpenRouterCustomModel",
+      "deleteWorkspaceWebhook",
       "denyDeviceEnrollment",
       "denySlackUserLinkAccessRequest",
       "designateCodexAppsAccount",
@@ -26309,6 +26600,7 @@
       "getWorkspaceArtifactHtml",
       "getWorkspaceCapture",
       "getWorkspaceCaptureFile",
+      "getWorkspaceCredentialProvider",
       "getWorkspaceInsights",
       "getWorkspaceInstructionPolicyRevision",
       "getWorkspaceLearningHistory",
@@ -26421,7 +26713,10 @@
       "listWorkspaceMemberCandidates",
       "listWorkspaceMembers",
       "listWorkspaceOpenRouterCustomModels",
+      "listWorkspaceSandboxImages",
       "listWorkspaceSkills",
+      "listWorkspaceWebhookDeliveries",
+      "listWorkspaceWebhooks",
       "listWorkspaces",
       "lookupDeviceEnrollment",
       "machineMetricsSeries",
@@ -26463,12 +26758,14 @@
       "publishSandboxFileArtifact",
       "publishWorkspaceArtifactVersion",
       "putOrganizationWorkspaceMember",
+      "putWorkspaceCredentialProvider",
       "readBrowserClipboard",
       "readBrowserDom",
       "readComputerClipboard",
       "readWorkspaceSkill",
       "reconnectPersonalGitHub",
       "recoverSandbox",
+      "redeliverWorkspaceWebhookDelivery",
       "refreshCodexUsage",
       "refreshScheduledTaskAccess",
       "rejectGoalRevision",
@@ -26609,6 +26906,7 @@
       "updateWorkspaceMember",
       "updateWorkspaceModelAccessPolicy",
       "updateWorkspaceSettings",
+      "updateWorkspaceWebhook",
       "uploadFile",
       "uploadTranscriptionRecordingChunk",
       "upsertOrganizationModelProviderConnection",
