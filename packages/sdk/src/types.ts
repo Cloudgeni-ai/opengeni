@@ -593,7 +593,12 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
+  /**
+   * Put this server's tool schemas on the first model request instead of behind
+   * `tool_search` progressive discovery. A startup choice only; grants nothing.
+   */
   eager?: boolean | undefined;
 };
 
@@ -3046,6 +3051,12 @@ export type CreateSessionRequest = {
   skills?: SessionSkillInput[] | undefined;
   /** Installed session-selected Skill identities to freeze onto this session at creation. */
   installedSkillIds?: string[] | undefined;
+  /**
+   * MCP servers to select. Omitted follows the workspace defaults; an explicit
+   * array (including `[]`) is an exact allow-list over workspace/deployment
+   * servers. Servers attached in this request's `mcpServers` are always
+   * selected; list one here only to set `eager`/`optional`.
+   */
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;

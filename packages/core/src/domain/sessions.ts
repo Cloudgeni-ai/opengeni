@@ -2676,6 +2676,12 @@ async function createSessionForRequestInFileScope(
     );
     toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
   }
+  if (!parentSession) {
+    selectedTools = withSameRequestSessionMcpServerTools(
+      selectedTools,
+      sessionMcpServers.runtimeServers,
+    );
+  }
   if (payload.excludedMcpServerIds !== undefined) {
     if (toolPolicy.mode !== "workspace_default") {
       throw new HTTPException(403, {
@@ -4509,6 +4515,30 @@ export async function readSessionLineage(
     throw new HTTPException(404, { message: "session not found" });
   }
   return lineage;
+}
+
+/**
+ * A server attached in the same root create request is selected by that
+ * attachment. Neither `tools` (an allow-list over the workspace/deployment
+ * registry) nor the workspace-default expansion can name it, so without this
+ * the attached endpoint was stored but never contacted and the model saw no
+ * tools. This grants nothing beyond the attach itself: the caller already
+ * passed `mcp_servers:attach` for exactly this endpoint, and the server's own
+ * approval policy still governs every call. An explicit ref for the same id
+ * wins unchanged so a caller can still mark it `eager` or `optional`; the
+ * added ref is strict, exactly like listing `{ kind: "mcp", id }` explicitly.
+ * Child creates never reach here: an inherited snapshot keeps the parent's
+ * selection and a child may only narrow it.
+ */
+export function withSameRequestSessionMcpServerTools(
+  tools: ToolRef[],
+  attachedServers: ReadonlyArray<{ id: string }>,
+): ToolRef[] {
+  const selectedIds = new Set(tools.map((tool) => tool.id));
+  const missing = attachedServers
+    .filter((server) => !selectedIds.has(server.id))
+    .map((server) => ({ kind: "mcp" as const, id: server.id }));
+  return missing.length === 0 ? tools : mergeToolRefs(tools, missing);
 }
 
 function withFirstPartyTools(

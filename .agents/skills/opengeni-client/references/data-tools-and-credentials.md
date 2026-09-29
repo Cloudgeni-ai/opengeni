@@ -41,7 +41,7 @@ The normal workspace-scoped API Integration flow is deterministic control-plane 
 3. Call previewApiIntegration with the source and, when needed, the Connection.
 4. Apply the customer's policy to the compiled operation list, safety classification, warnings, and approval modes. Select only intended operations.
 5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations.
-6. Persist the returned non-secret instance and server identifiers with the workspace provisioning record, then select that server for sessions.
+6. Persist the returned non-secret instance and server identifiers with the workspace provisioning record, then select that server for sessions: omit `tools` to follow the workspace defaults, or list it explicitly as `tools: [{ kind: "mcp", id: serverId }]`. An explicit `tools` array is an exact allow-list; `[]` selects no workspace server.
 
 Preview and install are ordinary backend API calls and can be automated. Human review is required only when the customer's policy or the operation risk requires it. The immutable revision/digest fence ensures that automation cannot install a different schema from the one it evaluated.
 
@@ -52,6 +52,10 @@ An agent-focused API description is often helpful: concise descriptions, stable 
 ## MCP lifecycle
 
 A workspace MCP capability is suitable when many sessions in that workspace use the same server and authority. A session may also receive an explicit mcpServers definition with URL, allowed tools, approval policy, and write-only credential headers or a non-secret Connection reference.
+
+A server attached through a top-level createSession `mcpServers` entry is selected by that attachment, whether `tools` is omitted or explicit (including `tools: []`); there is no separate selection step. Every other MCP server (workspace capability, installed API Integration, deployment server) is reachable only when `tools` selects it or the omitted-`tools` workspace default includes it. A selected server the model never finds usually means it was not selected: check `session.effectiveToolPolicy`.
+
+Selected MCP servers are prepared lazily by default: the model discovers their tools through `tool_search`. For a small, always-needed server (for example a product's own data tools), add `eager: true` to its ref, such as `tools: [{ kind: "mcp", id: "product", eager: true }]`, so its schemas are on the first model request. `eager` is a startup choice only and grants nothing. `optional: true` makes a connect or list failure skip that server instead of failing the demanding turn.
 
 For session-specific MCP credentials, createSession stores header values encrypted and returns only metadata such as header names and credential version. Later accepted message requests can rotate those values through the supported MCP credential-update field without recreating the session. For workspace Connections, rotate or reconnect the Connection with optimistic versioning; installed Integrations continue to reference its stable ID.
 
