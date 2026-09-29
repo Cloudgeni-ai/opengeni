@@ -110,6 +110,95 @@ describe("readable timeline browser regression", () => {
     return page;
   }
 
+  for (const mode of ["pending", "started", "withdrawn"] as const) {
+    for (const width of [390, 1280]) {
+      test(`Latest question reaches ${mode} through the production conversation at ${width}px`, async () => {
+        const page = await openHarness(`question-${mode}`, width, width === 390);
+        try {
+          await page.waitForSelector("[data-og-conversation]");
+          await page.waitForSelector("[data-og-wide-table-message]");
+          if (mode === "pending") {
+            const queue = page.getByRole("button", { name: /1 queued/ });
+            if ((await queue.getAttribute("aria-expanded")) === "true") await queue.click();
+          }
+          const latest = page.locator("[data-og-jump-to-question]");
+          await latest.waitFor({ state: "visible" });
+          expect(await latest.count()).toBe(1);
+          await latest.click();
+          if (mode === "pending") {
+            await page.waitForFunction(
+              () =>
+                (document.activeElement as HTMLElement)?.dataset.queueTurnId ===
+                "newest-queued-turn",
+            );
+            expect(await page.locator("[data-og-timeline-scroller]").innerText()).not.toContain(
+              "Newest queued question",
+            );
+          } else {
+            const label = mode === "started" ? "Newest queued question" : "Previous valid question";
+            await page.waitForFunction((text) => {
+              const scroller = document.querySelector("[data-og-timeline-scroller]")!;
+              const prompt = [...scroller.querySelectorAll("[data-og-prompt]")].find((row) =>
+                row.textContent?.includes(text),
+              );
+              if (!prompt) return false;
+              const bounds = prompt.getBoundingClientRect();
+              const viewport = scroller.getBoundingClientRect();
+              return bounds.top >= viewport.top && bounds.top < viewport.bottom - 20;
+            }, label);
+            // The target must survive automatic later-page loading and row
+            // settlement, not merely cross the viewport for one animation frame.
+            await page.waitForTimeout(1000);
+            const parked = await page.evaluate((text) => {
+              const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+              const prompt = [...scroller.querySelectorAll("[data-og-prompt]")].find((row) =>
+                row.textContent?.includes(text),
+              );
+              const bounds = prompt?.getBoundingClientRect();
+              const viewport = scroller.getBoundingClientRect();
+              return {
+                visible:
+                  !!bounds && bounds.top >= viewport.top && bounds.top < viewport.bottom - 20,
+                following: scroller.dataset.ogBottomFollow,
+                top: scroller.scrollTop,
+                promptTop: bounds ? bounds.top - viewport.top : null,
+              };
+            }, label);
+            expect(parked).toMatchObject({ visible: true, following: "false" });
+            expect(
+              await page.evaluate(() => document.activeElement?.hasAttribute("data-og-prompt")),
+            ).toBe(true);
+            if (mode === "withdrawn")
+              expect(await page.locator("[data-og-timeline-scroller]").innerText()).not.toContain(
+                "Newest queued question",
+              );
+          }
+          const directory = process.env.TIMELINE_QUESTION_PREVIEW_DIR;
+          if (directory) {
+            mkdirSync(directory, { recursive: true });
+            await page.screenshot({ path: `${directory}/question-${mode}-${width}-dark.png` });
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+            await nextPaint(page);
+            await page.screenshot({ path: `${directory}/question-${mode}-${width}-light.png` });
+          }
+          if (mode === "started") {
+            const scroller = page.locator("[data-og-timeline-scroller]");
+            const beforeScroll = await scroller.evaluate((node) => node.scrollTop);
+            await scroller.hover();
+            await page.mouse.wheel(0, 250);
+            await page.waitForTimeout(300);
+            expect(await scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(
+              beforeScroll + 100,
+            );
+            expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("false");
+          }
+        } finally {
+          await page.context().close();
+        }
+      }, 30_000);
+    }
+  }
+
   test("a long answer follows normally and every progress message remains readable", async () => {
     const page = await openHarness("notes");
     try {

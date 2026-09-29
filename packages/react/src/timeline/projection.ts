@@ -1957,6 +1957,22 @@ type TurnAnchorPrescan = {
   startedTurnIds: Set<string>;
 };
 
+/** Navigation uses the same queue/start/withdrawal rules as transcript ordering. */
+export function timelineQuestionPlacement(question: SessionEvent, evidence: SessionEvent[]) {
+  const anchors = prescanTurnAnchors([question, ...evidence]);
+  const direct = anchors.directChatSequenceByTrigger.get(question.id);
+  if (direct !== undefined) return { kind: "visible" as const, sequence: direct };
+  if (anchors.cancelledBeforeStartTriggers.has(question.id)) return { kind: "withdrawn" as const };
+  const start = anchors.startSeqByTrigger.get(question.id);
+  if (start !== undefined) return { kind: "visible" as const, sequence: start };
+  if (
+    anchors.queuedTurnByTrigger.has(question.id) ||
+    anchors.explicitQueuedTriggers.has(question.id)
+  )
+    return { kind: "pending" as const };
+  return { kind: "visible" as const, sequence: question.sequence };
+}
+
 function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
   const queuedTurnByTrigger = new Map<string, string>();

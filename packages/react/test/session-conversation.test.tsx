@@ -5,8 +5,57 @@ import { conversationTimeline } from "../src/conversation-timeline";
 import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { latestQuestionClient } from "./fixtures/latest-question-client";
 
 registerDom();
+
+for (const mode of ["pending", "started", "withdrawn"] as const) {
+  test(`Latest question reaches the real ${mode} destination through SessionConversation`, async () => {
+    const { client, turn, reads } = latestQuestionClient(mode);
+    const view = await renderComponent(
+      <SessionConversation client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    try {
+      await flush(100);
+      if (mode === "pending") {
+        const queueButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.textContent?.includes("1 queued"),
+        );
+        if (queueButton?.getAttribute("aria-expanded") === "true")
+          await actRun(() => queueButton.click());
+      }
+      const latest = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
+      expect(latest).not.toBeNull();
+      await actRun(() => latest!.click());
+      await flush(120);
+      expect(reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(true);
+      if (mode === "pending") {
+        expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(turn.id);
+        expect(
+          view.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+        ).not.toBeNull();
+        expect(
+          view.container.querySelector("[data-og-timeline-scroller]")?.textContent,
+        ).not.toContain("Newest queued question");
+      } else {
+        const prompts = [...view.container.querySelectorAll("[data-og-prompt]")].map(
+          (item) => item.textContent,
+        );
+        expect(
+          prompts.some((text) =>
+            text?.includes(
+              mode === "started" ? "Newest queued question" : "Previous valid question",
+            ),
+          ),
+        ).toBe(true);
+        if (mode === "withdrawn")
+          expect(prompts.some((text) => text?.includes("Newest queued question"))).toBe(false);
+      }
+    } finally {
+      await view.unmount();
+    }
+  });
+}
 
 test("queued delivery failures remain visible and retryable; acknowledged queue items are not duplicated", () => {
   const turn = fakeTurn();

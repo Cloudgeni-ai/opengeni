@@ -1,6 +1,7 @@
 import {
   sessionEventStreamCoveredThrough,
   type SessionEvent,
+  type SessionTurn,
   type SessionStatus,
   type StreamConnectionState,
 } from "@opengeni/sdk";
@@ -11,6 +12,7 @@ import {
   buildTimeline,
   groupTimeline,
   isTimelineUserQuestion,
+  timelineQuestionPlacement,
   sessionStatusFromEvents,
 } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
@@ -31,7 +33,7 @@ export type UseSessionEventsOptions = EmbeddedSessionClientOverride & {
 export type UseSessionEventsResult = {
   /** Replayed + live events, ordered by sequence, no gaps, no duplicates. */
   events: SessionEvent[];
-  /** Projected, renderable timeline (memoized over `events`). */
+  /** Renderable timeline, including the bounded navigation witness for a distant queued prompt. */
   timeline: TimelineItem[];
   /** Latest session status observed in the event log, if any. */
   sessionStatus: SessionStatus | null;
@@ -82,9 +84,12 @@ export type UseSessionEventsResult = {
    * "Jump to latest" when the tip is not in memory (history view).
    */
   jumpToLatest: () => Promise<void>;
-  /** Resolve the newest durable user message, then load just its bounded context.
-   * Returns its sequence (or null when the session has no user message). */
-  jumpToLatestQuestion: () => Promise<number | null>;
+  /** Resolve the newest eligible durable human question. Pending prompts use the
+   * optional queue destination and return null; started prompts load their actual
+   * turn context (pass `timeline` to MessageTimeline as `items`). */
+  jumpToLatestQuestion: (options?: {
+    onQueuedQuestion?: (turn: SessionTurn) => void | Promise<void>;
+  }) => Promise<number | null>;
   /** Replace history with a bounded window containing this exact durable event. */
   jumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   loadingTarget: boolean;
@@ -155,6 +160,13 @@ export function useSessionEvents(
   navigationIdentityRef.current = { client, streamKey, enabled };
 
   const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
+  // One navigation witness, not a second history cache. Raw events stay contiguous.
+  const [questionEvidence, setQuestionEvidence] = useState<{
+    client: EmbeddedSessionClientLike;
+    streamKey: string;
+    anchor: number;
+    events: SessionEvent[];
+  } | null>(null);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
   const [newerError, setNewerError] = useState<Error | null>(null);
@@ -212,6 +224,7 @@ export function useSessionEvents(
     loadingNewerRef.current = false;
     loadingOldestRef.current = false;
     loadingTargetRef.current = false;
+    setQuestionEvidence(null);
     setLoadingTarget(false);
     setLoadingOlder(false);
     setLoadingNewer(false);
@@ -866,6 +879,7 @@ export function useSessionEvents(
       if (signal?.aborted) return false;
       // Explicit targets supersede both other targets and adjacent-page requests.
       const generation = ++navigationGenerationRef.current;
+      setQuestionEvidence(null);
       const current = () =>
         generation === navigationGenerationRef.current &&
         navigationIdentityRef.current.client === client &&
@@ -949,54 +963,184 @@ export function useSessionEvents(
     [client, workspaceId, sessionId, streamKey, enabled],
   );
 
-  const jumpToLatestQuestion = useCallback(async (): Promise<number | null> => {
-    if (!sessionId) return null;
-    const identity = navigationIdentityRef.current;
-    const generation = navigationGenerationRef.current;
-    const current = () =>
-      identity.client === navigationIdentityRef.current.client &&
-      identity.streamKey === navigationIdentityRef.current.streamKey &&
-      identity.enabled === navigationIdentityRef.current.enabled &&
-      generation === navigationGenerationRef.current;
-    let before: number | undefined;
-    while (true) {
-      let latest: SessionEvent[];
-      try {
-        latest = await client.listEvents(workspaceId, sessionId, {
-          direction: "before",
-          includeTypes: ["user.message"],
-          // Most sessions need one row. Historical worker completions also used
-          // user.message; page only this filtered index when they occupy the tail.
-          limit: before === undefined ? 1 : 64,
-          ...(before === undefined ? {} : { before }),
-          payloadMode: "full",
-          mode: "forensic",
-        });
-      } catch (reason) {
-        if (!current()) return null;
-        throw reason;
-      }
-      if (!current()) return null;
-      // Reuse canonical projection rather than guessing from text or treating
-      // a legacy childCompletion as a human question. Invalid legacy payloads
-      // intentionally remain ordinary messages, just as they do in the UI.
-      const question = [...latest]
-        .sort((a, b) => b.sequence - a.sequence)
-        .find(isTimelineUserQuestion);
-      if (question) {
-        const loaded = eventWindowRef.current.events.some((event) => event.id === question.id);
-        return loaded || (await jumpToSequence(question.sequence)) ? question.sequence : null;
-      }
-      const oldest = Math.min(...latest.map((event) => event.sequence));
+  const jumpToLatestQuestion = useCallback(
+    async (questionOptions?: {
+      onQueuedQuestion?: (turn: SessionTurn) => void | Promise<void>;
+    }): Promise<number | null> => {
       if (
-        !Number.isSafeInteger(oldest) ||
-        oldest <= 1 ||
-        (before !== undefined && oldest >= before)
+        !sessionId ||
+        navigationIdentityRef.current.client !== client ||
+        navigationIdentityRef.current.streamKey !== streamKey ||
+        navigationIdentityRef.current.enabled !== enabled
       )
         return null;
-      before = oldest;
-    }
-  }, [client, workspaceId, sessionId, jumpToSequence]);
+      const identity = navigationIdentityRef.current;
+      let generation = navigationGenerationRef.current;
+      const current = () =>
+        identity.client === navigationIdentityRef.current.client &&
+        identity.streamKey === navigationIdentityRef.current.streamKey &&
+        identity.enabled === navigationIdentityRef.current.enabled &&
+        generation === navigationGenerationRef.current;
+      let before: number | undefined;
+      while (true) {
+        let latest: SessionEvent[];
+        try {
+          latest = await client.listEvents(workspaceId, sessionId, {
+            direction: "before",
+            includeTypes: ["user.message"],
+            // Most sessions need one row. Historical worker completions also used
+            // user.message; page only this filtered index when they occupy the tail.
+            limit: before === undefined ? 1 : 64,
+            ...(before === undefined ? {} : { before }),
+            payloadMode: "full",
+            mode: "forensic",
+          });
+        } catch (reason) {
+          if (!current()) return null;
+          throw reason;
+        }
+        if (!current()) return null;
+        // Reuse canonical projection rather than guessing from text or treating
+        // a legacy childCompletion as a human question. Invalid legacy payloads
+        // intentionally remain ordinary messages, just as they do in the UI.
+        const question = [...latest]
+          .sort((a, b) => b.sequence - a.sequence)
+          .find(isTimelineUserQuestion);
+        if (question) {
+          try {
+            const queue = await client.getQueue(workspaceId, sessionId);
+            if (!current()) return null;
+            const pending = queue.items.find(
+              (turn) => turn.triggerEventId === question.id && turn.metadata.delivery !== "steer",
+            );
+            if (pending) {
+              if (!questionOptions?.onQueuedQuestion) {
+                const reason = new Error("The latest question is in the prompt queue.");
+                reason.name = "LatestQuestionQueuedError";
+                throw reason;
+              }
+              await questionOptions.onQueuedQuestion(pending);
+              if (!current()) return null;
+              // Queue refresh/focus can race a claim or withdrawal. Resolve that
+              // transition below instead of settling on a row that just vanished.
+              const refreshedQueue = await client.getQueue(workspaceId, sessionId);
+              if (!current()) return null;
+              if (
+                refreshedQueue.items.some(
+                  (turn) =>
+                    turn.triggerEventId === question.id && turn.metadata.delivery !== "steer",
+                )
+              )
+                return null;
+            }
+            const evidence: SessionEvent[] = [];
+            const payload =
+              question.payload != null && typeof question.payload === "object"
+                ? (question.payload as Record<string, unknown>)
+                : {};
+            // Explicit direct admission needs no lifecycle lookup. Older ledgers and
+            // queued admission need their durable start/withdrawal witnesses.
+            if (
+              payload.routing !== "accepted_for_execution" &&
+              payload.routing !== "accepted_for_steering" &&
+              payload.delivery !== "steer"
+            ) {
+              let lifecycleAfter = question.sequence;
+              while (true) {
+                const page = await client.listEvents(workspaceId, sessionId, {
+                  direction: "after",
+                  after: lifecycleAfter,
+                  limit: 128,
+                  mode: "forensic",
+                  payloadMode: "full",
+                  includeTypes: [
+                    "turn.queued",
+                    "turn.started",
+                    "turn.cancelled",
+                    "turn.completed",
+                    "turn.failed",
+                    "session.queue.changed",
+                    "session.control.steer_requested",
+                  ],
+                });
+                if (!current()) return null;
+                const next = Math.max(lifecycleAfter, ...page.map((event) => event.sequence));
+                if (next === lifecycleAfter) break;
+                const queued =
+                  page.find(
+                    (event) =>
+                      event.type === "turn.queued" &&
+                      ((event.payload ?? {}) as Record<string, unknown>).triggerEventId ===
+                        question.id,
+                  ) ?? evidence.find((event) => event.type === "turn.queued");
+                const turnId =
+                  queued &&
+                  (((queued.payload ?? {}) as Record<string, unknown>).turnId ?? queued.turnId);
+                evidence.push(
+                  ...page.filter((event) => {
+                    const data = (event.payload ?? {}) as Record<string, unknown>;
+                    return (
+                      data.triggerEventId === question.id ||
+                      (turnId != null &&
+                        (event.turnId === turnId ||
+                          data.turnId === turnId ||
+                          data.targetTurnId === turnId))
+                    );
+                  }),
+                );
+                lifecycleAfter = next;
+                const placed = timelineQuestionPlacement(question, evidence);
+                if (placed.kind === "visible" && placed.sequence !== question.sequence) break;
+              }
+            }
+            const placement = timelineQuestionPlacement(question, evidence);
+            if (placement.kind === "withdrawn") {
+              before = question.sequence;
+              continue;
+            }
+            if (placement.kind === "pending")
+              throw new Error("The latest question is changing queue state. Try again.");
+            const witness = [
+              question,
+              ...evidence.filter(
+                (event) =>
+                  event.type === "turn.queued" &&
+                  ((event.payload ?? {}) as Record<string, unknown>).triggerEventId === question.id,
+              ),
+            ];
+            const loaded = eventWindowRef.current.events.some(
+              (event) => event.sequence === placement.sequence,
+            );
+            if (!loaded) {
+              const navigation = jumpToSequence(placement.sequence);
+              generation = navigationGenerationRef.current;
+              if (!(await navigation) || !current()) return null;
+            }
+            if (!current()) return null;
+            setQuestionEvidence({
+              client,
+              streamKey,
+              anchor: placement.sequence,
+              events: witness,
+            });
+            return question.sequence;
+          } catch (reason) {
+            if (!current()) return null;
+            throw reason;
+          }
+        }
+        const oldest = Math.min(...latest.map((event) => event.sequence));
+        if (
+          !Number.isSafeInteger(oldest) ||
+          oldest <= 1 ||
+          (before !== undefined && oldest >= before)
+        )
+          return null;
+        before = oldest;
+      }
+    },
+    [client, workspaceId, sessionId, streamKey, enabled, jumpToSequence],
+  );
 
   const jumpToLatest = useCallback(async (): Promise<void> => {
     // An old host retry closure must not clear a replacement session's error
@@ -1053,13 +1197,18 @@ export function useSessionEvents(
 
   const identityMatches = stateStreamKey === streamKey;
   const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
-  const timeline = useMemo(
-    () =>
-      buildTimeline(visibleEvents, {
-        partialStart: hasOlder || eventWindow.truncated || after > 0,
-      }),
-    [visibleEvents, hasOlder, eventWindow.truncated, after],
-  );
+  const timeline = useMemo(() => {
+    const witness =
+      questionEvidence?.client === client &&
+      questionEvidence.streamKey === streamKey &&
+      visibleEvents.some((event) => event.sequence === questionEvidence.anchor)
+        ? questionEvidence.events
+        : EMPTY_EVENTS;
+    const ids = new Set(visibleEvents.map((event) => event.id));
+    return buildTimeline([...visibleEvents, ...witness.filter((event) => !ids.has(event.id))], {
+      partialStart: hasOlder || eventWindow.truncated || after > 0,
+    });
+  }, [visibleEvents, hasOlder, eventWindow.truncated, after, questionEvidence, client, streamKey]);
 
   return {
     events: visibleEvents,

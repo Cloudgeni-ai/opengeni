@@ -669,7 +669,7 @@ export function MessageTimeline({
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
   const [questionTarget, setQuestionTarget] = useState<number | null>(null);
   const [questionPending, setQuestionPending] = useState(false);
-  const [questionError, setQuestionError] = useState(false);
+  const [questionError, setQuestionError] = useState<string | null>(null);
   const questionRequestRef = useRef(0);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
@@ -1246,6 +1246,12 @@ export function MessageTimeline({
     wantPinRef.current = false;
     disclosureKeepsUnpinnedRef.current = false;
     writeScrollTop(node, Math.max(0, top - QUESTION_NAV_MARGIN_PX));
+    // Hand keyboard/accessibility focus to the actual destination. This also
+    // gives native scroll anchoring the new question rather than an old work
+    // row when the bounded context subsequently gains a later history page.
+    node
+      .querySelector<HTMLElement>(`[data-og-group-key="${cssEscapeAttribute(key)}"]`)
+      ?.focus({ preventScroll: true });
     syncScrollBaseline(node);
     scheduleQuestionNav();
   };
@@ -1258,12 +1264,17 @@ export function MessageTimeline({
     releasePinFromReader();
     wantPinRef.current = false;
     setQuestionPending(true);
-    setQuestionError(false);
+    setQuestionError(null);
     try {
       const sequence = await onJumpToLatestQuestion();
       if (request === questionRequestRef.current) setQuestionTarget(sequence);
-    } catch {
-      if (request === questionRequestRef.current) setQuestionError(true);
+    } catch (reason) {
+      if (request === questionRequestRef.current)
+        setQuestionError(
+          reason instanceof Error && reason.name === "LatestQuestionQueuedError"
+            ? "The latest question is in the prompt queue."
+            : "Could not load the latest question. Try again.",
+        );
     } finally {
       if (request === questionRequestRef.current) setQuestionPending(false);
     }
@@ -2398,16 +2409,17 @@ export function MessageTimeline({
                               onClick={() => void jumpToLatestQuestion()}
                               disabled={questionPending}
                               aria-busy={questionPending}
-                              title={
-                                questionError
-                                  ? "Could not load the latest question. Try again."
-                                  : undefined
-                              }
+                              title={questionError ?? undefined}
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
                             >
                               <ArrowUpIcon aria-hidden className="size-3.5" />
                               Latest question
                             </button>
+                            {questionError && (
+                              <span role="status" className="px-2 text-og-xs">
+                                {questionError}
+                              </span>
+                            )}
                           </div>
                         </motion.div>
                       ) : null}
@@ -2761,6 +2773,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         data-og-prompt={
           group.kind === "item" && group.item.kind === "user-message" ? "" : undefined
         }
+        tabIndex={group.kind === "item" && group.item.kind === "user-message" ? -1 : undefined}
       >
         <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
           <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>

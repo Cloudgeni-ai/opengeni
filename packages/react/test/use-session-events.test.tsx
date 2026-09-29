@@ -1,7 +1,12 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { GetSessionOptions, SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
+import type {
+  GetSessionOptions,
+  SessionEvent,
+  SessionEventPayloadMode,
+  SessionQueueSnapshot,
+} from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
-import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
   SESSION_EVENT_BROWSER_MAX_BYTES,
   SESSION_EVENT_BROWSER_MAX_COUNT,
@@ -26,7 +31,10 @@ const SESSION_HISTORY_PAGE_SIZE = 1000;
 function event(
   sequence: number,
   type: SessionEvent["type"] = "user.message",
-  payload: unknown = { text: `m-${sequence}` },
+  payload: unknown = {
+    text: `m-${sequence}`,
+    routing: "accepted_for_execution",
+  },
 ): SessionEvent {
   const coalescedUntil = Number(
     payload && typeof payload === "object"
@@ -78,10 +86,12 @@ function scriptedClient(input: {
   store: SessionEvent[];
   streamEvents?: SessionEvent[];
   listEvents?: (options: ListOptions) => Promise<SessionEvent[]>;
+  getQueue?: () => Promise<SessionQueueSnapshot>;
 }) {
   const listCalls: ListOptions[] = [];
   const streamCalls: number[] = [];
   const client = fakeClient({
+    getQueue: input.getQueue ?? (async () => ({ items: [] }) as unknown as SessionQueueSnapshot),
     listEvents: async (_workspaceId, _sessionId, options = {}) => {
       listCalls.push(options);
       return input.listEvents ? await input.listEvents(options) : listPage(input.store, options);
@@ -229,8 +239,10 @@ describe("useSessionEvents", () => {
     }
   });
 
-  test("Latest question does not confuse queued admission routing with machine provenance", async () => {
+  test("Latest question directs pending human input to the queue, not an invisible sequence", async () => {
+    const turn = fakeTurn({ triggerEventId: "evt-2" });
     const { client } = scriptedClient({
+      getQueue: async () => ({ items: [turn] }) as unknown as SessionQueueSnapshot,
       store: [
         event(1),
         event(2, "user.message", {
@@ -245,7 +257,220 @@ describe("useSessionEvents", () => {
     );
     try {
       await flush(20);
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+      expect(
+        hook.result.current.timeline.filter((item) => item.kind === "user-message"),
+      ).toHaveLength(1);
+      await actRun(async () => {
+        await expect(hook.result.current.jumpToLatestQuestion()).rejects.toMatchObject({
+          name: "LatestQuestionQueuedError",
+        });
+      });
+      const focused: string[] = [];
+      await actRun(async () =>
+        expect(
+          await hook.result.current.jumpToLatestQuestion({
+            onQueuedQuestion: (queued) => {
+              focused.push(queued.id);
+            },
+          }),
+        ).toBeNull(),
+      );
+      expect(focused).toEqual([turn.id]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a queue claim during host focus resolves the actual started question rather than a vanished queue row", async () => {
+    const turn = fakeTurn({ triggerEventId: "evt-2" });
+    let pending = true;
+    const store = [
+      event(1),
+      event(2, "user.message", { text: "Claimed during focus", routing: "queued_for_execution" }),
+      {
+        ...event(3, "turn.queued", { triggerEventId: turn.triggerEventId, turnId: turn.id }),
+        turnId: turn.id,
+      },
+    ];
+    const { client } = scriptedClient({
+      store,
+      getQueue: async () => ({ items: pending ? [turn] : [] }) as unknown as SessionQueueSnapshot,
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () =>
+        expect(
+          await hook.result.current.jumpToLatestQuestion({
+            onQueuedQuestion: () => {
+              pending = false;
+              store.push({
+                ...event(4, "turn.started", { triggerEventId: turn.triggerEventId }),
+                turnId: turn.id,
+              });
+            },
+          }),
+        ).toBe(2),
+      );
+      await flush(20);
+      expect(
+        hook.result.current.timeline.some(
+          (item) => item.kind === "user-message" && item.id === "evt-2",
+        ),
+      ).toBe(true);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("unstarted admission missing from the queue is retryable, never replaced with an older human question", async () => {
+    const { client } = scriptedClient({
+      store: [
+        event(1),
+        event(2, "user.message", { text: "Admission in flight", routing: "queued_for_execution" }),
+      ],
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => {
+        await expect(hook.result.current.jumpToLatestQuestion()).rejects.toThrow(
+          "changing queue state",
+        );
+      });
+      expect(
+        hook.result.current.timeline
+          .filter((item) => item.kind === "user-message")
+          .map((item) => item.id),
+      ).toEqual(["evt-1"]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  for (const routing of [undefined, "queued_for_execution"]) {
+    test(`Latest question restores a distant started queued prompt at its turn boundary (${routing ?? "legacy"})`, async () => {
+      const question = event(2, "user.message", {
+        text: "Started queued request",
+        ...(routing ? { routing } : {}),
+      });
+      const turnId = "queued-turn";
+      const store = [
+        event(1),
+        question,
+        { ...event(3, "turn.queued", { triggerEventId: question.id, turnId }), turnId },
+        ...Array.from({ length: 1197 }, (_, index) =>
+          event(index + 4, "agent.reasoning.delta", { text: "unrelated", itemId: "old" }),
+        ),
+        { ...event(1201, "turn.started", { triggerEventId: question.id }), turnId },
+        {
+          ...event(1202, "agent.message.completed", { text: "Response", messageId: "answer" }),
+          turnId,
+        },
+      ];
+      const { client, listCalls } = scriptedClient({ store });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        await actRun(async () => {
+          await hook.result.current.jumpToSequence(1);
+        });
+        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+        await flush(20);
+        expect(hook.result.current.events.some((item) => item.id === question.id)).toBe(false);
+        expect(hook.result.current.events.some((item) => item.sequence === 1201)).toBe(true);
+        expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
+        const projected = hook.result.current.timeline.find(
+          (item) => item.kind === "user-message" && item.id === question.id,
+        );
+        expect(projected).toBeDefined();
+        expect(projected?.sourceEvents?.some((source) => source.sequence === 2)).toBe(true);
+        expect(listCalls.some((call) => call.includeTypes?.includes("turn.started"))).toBe(true);
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  for (const withdrawal of ["delete", "edit", "cancel"] as const) {
+    test(`Latest question skips ${withdrawal} before start and finds the previous durable question outside loaded history`, async () => {
+      const turnId = "withdrawn-turn";
+      const store = [
+        event(1),
+        event(2),
+        event(3, "user.message", { text: "Withdrawn", routing: "queued_for_execution" }),
+        { ...event(4, "turn.queued", { triggerEventId: "evt-3", turnId }), turnId },
+        {
+          ...event(5, withdrawal === "cancel" ? "turn.cancelled" : "session.queue.changed", {
+            operation: withdrawal,
+            turnId,
+          }),
+          turnId,
+        },
+        ...Array.from({ length: 2000 }, (_, index) =>
+          event(index + 6, "agent.reasoning.delta", { text: "thinking", itemId: "old" }),
+        ),
+      ];
+      const { client } = scriptedClient({ store });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        expect(hook.result.current.events.some((item) => item.sequence === 2)).toBe(false);
+        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+        await flush(20);
+        expect(
+          hook.result.current.timeline.some(
+            (item) => item.kind === "user-message" && item.id === "evt-2",
+          ),
+        ).toBe(true);
+        expect(
+          hook.result.current.timeline.some(
+            (item) => item.kind === "user-message" && item.id === "evt-3",
+          ),
+        ).toBe(false);
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  test("a delayed queue lookup cannot focus a prompt after explicit history navigation", async () => {
+    let release!: (snapshot: SessionQueueSnapshot) => void;
+    const pending = new Promise<SessionQueueSnapshot>((resolve) => {
+      release = resolve;
+    });
+    const { client } = scriptedClient({ store: [event(1), event(2)], getQueue: () => pending });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      let focused = false;
+      const lookup = hook.result.current.jumpToLatestQuestion({
+        onQueuedQuestion: () => {
+          focused = true;
+        },
+      });
+      await flush(10);
+      await actRun(async () => {
+        await hook.result.current.jumpToSequence(1);
+      });
+      release({ items: [fakeTurn({ triggerEventId: "evt-2" })] } as SessionQueueSnapshot);
+      await actRun(async () => expect(await lookup).toBeNull());
+      expect(focused).toBe(false);
     } finally {
       await hook.unmount();
     }
@@ -499,9 +724,11 @@ describe("useSessionEvents", () => {
     const controller = new AbortController();
     controller.abort();
     await actRun(async () =>
-      expect(await hook.result.current.jumpToSequence(50, { signal: controller.signal })).toBe(
-        false,
-      ),
+      expect(
+        await hook.result.current.jumpToSequence(50, {
+          signal: controller.signal,
+        }),
+      ).toBe(false),
     );
     await flush(10);
     expect(listCalls.length).toBe(reads);

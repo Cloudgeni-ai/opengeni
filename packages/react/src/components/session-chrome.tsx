@@ -97,6 +97,8 @@ export type SessionChromeProps = {
   /** Authoritative execution status; omitted by older embedding hosts. */
   sessionStatus?: SessionStatus | undefined;
   queue: UseTurnQueueResult;
+  /** Open and focus an existing queued prompt without changing its delivery. */
+  queueFocusTarget?: { turnId: string; requestId: number } | undefined;
   /** Needed for queue edit → composer checkout. Omit with `readOnly`. */
   composer?: ComposerState | undefined;
   /** Focus the composer after a successful queue checkout has applied its draft.
@@ -433,6 +435,7 @@ function toneClass(tone: SessionChromeSignalTone, selected: boolean): string {
 export function SessionChrome({
   sessionStatus,
   queue,
+  queueFocusTarget,
   composer,
   onComposerFocus,
   goal,
@@ -496,6 +499,40 @@ export function SessionChrome({
     }),
   );
   const active = activeControlled !== undefined ? activeControlled : activeUncontrolled;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const openedQueueTargetRef = useRef<string | null>(null);
+  const focusedQueueTargetRef = useRef<string | null>(null);
+  const queueTargetKey = queueFocusTarget
+    ? `${queueFocusTarget.turnId}:${queueFocusTarget.requestId}`
+    : null;
+  useEffect(() => {
+    if (!queueTargetKey || openedQueueTargetRef.current === queueTargetKey) return;
+    openedQueueTargetRef.current = queueTargetKey;
+    if (activeControlled === undefined) setActiveUncontrolled("queue");
+    onActiveChange?.("queue");
+  }, [queueTargetKey, activeControlled, onActiveChange]);
+  useEffect(() => {
+    if (!queueFocusTarget || active !== "queue" || focusedQueueTargetRef.current === queueTargetKey)
+      return;
+    const root = rootRef.current;
+    if (!root) return;
+    const focus = () => {
+      const row = Array.from(root.querySelectorAll<HTMLElement>("[data-queue-turn-id]")).find(
+        (element) => element.dataset.queueTurnId === queueFocusTarget.turnId,
+      );
+      if (!row) return false;
+      focusedQueueTargetRef.current = queueTargetKey;
+      row.focus({ preventScroll: true });
+      row.scrollIntoView?.({ block: "nearest" });
+      return true;
+    };
+    if (focus()) return;
+    const observer = new MutationObserver(() => {
+      if (focus()) observer.disconnect();
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [queueFocusTarget, queueTargetKey, active, queuedTurns]);
   const activityOpen =
     activityRequested || Boolean(active && ["incoming", "agents", "commands"].includes(active));
   const activityVisibleRef = useRef(activityOpen);
@@ -869,6 +906,7 @@ export function SessionChrome({
       <div
         className={cn("og-session-chrome og-root w-full", className)}
         data-testid="session-chrome"
+        ref={rootRef}
         data-og-session-chrome=""
         data-og-session-chrome-open={open ? "true" : "false"}
       >
@@ -1362,6 +1400,7 @@ function QueuePanel({
           <li
             key={turn.id}
             data-queue-turn-id={turn.id}
+            tabIndex={-1}
             className="group flex flex-col gap-1 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
           >
             <div className="flex items-start gap-1.5">
