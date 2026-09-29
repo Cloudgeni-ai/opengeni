@@ -259,7 +259,7 @@ export function SessionVariableSetPicker(props: {
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="outline"
             disabled={saving}
             onClick={() => setDraftRows((rows) => rows.map((row) => ({ ...row, enabled: false })))}
           >
@@ -281,7 +281,7 @@ export function SessionVariableSetPicker(props: {
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="outline"
             disabled={variableSets.loading}
             onClick={() => void variableSets.refresh()}
           >
@@ -319,7 +319,7 @@ export function SessionVariableSetPicker(props: {
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="outline"
             disabled={saving}
             onClick={() => void refreshCommittedSession()}
           >

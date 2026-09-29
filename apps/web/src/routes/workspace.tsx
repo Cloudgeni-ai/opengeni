@@ -475,7 +475,7 @@ export function WorkspaceShellRouteContent({
                   ) : null}
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant="outline"
                     disabled={slackAccessBusy}
                     onClick={() => void cancelSlackAccess()}
                   >
@@ -489,7 +489,7 @@ export function WorkspaceShellRouteContent({
               title="Slack link unavailable"
               description={slackAccessError ?? terminalGuidance}
               action={
-                <Button asChild type="button" variant="secondary">
+                <Button asChild type="button" variant="outline">
                   <Link to="/" onClick={context.clearSlackLinkContinuation}>
                     Open default workspace
                   </Link>

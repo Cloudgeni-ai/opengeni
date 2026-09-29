@@ -396,7 +396,6 @@ export function SessionInspector(props: {
                   <Button
                     type="button"
                     size="sm"
-                    variant="secondary"
                     disabled={
                       !selectedChanged ||
                       sessionHasVariableSetBlockingWork(props.session) ||
@@ -435,7 +434,7 @@ export function SessionInspector(props: {
                     <Button
                       type="button"
                       size="sm"
-                      variant="secondary"
+                      variant="outline"
                       disabled={savingVariableSets || restarting}
                       onClick={() => void restartWithSetup()}
                     >

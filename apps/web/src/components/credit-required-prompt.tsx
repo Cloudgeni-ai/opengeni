@@ -98,8 +98,10 @@ export function CreditRequiredPromptView({
         {canBuyCredits && stripeEnabled ? (
           <div className="grid gap-4">
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
+            {/* The footer's Connect a model is this dialog's one primary. */}
             <Button
               type="button"
+              variant="outline"
               disabled={busy || !validTopupAmount(topupAmount)}
               onClick={() => void buyCredits()}
               {...analyticsAction("buy_credits")}
@@ -118,7 +120,7 @@ export function CreditRequiredPromptView({
           </p>
         ) : null}
         <DialogFooter>
-          <Button asChild type="button" variant="secondary">
+          <Button asChild type="button">
             <Link
               to="/workspaces/$workspaceId/settings"
               params={{ workspaceId }}
@@ -180,7 +182,7 @@ export function EmptyCreditsNotice({
       No credits are available for this model. Buy some or connect a model to continue.
       <div className="mt-2 flex flex-wrap gap-2">
         {canBuyCredits && stripeEnabled ? (
-          <Button asChild type="button" size="sm">
+          <Button asChild type="button" size="sm" variant="outline">
             <Link
               to="/workspaces/$workspaceId/organization"
               params={{ workspaceId }}
@@ -192,7 +194,7 @@ export function EmptyCreditsNotice({
             </Link>
           </Button>
         ) : null}
-        <Button asChild type="button" size="sm" variant="secondary">
+        <Button asChild type="button" size="sm">
           <Link
             to="/workspaces/$workspaceId/settings"
             params={{ workspaceId }}

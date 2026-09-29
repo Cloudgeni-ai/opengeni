@@ -377,7 +377,7 @@ export function InstructionsTab({
                     ) : null}
                     <Button
                       type="button"
-                      variant="outline"
+                      variant={configured ? "outline" : "default"}
                       size="sm"
                       onClick={onEdit}
                       disabled={loading || Boolean(error && !content)}

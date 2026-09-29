@@ -313,6 +313,7 @@ export function RigDetailRoute({
             <>
               {active ? (
                 <Button
+                  variant="outline"
                   type="button"
                   size="sm"
                   onClick={() => openRig({ view: "edit-setup" })}

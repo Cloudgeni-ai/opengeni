@@ -305,7 +305,7 @@ function AtlassianSourceDialogBody({
       </div>
 
       <DialogFooter>
-        <Button variant="secondary" onClick={() => onClose()}>
+        <Button variant="outline" onClick={() => onClose()}>
           Cancel
         </Button>
         <Button

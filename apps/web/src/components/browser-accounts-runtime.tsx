@@ -379,7 +379,7 @@ export function BrowserAccountsLoadingGate({ children }: { children?: ReactNode 
         action={
           <Button
             type="button"
-            variant="secondary"
+            variant="outline"
             onClick={() => void accounts.refresh().catch(() => undefined)}
           >
             Try again

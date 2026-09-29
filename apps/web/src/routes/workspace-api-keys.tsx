@@ -511,7 +511,6 @@ function KeyPage({
     <Button
       type="button"
       size="sm"
-      variant="outline"
       onClick={() => onReplace(apiKey)}
       className="rounded-[10px] pointer-coarse:h-11"
     >

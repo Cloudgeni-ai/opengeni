@@ -361,7 +361,7 @@ function ModelsList({
         description="Subscriptions and API keys that pay for models here."
         action={
           canManageConnections && !empty ? (
-            <RowButton onClick={onConnect}>
+            <RowButton variant="default" onClick={onConnect}>
               <PlusIcon aria-hidden="true" />
               Connect account
             </RowButton>
@@ -380,7 +380,7 @@ function ModelsList({
             }
             action={
               canManageConnections ? (
-                <RowButton onClick={onConnect}>
+                <RowButton variant="default" onClick={onConnect}>
                   <PlusIcon aria-hidden="true" />
                   Connect account
                 </RowButton>

@@ -101,7 +101,6 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
           </p>
           <Button
             className="mt-3 min-h-11"
-            variant="secondary"
             disabled={props.busy}
             onClick={() => {
               setPassword("");

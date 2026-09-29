@@ -473,8 +473,10 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         aria-label={messages.label}
         className={cn(
           "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          // With no usable model the pill is the one thing that unblocks the
+          // composer, so it takes the primary wash.
           needsModel
-            ? "border-og-border bg-og-surface-2 text-og-fg hover:bg-og-surface-3"
+            ? "border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover"
             : "border-transparent text-og-fg-muted hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg",
           props.className,
         )}

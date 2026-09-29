@@ -673,7 +673,7 @@ function EntryPageContent({
                   tone="waiting"
                   title="Waiting for review"
                   action={
-                    <Button type="button" size="sm" variant="outline" onClick={onOpenReview}>
+                    <Button type="button" size="sm" onClick={onOpenReview}>
                       Open Review
                     </Button>
                   }
@@ -693,7 +693,6 @@ function EntryPageContent({
                       <Button
                         type="button"
                         size="sm"
-                        variant="outline"
                         disabled={busy}
                         onClick={() =>
                           void restore(
@@ -899,7 +898,7 @@ function CollectionMembers({
       title="In this collection"
       action={
         canAdd ? (
-          <Button type="button" variant="outline" size="sm" onClick={onAdd}>
+          <Button type="button" size="sm" onClick={onAdd}>
             <PlusIcon aria-hidden="true" />
             Add knowledge
           </Button>

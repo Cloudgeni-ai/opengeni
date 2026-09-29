@@ -397,7 +397,7 @@ export function GoogleDriveKnowledgeSourceDialog({
                 <div className="border-t border-border p-2 text-center">
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant="outline"
                     size="sm"
                     disabled={browseBusy}
                     onClick={() =>
@@ -430,7 +430,7 @@ export function GoogleDriveKnowledgeSourceDialog({
             />
             <Button
               type="button"
-              variant="secondary"
+              variant="outline"
               size="sm"
               disabled={!folderIdDraft.trim() || browseBusy}
               onClick={() => void addFolderId()}
@@ -511,7 +511,7 @@ export function GoogleDriveKnowledgeSourceDialog({
         </div>
 
         <DialogFooter>
-          <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>
+          <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
             Cancel
           </Button>
           <Button

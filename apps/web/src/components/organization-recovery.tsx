@@ -555,6 +555,7 @@ export function OrganizationRecoverySection(props: {
             <div className="flex min-w-0 flex-wrap gap-2">
               {overview.capabilities.approve ? (
                 <Button
+                  variant={overview.capabilities.execute ? "outline" : "default"}
                   type="button"
                   size="sm"
                   className="pointer-coarse:h-11"

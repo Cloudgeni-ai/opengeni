@@ -1064,7 +1064,7 @@ function BrowserLifecyclePanel(props: {
           <button
             type="button"
             onClick={props.onResume}
-            className="mt-4 inline-flex h-8 items-center rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2"
+            className="mt-4 inline-flex h-8 items-center rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover"
           >
             Open browser
           </button>
@@ -1206,7 +1206,7 @@ function BrowserUnselectedPanel(props: {
           type="button"
           disabled={props.creating}
           onClick={props.onCreate}
-          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <PlusIcon className="size-3.5" />
           {props.creating ? "Opening…" : "New browser"}
@@ -1677,7 +1677,7 @@ function BrowserProfileMenu(props: {
                 <button
                   type="submit"
                   disabled={!name.trim() || props.saving}
-                  className="inline-flex h-8 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-40"
+                  className="inline-flex h-8 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
                 >
                   {props.saving ? (
                     <LoaderCircleIcon className="size-3.5 animate-spin" />

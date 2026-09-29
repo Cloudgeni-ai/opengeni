@@ -315,7 +315,7 @@ function SuperGrokAccountDetail({
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
+                    variant="default"
                     onClick={places.openConnect}
                     className="rounded-[10px] pointer-coarse:h-11"
                   >

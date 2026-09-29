@@ -51,7 +51,6 @@ export function ScheduledTaskAccessNotices(props: {
   const refreshButton = canRefreshAccess ? (
     <Button
       type="button"
-      variant="secondary"
       size="xs"
       disabled={props.busy}
       onClick={props.onRefreshAccess}

@@ -46,7 +46,7 @@ export function RouteErrorPanel({ error, reload = reloadDocument }: RouteErrorPa
           <Button type="button" onClick={reload}>
             {updated ? "Reload to update" : "Reload page"}
           </Button>
-          <Button asChild variant="secondary">
+          <Button asChild variant="outline">
             <a href="/">Go home</a>
           </Button>
         </div>
@@ -74,7 +74,7 @@ export function NotFoundPanel() {
       title="Page not found"
       description="This page doesn't exist or has moved. Go back to your workspace to continue."
       action={
-        <Button asChild variant="secondary">
+        <Button asChild variant="outline">
           <Link to="/">Go home</Link>
         </Button>
       }

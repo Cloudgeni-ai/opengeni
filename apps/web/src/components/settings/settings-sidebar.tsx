@@ -265,7 +265,7 @@ export function SettingsShell({
         <SheetTrigger asChild>
           <Button
             type="button"
-            variant="secondary"
+            variant="outline"
             size="sm"
             className="shrink-0 pointer-coarse:h-11"
             aria-label={`Open ${label.toLowerCase()} menu`}

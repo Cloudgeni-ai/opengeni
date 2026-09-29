@@ -157,7 +157,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
 
   const openCreate = () => setView("new-key");
   const createButton = (
-    <RowButton onClick={openCreate}>
+    <RowButton variant="default" onClick={openCreate}>
       <PlusIcon aria-hidden="true" />
       Create API key
     </RowButton>

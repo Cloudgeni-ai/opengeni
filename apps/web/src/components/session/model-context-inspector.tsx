@@ -214,7 +214,7 @@ export function ModelContextInspectorPane(props: {
         {pending ? (
           <Button
             size="xs"
-            variant="secondary"
+            variant="outline"
             className="h-auto whitespace-normal"
             onClick={() => {
               currentCapture.current = pending.snapshot
@@ -331,7 +331,7 @@ export function ModelContextInspectorPane(props: {
                   </h4>
                   <span className="text-xs text-fg-subtle">{tokenLabel(selectedRow.tokens)}</span>
                 </div>
-                <Button size="xs" variant="secondary" onClick={() => setRawItem(!rawItem)}>
+                <Button size="xs" variant="outline" onClick={() => setRawItem(!rawItem)}>
                   {rawItem ? "Read content" : "View item JSON"}
                 </Button>
                 <ContextTextReader

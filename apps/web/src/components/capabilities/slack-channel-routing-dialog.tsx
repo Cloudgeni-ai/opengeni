@@ -293,7 +293,7 @@ function SlackChannelRoutingDialogBody({
       </div>
 
       <DialogFooter>
-        <Button type="button" variant="secondary" onClick={onClose}>
+        <Button type="button" variant="outline" onClick={onClose}>
           Cancel
         </Button>
         <Button

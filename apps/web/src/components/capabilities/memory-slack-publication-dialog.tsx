@@ -473,6 +473,7 @@ function PublicationRow({
             {publication.state === "review_pending" ? (
               <>
                 <Button
+                  variant="outline"
                   type="button"
                   size="sm"
                   disabled={acting}
@@ -493,6 +494,7 @@ function PublicationRow({
             ) : null}
             {publication.state === "failed" ? (
               <Button
+                variant="outline"
                 type="button"
                 size="sm"
                 disabled={acting}

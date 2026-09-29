@@ -112,7 +112,7 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
                 model.notice.action ? (
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant="outline"
                     size="sm"
                     onClick={model.notice.action.onClick}
                     disabled={model.notice.action.disabled}
@@ -147,7 +147,7 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
             {model.presentation.routing.action ? (
               <Button
                 type="button"
-                variant="secondary"
+                variant="outline"
                 size="sm"
                 disabled={model.presentation.routing.action.disabled}
                 onClick={model.presentation.routing.action.onClick}
@@ -448,13 +448,17 @@ function OptionRow({ option }: { option: IntegrationOption }) {
           className={cn(
             "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
-            option.checked ? "border-primary-border bg-primary" : "border-transparent bg-switch-track",
+            option.checked
+              ? "border-primary-border bg-primary"
+              : "border-transparent bg-switch-track",
           )}
         >
           <span
             className={cn(
               "inline-block size-3.5 rounded-full shadow-sm transition-transform",
-              option.checked ? "translate-x-4 bg-primary-foreground" : "translate-x-0.5 bg-switch-thumb",
+              option.checked
+                ? "translate-x-4 bg-primary-foreground"
+                : "translate-x-0.5 bg-switch-thumb",
             )}
           />
         </button>
@@ -541,7 +545,7 @@ function IntegrationFooterView({
         <>
           <Button
             type="button"
-            variant={footer.kind === "repair" ? "default" : "secondary"}
+            variant={footer.kind === "repair" ? "default" : "outline"}
             className="flex-1"
             disabled={footer.reconnectDisabled || footer.busy}
             aria-describedby={describedBy(footer.disclosureId)}

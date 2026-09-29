@@ -253,6 +253,7 @@ export function OrganizationBillingPage({
                         />
                       </div>
                       <RowButton
+                        variant="default"
                         {...analyticsAction("buy_credits")}
                         disabled={visibleBusy || !validTopupAmount(topupAmount)}
                         onClick={() => void startCheckout(Number(topupAmount))}

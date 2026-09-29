@@ -69,7 +69,7 @@ export default function SessionRouteAuxiliary(
         props.loadError instanceof Error ? props.loadError.message : String(props.loadError)
       }
       action={
-        <Button asChild type="button" variant="secondary">
+        <Button asChild type="button" variant="outline">
           <a href={workspaceSessionsPath(props.workspaceId)}>Back to sessions</a>
         </Button>
       }
@@ -787,7 +787,8 @@ export function SessionTenancyControl({
             {canForkPrivately ? (
               <Button
                 type="button"
-                variant={confirmation.visibility === "private" ? "default" : "secondary"}
+                variant={confirmation.visibility === "private" ? "secondary" : "outline"}
+                className="aria-checked:text-fg"
                 role="radio"
                 aria-checked={confirmation.visibility === "private"}
                 onClick={() => setConfirmation({ kind: "fork", visibility: "private" })}
@@ -797,7 +798,8 @@ export function SessionTenancyControl({
             ) : null}
             <Button
               type="button"
-              variant={confirmation.visibility === "workspace" ? "default" : "secondary"}
+              variant={confirmation.visibility === "workspace" ? "secondary" : "outline"}
+              className="aria-checked:text-fg"
               role="radio"
               aria-checked={confirmation.visibility === "workspace"}
               onClick={() => setConfirmation({ kind: "fork", visibility: "workspace" })}

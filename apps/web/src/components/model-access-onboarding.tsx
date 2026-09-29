@@ -400,7 +400,7 @@ export function ModelAccessOnboardingPanel({
       <p className="rounded-md bg-bg px-4 py-4 text-center font-mono text-2xl tracking-[0.18em] select-all">
         {pending.userCode}
       </p>
-      <Button asChild type="button" variant="secondary">
+      <Button asChild type="button">
         <a href={pending.verificationUri} target="_blank" rel="noreferrer">
           Open authorization <ArrowUpRightIcon className="size-4" />
         </a>
@@ -494,7 +494,7 @@ export function ModelAccessOnboardingPanel({
       </div>
       <Button
         type="button"
-        variant="secondary"
+        variant="outline"
         disabled={busy}
         onClick={() => void retryConnectedModelSelection()}
       >
@@ -529,7 +529,7 @@ export function ModelAccessOnboardingPanel({
         />
         <Button
           type="button"
-          variant={secondaryCredits ? "secondary" : "default"}
+          variant={secondaryCredits ? "outline" : "default"}
           className="h-10 w-full"
           disabled={!client || busy || !!pending || !validAmount}
           onClick={() => void buyCredits()}

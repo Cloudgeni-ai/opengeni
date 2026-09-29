@@ -664,13 +664,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
               {command}
             </pre>
           </div>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="w-full"
-            onClick={copyCommand}
-          >
+          <Button type="button" size="sm" className="w-full" onClick={copyCommand}>
             {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
             {copied ? "Copied" : "Copy connect command"}
           </Button>

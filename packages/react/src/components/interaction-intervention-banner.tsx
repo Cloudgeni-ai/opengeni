@@ -50,7 +50,7 @@ export function InteractionInterventionBanner({
           type="button"
           onClick={() => onOpen(intervention)}
           disabled={mutating}
-          className="h-7 shrink-0 rounded-og-sm border border-og-border bg-og-surface-1 px-2.5 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:opacity-50"
+          className="h-7 shrink-0 rounded-og-sm border border-og-primary-border bg-og-primary px-2.5 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover disabled:opacity-50"
         >
           Open
         </button>
@@ -59,7 +59,7 @@ export function InteractionInterventionBanner({
           type="button"
           onClick={() => onResolve(intervention, "completed")}
           disabled={mutating}
-          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-40"
+          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
         >
           {mutating ? (
             <LoaderCircleIcon className="size-3 animate-spin" />

@@ -50,11 +50,7 @@ export function CrossSlotDeepLinkRecovery(props: { path: string; fallback: React
         title="Destination unavailable"
         description="Opengeni couldn't safely verify this link across your browser accounts. No workspace details were disclosed."
         action={
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => setAttempt((value) => value + 1)}
-          >
+          <Button type="button" variant="outline" onClick={() => setAttempt((value) => value + 1)}>
             Try again
           </Button>
         }

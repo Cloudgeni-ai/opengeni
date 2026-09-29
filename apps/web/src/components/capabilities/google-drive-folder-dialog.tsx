@@ -404,7 +404,7 @@ function GoogleDriveFolderDialogBody({
               <div className="border-t border-border p-2 text-center">
                 <Button
                   type="button"
-                  variant="secondary"
+                  variant="outline"
                   size="sm"
                   disabled={browseBusy}
                   onClick={() =>
@@ -434,7 +434,7 @@ function GoogleDriveFolderDialogBody({
           />
           <Button
             type="button"
-            variant="secondary"
+            variant="outline"
             size="sm"
             disabled={!folderIdDraft.trim() || browseBusy}
             onClick={() => void addFolderId()}
@@ -520,7 +520,7 @@ function GoogleDriveFolderDialogBody({
       </div>
 
       <DialogFooter>
-        <Button type="button" variant="secondary" onClick={() => onClose()}>
+        <Button type="button" variant="outline" onClick={() => onClose()}>
           Cancel
         </Button>
         <Button

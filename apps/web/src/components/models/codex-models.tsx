@@ -731,7 +731,7 @@ function CodexAccountDetail({
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
+                    variant="default"
                     onClick={places.openConnect}
                     className="rounded-[10px] pointer-coarse:h-11"
                   >
@@ -1207,6 +1207,7 @@ export function CodexSubscriptionsCard({
       ) : canManage && codex.workspaceManaged && !codex.loading && !codex.loadError ? (
         <div>
           <RowButton
+            variant="default"
             data-analytics-action="connect_codex"
             disabled={codex.busy}
             onClick={() => void codex.connect()}

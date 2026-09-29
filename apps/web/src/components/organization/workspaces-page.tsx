@@ -246,7 +246,11 @@ function WorkspacesList({
         icon={<SquareStackIcon />}
         title="No shared workspaces yet"
         description="Create one for a team. Everyone also has a private Personal workspace."
-        action={<RowButton onClick={nav.openNewWorkspace}>New workspace</RowButton>}
+        action={
+          <RowButton variant="default" onClick={nav.openNewWorkspace}>
+            New workspace
+          </RowButton>
+        }
         className="pt-8 pb-6"
       />
     );

@@ -205,7 +205,7 @@ function SlackReactionChannelsDialogBody({
       ) : null}
 
       <DialogFooter>
-        <Button type="button" variant="secondary" onClick={onClose}>
+        <Button type="button" variant="outline" onClick={onClose}>
           Cancel
         </Button>
         <Button type="button" disabled={!canManage || saving} onClick={() => void save()}>

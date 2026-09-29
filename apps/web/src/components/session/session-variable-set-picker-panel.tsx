@@ -38,12 +38,7 @@ function SessionVariableSetPickerLoadFailed(props: SessionVariableSetPickerProps
         className="flex items-center justify-between gap-3 px-2 py-1 text-sm text-fg-muted"
       >
         <span>Variable sets could not be loaded.</span>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          onClick={() => window.location.reload()}
-        >
+        <Button type="button" size="sm" variant="outline" onClick={() => window.location.reload()}>
           Reload
         </Button>
       </div>

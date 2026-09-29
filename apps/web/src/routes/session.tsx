@@ -1091,7 +1091,7 @@ export function SessionRoute({
                 title="Conversation couldn't be loaded"
                 description="Your saved messages are unchanged. Try loading them again."
                 action={
-                  <Button variant="secondary" onClick={() => void jumpToLatest()}>
+                  <Button variant="outline" onClick={() => void jumpToLatest()}>
                     Retry conversation
                   </Button>
                 }
@@ -2758,7 +2758,7 @@ function SessionChatPane(props: {
                       title="Conversation couldn't be loaded"
                       description="Your saved messages are unchanged. Try loading them again."
                       action={
-                        <Button variant="secondary" onClick={() => void props.onJumpToLatest()}>
+                        <Button variant="outline" onClick={() => void props.onJumpToLatest()}>
                           Retry conversation
                         </Button>
                       }

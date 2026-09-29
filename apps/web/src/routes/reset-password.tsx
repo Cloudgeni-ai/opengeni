@@ -110,7 +110,7 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
               The reset link is missing its token, so we can't verify the request. Request a new
               reset email and open the link from your inbox.
             </Notice>
-            <Button asChild variant="secondary" className="mt-4 w-full">
+            <Button asChild variant="outline" className="mt-4 w-full">
               <Link to="/">Return to sign in</Link>
             </Button>
           </>

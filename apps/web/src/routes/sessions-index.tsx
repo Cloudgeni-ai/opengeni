@@ -1724,7 +1724,7 @@ function SessionsIndexRouteContent({
                 action={
                   connectionAccounts.error && !connectionAccounts.accessDenied ? (
                     <Button
-                      variant="secondary"
+                      variant="outline"
                       size="sm"
                       onClick={() => void connectionAccounts.refresh()}
                     >
@@ -2676,7 +2676,7 @@ function ManagedSandboxFields(props: {
               <Button
                 type="button"
                 size="sm"
-                variant="secondary"
+                variant="outline"
                 disabled={props.disabled || props.catalogRecovery.refreshing}
                 onClick={props.catalogRecovery.onRetry}
               >

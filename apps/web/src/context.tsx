@@ -2776,7 +2776,7 @@ export function RootRouteComponent() {
       action={
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           onClick={() => {
             setConfigError(null);
             setConfigRequestVersion((version) => version + 1);
@@ -2859,7 +2859,7 @@ export function RootRouteComponent() {
       action={
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           onClick={() => setAccessKeyVersion((version) => version + 1)}
         >
           Retry

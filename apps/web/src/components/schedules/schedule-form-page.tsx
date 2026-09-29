@@ -747,7 +747,7 @@ function AgentScheduleForm({
               }
               actionLayout="responsive"
               action={
-                <Button asChild variant="outline" size="sm" className="pointer-coarse:h-11">
+                <Button asChild size="sm" className="pointer-coarse:h-11">
                   <Link to="/workspaces/$workspaceId/machines" params={{ workspaceId }}>
                     Connect a machine
                   </Link>

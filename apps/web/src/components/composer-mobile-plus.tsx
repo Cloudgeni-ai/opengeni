@@ -32,12 +32,7 @@ function ComposerPanelNotice(props: ComposerPlusProps & { failed?: boolean }) {
         {props.failed ? "Composer actions could not be loaded." : "Loading actions…"}
       </p>
       {props.failed ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          onClick={() => window.location.reload()}
-        >
+        <Button type="button" size="sm" onClick={() => window.location.reload()}>
           Reload
         </Button>
       ) : null}

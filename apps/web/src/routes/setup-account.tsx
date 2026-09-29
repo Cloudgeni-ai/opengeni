@@ -219,7 +219,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             <Notice tone="failed" title="This link is incomplete">
               Ask your organization administrator for a new invitation.
             </Notice>
-            <Button asChild variant="secondary" className="mt-4 w-full">
+            <Button asChild variant="outline" className="mt-4 w-full">
               <Link to="/">Return to sign in</Link>
             </Button>
           </>
@@ -287,7 +287,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
               </p>
               <Button
                 asChild
-                variant="secondary"
+                variant="outline"
                 size="sm"
                 className="mt-3 h-auto min-h-9 w-full whitespace-normal"
               >
@@ -396,7 +396,7 @@ function UnavailableSetupState({
       <Notice tone={state === "completed" ? "success" : "failed"} title={copy.title}>
         {copy.body}
       </Notice>
-      <Button asChild variant="secondary" className="mt-4 w-full">
+      <Button asChild variant="outline" className="mt-4 w-full">
         <Link to="/">Return to sign in</Link>
       </Button>
     </>

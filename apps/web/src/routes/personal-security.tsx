@@ -283,7 +283,7 @@ export function SecurityController({
           <Notice tone="failed" title="Couldn't load sign-in methods">
             {error}
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={() => setRevision((value) => value + 1)}>
+              <Button variant="outline" onClick={() => setRevision((value) => value + 1)}>
                 Retry
               </Button>
               <Button variant="ghost" onClick={onReauthenticate}>
@@ -331,7 +331,7 @@ export function SecurityController({
           <div className="mt-4 flex flex-wrap gap-2">
             {uncertain ? (
               <Button
-                variant="secondary"
+                variant="outline"
                 disabled={busy}
                 onClick={() => {
                   if (inFlight.current) return;
