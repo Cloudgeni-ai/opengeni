@@ -17,6 +17,7 @@ import {
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
+  SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimeTablePosture,
@@ -483,7 +484,9 @@ function safePosture(): RuntimeDatabasePosture {
         owner: "opengeni_migrator",
         execute: false,
         publicExecute: false,
-        securityDefiner: true,
+        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
       })),
     ],
     privateRoutines: [
@@ -632,6 +635,55 @@ describe("runtime database posture evaluator", () => {
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "sandbox file publication capability list_sandbox_file_publications(uuid, uuid, jsonb) is missing or unsafe",
+    );
+  });
+
+  test("Slack file upload ledger uses ordinary session RLS and bounded direct DML", () => {
+    const posture = safePosture();
+    const table = {
+      name: SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: true,
+      insert: true,
+      update: true,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    const guard = posture.targetRoutines.find(
+      (routine) => routine.name === "guard_slack_file_upload_operation()",
+    )!;
+    expect(guard.securityDefiner).toBe(false);
+    guard.execute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden owner-internal helper guard_slack_file_upload_operation()",
+    );
+    guard.execute = false;
+    guard.securityDefiner = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "owner-internal target-schema helper guard_slack_file_upload_operation() is not SECURITY INVOKER",
+    );
+    guard.securityDefiner = false;
+    // Private placement does not change an older public-table contract.
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain(table.name);
+    expect(RUNTIME_TABLE_PRIVILEGES[table.name]).toBeUndefined();
+    table.delete = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has unsafe Slack file upload ledger privileges",
+    );
+    table.delete = false;
+    table.update = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has unsafe Slack file upload ledger privileges",
+    );
+    table.update = true;
+    table.rlsActive = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Slack file upload relation lacks active FORCE-RLS session isolation",
     );
   });
 

@@ -96,6 +96,13 @@ Empty realtime session creation captures no authority; first text Send selects
 normally. Superseded host references are rejected, not converted to native IDs.
 See `docs/architecture.md` and `docs/remote-mcp-credentials.md`.
 
+Explicit Slack task-file delivery uses the exact session's mapped thread and the
+installation's own bot credential, never a model-supplied destination or personal
+token. The source-workspace upload ledger checkpoints provider identity before
+byte transfer and completion intent before sharing; uncertain completion is
+reconciled rather than resent. See `docs/slack-bot.md` and
+`apps/api/src/integrations/slack-task-file-upload.ts`.
+
 For a map of every app, package, and how the parts fit together, start at [`docs/architecture.md`](docs/architecture.md) and follow its links to the focused topic docs.
 
 Configured Skill descriptors enter durable developer-message history during

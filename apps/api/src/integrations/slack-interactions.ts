@@ -238,9 +238,9 @@ export const SLACK_SESSION_INSTRUCTIONS = [
 
 /**
  * Slack-originated tasks may retrieve the workspace bot's bounded read surface
- * on demand. Connector tools are explicit-only, so freeze that narrow context
- * selection at session creation while keeping Slack mutations out of the model
- * surface; interaction delivery remains owned by the durable delivery pump.
+ * and explicitly deliver a retained task file to their own thread. Connector
+ * tools are explicit-only, so freeze that narrow selection at session creation;
+ * ordinary interaction messages remain owned by the durable delivery pump.
  */
 export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -251,12 +251,13 @@ export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   "slack_bot_list_files",
   "slack_bot_file_info",
   "slack_bot_file_content",
+  "slack_bot_upload_file",
 ] satisfies readonly FirstPartyMcpToolName[];
 
 /**
  * The workspace's default first-party selection (or the deployment default)
- * plus the Slack read tools. The read tools are added whatever the base is: a
- * Slack task that cannot read its own thread cannot do what it was asked.
+ * plus the bounded Slack task tools. These are added whatever the base is, then
+ * intersected with deployment policy; existing accepted selections stay frozen.
  */
 export function slackTaskFirstPartyMcpTools(
   settings: Settings,
