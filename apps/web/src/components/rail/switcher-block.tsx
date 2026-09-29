@@ -1,11 +1,12 @@
-// The rail's compact workspace switcher. Its menu groups workspaces by
-// organization and carries workspace/organization creation and settings so the
-// rail does not spend permanent vertical space on a second organization row.
-// Collapsed, it reduces to a workspace-initial avatar that opens the same menu.
+// The rail's workspace picker. Its trigger names the workspace and its
+// organization; its menu lists the current organization's workspaces (with a
+// create action that names the organization), organization settings, and the
+// other organizations to switch to. Collapsed, it reduces to a
+// workspace-initial avatar that opens the same menu.
 import { Link } from "@tanstack/react-router";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -50,9 +51,16 @@ export function additionalOrganizationCreationAttemptIsCurrent(input: {
 
 export const WORKSPACE_SWITCHER_GRID_CLASS = "grid min-w-0 grid-cols-[minmax(0,1fr)] px-2";
 
-export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
+/**
+ * The "New organization" flow: eligibility, the dialog and its exact-once
+ * creation state. `onCreated` opens the new organization's first workspace.
+ */
+export function useCreateOrganizationFlow(onCreated: (workspaceId: string) => void): {
+  canCreate: boolean;
+  start: () => void;
+  dialog: ReactNode;
+} {
   const context = useAppContext();
-  const rail = useRail();
   const managedUserId = context.authSession?.user.id ?? null;
   const canCreateOrganization =
     context.clientConfig.auth.mode === "managedSession" &&
@@ -144,7 +152,7 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
       if (!refreshed) {
         throw new Error("Your access changed before the new organization could be opened");
       }
-      rail.openWorkspace(created.workspaceId);
+      onCreated(created.workspaceId);
       toast.success(`${created.organization.name} created`, {
         description: `${initialWorkspaceName} is ready for your team.`,
       });
@@ -181,6 +189,32 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
     }
   }
 
+  return {
+    canCreate: canCreateOrganization,
+    start: () => setCreateOpen(true),
+    dialog: createOpen ? (
+      <Suspense fallback={null}>
+        <LazyCreateOrganizationDialog
+          open
+          organizationName={organizationName}
+          workspaceName={workspaceName}
+          busy={createBusy}
+          creationState={creationState}
+          onOrganizationNameChange={setOrganizationName}
+          onWorkspaceNameChange={setWorkspaceName}
+          onOpenChange={updateCreateOpen}
+          onSubmit={() => void submitCreateOrganization()}
+        />
+      </Suspense>
+    ) : null,
+  };
+}
+
+export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
+  const rail = useRail();
+  const createOrganization = useCreateOrganizationFlow(rail.openWorkspace);
+  const onCreateOrganization = createOrganization.canCreate ? createOrganization.start : undefined;
+
   if (rail.collapsed) {
     return (
       <>
@@ -189,52 +223,23 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
           collapsed
           align="start"
           onSelect={rail.openWorkspace}
-          onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}
+          onCreateOrganization={onCreateOrganization}
         />
-        {createOpen ? (
-          <Suspense fallback={null}>
-            <LazyCreateOrganizationDialog
-              open
-              organizationName={organizationName}
-              workspaceName={workspaceName}
-              busy={createBusy}
-              creationState={creationState}
-              onOrganizationNameChange={setOrganizationName}
-              onWorkspaceNameChange={setWorkspaceName}
-              onOpenChange={updateCreateOpen}
-              onSubmit={() => void submitCreateOrganization()}
-            />
-          </Suspense>
-        ) : null}
+        {createOrganization.dialog}
       </>
     );
   }
 
   return (
     <div className={inline ? "ml-auto grid min-w-0 flex-1" : WORKSPACE_SWITCHER_GRID_CLASS}>
-      {createOpen ? (
-        <Suspense fallback={null}>
-          <LazyCreateOrganizationDialog
-            open
-            organizationName={organizationName}
-            workspaceName={workspaceName}
-            busy={createBusy}
-            creationState={creationState}
-            onOrganizationNameChange={setOrganizationName}
-            onWorkspaceNameChange={setWorkspaceName}
-            onOpenChange={updateCreateOpen}
-            onSubmit={() => void submitCreateOrganization()}
-          />
-        </Suspense>
-      ) : null}
-
+      {createOrganization.dialog}
       <WorkspaceSwitcherMenu
         workspaceId={rail.workspaceId}
         collapsed={false}
         compact={inline}
         align="start"
         onSelect={rail.openWorkspace}
-        onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}
+        onCreateOrganization={onCreateOrganization}
       />
     </div>
   );

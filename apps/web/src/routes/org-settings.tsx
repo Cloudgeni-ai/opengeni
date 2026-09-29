@@ -1,6 +1,8 @@
 // Organization settings: General, People, Workspaces, Models, Integrations,
 // Organization identity, Billing & usage, Developer and Security & data.
-// Pages this person can't use are hidden from the nav.
+// They render inside the settings shell's Organization section
+// (components/settings/workspace-settings-shell.tsx); pages this person can't
+// use are hidden from the rail (lib/organization-settings-access.ts).
 import { useNavigate } from "@tanstack/react-router";
 import { PlusIcon, UserPlusIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, type ReactNode } from "react";
@@ -20,10 +22,14 @@ import { OrganizationPeoplePage } from "@/components/organization/people-page";
 import { OrganizationSecurityPage } from "@/components/organization/security-page";
 import { OrganizationWorkspacesPage } from "@/components/organization/workspaces-page";
 import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
-import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
+import {
+  organizationSettingsDescription,
+  organizationSettingsLabel,
+} from "@/components/settings/organization-settings-pages";
 import { Button } from "@/components/ui/button";
 import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { PageHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import type { ModelsView } from "@/lib/models-route";
@@ -31,12 +37,14 @@ import { orgLabel } from "@/lib/org";
 import {
   canInviteOrganizationRole,
   organizationAdminIdentityKey,
-  ORGANIZATION_ADMIN_SECTIONS,
   type OrganizationAdminIdentity,
   type OrganizationAdminSection,
 } from "@/lib/organization-admin";
+import {
+  organizationSettingsAccess,
+  resolveOrganizationSettingsSection,
+} from "@/lib/organization-settings-access";
 import type { OrganizationView } from "@/lib/organization-route";
-import { hasAccountPermission } from "@/lib/permissions";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
@@ -87,61 +95,26 @@ export function OrgSettingsRoute({
   const fallbackLabel = accountId
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
-  const canManageBilling = hasAccountPermission(context.accessContext, accountId, "billing:manage");
-  const canReadBilling =
-    canManageBilling || hasAccountPermission(context.accessContext, accountId, "billing:read");
-  const canManageOrganizationKnowledge = hasAccountPermission(
-    context.accessContext,
-    accountId,
-    "account:admin",
-  );
-  const accountGrant =
-    context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
-  const canManageCompanyProfileAgentPolicy = accountGrant?.role === "owner";
-  const canManageOrganizationApiKeys = hasAccountPermission(
-    context.accessContext,
-    accountId,
-    "api_keys:manage",
-  );
-  const actorRole: OrganizationMembershipRole | null =
-    accountGrant?.role === "owner" ||
-    accountGrant?.role === "admin" ||
-    accountGrant?.role === "member"
-      ? accountGrant.role
-      : null;
-  const singleUser = context.clientConfig.productAccessMode === "local";
-  const managedHumanSession = context.clientConfig.auth.mode === "managedSession";
-  const organizationAdministratorSession = managedHumanSession || singleUser;
-  const administrator =
-    organizationAdministratorSession && (actorRole === "owner" || actorRole === "admin");
-
-  const visibleSections = useMemo(() => {
-    const visible = new Set<OrganizationAdminSection>();
-    if (administrator) {
-      visible.add("general");
-      if (managedHumanSession && !singleUser) visible.add("people");
-      visible.add("workspaces");
-      visible.add("models");
-      visible.add("integrations");
-    }
-    visible.add("identity");
-    if (canReadBilling) visible.add("billing");
-    if (canManageOrganizationApiKeys) visible.add("developer");
-    // Recovery contacts are members, not only owners and admins: they accept
-    // and approve recovery on this page, so every managed person can reach it.
-    if (administrator || (managedHumanSession && !singleUser)) visible.add("security");
-    return visible;
-  }, [
-    administrator,
-    canManageOrganizationApiKeys,
-    canReadBilling,
-    managedHumanSession,
+  // The same rule decides which pages the settings rail lists.
+  const {
+    actorRole,
     singleUser,
-  ]);
-  const section: OrganizationAdminSection =
-    requestedSection && visibleSections.has(requestedSection)
-      ? requestedSection
-      : (ORGANIZATION_ADMIN_SECTIONS.find((each) => visibleSections.has(each)) ?? "identity");
+    organizationAdministratorSession,
+    canReadBilling,
+    canManageBilling,
+    canManageOrganizationKnowledge,
+    canManageCompanyProfileAgentPolicy,
+    canManageOrganizationApiKeys,
+    visibleSections,
+  } = organizationSettingsAccess({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId,
+  });
+  const section: OrganizationAdminSection = resolveOrganizationSettingsSection(
+    requestedSection,
+    visibleSections,
+  );
 
   const adminIdentity = useMemo<OrganizationAdminIdentity>(
     () => ({
@@ -274,7 +247,6 @@ export function OrgSettingsRoute({
         workspaceId={workspaceId}
         fallbackLabel={fallbackLabel}
         section={section}
-        visibleSections={visibleSections}
         hideHeader={subPage}
         actorRole={actorRole}
       >
@@ -294,6 +266,14 @@ export function OrgSettingsRoute({
             workspaceId={workspaceId}
             workspace={workspace}
             view={organizationView === "new-workspace" ? "new-workspace" : undefined}
+            returnTo={returnTo}
+            onEnterWorkspace={(createdId) => {
+              context.resetSessionView();
+              void navigate({
+                to: "/workspaces/$workspaceId/sessions",
+                params: { workspaceId: createdId },
+              });
+            }}
           />
         ) : null}
 
@@ -370,12 +350,14 @@ export function OrgSettingsRoute({
   );
 }
 
-/** The shell, with the organization's real name once it has loaded. */
+/**
+ * The page header and body of one organization page, with the organization's
+ * real name once it has loaded. The settings shell around it draws the rail.
+ */
 function OrganizationSettingsFrame({
   workspaceId,
   fallbackLabel,
   section,
-  visibleSections,
   hideHeader,
   actorRole,
   children,
@@ -383,7 +365,7 @@ function OrganizationSettingsFrame({
   workspaceId: string;
   fallbackLabel: string;
   section: OrganizationAdminSection;
-  visibleSections: ReadonlySet<OrganizationAdminSection>;
+  /** A sub-page (a person, a workspace, a form) brings its own back link and title. */
   hideHeader: boolean;
   actorRole: OrganizationMembershipRole | null;
   children: ReactNode;
@@ -407,17 +389,17 @@ function OrganizationSettingsFrame({
       </Button>
     );
   }
+  const body = <div className="grid min-w-0 gap-8 text-left">{children}</div>;
+  if (hideHeader) return body;
   return (
-    <OrganizationSettingsShell
-      workspaceId={workspaceId}
-      organizationLabel={organizationLabel}
-      section={section}
-      visibleSections={visibleSections}
-      actions={actions}
-      hideHeader={hideHeader}
-    >
-      <div className="grid min-w-0 gap-8 text-left">{children}</div>
-    </OrganizationSettingsShell>
+    <>
+      <PageHeader
+        title={organizationSettingsLabel(section)}
+        description={organizationSettingsDescription(section, organizationLabel)}
+        actions={actions}
+      />
+      <div className="mt-6">{body}</div>
+    </>
   );
 }
 

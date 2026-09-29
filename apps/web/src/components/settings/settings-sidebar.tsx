@@ -1,6 +1,13 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, ChevronRightIcon, MenuIcon, type LucideIcon } from "lucide-react";
-import { useEffect, useState, type ReactElement, type ReactNode } from "react";
+import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 
 import { BrandMark, Wordmark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
@@ -23,9 +30,11 @@ import { SettingsActionsSlotContext } from "./settings-header-actions";
  *
  * Settings is a mode of the left rail: entering settings swaps the main rail
  * (sessions) for the settings rail, and its back link leaves settings and
- * restores the main rail. Below 1024px the rail folds into a header with the
- * back link, the current page and a Menu button that opens the rail in a
- * drawer.
+ * restores the main rail. The rail lists every settings page the person can
+ * use in one place, in labeled sections: Workspace, Organization and Your
+ * account, each naming the workspace or organization it configures. Below
+ * 1024px the rail folds into a header with the back link, the current page
+ * and a Menu button that opens the rail in a drawer.
  *
  * Pages inside the shell drop their header icon; the settings rail gives context.
  */
@@ -51,6 +60,21 @@ export interface SettingsRailGroup {
   items: SettingsRailItem[];
 }
 
+/**
+ * One scope of settings: "Workspace", "Organization" or "Your account". Its
+ * header is the only heading in the section: the scope, with the workspace or
+ * organization it configures as quiet meta. Groups inside are set apart by
+ * space, without labels.
+ */
+export interface SettingsRailSection {
+  id: string;
+  /** The scope, in sentence case: "Workspace". */
+  label: string;
+  /** Which one: "Design preview", "Acme Robotics", the account's email. */
+  meta?: string;
+  groups: SettingsRailGroup[];
+}
+
 export interface SettingsShellPage {
   title: string;
   description?: ReactNode;
@@ -59,21 +83,22 @@ export interface SettingsShellPage {
 }
 
 export interface SettingsShellProps {
-  /** Accessible name of the settings rail, "Workspace settings". */
+  /** Accessible name of the settings rail, "Settings". */
   label: string;
   /** The link that leaves this area ("Back to sessions"), without children. */
   back: { link: ReactElement; label: string };
   /** The brand link at the top of the rail, without children. */
   home: ReactElement;
-  /** The scope under the back link: a switcher or the scope's name. */
+  /** The one picker under the back link: the same workspace picker as the main rail. */
   scope?: ReactNode;
-  groups: SettingsRailGroup[];
+  /** Workspace, Organization and Your account, in that order. */
+  sections: SettingsRailSection[];
   /** The item that is current. */
   activeId: string | null;
-  /** A link out of this area at the bottom of the rail: "Organization: Acme →". */
-  footer?: ReactNode;
   /** The current page's name, for the narrow header. */
   currentPage: string;
+  /** The current page's scope for the narrow header: "Organization · Acme Robotics". */
+  currentScope?: string;
   /**
    * The page header of a settings page. `null` when the page brings its own: a
    * sub-page (an account, a key, a form) or a full page (Agents, Variable sets).
@@ -127,22 +152,76 @@ function LinkShell({
   );
 }
 
+function SettingsRailSectionView({
+  section,
+  activeId,
+  first,
+}: {
+  section: SettingsRailSection;
+  activeId: string | null;
+  first: boolean;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={section.label}
+      data-settings-section={section.id}
+      className={cn("flex min-w-0 flex-col gap-3", !first && "border-t border-border pt-4")}
+    >
+      <div className="min-w-0 px-2.5">
+        <p className="text-sm leading-5 font-medium text-fg">{section.label}</p>
+        {section.meta ? (
+          <p className="truncate text-xs leading-4.5 text-fg-muted" title={section.meta}>
+            {section.meta}
+          </p>
+        ) : null}
+      </div>
+      {section.groups.map((group, index) => (
+        <NavGroup key={group.label ?? `group-${index}`} label={group.label}>
+          {group.items.map((item) => {
+            const Icon = item.icon;
+            return (
+              <NavItem
+                key={item.id}
+                asChild
+                label={item.label}
+                icon={<Icon />}
+                active={activeId === item.id}
+                attention={item.attention}
+              >
+                {item.link}
+              </NavItem>
+            );
+          })}
+        </NavGroup>
+      ))}
+    </div>
+  );
+}
+
 function SettingsRail({
   label,
   back,
   home,
   scope,
-  groups,
+  sections,
   activeId,
-  footer,
   className,
   onNavigate,
-}: Pick<
-  SettingsShellProps,
-  "label" | "back" | "home" | "scope" | "groups" | "activeId" | "footer"
-> & { className?: string; onNavigate?: () => void }) {
+}: Pick<SettingsShellProps, "label" | "back" | "home" | "scope" | "sections" | "activeId"> & {
+  className?: string;
+  onNavigate?: () => void;
+}) {
+  const ref = useRef<HTMLElement>(null);
+  // The rail is long (workspace and organization pages): keep the current page in view.
+  useLayoutEffect(() => {
+    ref.current
+      ?.querySelector<HTMLElement>('[aria-current="page"]')
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [activeId]);
   return (
     <SettingsNav
+      ref={ref}
       variant="rail"
       aria-label={label}
       data-settings-rail
@@ -169,57 +248,16 @@ function SettingsRail({
           {scope ? <div className="min-w-0">{scope}</div> : null}
         </div>
       }
-      footer={footer}
     >
-      {groups.map((group, index) => (
-        <NavGroup key={group.label ?? `group-${index}`} label={group.label}>
-          {group.items.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavItem
-                key={item.id}
-                asChild
-                label={item.label}
-                icon={<Icon />}
-                active={activeId === item.id}
-                attention={item.attention}
-              >
-                {item.link}
-              </NavItem>
-            );
-          })}
-        </NavGroup>
+      {sections.map((section, index) => (
+        <SettingsRailSectionView
+          key={section.id}
+          section={section}
+          activeId={activeId}
+          first={index === 0}
+        />
       ))}
     </SettingsNav>
-  );
-}
-
-/** "Organization: Acme Robotics →" at the bottom of the settings rail. */
-export function SettingsRailOutLink({
-  groupLabel,
-  label,
-  icon: Icon,
-  link,
-}: {
-  groupLabel: string;
-  label: string;
-  icon: LucideIcon;
-  /** Omit when the viewer can't open it: the name shows as text. */
-  link?: ReactElement;
-}) {
-  return (
-    <NavGroup label={groupLabel}>
-      {link ? (
-        <NavItem asChild label={label} icon={<Icon />} trailingIcon={<ChevronRightIcon />}>
-          {link}
-        </NavItem>
-      ) : (
-        <div className="flex h-8 min-w-0 items-center gap-2.5 px-2.5 text-sm font-normal text-fg-label">
-          <Icon aria-hidden="true" className="size-4 shrink-0" />
-          <span className="truncate">{label}</span>
-        </div>
-      )}
-    </NavGroup>
   );
 }
 
@@ -228,10 +266,10 @@ export function SettingsShell({
   back,
   home,
   scope,
-  groups,
+  sections,
   activeId,
-  footer,
   currentPage,
+  currentScope,
   page,
   layout = "settings",
   notice,
@@ -245,7 +283,7 @@ export function SettingsShell({
   }, [narrow]);
   useEffect(() => setMenuOpen(false), [activeId, currentPage]);
 
-  const railProps = { label, back, home, scope, groups, activeId, footer };
+  const railProps = { label, back, home, scope, sections, activeId };
 
   const navigation = narrow ? (
     <header className="flex min-w-0 items-center gap-2 border-b border-border bg-bg px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
@@ -257,7 +295,7 @@ export function SettingsShell({
         <ArrowLeftIcon aria-hidden="true" className="size-4" />
       </LinkShell>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-xs leading-4.5 text-fg-subtle">{label}</p>
+        <p className="truncate text-xs leading-4.5 text-fg-muted">{currentScope ?? label}</p>
         <p className="truncate text-sm font-medium text-fg">{currentPage}</p>
       </div>
       <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
