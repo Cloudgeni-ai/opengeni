@@ -2086,6 +2086,9 @@
 :where(.og-root).max-w-\[240px\],:where(.og-root) .max-w-\[240px\] {
     max-width: 240px;
   }
+:where(.og-root).max-w-\[calc\(50\%-0\.5rem\)\],:where(.og-root) .max-w-\[calc\(50\%-0\.5rem\)\] {
+    max-width: calc(50% - 0.5rem);
+  }
 :where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
     max-width: calc(100% - 1.5rem);
   }
