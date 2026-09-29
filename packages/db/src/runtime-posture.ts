@@ -3870,13 +3870,15 @@ export function evaluateRuntimeDatabasePosture(
       routine.name ===
       "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
   );
+  const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
   if (
-    organizationModelUsageRoutine &&
-    (!organizationModelUsageRoutine.securityDefiner ||
+    modelCallFactsOwner !== undefined &&
+    (!organizationModelUsageRoutine ||
+      !organizationModelUsageRoutine.securityDefiner ||
       organizationModelUsageRoutine.publicExecute ||
-      organizationModelUsageRoutine.owner !== tableByName.get("model_call_facts")?.owner)
+      organizationModelUsageRoutine.owner !== modelCallFactsOwner)
   ) {
-    violations.push("organization model usage aggregate has unsafe owner or runtime privileges");
+    violations.push("organization model usage aggregate is missing or unsafe");
   }
   const scopedFactRowsRoutine = posture.privateRoutines.find(
     (routine) =>
@@ -3884,12 +3886,13 @@ export function evaluateRuntimeDatabasePosture(
       "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
   );
   if (
-    scopedFactRowsRoutine &&
-    (!scopedFactRowsRoutine.securityDefiner ||
+    modelCallFactsOwner !== undefined &&
+    (!scopedFactRowsRoutine ||
+      !scopedFactRowsRoutine.securityDefiner ||
       scopedFactRowsRoutine.publicExecute ||
-      scopedFactRowsRoutine.owner !== tableByName.get("model_call_facts")?.owner)
+      scopedFactRowsRoutine.owner !== modelCallFactsOwner)
   ) {
-    violations.push("Insights scoped fact projection has unsafe owner or runtime privileges");
+    violations.push("Insights scoped fact projection is missing or unsafe");
   }
 
   for (const routine of posture.privateRoutines) {
