@@ -575,6 +575,25 @@ describe("QueueSurface", () => {
     ).toBeNull();
   });
 
+  test("shows an explicit fallback for a queued turn with neither prompt nor annotations", async () => {
+    mounted = await renderLoadedQueueSurface(
+      <QueueSurface
+        queue={queue({
+          queue: [fakeTurn({ id: "11111111-1111-4111-8111-111111111120", prompt: "" })],
+        })}
+        readOnly
+      />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-testid="queue-collapsed-preview"]')?.textContent,
+    ).toBe("Content unavailable");
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    expect(
+      mounted.container.querySelector('[data-testid="queue-prompt-unavailable-1"]')?.textContent,
+    ).toBe("Content unavailable");
+  });
+
   test("withholds durable queue checkout from a local-only composer", () => {
     expect(queueComposerCheckoutEnabled(composer({ draftPersistence: "disabled" }), false)).toBe(
       false,

@@ -75,6 +75,8 @@ import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import { cn } from "../lib/cn";
 import { formatClockTime } from "../lib/format";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
+import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
+import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
 export type SessionChromeSignalId =
@@ -1376,9 +1378,10 @@ function QueuePanel({
                   {index + 1}
                 </span>
               )}
-              <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
-                {presentation.text}
-              </p>
+              <CompactQueueItemContent
+                text={presentation.text}
+                annotations={turn.annotations ?? []}
+              />
               {showActions ? (
                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
                   {onMove && turns.length > 1 ? (
@@ -1494,9 +1497,7 @@ function QueuePanel({
             <span className="shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
               {turns.length + index + 1}
             </span>
-            <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
-              {message.text}
-            </p>
+            <CompactQueueItemContent text={message.text} annotations={message.annotations} />
             <span className="sr-only">
               {message.state === "failed"
                 ? "Not confirmed"
@@ -1570,6 +1571,30 @@ function QueuePanel({
         </li>
       ) : null}
     </ol>
+  );
+}
+
+function CompactQueueItemContent({
+  text,
+  annotations,
+}: {
+  text: string;
+  annotations: readonly TimelineAnnotationLike[];
+}) {
+  const content = queueItemContent(text, annotations.length);
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-1.5">
+      {content === "text" ? (
+        <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">{text}</p>
+      ) : content === "unavailable" ? (
+        <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg-muted italic">
+          {QUEUE_ITEM_CONTENT_UNAVAILABLE}
+        </p>
+      ) : null}
+      {annotations.length > 0 ? (
+        <TimelineAnnotationsChip annotations={annotations} className="shrink-0" compact />
+      ) : null}
+    </div>
   );
 }
 
