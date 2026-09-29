@@ -384,7 +384,17 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await preview.getByText(/ledger-north/).waitFor({ timeout: 15_000 });
       await expectContainsText(preview, "Matching passage");
       await preview.getByText(/Where did the proposal end up/).waitFor();
-      expect((await preview.locator("mark").allTextContents()).length).toBeGreaterThan(0);
+      // Formatted previews highlight through the CSS Custom Highlight API,
+      // which leaves ReactMarkdown's DOM untouched, so there is no <mark>.
+      await waitFor(
+        () =>
+          page.evaluate(() =>
+            [...CSS.highlights.entries()].some(
+              ([name, highlight]) => name.startsWith("og-session-search-") && highlight.size > 0,
+            ),
+          ),
+        { timeoutMs: 10_000, describe: () => "session-search preview highlight registered" },
+      );
 
       // Title-only preview states the honest empty case.
       await titleRow.first().click();
@@ -422,6 +432,23 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         "quartzpine",
       );
       await expectTextInTimelineView(page, /ledger-north/);
+      expect(landed.searchParams.get("searchOrigin")).toBe("session-search");
+      expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(1);
+
+      // Closing the strip drops the origin mark, so a reload or shared link
+      // starts plain, and the strip stays closed.
+      await find.getByRole("button", { name: "Close conversation search", exact: true }).click();
+      await find.waitFor({ state: "detached" });
+      await waitFor(async () => !new URL(page.url()).searchParams.has("searchOrigin"), {
+        timeoutMs: 10_000,
+        describe: () => `searchOrigin cleared from ${page.url()}`,
+      });
+      expect(new URL(page.url()).searchParams.get("find")).toBe("quartzpine");
+      await page.waitForTimeout(300);
+      expect(await find.count()).toBe(0);
+      await page.keyboard.press("Control+f");
+      await find.waitFor();
+      expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(0);
     } finally {
       await writeFile(
         `${artifactDir}/session-search-wire.json`,
