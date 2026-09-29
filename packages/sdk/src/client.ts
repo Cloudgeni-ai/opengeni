@@ -4904,7 +4904,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Delete a shared workspace through organization-administrator authority. */
+  /**
+   * Delete an organization (shared) workspace. Accepts an organization owner
+   * session or an organization API key with `workspace:admin` (for tenant
+   * offboarding); never deletes a Personal workspace. 409 until quiescent.
+   */
   async deleteOrganizationWorkspace(organizationId: string, workspaceId: string): Promise<void> {
     await this.requestVoid(
       "DELETE",

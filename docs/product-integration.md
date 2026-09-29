@@ -380,6 +380,16 @@ OpenGeni human or membership. Provision lazily on first use, from the product's
 user/tenant lifecycle, through a bounded backfill, or a combination. Every path
 should call the same idempotent reconciler.
 
+To offboard a tenant (or clean up test tenants), delete its mapped workspace
+with the same full-access organization key: `deleteWorkspace(workspaceId)`
+(`DELETE /v1/workspaces/:workspaceId`) or
+`deleteOrganizationWorkspace(organizationId, workspaceId)`
+(`DELETE /v1/organizations/:organizationId/workspaces/:workspaceId`). Both need
+`workspace:admin`, so a `read` key receives 403; neither ever deletes a
+Personal workspace or the organization's only workspace, and deletion answers
+409 until the workspace's sessions, background commands, video generations, and
+sandboxes are quiescent. Deletion is irreversible.
+
 `getAccessContext()` / `GET /v1/access/me` intentionally returns the
 organization account grant without enumerating every organization workspace in
 `workspaceGrants`. Use `listWorkspaces()` / `GET /v1/workspaces` for the complete

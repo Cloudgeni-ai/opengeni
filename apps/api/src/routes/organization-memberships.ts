@@ -39,6 +39,7 @@ import {
 import {
   getManagedSession,
   accountScopedApiKeyWorkspaceAuthority,
+  hasPermission,
   requireAccessContext,
   organizationMembershipHttpStatus,
   requireCanonicalLocalAccountAdministrator,
@@ -59,6 +60,7 @@ import {
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
+  requireWorkspace,
   listOrganizationAdministrationMembers,
   listOrganizationInvitations,
   listSelfOrganizationInvitations,
@@ -106,6 +108,35 @@ async function requirePrivateSessionAdministrator(
     });
   }
   return { subjectId: access.subjectId };
+}
+
+async function requireOrganizationKeyWorkspaceDeletion(
+  context: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+  workspaceId: string,
+): Promise<void> {
+  const access = await requireAccessContext(context, deps);
+  const key = accountScopedApiKeyWorkspaceAuthority(access);
+  if (
+    !key ||
+    key.accountId !== organizationId ||
+    !hasPermission(key.permissions, "workspace:admin")
+  ) {
+    throw new HTTPException(403, {
+      message:
+        "deleting an organization workspace requires an organization owner session or an organization API key with workspace:admin",
+    });
+  }
+  const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+  if (!workspace || workspace.accountId !== organizationId) {
+    throw new HTTPException(404, { message: "workspace not found" });
+  }
+  if (workspace.kind !== "shared") {
+    throw new HTTPException(403, {
+      message: "organization API keys cannot delete a Personal workspace",
+    });
+  }
 }
 
 async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {
@@ -429,6 +460,18 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       context.req.param("organizationId"),
       "organization id",
     );
+    if (context.req.header("authorization")) {
+      // An integrating backend deletes the organization workspaces it
+      // provisions (tenant offboarding, test cleanup) with its organization
+      // key. This is exactly the authority `DELETE /v1/workspaces/:id` already
+      // grants that key - an organization workspace (never a Personal one) in
+      // the key's own organization, with `workspace:admin` - under the same
+      // quiescence rules. It confers no organization-administrator identity.
+      const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
+      await requireOrganizationKeyWorkspaceDeletion(context, deps, organizationId, workspaceId);
+      await deleteWorkspaceForRequest(deps, { accountId: organizationId, workspaceId });
+      return context.body(null, 204);
+    }
     const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
     await deleteWorkspaceForRequest(deps, {

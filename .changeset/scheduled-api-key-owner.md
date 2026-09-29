@@ -1,6 +1,7 @@
 ---
 "@opengeni/core": patch
 "@opengeni/db": patch
+"@opengeni/worker-bundle": patch
 ---
 
 Scheduled tasks created by an organization or workspace API key (or the
