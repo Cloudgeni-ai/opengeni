@@ -199,7 +199,7 @@ opacity-muted text.
   (model name, then the payer in muted text, never the reasoning effort, never a pill). Switches
   keep their own 20px size.
 - Elevation: pages and rows are flat, hover is a `surface-2` fill. Dialogs: 1px border +
-  `shadow-lg`. Menus: `shadow-md`.
+  `shadow-lg`. Menus: `shadow-md` (see "Menus and popovers" below).
 - Focus: 2px ring in brand (neutral grey) at 55%, 2px offset. Motion: 120ms, color and opacity
   only.
 - Rail: 240px in every mode, on the rail glow. Nav item 32px, radius 10, 16px icon, 14/400
@@ -210,6 +210,38 @@ opacity-muted text.
   settings rail follows the same rule, with its group labels in `fg-muted`.
 - Every page works at 390px wide with no horizontal scroll and 44px touch targets on coarse
   pointers.
+
+### Menus and popovers
+
+One surface and one row for every menu, in both themes: the workspace picker, the project folder
+picker, the composer "+" menu and its drill-ins, the model and voice pickers, row and header ⋯
+menus, right-click menus, selects, comboboxes and hover cards. The classes live in
+`components/ui/menu-styles.ts` (the SDK mirrors them in `packages/react/src/lib/menu-styles.ts`);
+the Radix primitives (`dropdown-menu.tsx`, `context-menu.tsx`, `select-menu.tsx`) already apply
+them, so a call site sets a width and nothing else.
+
+- **Panel:** `surface` fill (`--color-popover` is `surface`, never `surface-3`), 1px `border`,
+  16px radius, `shadow-og-md`, 6px inset. No second border, tint or shadow on a call site.
+- **Row:** 32px (44px on coarse pointers), 10px side padding, radius 10. A 16px icon in
+  `fg-muted`, 10px gap, then the label in 14/400 `fg`. Hover and keyboard focus are the same
+  `surface-2` fill; menu items draw no focus ring (triggers and plain buttons keep theirs).
+  Disabled is 50% opacity; destructive is `danger` text and icon.
+- **Right side**, in this order: meta (a count or the current value, 12px `fg-muted`), then a
+  16px chevron in `fg-muted` for a row that opens a submenu, or the check. **The chosen option
+  gets a 16px `fg` check on the right**, never a tint, bold label or left-hand dot; every option
+  of a choice list reserves the check's slot so meta lines up.
+- **Group heading:** 12/500 `fg-muted`, sentence case (never uppercase). **Separator:** one
+  `border` hairline inside the 6px inset, 6px above and below.
+- **Create action** ("New project", "New workspace in Acme", "Add repository URL"): an ordinary
+  row with a plus icon and `fg` label, last in the list it adds to, with no separator before it.
+- **Drill-in (submenu inside the same panel):** a header with a 32px back button (chevron-left)
+  and the title in 14/500 `fg`, over a hairline. Radix side submenus use the same panel.
+- **Empty, loading, unavailable:** one plain sentence (or a 14px line plus one 12px reason) in
+  the panel, never a card, dashed box or icon tile. Say it once, and hide an action that can't
+  work (no disabled "Refresh list" when GitHub is unavailable).
+- Tiles and logos in rows (workspace initials, organization, apps) fit the 16px icon slot so
+  labels align; richer rows (connectors with a logo, name and account) keep the same padding,
+  radius and hover and have no dividers between them.
 
 ## 5. Which control when
 
