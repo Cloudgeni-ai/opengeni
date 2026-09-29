@@ -131,6 +131,10 @@ import {
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
   storedBundledSkillSelectionIdentity,
+  withDisabledBuiltinToolsMetadata,
+  disabledBuiltinToolsFromMetadata,
+  storedDisabledBuiltinToolsIdentity,
+  type DisabledBuiltinTool,
   type BundledSkillId,
   type SkillRecord,
 } from "@opengeni/contracts";
@@ -33053,6 +33057,7 @@ async function setScheduledTaskAuthorityRlsContext(
 export type SessionCreateInput = {
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
+  disabledBuiltinTools?: DisabledBuiltinTool[] | undefined;
   requestedSessionId?: string;
   /** Internal ordinary source-run proof; never accepted from session HTTP input. */
   scheduledSourceRunId?: string;
@@ -33402,6 +33407,7 @@ async function existingSessionForCreateKey(
 type SessionCreateReplayIdentity = {
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
+  disabledBuiltinTools?: DisabledBuiltinTool[] | undefined;
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
@@ -33469,6 +33475,12 @@ function assertSessionCreateReplayIdentity(
   if (
     stableJson(storedBundledSkillSelectionIdentity(existing.metadata) ?? null) !==
     stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (
+    stableJson(storedDisabledBuiltinToolsIdentity(existing.metadata) ?? null) !==
+    stableJson(input.disabledBuiltinTools?.length ? [...input.disabledBuiltinTools].sort() : null)
   ) {
     throw new SessionCreateIdempotencyConflictError();
   }
@@ -33597,9 +33609,12 @@ async function createSessionInTransaction(
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
     withoutRetiredSessionCreateMetadata(
-      withBundledSkillSelectionMetadata(
-        metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
-        input.bundledSkillIds,
+      withDisabledBuiltinToolsMetadata(
+        withBundledSkillSelectionMetadata(
+          metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+          input.bundledSkillIds,
+        ),
+        input.disabledBuiltinTools,
       ),
     ),
     selectedInstalledSkillIds,
@@ -33653,6 +33668,7 @@ async function createSessionInTransaction(
       assertSessionCreateReplayIdentity(existing, {
         initialAgentLearning: input.initialAgentLearning,
         bundledSkillIds: input.bundledSkillIds,
+        disabledBuiltinTools: input.disabledBuiltinTools,
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
         variableSetIds,
@@ -33924,6 +33940,7 @@ async function createSessionInTransaction(
         assertSessionCreateReplayIdentity(existing, {
           initialAgentLearning: input.initialAgentLearning,
           bundledSkillIds: input.bundledSkillIds,
+          disabledBuiltinTools: input.disabledBuiltinTools,
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
           variableSetIds,
@@ -34133,6 +34150,7 @@ export async function getInitializedSessionCreateReplay(
     scopeSubjectId?: SessionScopeSubjectId | null;
     memoryScope?: SessionMemoryScope;
     bundledSkillIds?: BundledSkillId[] | undefined;
+    disabledBuiltinTools?: DisabledBuiltinTool[] | undefined;
     accountId: string;
     workspaceId: string;
     subjectId: string;
@@ -82959,6 +82977,7 @@ function mapSession(
   tenancyViewer?: { subjectId: string; activated: boolean },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
+  const disabledBuiltinTools = disabledBuiltinToolsFromMetadata(row.metadata);
   return {
     id: row.id,
     accountId: row.accountId,
@@ -82976,6 +82995,7 @@ function mapSession(
     resources: row.resources as ResourceRef[],
     skills: StoredSessionSkills.parse(row.skills ?? []),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
+    ...(disabledBuiltinTools.length > 0 ? { disabledBuiltinTools } : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),

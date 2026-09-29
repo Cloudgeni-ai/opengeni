@@ -9,6 +9,11 @@ import {
   type ResolvedModelProvider,
   type Settings,
 } from "@opengeni/config";
+import {
+  resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceAgentWebSearchEnabled,
+  type DisabledBuiltinTool,
+} from "@opengeni/contracts";
 import { type ModelAttachmentInputPolicy } from "../run-input";
 import { imageProviderBindingHash } from "../image-generation-operation";
 
@@ -181,6 +186,36 @@ export function shouldDeferNonEagerToolPreparation(args: {
  * deployment flag is its provider capability gate. There is deliberately no
  * cross-provider or sandbox/curl fallback.
  */
+/**
+ * Workspace settings and the session's frozen opt-outs for built-in tools.
+ * Each source can only switch a tool off.
+ */
+export function builtinToolSwitchesForTurn(
+  workspaceSettings: unknown,
+  sessionDisabled: readonly DisabledBuiltinTool[] | undefined,
+): { agentHumanInputEnabled: boolean; agentWebSearchEnabled: boolean } {
+  const disabled = new Set(sessionDisabled ?? []);
+  return {
+    agentHumanInputEnabled:
+      resolveWorkspaceAgentHumanInputEnabled(workspaceSettings) && !disabled.has("human_input"),
+    agentWebSearchEnabled:
+      resolveWorkspaceAgentWebSearchEnabled(workspaceSettings) && !disabled.has("web_search"),
+  };
+}
+
+/**
+ * Provider-hosted search the SuperGrok transport appends to each request
+ * body. It bypasses the agent's tool list, so it takes the same
+ * deployment + workspace/session switch as the hosted web_search tool.
+ */
+export function xaiHostedSearchForTurn(
+  deploymentWebSearchEnabled: boolean,
+  agentWebSearchEnabled: boolean,
+): { webSearch: boolean; xSearch: boolean } {
+  const enabled = deploymentWebSearchEnabled && agentWebSearchEnabled;
+  return { webSearch: enabled, xSearch: enabled };
+}
+
 export function hostedWebSearchForTurn(
   resolvedModel: { configured: { hostedWebSearch: boolean } } | null,
   deploymentWebSearchEnabled: boolean,

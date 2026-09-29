@@ -7,6 +7,9 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 
+/** Built-in agent tools a session can switch off (`disabledBuiltinTools`). */
+export type DisabledBuiltinTool = "human_input" | "web_search";
+
 export type BundledSkillId =
   | "builtin:opengeni-help"
   | "builtin:opengeni-client"
@@ -1479,6 +1482,8 @@ export type Session = {
     | null
     | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
+  /** Built-in tools this session switched off at creation. */
+  disabledBuiltinTools?: DisabledBuiltinTool[] | undefined;
   id: string;
   workspaceId: string;
   accountId: string;
@@ -2944,6 +2949,8 @@ export type ScheduledTaskAgentConfig = {
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
+  /** Narrowing-only; same meaning as `CreateSessionRequest.disabledBuiltinTools`. */
+  disabledBuiltinTools?: DisabledBuiltinTool[] | undefined;
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
@@ -3071,6 +3078,14 @@ export type RefreshScheduledTaskAccessRequest = {
 export type CreateSessionRequest = {
   /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
   bundledSkillIds?: BundledSkillId[] | undefined;
+  /**
+   * Switch built-in tools off for this session: `"human_input"` removes
+   * `request_human_input`, `"web_search"` removes provider-hosted web search
+   * (including the search a provider transport would add). Narrowing only and
+   * frozen at creation; children keep these and can add more. Workspace
+   * settings `agentHumanInputEnabled`/`agentWebSearchEnabled` still apply.
+   */
+  disabledBuiltinTools?: DisabledBuiltinTool[] | undefined;
   excludedMcpServerIds?: string[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
@@ -5583,6 +5598,8 @@ export type SaveNewSessionDraftRequest = Omit<
 /** Input shape for agent config on create/update (server applies defaults). */
 export type ScheduledTaskAgentConfigInput = {
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
+  /** Narrowing-only built-in tool opt-outs for each run's session. */
+  disabledBuiltinTools?: DisabledBuiltinTool[] | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
   tools?: ToolRef[] | undefined;

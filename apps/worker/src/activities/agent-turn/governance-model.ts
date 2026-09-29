@@ -45,16 +45,12 @@ import {
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { retryWhileMissing } from "@opengeni/storage";
 import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
-import {
-  evaluateWorkspaceModelPolicy,
-  resolveWorkspaceAgentHumanInputEnabled,
-  resolveWorkspaceAgentWebSearchEnabled,
-  type MediaGenerationResult,
-} from "@opengeni/contracts";
+import { evaluateWorkspaceModelPolicy, type MediaGenerationResult } from "@opengeni/contracts";
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {
+  builtinToolSwitchesForTurn,
   lazyToolTransportForTurn,
   openAiHostedImageProviderBindingForTurn,
   modelAttachmentInputPolicyForTurn,
@@ -239,8 +235,10 @@ export async function prepareGovernanceAndModel(
   workspaceRefs.rigId = session.rigId ?? "";
   workspaceRefs.rigVersionId = session.rigVersionId ?? "";
   if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
-  const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
-  const agentWebSearchEnabled = resolveWorkspaceAgentWebSearchEnabled(workspace.settings);
+  const { agentHumanInputEnabled, agentWebSearchEnabled } = builtinToolSwitchesForTurn(
+    workspace.settings,
+    session.disabledBuiltinTools,
+  );
   // The session's decision was frozen when it was created, so only a
   // deliberate switch-off (deployment or workspace Off), or undoing one,
   // changes its tool list.

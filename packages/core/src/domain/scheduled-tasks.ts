@@ -27,6 +27,7 @@ import {
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceSessionToolDefaults,
   resolveBundledSkillSelection,
+  resolveDisabledBuiltinTools,
   SessionAgentAccess,
   SessionScopeSubjectId,
   SessionMemoryScope,
@@ -772,6 +773,17 @@ export async function validateScheduledTaskTarget(input: {
   const session = await getSession(input.db, input.grant.workspaceId, input.targetSessionId);
   if (!session || session.accountId !== input.grant.accountId) {
     throw new HTTPException(404, { message: "target session not found" });
+  }
+  if (
+    input.agentConfig.disabledBuiltinTools !== undefined &&
+    !isDeepStrictEqual(
+      [...input.agentConfig.disabledBuiltinTools].sort(),
+      session.disabledBuiltinTools ?? [],
+    )
+  ) {
+    throw new HTTPException(422, {
+      message: "An existing-session schedule cannot change that session's disabled built-in tools",
+    });
   }
   if (
     input.agentConfig.bundledSkillIds !== undefined &&
@@ -1922,9 +1934,15 @@ async function validateScheduledTaskAgentConfig(input: {
       });
     }
   }
+  // Narrowing-only: an agent-created schedule keeps its session's opt-outs.
+  const disabledBuiltinTools = resolveDisabledBuiltinTools(
+    input.payload.agentConfig.disabledBuiltinTools,
+    parent?.disabledBuiltinTools,
+  );
   const validated = {
     ...input.payload.agentConfig,
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
+    ...(disabledBuiltinTools !== undefined ? { disabledBuiltinTools } : {}),
     ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,

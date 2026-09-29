@@ -1,4 +1,5 @@
 import { getSessionAuthorityProjection, readActiveSandbox } from "@opengeni/db";
+import { xaiHostedSearchForTurn } from "./tool-policy";
 import { routingEnabled } from "../../sandbox-routing";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
@@ -780,10 +781,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId: turn.id,
               credentialId: providerTurn.effectiveXaiCredentialId,
               authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
-              hostedSearch: {
-                webSearch: runSettings.webSearchEnabled,
-                xSearch: runSettings.webSearchEnabled,
-              },
+              // The SuperGrok transport appends provider-hosted search to the
+              // request itself, so it must honor the same workspace/session
+              // switch-off as the agent's own hosted web_search tool.
+              hostedSearch: xaiHostedSearchForTurn(
+                runSettings.webSearchEnabled,
+                agentWebSearchEnabled,
+              ),
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
               nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
               onModelRequestDiagnostic: (event) => {

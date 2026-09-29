@@ -46,6 +46,7 @@ import {
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSkills,
   resolveBundledSkillSelection,
+  resolveDisabledBuiltinTools,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -827,6 +828,7 @@ export async function createAndStartSessionWithOutcome(input: {
   resources: ResourceRef[];
   skills?: SessionSkill[];
   bundledSkillIds?: import("@opengeni/contracts").BundledSkillId[] | undefined;
+  disabledBuiltinTools?: import("@opengeni/contracts").DisabledBuiltinTool[] | undefined;
   tools: ToolRef[];
   // Public admission always supplies provenance; optional keeps internal
   // callers that predate durable tool-policy provenance source-compatible
@@ -1081,6 +1083,7 @@ export async function createAndStartSessionWithOutcome(input: {
       resources: input.resources,
       skills: input.skills ?? [],
       bundledSkillIds: input.bundledSkillIds,
+      disabledBuiltinTools: input.disabledBuiltinTools,
       tools: input.tools,
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
@@ -1179,6 +1182,7 @@ export async function createAndStartSessionWithOutcome(input: {
       resources: input.resources,
       skills: input.skills ?? [],
       bundledSkillIds: input.bundledSkillIds,
+      disabledBuiltinTools: input.disabledBuiltinTools,
       tools: input.tools,
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
@@ -2305,6 +2309,11 @@ async function createSessionForRequestInFileScope(
       message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
     });
   }
+  // Narrowing-only built-in tool opt-outs: a child keeps every parent opt-out.
+  const disabledBuiltinTools = resolveDisabledBuiltinTools(
+    payload.disabledBuiltinTools,
+    parentSession?.disabledBuiltinTools,
+  );
   // Agent-access/end-user/memory scope inherit and narrow exactly like
   // visibility: presence is read from the raw request because the Zod
   // defaults erase absent-vs-explicit, and the parent side comes from the
@@ -2363,6 +2372,7 @@ async function createSessionForRequestInFileScope(
     try {
       const initializedReplay = await getInitializedSessionCreateReplay(db, {
         bundledSkillIds,
+        disabledBuiltinTools,
         accountId: grant.accountId,
         workspaceId,
         subjectId: replayManagedHumanSubjectId ?? grant.subjectId,
@@ -3355,6 +3365,7 @@ async function createSessionForRequestInFileScope(
       resources,
       skills,
       bundledSkillIds,
+      disabledBuiltinTools,
       tools,
       toolPolicy,
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),

@@ -833,10 +833,16 @@ effective selection (explicit `[]`, or a deployment ceiling of none) withholds
 them; any non-empty selection keeps them, with every write still governed by
 Learning mode. Read-only `skill_read` stays available so selected Skills load.
 
-Two built-in tools are governed by workspace settings rather than the session
-selection: `agentHumanInputEnabled: false` removes `request_human_input`, and
-`agentWebSearchEnabled: false` removes provider-hosted `web_search` (it only
-narrows the deployment/model capability). The progressive-disclosure router
+Two built-in tools are governed by switch-offs rather than the session
+selection: `request_human_input` and provider-hosted web search. Remove them
+per workspace with the settings `agentHumanInputEnabled: false` /
+`agentWebSearchEnabled: false`, or per session with
+`CreateSessionRequest.disabledBuiltinTools: ["human_input", "web_search"]`
+(also on scheduled-task `agentConfig`). Every source only narrows the
+deployment/model capability; session opt-outs are frozen at creation and
+inherited by children, which may add more. Web search is removed from the
+provider request itself, including the `web_search`/`x_search` tools the
+SuperGrok transport would otherwise append. The progressive-disclosure router
 (`tool_search`, `tool_list`, `tool_invoke`) is present whenever a selected MCP
 server is not `eager`, including the mandatory first-party server; it only
 reveals already-authorized tools. Read-only `list_models` is a base tool.

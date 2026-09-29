@@ -146,3 +146,38 @@ describe("createSessionForRequest selects same-request mcpServers", () => {
     ]);
   }, 60_000);
 });
+
+describe("createSessionForRequest built-in tool opt-outs", () => {
+  test("a root opt-out is frozen and a child keeps it while adding its own", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const parent = await createSessionForRequest(
+      deps(),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "hi", disabledBuiltinTools: ["web_search"] },
+    );
+    expect(parent.disabledBuiltinTools).toEqual(["web_search"]);
+
+    const child = await createSessionForRequest(
+      deps(),
+      {
+        ...grant(accountId, workspaceId),
+        permissions: ["sessions:create", "sessions:read"],
+        metadata: { sessionId: parent.id, firstPartyMcpTools: ["session_create"] },
+      },
+      workspaceId,
+      { initialMessage: "child", disabledBuiltinTools: ["human_input"] },
+    );
+    expect(child.parentSessionId).toBe(parent.id);
+    expect(child.disabledBuiltinTools).toEqual(["human_input", "web_search"]);
+
+    const plain = await createSessionForRequest(
+      deps(),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "plain" },
+    );
+    expect(plain.disabledBuiltinTools).toBeUndefined();
+  }, 60_000);
+});

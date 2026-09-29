@@ -697,6 +697,7 @@ export type {
   ApiKeyConnectionCredential,
   ConnectionCredentialPlacement,
   CreateConnectionRequest,
+  DisabledBuiltinTool,
   SessionApprovalRequest,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,

@@ -8,8 +8,10 @@ import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
+export * from "./session-builtin-tools";
 export * from "./skill-use";
 import { BundledSkillSelection } from "./bundled-skills";
+import { DisabledBuiltinTools } from "./session-builtin-tools";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
 import {
@@ -9674,6 +9676,8 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     .strict();
   return {
     bundledSkillIds: BundledSkillSelection.optional(),
+    // Same narrowing-only session opt-outs as CreateSessionRequest.
+    disabledBuiltinTools: DisabledBuiltinTools.optional(),
     // Frozen with the ordinary scheduled run. This selects a connector source;
     // fetching happens only through that run's live agent tool.
     knowledgeSource: KnowledgeSourceSyncAction.optional(),
@@ -12714,6 +12718,8 @@ export type SessionAdmissionBlock = z.infer<typeof SessionAdmissionBlock>;
 export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.object({
     bundledSkillIds: BundledSkillSelection.optional(),
+    /** Built-in tools this session switched off at creation (inherited by children). */
+    disabledBuiltinTools: DisabledBuiltinTools.optional(),
     id: z.string().uuid(),
     workspaceId: z.string().uuid(),
     accountId: z.string().uuid(),
@@ -15474,6 +15480,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
     {
       /** Omission inherits/defaults; [] disables bundles. Children may only narrow. */
       bundledSkillIds: BundledSkillSelection.optional(),
+      /**
+       * Built-in tools to switch off for this session: "human_input" removes
+       * request_human_input, "web_search" removes provider-hosted web search.
+       * Narrowing only and frozen at creation; children keep the parent's
+       * opt-outs and may add more. Workspace settings can still withhold them.
+       */
+      disabledBuiltinTools: DisabledBuiltinTools.optional(),
       /**
        * Optional UUID preallocated by an embedding host. This lets the host durably
        * link its own projection before OpenGeni admits the initial turn. Replays
