@@ -103,6 +103,8 @@ describe("signed-out homepage on the real app route", () => {
     return posts;
   }
 
+  const SIGNED_OUT_HEADING = "Infrastructure for agents that actually finish the job.";
+
   async function chooseTheme(page: Page, theme: "Light" | "Dark" | "System") {
     await page.getByRole("button", { name: "Appearance", exact: true }).click();
     await page.getByRole("menuitemradio", { name: theme, exact: true }).click();
@@ -122,7 +124,7 @@ describe("signed-out homepage on the real app route", () => {
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(baseUrl);
-      await page.getByRole("heading", { name: "Open-source cloud agents" }).waitFor();
+      await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).waitFor();
       expect(await page.locator("h1").count()).toBe(1);
       expect(await page.locator("main ul li").count()).toBe(3);
       expect(await page.getByRole("button", { name: "Continue with Google" }).isVisible()).toBe(
@@ -170,7 +172,7 @@ describe("signed-out homepage on the real app route", () => {
       expect(posts).toContain("/v1/auth/request-password-reset");
       await page.goto(`${baseUrl}/reset-password`);
       await page.getByRole("heading", { name: "Reset password", exact: true }).waitFor();
-      expect(await page.getByRole("heading", { name: "Open-source cloud agents" }).count()).toBe(0);
+      expect(await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(0);
       expect(errors).toEqual([]);
     } finally {
       await context.close();
@@ -187,7 +189,7 @@ describe("signed-out homepage on the real app route", () => {
       expect(await page.locator("h1").count()).toBe(1);
       await page.getByRole("button", { name: "Create an account", exact: true }).click();
       await page.getByLabel("Name", { exact: true }).waitFor();
-      expect(await page.getByRole("heading", { name: "Open-source cloud agents" }).count()).toBe(1);
+      expect(await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(1);
       await page.getByRole("button", { name: "Back to sign in", exact: true }).click();
       const popupPromise = page.waitForEvent("popup");
       await page.getByRole("button", { name: "Continue with email", exact: true }).click();
@@ -196,10 +198,10 @@ describe("signed-out homepage on the real app route", () => {
       expect(await popup.getByRole("button", { name: "Continue with GitHub" }).isVisible()).toBe(
         true,
       );
-      expect(await popup.getByRole("heading", { name: "Open-source cloud agents" }).count()).toBe(
+      expect(await popup.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(
         0,
       );
-      expect(await page.getByRole("heading", { name: "Open-source cloud agents" }).count()).toBe(1);
+      expect(await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(1);
     } finally {
       await context.close();
     }

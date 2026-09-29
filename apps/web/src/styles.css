@@ -2,6 +2,10 @@
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/inter/wght-italic.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
+/* Display faces for the signed-out pages only; the browser fetches the files
+   only where they are used. */
+@import "@fontsource-variable/dm-sans/wght.css";
+@import "@fontsource/instrument-serif/400-italic.css";
 @import "@opengeni/react/styles.css";
 @import "@opengeni/react/responsive.css";
 
@@ -21,6 +25,8 @@
     ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular,
     "Noto Sans JP Variable", "Noto Sans Arabic Variable", Menlo, monospace;
+  --font-display: "DM Sans Variable", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
 
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;
