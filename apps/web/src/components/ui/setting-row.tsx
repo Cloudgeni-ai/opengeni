@@ -324,7 +324,7 @@ export function SettingRow({
   );
 }
 
-/** Rows of one section, split by hairlines. No box: sections stay open. */
+/** Rows of one section, split by hairlines. The Section variant decides whether they sit in a card. */
 export function SettingRowGroup({ className, ...props }: ComponentProps<"div">) {
   return (
     <div

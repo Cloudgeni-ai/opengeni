@@ -9,9 +9,13 @@ import { cn } from "@/lib/utils";
  * that, and an optional action vertically centred on the title line.
  *
  * Variants (how the rows are held):
- * - `open` (default): rows sit on the page, no box. Sections are separated by
- *   one full-width hairline (SectionStack). Never produces a card in a card.
- * - `group`: the rows share one bordered surface, split by hairlines.
+ * - `open` (default outside settings): rows sit on the page, no box. Sections
+ *   are separated by one full-width hairline (SectionStack).
+ * - `group` (default inside settings, via `SectionVariantProvider` in the
+ *   settings shell): the heading sits above, the rows share one bordered
+ *   card (radius 14, surface, 20px inner gutter), split by hairlines. A
+ *   Notice among the rows loses its own box so it never nests a card in a
+ *   card, and a Section whose rows render nothing shows no empty card.
  * - `tiles`: every row gets its own bordered card.
  *
  * Rows are the direct children of a Section (SettingRow, ListRow, a Notice...).
@@ -26,8 +30,42 @@ export type SectionVariant = "open" | "group" | "tiles";
 
 const SectionVariantContext = createContext<SectionVariant | null>(null);
 
+/** True inside a grouped Section's card, so nested lists don't draw a second card. */
+const SectionCardContext = createContext(false);
+
+/**
+ * How a resource list should hold itself here: `card` when the page groups its
+ * sections into cards but the list is not already inside one, `inside` when it
+ * sits in a grouped Section's card, `open` otherwise.
+ */
+export function useSectionListFrame(): "card" | "inside" | "open" {
+  const variant = useContext(SectionVariantContext);
+  const inCard = useContext(SectionCardContext);
+  if (inCard) return "inside";
+  return variant === "group" ? "card" : "open";
+}
+
+/**
+ * Sets the default variant for every SectionStack and Section below it. The
+ * settings shell provides `group`, so every settings page gets grouped cards.
+ */
+export function SectionVariantProvider({
+  variant,
+  children,
+}: {
+  variant: SectionVariant;
+  children?: ReactNode;
+}) {
+  return (
+    <SectionVariantContext.Provider value={variant}>{children}</SectionVariantContext.Provider>
+  );
+}
+
 export interface SectionStackProps extends ComponentProps<"div"> {
-  /** Applies to every Section inside unless a Section sets its own. */
+  /**
+   * Applies to every Section inside unless a Section sets its own. Defaults to
+   * the enclosing provider's variant, then `open`.
+   */
   variant?: SectionVariant;
   /**
    * A full-width hairline between sections with 24px above and below.
@@ -38,12 +76,14 @@ export interface SectionStackProps extends ComponentProps<"div"> {
 
 /** A column of sections with the page rhythm between them. */
 export function SectionStack({
-  variant = "open",
+  variant: variantProp,
   divided,
   className,
   children,
   ...props
 }: SectionStackProps) {
+  const inherited = useContext(SectionVariantContext);
+  const variant = variantProp ?? inherited ?? "open";
   const hairlines = divided ?? variant === "open";
   return (
     <SectionVariantContext.Provider value={variant}>
@@ -88,8 +128,13 @@ export interface SectionProps extends Omit<ComponentProps<"section">, "title"> {
 
 const CONTENT_CLASS: Record<SectionVariant, string> = {
   open: "flex flex-col",
-  group:
-    "flex flex-col divide-y divide-border overflow-hidden rounded-[14px] border border-border bg-surface [&>*]:px-4",
+  group: cn(
+    // The 20px gutter is on the card, so the hairlines between rows are inset
+    // like the text they separate.
+    "flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface px-5 py-1 empty:hidden",
+    // A Notice among the rows becomes a row: no second border, fill or radius.
+    "[&>[data-slot=notice]]:rounded-none [&>[data-slot=notice]]:border-0 [&>[data-slot=notice]]:bg-transparent [&>[data-slot=notice]]:px-0 [&>[data-slot=notice]]:py-4",
+  ),
   tiles:
     "flex flex-col gap-2 [&>*]:rounded-[14px] [&>*]:border [&>*]:border-border [&>*]:bg-surface [&>*]:px-4 [&>*]:py-1",
 };
@@ -170,7 +215,9 @@ export function Section({
             contentClassName,
           )}
         >
-          {children}
+          <SectionCardContext.Provider value={variant === "group"}>
+            {children}
+          </SectionCardContext.Provider>
         </div>
       ) : null}
     </section>

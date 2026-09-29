@@ -6,6 +6,7 @@ import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
+import { SectionVariantProvider } from "@/components/ui/section";
 import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
 import {
   Sheet,
@@ -157,7 +158,7 @@ function SettingsRail({
           <LinkShell
             link={home}
             aria-label="Opengeni home"
-            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-[15px] font-semibold text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-[15px] font-medium text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
           >
             <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
               <BrandMark className="size-4" />
@@ -215,7 +216,7 @@ export function SettingsRailOutLink({
           {link}
         </NavItem>
       ) : (
-        <div className="flex h-8 min-w-0 items-center gap-2.5 px-2.5 text-sm font-medium text-fg-muted">
+        <div className="flex h-8 min-w-0 items-center gap-2.5 px-2.5 text-sm font-normal text-fg-label">
           <Icon aria-hidden="true" className="size-4 shrink-0" />
           <span className="truncate">{label}</span>
         </div>
@@ -320,18 +321,23 @@ export function SettingsShell({
         {notice}
         <SettingsActionsSlotContext.Provider value={actionsSlot}>
           <PageHeaderStyleProvider icon="hide">
-            {layout === "page" ? (
-              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
-            ) : (
-              <ContentPage
-                width="standard"
-                // Pages that bring their own ContentPage (a detail page) join this
-                // scroller instead of nesting a second scroller and gutter.
-                className="pb-16 lg:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
-              >
-                {body}
-              </ContentPage>
-            )}
+            {/* Settings sections are grouped cards: heading above, rows in one card. */}
+            <SectionVariantProvider variant="group">
+              {layout === "page" ? (
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                  {children}
+                </div>
+              ) : (
+                <ContentPage
+                  width="standard"
+                  // Pages that bring their own ContentPage (a detail page) join this
+                  // scroller instead of nesting a second scroller and gutter.
+                  className="pb-16 lg:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
+                >
+                  {body}
+                </ContentPage>
+              )}
+            </SectionVariantProvider>
           </PageHeaderStyleProvider>
         </SettingsActionsSlotContext.Provider>
       </section>

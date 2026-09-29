@@ -31,6 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LogoTileSizeProvider, type LogoTileSize } from "@/components/ui/logo-tile";
+import { useSectionListFrame } from "@/components/ui/section";
 import { RelativeTimeDefaultsContext } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -174,6 +175,11 @@ export function RowList({
   children,
 }: RowListProps) {
   const value = useMemo<RowListContextValue>(() => ({ variant, columns }), [variant, columns]);
+  // In settings (grouped sections) a flush list that is not already inside a
+  // section card becomes the card itself: rows keep their 12px padding, the
+  // card adds 8px so titles sit 20px in, like setting rows.
+  const frame = useSectionListFrame();
+  const flushCard = flush && frame === "card";
   const templateStyle = {
     "--row-list-template": gridTemplate(columns, variant),
   } as CSSProperties;
@@ -260,7 +266,12 @@ export function RowList({
           data-slot="row-list"
           data-variant={variant}
           data-flush={flush || undefined}
-          className={cn("@container/list min-w-0", flush && "-mx-3", className)}
+          data-frame={flushCard ? "card" : undefined}
+          className={cn(
+            "@container/list min-w-0",
+            flushCard ? "rounded-lg border border-border bg-surface px-2 py-1" : flush && "-mx-3",
+            className,
+          )}
         >
           {busyNote}
           {body}
