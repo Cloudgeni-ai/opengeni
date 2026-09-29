@@ -1,6 +1,7 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
@@ -16,13 +17,45 @@ const degradedConnectionStates: Partial<Record<SessionEventsConnectionState, Con
     error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
   };
 
-export function LoadingPanel({ label }: { label: string }) {
+/** One quiet presentation across bootstrap, access, route and history gates.
+ * Named operation panels retain their existing treatment. Gates still own
+ * when content is authorized; this component never retains data.
+ */
+export function LoadingPanel({ label }: { label?: string }) {
+  if (label) {
+    return (
+      <section className="grid flex-1 place-items-center px-4 text-center">
+        <div className="max-w-sm rounded-lg border border-border bg-surface p-5 text-sm text-fg-muted">
+          <Loader2Icon className="mx-auto mb-3 size-5 animate-spin text-fg" />
+          {label}
+        </div>
+      </section>
+    );
+  }
+  const indicator = (
+    <span
+      role="status"
+      aria-label="Loading"
+      className="pointer-events-none fixed left-1/2 top-1/2 inline-flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 text-sm text-fg-muted"
+      data-page-loading=""
+    >
+      <Loader2Icon
+        aria-hidden
+        ref={(node) =>
+          node?.getAnimations?.().forEach((animation) => {
+            // Bootstrap/route boundaries remount this indicator. Share the
+            // document timeline so its rotation does not restart at each one.
+            animation.startTime = 0;
+          })
+        }
+        className="size-4 animate-spin motion-reduce:animate-none"
+      />
+      Loading…
+    </span>
+  );
   return (
-    <section className="grid flex-1 place-items-center px-4 text-center">
-      <div className="max-w-sm rounded-lg border border-border bg-surface p-5 text-sm text-fg-muted">
-        <Loader2Icon className="mx-auto mb-3 size-5 animate-spin text-fg" />
-        {label}
-      </div>
+    <section aria-busy="true" className="min-h-0 flex-1">
+      {typeof document === "undefined" ? indicator : createPortal(indicator, document.body)}
     </section>
   );
 }

@@ -2,19 +2,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { artifactKey, type ArtifactCatalogFilters } from "./artifact-catalog";
-import {
-  artifactCatalogs,
-  invalidateArtifactCatalog,
-  type CachedArtifactCatalog,
-} from "./artifact-catalog-cache";
+import { artifactCatalogs, type CachedArtifactCatalog } from "./artifact-catalog-cache";
 import { retainArtifactsAfterRefreshFailure } from "./artifact-refresh";
-
-export { invalidateArtifactCatalog } from "./artifact-catalog-cache";
 
 const FRESH_FOR_MS = 30_000;
 const MAX_CACHED_QUERIES = 40;
 type CatalogClient = Pick<OpenGeniBrowserClient, "listArtifactCatalog">;
 type CatalogPages = Pick<CachedArtifactCatalog, "items" | "nextCursor" | "pages">;
+
+/** Drop every cached view of a workspace, e.g. after a Site mutation. */
+export function invalidateArtifactCatalog(client: object, workspaceId: string) {
+  for (const [key, entry] of artifactCatalogs.get(client) ?? []) {
+    if (entry.workspaceId === workspaceId) artifactCatalogs.get(client)!.delete(key);
+  }
+}
 
 function saveCatalog(client: CatalogClient, key: string, entry: CachedArtifactCatalog) {
   let cache = artifactCatalogs.get(client);

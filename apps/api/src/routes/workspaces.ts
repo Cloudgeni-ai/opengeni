@@ -126,6 +126,7 @@ import {
   configuredOpenRouterWorkspaceProductModelIds,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  sandboxImageAllowlist,
   type Settings,
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
@@ -454,6 +455,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, {
         message: "invalid workspace settings patch",
+      });
+    }
+    const requestedImage = parsed.data.defaultSandboxImage;
+    if (requestedImage && !sandboxImageAllowlist(deps.settings).includes(requestedImage)) {
+      throw new HTTPException(422, {
+        message:
+          "defaultSandboxImage must be one of the images in this deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST",
       });
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy

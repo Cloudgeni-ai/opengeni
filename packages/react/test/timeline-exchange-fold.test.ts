@@ -1,12 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import {
-  buildTimeline,
-  groupTimeline,
-  type AgentMessageItem,
-  type NoticeItem,
-  type TimelineGroup,
-} from "../src/timeline";
+import { buildTimeline, groupTimeline, type TimelineGroup } from "../src/timeline";
 
 let sequence = 0;
 
@@ -75,22 +69,6 @@ function kinds(groups: TimelineGroup[]): string[] {
 
 function fold(events: SessionEvent[]): TimelineGroup[] {
   return groupTimeline(buildTimeline(events), { foldExchanges: true });
-}
-
-/** Rows a reader sees between the prompt and the answer. */
-function rowsBetweenPromptAndAnswer(groups: TimelineGroup[]): number {
-  const prompt = groups.findIndex(
-    (group) => group.kind === "item" && group.item.kind === "user-message",
-  );
-  let answerIndex = groups.length;
-  for (let index = groups.length - 1; index > prompt; index -= 1) {
-    const group = groups[index];
-    if (group?.kind === "item" && group.item.kind === "agent-message") {
-      answerIndex = index;
-      break;
-    }
-  }
-  return answerIndex - prompt - 1;
 }
 
 /**
@@ -165,389 +143,414 @@ function delegatedExchange() {
   return { prompt, first, result, secondStart, answer: reply, secondEnd };
 }
 
-describe("exchange fold", () => {
-  test("default grouping is unchanged: every note and wait stays a separate row", () => {
-    const exchange = delegatedExchange();
+const visibleProse = (groups: TimelineGroup[]) =>
+  groups.flatMap((group) =>
+    group.kind === "item" && group.item.kind === "agent-message" ? [group.item.text] : [],
+  );
+const workRows = (groups: TimelineGroup[]) =>
+  groups.filter((group) => group.kind === "activity" && group.work);
+
+describe("readable per-turn grouping", () => {
+  test("late commentary cannot change a settled phase-less response duration", () => {
+    sequence = 0;
+    const work = tool("read", "exec_command", "turn-1");
+    const start = event("agent.message.delta", { text: "Answer", messageId: "a" });
     const events = [
-      exchange.prompt,
-      ...exchange.first,
-      exchange.result,
-      ...exchange.secondStart,
-      ...exchange.answer,
-      ...exchange.secondEnd,
+      ...work,
+      start,
+      event("agent.message.completed", { text: "Answer", messageId: "a" }),
+      event("turn.completed", {}),
     ];
-    // The row flood this fold removes: turn chip, lifted note, recorded wait,
-    // child result, second turn chip, then the answer.
-    expect(kinds(groupTimeline(buildTimeline(events)))).toEqual([
-      "user-message",
-      "turn",
-      "agent-message",
-      "notice",
-      "machine-input-batch",
-      "turn",
-      "agent-message",
-    ]);
-    expect(rowsBetweenPromptAndAnswer(fold(events))).toBe(1);
-  });
-
-  test("commentary joins its cluster while the first turn works", () => {
-    const exchange = delegatedExchange();
-    // Through the wait tool call, so the second note has activity after it.
-    const live = [exchange.prompt, ...exchange.first.slice(0, 12)];
-    const groups = fold(live);
-    expect(kinds(groups)).toEqual(["user-message", "activity"]);
-    const activity = groups[1];
-    if (activity?.kind !== "activity") throw new Error("expected the live cluster");
-    expect(activity.outcome).toBeUndefined();
-    expect(
-      activity.items
-        .filter((item): item is AgentMessageItem => item.kind === "agent-message")
-        .map((item) => item.text),
-    ).toEqual([
-      "I'll run the replica check in a worker.",
-      "The worker is still running; I'll wait for its result.",
-    ]);
-  });
-
-  test("a phase-less message of the running turn streams as a note, never as the answer", () => {
-    sequence = 0;
-    const prompt = event("user.message", { text: "how many users?" }, { turnId: null });
-    const working = [
-      prompt,
-      event("turn.started", { triggerEventId: prompt.id }),
-      ...tool("read", "exec_command", "turn-1"),
-      recordedDelta("Checking the users table ", "note-1"),
-      recordedDelta("next.", "note-1"),
-    ];
-    const live = fold(working);
-    expect(kinds(live)).toEqual(["user-message", "activity"]);
-    const row = live[1];
-    expect(row?.kind === "activity" ? row.items.at(-1) : null).toMatchObject({
-      kind: "agent-message",
-      text: "Checking the users table next.",
-    });
-    // The final answer is indistinguishable from a note until the turn ends.
-    const answering = [
-      ...working,
-      ...tool("query", "exec_command", "turn-1"),
-      recordedDelta("312 users signed up.", "answer-1"),
-    ];
-    expect(kinds(fold(answering))).toEqual(["user-message", "activity"]);
-    const settled = fold([...answering, ...recordedTurnEnd("312 users signed up.")]);
-    expect(kinds(settled)).toEqual(["user-message", "turn", "agent-message"]);
-    expect(settled[2]?.kind === "item" ? settled[2].item : null).toMatchObject({
-      kind: "agent-message",
-      text: "312 users signed up.",
-    });
-  });
-
-  test("a phase-less message that outgrows a note streams as the answer", () => {
-    sequence = 0;
-    const long = "The signup table has three sources to reconcile. ".repeat(24);
-    const streaming = [
-      event("user.message", { text: "explain the signups" }, { turnId: null }),
-      event("turn.started", {}),
-      ...tool("read", "exec_command", "turn-1"),
-      recordedDelta(long.slice(0, 600), "answer-1"),
-    ];
-    expect(kinds(fold(streaming))).toEqual(["user-message", "activity"]);
-    const grown = [...streaming, recordedDelta(long.slice(600), "answer-1")];
-    expect(kinds(fold(grown))).toEqual(["user-message", "activity", "agent-message"]);
-    // More work after it still makes it a note.
-    const followed = [...grown, ...tool("next", "exec_command", "turn-1")];
-    expect(kinds(fold(followed))).toEqual(["user-message", "activity"]);
-  });
-
-  test("only the running turn keeps its latest message as a note", () => {
-    sequence = 0;
-    const prompt = event("user.message", { text: "check prod" }, { turnId: null });
-    const first = [
-      prompt,
-      event("turn.started", { triggerEventId: prompt.id }),
-      ...tool("read", "exec_command", "turn-1"),
-      recordedDelta("Prod looks healthy so far.", "note-1"),
-    ];
-    const steer = event(
-      "user.message",
-      { text: "stop, check staging instead", delivery: "steer" },
-      { turnId: null },
-    );
+    const before = workRows(fold(events))[0];
     const groups = fold([
-      ...first,
-      steer,
-      // A steered turn is superseded without a turn end of its own.
-      event("turn.superseded", {}),
-      event("turn.started", { triggerEventId: steer.id }, { turnId: "turn-2" }),
-      ...tool("staging", "exec_command", "turn-2"),
-    ]);
-    expect(kinds(groups)).toEqual([
-      "user-message",
-      "activity",
-      "agent-message",
-      "user-message",
-      "activity",
-    ]);
-  });
-
-  test("a stream that declares commentary joins the cluster while it streams", () => {
-    sequence = 0;
-    const groups = fold([
-      event("turn.started", {}),
-      ...tool("read", "exec_command", "turn-1"),
-      event("agent.message.delta", {
-        text: "Reading the schema next",
-        messageId: "note-1",
+      ...events,
+      event("agent.message.completed", {
+        text: "Late note",
+        messageId: "late",
         phase: "commentary",
       }),
     ]);
-    expect(kinds(groups)).toEqual(["activity"]);
-    const activity = groups[0];
-    expect(activity?.kind === "activity" ? activity.items.at(-1) : null).toMatchObject({
-      kind: "agent-message",
-      phase: "commentary",
-      streaming: true,
-    });
+    const after = workRows(groups)[0];
+    expect(after?.kind === "activity" ? after.work?.responseStartedAt : null).toBe(
+      before?.kind === "activity" ? before.work?.responseStartedAt : null,
+    );
+    expect(visibleProse(groups)).toEqual(["Answer", "Late note"]);
   });
 
-  test("a parked exchange is one waiting row that knows its agents", () => {
-    const exchange = delegatedExchange();
-    const groups = fold([exchange.prompt, ...exchange.first]);
-    expect(kinds(groups)).toEqual(["user-message", "turn"]);
-    const row = groups[1];
-    if (row?.kind !== "turn") throw new Error("expected the exchange row");
-    expect(row.id).toBe("exchange-turn-turn-1");
-    expect(kinds(row.groups)).toEqual(["turn", "agent-message", "notice"]);
-    const wait = row.groups[2];
-    expect(wait?.kind === "item" ? wait.item : null).toMatchObject({
-      kind: "notice",
-      recordedOutcome: true,
-      waitingAgents: 1,
-      text: "Waiting for the replica worker.",
-    });
-    expect((wait as { item: NoticeItem }).item.waitEndedAt).toBeUndefined();
-  });
-
-  test("the resumed turn continues the same live row with the earlier work behind it", () => {
-    const exchange = delegatedExchange();
-    const groups = fold([
-      exchange.prompt,
-      ...exchange.first,
-      exchange.result,
-      ...exchange.secondStart,
-    ]);
-    expect(kinds(groups)).toEqual(["user-message", "activity"]);
-    const row = groups[1];
-    if (row?.kind !== "activity") throw new Error("expected the live row");
-    expect(row.id).toBe("exchange-turn-turn-1");
-    expect(row.outcome).toBeUndefined();
-    expect(kinds(row.earlier ?? [])).toEqual([
-      "turn",
-      "agent-message",
-      "notice",
-      "machine-input-batch",
-    ]);
-    const wait = row.earlier?.[2];
-    // The child result ended the recorded wait.
-    expect(
-      wait?.kind === "item" && wait.item.kind === "notice" ? wait.item.waitEndedAt : null,
-    ).toBe(exchange.result.occurredAt);
-  });
-
-  test("the answer streams below the live row", () => {
-    const exchange = delegatedExchange();
-    const groups = fold([
-      exchange.prompt,
-      ...exchange.first,
-      exchange.result,
-      ...exchange.secondStart,
-      exchange.answer[0]!,
-    ]);
-    expect(kinds(groups)).toEqual(["user-message", "activity", "agent-message"]);
-    expect(rowsBetweenPromptAndAnswer(groups)).toBe(1);
-  });
-
-  test("a settled exchange is one row followed by its answer", () => {
-    const exchange = delegatedExchange();
-    const groups = fold([
-      exchange.prompt,
-      ...exchange.first,
-      exchange.result,
-      ...exchange.secondStart,
-      ...exchange.answer,
-      ...exchange.secondEnd,
-    ]);
-    expect(kinds(groups)).toEqual(["user-message", "turn", "agent-message"]);
-    const row = groups[1];
-    if (row?.kind !== "turn") throw new Error("expected the exchange row");
-    expect(row.id).toBe("exchange-turn-turn-1");
-    expect(row.outcome).toBe("complete");
-    expect(kinds(row.groups)).toEqual([
-      "turn",
-      "agent-message",
-      "notice",
-      "machine-input-batch",
-      "turn",
-    ]);
-    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
-      kind: "agent-message",
-      text: "312 new users signed up in the last 48 hours.",
-    });
-  });
-
-  test("a turn without an answer still surfaces its latest note", () => {
+  test("a late final cannot move settled work across a newer turn or extend its clock", () => {
     sequence = 0;
-    const groups = fold([
-      event("user.message", { text: "tidy up" }, { turnId: null }),
-      event("turn.started", {}),
-      ...tool("fix", "exec_command", "turn-1"),
-      ...note("Done: the formatter is clean.", "turn-1"),
-      // A trailing tool call makes the phase-less message commentary.
-      ...tool("title", "opengeni__set_session_title", "turn-1"),
-      event("turn.completed", {}),
-    ]);
-    expect(kinds(groups)).toEqual(["user-message", "turn", "agent-message"]);
-    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
-      text: "Done: the formatter is clean.",
-    });
-    const turn = groups[1];
-    if (turn?.kind !== "turn") throw new Error("expected the turn");
-    expect(
-      turn.groups.flatMap((group) =>
-        group.kind === "activity" ? group.items.map((item) => item.kind) : [],
+    const first = [event("turn.started", {}), ...tool("read", "exec_command", "turn-1")];
+    const ended = event("turn.completed", {});
+    const resumed = event(
+      "system.update.delivered",
+      {
+        members: [
+          {
+            id: "u",
+            sourceId: "worker",
+            kind: "agent_message",
+            classification: "info",
+            summary: "Follow up",
+          },
+        ],
+      },
+      { turnId: "turn-2" },
+    );
+    const events = [
+      ...first,
+      ended,
+      resumed,
+      ...tool("next", "exec_command", "turn-2"),
+      event(
+        "agent.message.completed",
+        { text: "Late final", phase: "final_answer", messageId: "late" },
+        { turnId: "turn-1" },
       ),
-    ).toEqual(["tool-call", "tool-call"]);
+    ];
+    const groups = fold(events);
+    expect(visibleProse(groups)).toEqual(["Late final"]);
+    expect(kinds(groups)).toEqual(["activity", "machine-input-batch", "activity", "agent-message"]);
+    const row = workRows(groups)[0];
+    expect(row?.kind === "activity" ? row.work?.responseStartedAt : null).toBe(ended.occurredAt);
+    expect(workRows(groups).map((group) => group.kind === "activity" && group.id)).toEqual([
+      "work-turn-1",
+      "work-turn-2",
+    ]);
   });
 
-  test("compaction folds into the row as a facet count", () => {
+  test("classic grouping retains its original turn and wait boundaries", () => {
+    const x = delegatedExchange();
+    expect(
+      kinds(
+        groupTimeline(
+          buildTimeline([
+            x.prompt,
+            ...x.first,
+            x.result,
+            ...x.secondStart,
+            ...x.answer,
+            ...x.secondEnd,
+          ]),
+        ),
+      ),
+    ).toEqual([
+      "user-message",
+      "turn",
+      "agent-message",
+      "notice",
+      "machine-input-batch",
+      "turn",
+      "agent-message",
+    ]);
+  });
+
+  for (const phase of [undefined, "commentary", "final_answer"] as const) {
+    for (const length of [12, 999, 1000, 1001, 2400]) {
+      test(`${phase ?? "phase-less"} prose streams visibly at ${length} characters`, () => {
+        sequence = 0;
+        const text = "x".repeat(length);
+        const events = [
+          event("turn.started", {}),
+          ...tool("read", "exec_command", "turn-1"),
+          event("agent.message.delta", { text, messageId: "m1", ...(phase ? { phase } : {}) }),
+        ];
+        expect(visibleProse(fold(events))).toEqual([text]);
+        expect(visibleProse(fold([...events, ...tool("next", "exec_command", "turn-1")]))).toEqual([
+          text,
+        ]);
+        const row = workRows(fold(events))[0];
+        expect(
+          row?.kind === "activity" && row.items.every((item) => item.kind !== "agent-message"),
+        ).toBe(true);
+      });
+    }
+  }
+
+  test("every progress message and turn-ending reply survives machine resumption", () => {
+    const x = delegatedExchange();
+    const first = fold([x.prompt, ...x.first]);
+    const resumed = fold([
+      x.prompt,
+      ...x.first,
+      x.result,
+      ...x.secondStart,
+      ...x.answer,
+      ...x.secondEnd,
+    ]);
+    expect(visibleProse(first)).toEqual([
+      "I'll run the replica check in a worker.",
+      "The worker is still running; I'll wait for its result.",
+    ]);
+    expect(visibleProse(resumed)).toEqual([
+      ...visibleProse(first),
+      "312 new users signed up in the last 48 hours.",
+    ]);
+    expect(workRows(resumed).map((row) => row.kind === "activity" && row.id)).toEqual([
+      "work-turn-1",
+      "work-turn-2",
+    ]);
+    expect(resumed.some((group) => group.kind !== "item" && group.id.startsWith("exchange-"))).toBe(
+      false,
+    );
+  });
+
+  test("a settled work row ends at the first answer delta and retains its identity", () => {
+    sequence = 0;
+    const events = [event("turn.started", {}), ...tool("read", "exec_command", "turn-1")];
+    const start = event("agent.message.delta", {
+      messageId: "a",
+      text: "Answer",
+      phase: "final_answer",
+    });
+    const live = workRows(fold([...events, start]))[0];
+    const settled = workRows(
+      fold([
+        ...events,
+        start,
+        event("agent.message.completed", { text: "Answer", phase: "final_answer" }),
+        event("turn.completed", {}),
+      ]),
+    )[0];
+    expect(live?.kind === "activity" ? live.work?.responseStartedAt : null).toBe(start.occurredAt);
+    expect(settled?.kind === "activity" ? settled.work?.responseStartedAt : null).toBe(
+      start.occurredAt,
+    );
+    expect(settled?.kind === "activity" ? settled.id : null).toBe(
+      live?.kind === "activity" ? live.id : null,
+    );
+  });
+
+  test("a phase-less final output settles without changing its visible text", () => {
+    sequence = 0;
+    const events = [
+      event("turn.started", {}),
+      ...tool("read", "exec_command", "turn-1"),
+      recordedDelta("312 users", "a"),
+    ];
+    expect(visibleProse(fold(events))).toEqual(["312 users"]);
+    expect(visibleProse(fold([...events, ...recordedTurnEnd("312 users")]))).toEqual(["312 users"]);
+  });
+
+  test("routine deliveries coalesce once per resumed turn without losing payloads", () => {
+    const x = delegatedExchange();
+    const more = event(
+      "system.update.delivered",
+      {
+        members: [
+          {
+            id: "another",
+            kind: "child_progress",
+            sourceId: "worker-2",
+            classification: "info",
+            summary: "Still checking",
+          },
+        ],
+      },
+      { turnId: "turn-2" },
+    );
+    const groups = fold([x.prompt, ...x.first, x.result, more, ...x.secondStart]);
+    const batches = groups.flatMap((group) =>
+      group.kind === "item" && group.item.kind === "machine-input-batch" ? [group.item] : [],
+    );
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.members.map((member) => member.id)).toEqual(["update-1", "another"]);
+  });
+
+  for (const status of ["paused", "cancelled", "failed"]) {
+    test(`${status} ends a recorded wait while preserving its reason and worker count`, () => {
+      const x = delegatedExchange();
+      const end = event(
+        status === "paused" ? "session.control.paused" : "session.status.changed",
+        { status },
+        { turnId: null },
+      );
+      const groups = fold([x.prompt, ...x.first, end]);
+      const wait = groups.find(
+        (group) =>
+          group.kind === "item" && group.item.kind === "notice" && group.item.recordedOutcome,
+      );
+      expect(wait?.kind === "item" ? wait.item : null).toMatchObject({
+        waitingAgents: 1,
+        waitEndedAt: end.occurredAt,
+        text: "Waiting for the replica worker.",
+      });
+    });
+  }
+
+  test("completed compaction has accessible per-turn details", () => {
     sequence = 0;
     const groups = fold([
-      event("user.message", { text: "refactor" }, { turnId: null }),
       event("turn.started", {}),
-      ...tool("before", "exec_command", "turn-1"),
-      event("session.context.compaction.started", { trigger: "auto" }),
+      ...tool("read", "exec_command", "turn-1"),
       event("session.context.compacted", {
         trigger: "auto",
-        estimatedTokensBefore: 240_000,
-        estimatedTokensAfter: 40_000,
+        estimatedTokensBefore: 240000,
+        estimatedTokensAfter: 40000,
       }),
-      ...tool("after", "exec_command", "turn-1"),
-      ...answer("Refactor complete.", "turn-1", "final_answer"),
+      ...answer("Done", "turn-1", "final_answer"),
       event("turn.completed", {}),
     ]);
-    expect(kinds(groups)).toEqual(["user-message", "turn", "agent-message"]);
-    const row = groups[1];
-    if (row?.kind !== "turn") throw new Error("expected the exchange row");
-    expect(row.contextCompactionCount).toBe(1);
-    expect(kinds(row.groups)).toEqual(["activity", "context-compaction", "turn"]);
+    const row = workRows(groups)[0];
+    expect(row?.kind === "activity" ? kinds(row.work!.details) : []).toEqual([
+      "context-compaction",
+    ]);
+    expect(visibleProse(groups)).toEqual(["Done"]);
   });
 
-  test("failures, human input, and scheduled prompts stay visible", () => {
+  test("settled standalone maintenance compaction never manufactures live work", () => {
     sequence = 0;
     const groups = fold([
-      event("user.message", { text: "deploy" }, { turnId: null }),
-      event("turn.started", {}, { turnId: "turn-1" }),
+      event("turn.started", {}, { turnId: "maintenance" }),
+      event(
+        "session.context.compaction.started",
+        { trigger: "operator" },
+        { turnId: "maintenance" },
+      ),
+      event("session.context.compacted", { trigger: "operator" }, { turnId: "maintenance" }),
+      event("turn.completed", { maintenance: "context_compaction" }, { turnId: "maintenance" }),
+      event("session.status.changed", { status: "idle" }, { turnId: "maintenance" }),
+    ]);
+    expect(workRows(groups)).toHaveLength(0);
+    expect(kinds(groups)).toEqual(["context-compaction"]);
+    expect(groups[0]).toMatchObject({ kind: "item", item: { phase: "compacted" } });
+  });
+
+  test("compaction before real work attaches only to its own conversational turn", () => {
+    sequence = 0;
+    const groups = fold([
+      event("session.context.compacted", { trigger: "auto" }),
+      ...tool("read", "exec_command", "turn-1"),
+      event("turn.completed", {}),
+      event("session.context.compacted", { trigger: "operator" }, { turnId: "maintenance" }),
+      event("turn.completed", { maintenance: "context_compaction" }, { turnId: "maintenance" }),
+    ]);
+    expect(workRows(groups)).toHaveLength(1);
+    const row = workRows(groups)[0]!;
+    expect(row.kind === "activity" ? kinds(row.work!.details) : []).toEqual(["context-compaction"]);
+    expect(
+      groups.filter((group) => group.kind === "item" && group.item.kind === "context-compaction"),
+    ).toHaveLength(1);
+  });
+
+  test.each(["running", "output"])(
+    "resolved approval clears waiting from %s without creating a new tool",
+    (resume) => {
+      sequence = 0;
+      const waiting = [
+        event("turn.started", {}),
+        event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+        event("session.requiresAction", {}),
+        event("session.status.changed", { status: "requires_action" }),
+      ];
+      expect(workRows(fold(waiting))[0]).toMatchObject({
+        work: { waiting: { label: "Waiting for you" } },
+      });
+      const groups = fold([
+        ...waiting,
+        resume === "running"
+          ? event("session.status.changed", { status: "running" })
+          : event("agent.toolCall.output", { id: "same", output: "approved result" }),
+        event("agent.message.delta", {
+          text: "Continuing the approved work.",
+          phase: "commentary",
+        }),
+      ]);
+      const row = workRows(groups)[0]!;
+      expect(row.kind === "activity" ? row.work!.waiting : null).toBeUndefined();
+      expect(
+        groups.some(
+          (group) =>
+            group.kind === "item" &&
+            group.item.kind === "notice" &&
+            group.item.text.startsWith("Approval needed"),
+        ),
+      ).toBe(true);
+      expect(visibleProse(groups)).toEqual(["Continuing the approved work."]);
+    },
+  );
+
+  test.each(["other-turn", "unmatched", "late", "duplicate"])(
+    "%s tool output cannot resolve this turn's approval wait",
+    (variant) => {
+      sequence = 0;
+      const waiting = [
+        event("turn.started", {}),
+        event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+        event("session.requiresAction", {}),
+      ];
+      const receipt = event(
+        "agent.toolCall.output",
+        { id: variant === "unmatched" ? "unknown" : "same", output: "ok" },
+        { turnId: variant === "other-turn" ? "other" : "turn-1" },
+      );
+      if (variant === "late") receipt.turnAssociation = "late_rejected";
+      if (variant === "duplicate") receipt.duplicateOfEventId = "original";
+      const groups = fold([...waiting, receipt]);
+      expect(workRows(groups)[0]).toMatchObject({
+        work: { waiting: { label: "Waiting for you" } },
+      });
+    },
+  );
+
+  test("unscoped lifecycle receipts resolve only the active turn's historical approval", () => {
+    sequence = 0;
+    const groups = fold([
+      event("turn.started", {}),
+      event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+      event("session.requiresAction", {}),
+      event("session.status.changed", { status: "requires_action" }, { turnId: null }),
+      event("session.status.changed", { status: "running" }, { turnId: null }),
+    ]);
+    const row = workRows(groups)[0]!;
+    expect(row.kind === "activity" ? row.work!.waiting : null).toBeUndefined();
+    expect(
+      groups.filter(
+        (group) =>
+          group.kind === "item" &&
+          (group.item.kind === "notice" || group.item.kind === "session-status"),
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("a new approval after resumed work remains waiting and retains both status landmarks", () => {
+    sequence = 0;
+    const groups = fold([
+      event("turn.started", {}),
+      ...tool("same", "exec_command", "turn-1"),
+      event("session.status.changed", { status: "requires_action" }),
+      event("session.status.changed", { status: "running" }),
+      event("session.status.changed", { status: "requires_action" }),
+    ]);
+    expect(workRows(groups)[0]).toMatchObject({ work: { waiting: { label: "Waiting for you" } } });
+    expect(
+      groups.filter((group) => group.kind === "item" && group.item.kind === "session-status"),
+    ).toHaveLength(2);
+  });
+
+  test("failure stays on its own work row and scheduled input stays visible", () => {
+    sequence = 0;
+    const groups = fold([
+      event("turn.started", {}),
       ...tool("try", "exec_command", "turn-1"),
-      event("turn.failed", { error: "provider timeout" }, { turnId: "turn-1" }),
+      event("turn.failed", { error: "provider timeout" }),
       event(
         "system.update.delivered",
         {
           members: [
             {
-              id: "tick",
+              id: "schedule",
               kind: "scheduled_occurrence",
-              classification: "info",
               sourceId: "schedule-1",
-              summary: "Nightly deploy check",
+              classification: "info",
+              summary: "Nightly check",
             },
           ],
         },
         { turnId: "turn-2" },
       ),
-      event("turn.started", {}, { turnId: "turn-2" }),
-      ...tool("retry", "exec_command", "turn-2"),
-      ...answer("Deployed.", "turn-2", "final_answer"),
-      event("turn.completed", {}, { turnId: "turn-2" }),
     ]);
-    expect(kinds(groups)).toEqual([
-      "user-message",
-      "turn",
-      "machine-input-batch",
-      "turn",
-      "agent-message",
-    ]);
-    expect(groups[1]?.kind === "turn" ? groups[1].outcome : null).toBe("failed");
-  });
-
-  test("a recorded wait counts only this session's workers", () => {
-    sequence = 0;
-    const worker = "8a5b0c2e-1111-4222-8333-944455556666";
-    const peer = "3c9d1e2f-2222-4333-8444-a55566667777";
-    const groups = fold([
-      event("user.message", { text: "count users" }, { turnId: null }),
-      event("turn.started", {}),
-      event("agent.toolCall.created", {
-        id: "spawn",
-        name: "opengeni__session_create",
-        arguments: { initialMessage: "Count" },
-      }),
-      event("agent.toolCall.output", { id: "spawn", output: { sessionId: worker } }),
-      // A peer session is told about the work; it never reports back here.
-      event("agent.toolCall.created", {
-        id: "tell",
-        name: "opengeni__session_send_message",
-        arguments: { sessionId: peer, message: "FYI" },
-      }),
-      event("agent.toolCall.output", { id: "tell", output: { sessionId: peer } }),
-      event("session.wait.started", { actor: "agent", reason: "Worker running." }),
-      event("turn.completed", { output: "" }),
-    ]);
-    const row = groups[1];
-    const wait = row?.kind === "turn" ? row.groups.at(-1) : undefined;
-    expect(wait?.kind === "item" ? wait.item : null).toMatchObject({
-      kind: "notice",
-      recordedOutcome: true,
-      waitingAgents: 1,
-    });
-  });
-
-  test("a wait ends when its session is cancelled", () => {
-    const exchange = delegatedExchange();
-    const cancelled = event("session.status.changed", { status: "cancelled" }, { turnId: null });
-    const groups = fold([exchange.prompt, ...exchange.first, cancelled]);
-    const row = groups[1];
-    const wait =
-      row?.kind === "turn"
-        ? row.groups.find((group) => group.kind === "item" && group.item.kind === "notice")
-        : undefined;
-    expect(
-      wait?.kind === "item" && wait.item.kind === "notice" ? wait.item.waitEndedAt : null,
-    ).toBe(cancelled.occurredAt);
-  });
-
-  test("a later human prompt ends the fold and starts a new exchange", () => {
-    const exchange = delegatedExchange();
-    const followUp = event("user.message", { text: "and yesterday?" }, { turnId: null });
-    const groups = fold([
-      exchange.prompt,
-      ...exchange.first,
-      followUp,
-      event("turn.started", { triggerEventId: followUp.id }, { turnId: "turn-3" }),
-      ...tool("query", "exec_command", "turn-3"),
-      ...answer("140 users yesterday.", "turn-3", "final_answer"),
-      event("turn.completed", {}, { turnId: "turn-3" }),
-    ]);
-    expect(kinds(groups)).toEqual([
-      "user-message",
-      "turn",
-      "user-message",
-      "turn",
-      "agent-message",
-    ]);
-    // The human prompt ended the earlier wait.
-    const parked = groups[1];
-    const wait = parked?.kind === "turn" ? parked.groups[parked.groups.length - 1] : undefined;
-    expect(
-      wait?.kind === "item" && wait.item.kind === "notice" ? wait.item.waitEndedAt : null,
-    ).toBe(followUp.occurredAt);
+    const row = workRows(groups)[0];
+    expect(row?.kind === "activity" ? row.outcome : null).toBe("failed");
+    expect(kinds(groups)).toContain("machine-input-batch");
   });
 });

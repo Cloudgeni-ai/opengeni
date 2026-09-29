@@ -97,9 +97,11 @@ describe("session-only entry", () => {
     // Keep the session-only closure explicit: adding a source requires reviewing
     // whether it belongs to this provider-neutral public subpath.
     expect(reactSources.some((id) => id.endsWith("/src/conversation-timeline.ts"))).toBe(true);
-    // The exchange fold keeps presented images visible; its pure, React-free
-    // predicate is part of the projection.
-    expect(reactSources.some((id) => id.endsWith("/src/timeline/presented-image.ts"))).toBe(true);
+    // Image presentation belongs to the renderer, not the readable projection.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/presented-image.ts"))).toBe(false);
+    // Vite transforms the optional resolver even when this fixture tree-shakes
+    // its invocation; production browser tests verify its on-click chunk load.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/latest-question.ts"))).toBe(true);
     expect(reactSources.length).toBe(23);
 
     const chunks = result.output.filter((item) => item.type === "chunk");

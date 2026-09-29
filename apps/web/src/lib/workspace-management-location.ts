@@ -3,7 +3,13 @@
  * hold configuration only: the settings rail also links to the Agents and
  * Insights dashboards and the runtime pages, which open as their own pages.
  */
-export type WorkspaceSettingsSection = "general" | "access" | "models" | "api-keys" | "learning";
+export type WorkspaceSettingsSection =
+  | "general"
+  | "access"
+  | "models"
+  | "api-keys"
+  | "developer"
+  | "learning";
 
 /**
  * Older `?section=` values. They keep working: Members is now Access, Danger
@@ -16,6 +22,7 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
   "access",
   "models",
   "api-keys",
+  "developer",
   "learning",
 ];
 

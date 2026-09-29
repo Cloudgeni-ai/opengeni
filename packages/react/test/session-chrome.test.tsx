@@ -21,6 +21,35 @@ registerDom();
 
 let mounted: RenderedComponent | null = null;
 
+test("queue navigation opens and focuses once, without stealing focus on refresh or reopening dismissal", async () => {
+  const value = queue();
+  const target = { turnId: value.queue[1]!.id, requestId: 1 };
+  mounted = await renderComponent(<SessionChrome queue={value} queueFocusTarget={target} />);
+  await flush(80);
+  expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(target.turnId);
+  const other = document.createElement("button");
+  document.body.append(other);
+  other.focus();
+  await mounted.rerender(
+    <SessionChrome
+      queue={{ ...value, queue: [...value.queue] }}
+      queueFocusTarget={{ ...target }}
+    />,
+  );
+  expect(document.activeElement).toBe(other);
+  const chip = mounted.container.querySelector<HTMLButtonElement>(
+    '[data-og-session-chrome-signal="queue"]',
+  )!;
+  await act(async () => chip.click());
+  await flush(50);
+  expectChromeCollapsed(mounted.container);
+  await mounted.rerender(
+    <SessionChrome queue={value} queueFocusTarget={{ ...target, requestId: 2 }} />,
+  );
+  await flush(80);
+  expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(target.turnId);
+});
+
 /** Collapsed chrome. Do not require the queue panel node to unmount — AnimatePresence may keep an exiting frame. */
 function expectChromeCollapsed(container: HTMLElement) {
   expect(container.querySelector('[data-og-session-chrome-open="true"]')).toBeNull();

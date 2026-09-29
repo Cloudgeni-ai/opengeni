@@ -71,57 +71,59 @@ The renderer receives `startedAt`, `detailsOpen`, and `onShowDetails` to optiona
 keep the diagnostics affordance. The SDK still owns loading visibility and exit
 transitions. Returning `null` hides the visual.
 
-## Compact progress (`turnSummary.rolling`)
+## Readable turns (`turnSummary.rolling`)
 
-`turnSummary={{ rolling: true }}` selects the compact progress presentation, which
-the web app enables. It groups with `groupTimeline(items, { foldExchanges: true })`:
+`turnSummary={{ rolling: true }}` selects `groupTimeline(items, { readableTurns:
+true })`. The September 28, 2026 design revision supersedes the exchange-fold and
+answer-anchor presentation. Runtime phase semantics, replay deduplication, and
+classic `groupTimeline(items)` grouping are unchanged. The deprecated
+`foldExchanges` option aliases readable turns; there is no legacy folding mode.
 
-- **Commentary is activity.** Assistant prose that narrates work joins its activity
-  cluster instead of splitting it: a provider-declared `commentary` phase, or, for
-  phase-less events, a message that more work or prose followed in the same turn.
-  The runtime does not yet record a phase, and while it streams the latest message
-  of the running turn cannot be told apart from a note, so it stays the live note
-  until its turn ends or it grows past 1,000 characters (a length recorded notes
-  rarely reach); a declared `final_answer` phase is an answer at once. A long
-  message that turns out to be a note folds back once work follows it.
-- **One row per stretch of work.** Only work folds: the work between two human
-  boundaries folds behind one status row, and an answer always stays a normal
-  visible message. Only human messages, structured human input, and input notices
-  start a new exchange. Routine machine inputs (child results and progress, agent
-  messages and steer instructions, background command results, wait timeouts,
-  goal continuations), recorded waits, progress notes, and completed compaction
-  fold inside; compaction also counts as the chip's `compacted` facet. When such
-  input continues the exchange after an answer, its turns fold into a new row
-  below that answer. The row opens as soon as the input is delivered, and the
-  later turn's own answer renders below it. Failed turns, approvals, auth
-  recovery, scheduled prompts, generated media, and presented images stay visible
-  between folds.
-- **Live status.** While the agent works, the row reads "Working · 2m 14s · 12
-  steps" with a live clock and the step count (notes are not steps). Below it, the
-  latest progress note is previewed muted and clamped to two lines, replaced when a
-  newer note arrives, and the fixed-height rolling reel shows the current step even
-  when there is no note. A parked exchange reads "Waiting for 2 agents · 3m" using
-  the delegated workers (sessions this session spawned) that had not reported back
-  when the wait began; a pending approval or question reads "Waiting for you".
-  Opening the row shows every earlier turn, note, input, and wait on one rail.
-- **Answer.** The answer renders below a "Worked for 4m 10s" separator that carries
-  the remaining facets; the time runs until the answer started, so it does not
-  change when the answer completes. A turn that ends without an answer still lifts
-  its latest note as the visible reply, unless it parked in a wait or more work
-  followed it; then the note folds into the row like any other progress note.
+- **Assistant prose stays readable.** Every commentary and answer message is a
+  distinct, fully formatted message with its normal actions. Short and long
+  phase-less streams render identically: there is no character-count heuristic,
+  replaceable note preview, or automatic demotion when more work follows.
+- **One summary per turn.** Work uses a stable turn identity, never a cross-turn
+  exchange fold. Routine machine deliveries coalesce into one compact reason per
+  resumed turn, with payloads behind its disclosure. Prior turn-ending messages
+  remain visible. Failures, approvals, auth recovery, human input, scheduled
+  prompts, generated media, and deliberately presented images remain accessible.
+- **Truthful activity.** Working and its elapsed clock remain active between
+  tools, while the rolling latest tool retains its own actual completion state.
+  Live category counts stay hidden; assistant text is not counted as steps.
+  Completed summaries carry fuller facets. Completed compaction has a compact
+  indicator and inspectable details. The disclosure chevron remains clear on
+  phones without redundant show/hide-steps copy.
+- **Stable settlement.** The Worked separator sits before the response. Its
+  duration ends at the response's first delta, not its completion receipt. A
+  declared final phase establishes that boundary while streaming; for phase-less
+  messages, settlement identifies the last response without hiding any text.
+  Same-row expansion state survives updates and settlement. New turns get their
+  own rows rather than inheriting an earlier turn's disclosure.
 
 The recorded wait itself reads "Waited for 1 agent · 3m 5s" once later input, a
 pause, or the session failing or being cancelled ended it, or "Waiting · since
 10:32" while it is still open, in both presentations.
 
-Following the tip stops once an answer pushes its question to the top of the
-viewport (or, when the question had already scrolled away, the status row or the
-answer itself). The stop applies while that answer is the newest message: rows of
-machine-triggered work below it never move the reader. Once a question, a newer
-reply, or the answer folding back into a note follows it, a reader who has not
-moved since returns to the tip. When the question of the exchange
-being read has scrolled away, a "Your question" control returns to it, with
-previous and next question buttons.
+Normal tip-follow continues through long answers. Manual scroll, older
+history anchors, and explicit Jump to latest retain their existing behavior.
+There is no forced answer stop and no automatic repin on subsequent work.
+
+An expanded outer work header sticks inside the timeline viewport while its
+details scroll, keeping collapse reachable. It releases at the end of its own
+section, stays below Latest question when present, and never makes nested work
+headers sticky. This is section-scoped CSS, not another scroll owner.
+
+One **Latest question** button targets the newest actual user message, never the
+question nearest the viewport. Hosts with bounded history wire
+`onJumpToLatestQuestion={events.jumpToLatestQuestion}` from `useSessionEvents`.
+It resolves the newest durable user message with a filtered forensic read (paging
+past legacy worker-completion records using the canonical timeline projection), then uses
+the existing bounded `jumpToSequence` path only when needed. Target placement
+wins over prepend correction without enabling tip-follow. Lookup failures are
+retryable; stale history/identity requests cannot replace the current window.
+Without the callback, local navigation is limited to the live window and does
+not substitute an older page's last question. There are no previous/next arrows.
 
 Tool labels reuse `ActivityDisclosure` through its compact presentation context;
 reasoning keeps a stable Thinking label with a live text preview. Step changes roll
@@ -129,14 +131,15 @@ together over 400ms; a focused light beam sweeps across running text every 3.6
 seconds. Reduced motion disables both animations.
 
 `/exchange-fold.html` in the React demo replays a delegated question through every
-stage (working, waiting, resumed, answering, done, follow-up) with a compact or
+stage (working, waiting, resumed, answering, done, follow-up) with a readable or
 classic toggle and light/dark themes; `?scenario=follow-up`, `notes`, and `history`
 replay messages streamed the way the runtime records them today (identified,
 phase-less deltas), and `?scenario=machine-follow-up` replays an anonymized
 recorded exchange whose answer (with an image and a question) is followed by one
 more machine-triggered turn. `/rolling-steps.html` loops sample commands. Neither
 needs model calls. `test/e2e/timeline-exchange-fold.browser.e2e.ts` covers, in the
-compact presentation and in Chromium, the answer anchoring, a short answer
-followed by a new question, phase-less progress notes, loading older history
-inside an exchange, question navigation, and an answer that stays visible, with
-its reader in place, when a machine-triggered turn follows it.
+readable presentation and in Chromium, normal long-answer following, manual
+scroll retention, phase-less progress, older-history anchoring, newest-question
+navigation across bounded windows, and answers surviving machine turns. It also
+checks desktop/mobile light/dark layouts and disclosures. Set
+`OPENGENI_TIMELINE_PREVIEW_DIR` to retain actual-component screenshots.

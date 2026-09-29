@@ -26,6 +26,7 @@ import { RailHeader } from "@/components/rail/rail-header";
 import { RailFooter } from "@/components/rail/rail-footer";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { SessionHeader } from "@/components/rail/session-header";
+import { SessionStartupProvider } from "@/lib/session-startup";
 import {
   RAIL_DEFAULT_WIDTH,
   RAIL_MAX_WIDTH,
@@ -220,6 +221,7 @@ function RailResizeHandle({
 
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
+  const context = useAppContext();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
@@ -345,9 +347,11 @@ export function RailShell({ children }: { children: ReactNode }) {
 
         {/* Main canvas. */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <CanvasTopStrip hamburgerRef={hamburgerRef} />
-          <WorkspacePausedBanner workspaceId={rail.workspaceId} />
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+          <SessionStartupProvider session={context.session}>
+            <CanvasTopStrip hamburgerRef={hamburgerRef} />
+            <WorkspacePausedBanner workspaceId={rail.workspaceId} />
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+          </SessionStartupProvider>
         </div>
       </div>
     </TooltipProvider>

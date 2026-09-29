@@ -7,6 +7,34 @@ import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
+test("Latest question explains a pending queue destination when the host provides no queue focus", async () => {
+  const reason = new Error("Queued");
+  reason.name = "LatestQuestionQueuedError";
+  const view = await renderComponent(
+    <MessageTimeline
+      events={[]}
+      turnSummary={{ rolling: true }}
+      hasNewer
+      onJumpToLatestQuestion={async () => {
+        throw reason;
+      }}
+    />,
+  );
+  try {
+    await flush(50);
+    const button = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
+    expect(button).not.toBeNull();
+    await act(async () => button!.click());
+    await flush(30);
+    expect(view.container.querySelector('[role="status"]')?.textContent).toContain(
+      "The latest question is in the prompt queue.",
+    );
+    expect(button?.disabled).toBe(false);
+  } finally {
+    await view.unmount();
+  }
+});
+
 const WORKER = "0d4f6a8b-2c3e-4f5a-8b9c-1d2e3f4a5b6c";
 let sequence = 0;
 // Anchored in the past so live clocks read a realistic elapsed time.
@@ -102,95 +130,34 @@ function topLevelMessages(container: HTMLElement): string[] {
   });
 }
 
-describe("compact exchange rows", () => {
-  test("a working exchange is one status row with its latest note and current step", async () => {
-    const { first } = exchange();
-    // Through the spawn and the second note's follow-up tool call.
-    const live = first.slice(0, 11);
-    const r = await renderComponent(
-      <MessageTimeline events={live} turnSummary={{ rolling: true }} />,
-    );
-    try {
-      await flush();
-      const trigger = statusTrigger(r.container);
-      expect(trigger.getAttribute("aria-expanded")).toBe("false");
-      // Notes narrate steps and are not counted as steps.
-      expect(trigger.textContent).toMatch(/^Working · \d+m( \d+s)? · 3 steps/);
-      const note = r.container.querySelector("[data-og-exchange-note]");
-      // The latest note, as plain text for the two-line clamp.
-      expect(note?.textContent).toBe("The worker is still running.");
-      expect(
-        r.container.querySelector("[data-og-exchange-preview] .og-rolling-status"),
-      ).not.toBeNull();
-      // No progress note renders as its own message row.
-      expect(topLevelMessages(r.container)).toEqual([]);
-
-      await act(async () => trigger.click());
-      await flush();
-      const notes = Array.from(r.container.querySelectorAll("[data-og-activity-note]")).map(
-        (row) => row.textContent,
-      );
-      expect(notes).toEqual(["Starting a worker for the count.", "The worker is still running."]);
-      // The open row keeps its status line and drops the collapsed preview.
-      expect(r.container.querySelector("[data-og-exchange-preview]")).toBeNull();
-    } finally {
-      await r.unmount();
-    }
-  });
-
-  test("a parked exchange says how many agents it is waiting for", async () => {
+describe("readable per-turn rows", () => {
+  test("progress keeps Markdown and distinct message rows while completed tools do not spin", async () => {
     const { first } = exchange();
     const r = await renderComponent(
-      <MessageTimeline events={first} turnSummary={{ rolling: true }} />,
-    );
-    try {
-      await flush();
-      expect(statusTrigger(r.container).textContent).toMatch(/^Waiting for 1 agent · /);
-      expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
-        "The worker is still running.",
-      );
-      expect(r.container.textContent).not.toContain("Wait recorded");
-      expect(topLevelMessages(r.container)).toEqual([]);
-    } finally {
-      await r.unmount();
-    }
-  });
-
-  test("a resumed exchange keeps one live row and the answer sits below a separator", async () => {
-    const { first, resumed, answer } = exchange();
-    const r = await renderComponent(
-      <MessageTimeline events={[...first, ...resumed]} turnSummary={{ rolling: true }} />,
+      <MessageTimeline events={first.slice(0, 8)} turnSummary={{ rolling: true }} />,
     );
     try {
       await flush();
       expect(statusTrigger(r.container).textContent).toMatch(/^Working · /);
-      expect(r.container.querySelectorAll("[data-og-exchange-status]")).toHaveLength(1);
-
-      await r.rerender(
-        <MessageTimeline
-          events={[...first, ...resumed, ...answer]}
-          turnSummary={{ rolling: true }}
-        />,
+      expect(topLevelMessages(r.container)).toEqual([
+        "Starting a worker for the count.",
+        "The worker is still running.",
+      ]);
+      expect(r.container.querySelector("[data-og-wide-table-message] strong")?.textContent).toBe(
+        "worker",
       );
-      await flush();
-      const trigger = statusTrigger(r.container);
-      expect(trigger.textContent).toMatch(/^Worked for \d+m( \d+s)? · 4 steps/);
-      expect(r.container.querySelectorAll("[data-og-exchange-status]")).toHaveLength(1);
-      expect(r.container.querySelector("[data-og-exchange-preview]")).toBeNull();
-      expect(topLevelMessages(r.container)).toEqual(["312 users signed up."]);
-
-      // Everything else stays one click away, including the recorded wait.
-      await act(async () => trigger.click());
-      await flush();
-      const wait = r.container.querySelector('[data-og-recorded-outcome="wait"] summary');
-      expect(wait?.textContent).toMatch(/^Waited for 1 agent · \d+s$/);
-      expect(r.container.textContent).toContain("Agent result received");
+      expect(r.container.querySelector("[data-og-exchange-note]")).toBeNull();
+      expect(
+        r.container.querySelector(".og-rolling-status")?.getAttribute("data-running"),
+      ).not.toBe("true");
+      expect(statusTrigger(r.container).textContent).not.toContain("commands");
+      expect(statusTrigger(r.container).textContent).not.toContain("show steps");
     } finally {
       await r.unmount();
     }
   });
 
-  test("an opened row stays the same open row as turns start and end", async () => {
+  test("waiting count and historical duration remain visible beside separate resumed turns", async () => {
     const { first, resumed, answer } = exchange();
     const timeline = (events: SessionEvent[]) => (
       <MessageTimeline events={events} turnSummary={{ rolling: true }} />
@@ -198,16 +165,38 @@ describe("compact exchange rows", () => {
     const r = await renderComponent(timeline(first));
     try {
       await flush();
+      expect(
+        r.container.querySelector('[data-og-recorded-outcome="wait"] summary')?.textContent,
+      ).toMatch(/^Waiting for 1 agent/);
+      await r.rerender(timeline([...first, ...resumed, ...answer]));
+      await flush();
+      expect(r.container.querySelectorAll("[data-og-exchange-status]")).toHaveLength(2);
+      expect(
+        r.container.querySelector('[data-og-recorded-outcome="wait"] summary')?.textContent,
+      ).toMatch(/^Waited for 1 agent · \d+s/);
+      expect(topLevelMessages(r.container)).toEqual([
+        "Starting a worker for the count.",
+        "The worker is still running.",
+        "312 users signed up.",
+      ]);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("an expanded work row keeps its element and state through settlement and later turns", async () => {
+    const { first, resumed, answer } = exchange();
+    const timeline = (events: SessionEvent[]) => (
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />
+    );
+    const r = await renderComponent(timeline(first.slice(0, 8)));
+    try {
+      await flush();
       const trigger = statusTrigger(r.container);
       await act(async () => trigger.click());
-      expect(trigger.getAttribute("aria-expanded")).toBe("true");
-      for (const events of [
-        [...first, ...resumed],
-        [...first, ...resumed, ...answer],
-      ]) {
+      for (const events of [first, [...first, ...resumed], [...first, ...resumed, ...answer]]) {
         await r.rerender(timeline(events));
         await flush();
-        // Same element: the row never remounts between its live and settled forms.
         expect(statusTrigger(r.container)).toBe(trigger);
         expect(trigger.getAttribute("aria-expanded")).toBe("true");
       }
@@ -216,208 +205,155 @@ describe("compact exchange rows", () => {
     }
   });
 
-  test("work after an answer opens its own row below it and keeps that row through the turn", async () => {
-    sequence = 0;
-    const answered = [
-      event("user.message", { text: "Build and report" }, null),
-      event("turn.started", {}),
-      ...tool("build", "exec_command"),
-      event("agent.message.completed", { text: "The build is running in the background." }),
-      event("turn.completed", {}),
-    ];
-    const result = event(
-      "system.update.delivered",
-      {
-        members: [
-          {
-            id: "command",
-            kind: "background_command_result",
-            classification: "success",
-            sourceId: "command-1",
-            summary: "execCommand: completed successfully.",
-          },
-        ],
-      },
-      "turn-2",
-    );
-    const next = [event("turn.started", {}, "turn-2"), ...tool("report", "exec_command", "turn-2")];
-    const done = [
-      event(
-        "agent.message.completed",
-        { text: "The build passed and the report is attached.", phase: "final_answer" },
-        "turn-2",
-      ),
-      event("turn.completed", {}, "turn-2"),
-    ];
-    const timeline = (events: SessionEvent[]) => (
-      <MessageTimeline events={events} turnSummary={{ rolling: true }} />
-    );
-    const rows = (container: HTMLElement) =>
-      Array.from(container.querySelectorAll("[data-og-exchange-status]")).map(
-        (status) => status.closest("button") as HTMLButtonElement,
-      );
-    const r = await renderComponent(timeline(answered));
-    try {
-      await flush();
-      await r.rerender(timeline([...answered, result]));
-      await flush();
-      // The delivered input opens a new row at once; the answer stays in place.
-      expect(topLevelMessages(r.container)).toEqual(["The build is running in the background."]);
-      expect(rows(r.container)).toHaveLength(2);
-      const trigger = rows(r.container)[1]!;
-      expect(trigger.textContent).toMatch(/^Working · /);
-      await act(async () => trigger.click());
-      const stages: [SessionEvent[], RegExp][] = [
-        [[...answered, result, ...next], /^Working · /],
-        [[...answered, result, ...next, ...done], /^Worked for /],
-      ];
-      for (const [events, status] of stages) {
-        await r.rerender(timeline(events));
-        await flush();
-        // Same element: the row never remounts between its live and settled forms.
-        expect(rows(r.container)[1]).toBe(trigger);
-        expect(trigger.textContent).toMatch(status);
-        expect(trigger.getAttribute("aria-expanded")).toBe("true");
-      }
-      expect(topLevelMessages(r.container)).toEqual([
-        "The build is running in the background.",
-        "The build passed and the report is attached.",
-      ]);
-    } finally {
-      await r.unmount();
-    }
-  });
-
-  test("an approval wait says so, and the approved turn settles back into one row", async () => {
+  test("approval pauses overall activity; approved work resumes the same row", async () => {
     sequence = 0;
     const waiting = [
-      event("user.message", { text: "Deploy it" }, null),
       event("turn.started", {}),
       ...tool("plan", "exec_command"),
       event("session.requiresAction", {}),
       event("session.status.changed", { status: "requires_action" }),
     ];
-    const approved = [
-      event("session.status.changed", { status: "running" }),
-      ...tool("apply", "exec_command"),
-    ];
-    const done = [
-      event("agent.message.completed", { text: "Deployed.", phase: "final_answer" }),
-      event("turn.completed", {}),
-    ];
-    const timeline = (events: SessionEvent[]) => (
-      <MessageTimeline events={events} turnSummary={{ rolling: true }} />
+    const r = await renderComponent(
+      <MessageTimeline events={waiting} turnSummary={{ rolling: true }} />,
     );
-    const r = await renderComponent(timeline(waiting));
     try {
       await flush();
-      expect(statusTrigger(r.container).textContent).toMatch(/^Waiting for you · /);
-      await r.rerender(timeline([...waiting, ...approved]));
-      await flush();
-      const statuses = Array.from(r.container.querySelectorAll("[data-og-exchange-status]")).map(
-        (status) => status.getAttribute("data-og-exchange-status"),
+      expect(statusTrigger(r.container).textContent).toMatch(/^Waiting for you/);
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...waiting,
+            event("session.status.changed", { status: "running" }),
+            ...tool("apply", "exec_command"),
+          ]}
+          turnSummary={{ rolling: true }}
+        />,
       );
-      // The approved work continues in a live row; the earlier part is behind it.
-      expect(statuses).toEqual(["worked", "working"]);
-      await r.rerender(timeline([...waiting, ...approved, ...done]));
       await flush();
+      expect(statusTrigger(r.container).textContent).toMatch(/^Working/);
       expect(r.container.querySelectorAll("[data-og-exchange-status]")).toHaveLength(1);
-      expect(topLevelMessages(r.container)).toEqual(["Deployed."]);
     } finally {
       await r.unmount();
     }
   });
 
-  test("a note streaming as recorded today keeps the row working", async () => {
+  test("same-tool approval resumption clears live waiting without hiding historical approval", async () => {
+    sequence = 0;
+    const waiting = [
+      event("turn.started", {}),
+      event("agent.toolCall.created", { id: "same", name: "exec_command", arguments: {} }),
+      event("session.requiresAction", {}),
+      event("session.status.changed", { status: "requires_action" }, null),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={waiting} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      const trigger = statusTrigger(r.container);
+      expect(trigger.textContent).toMatch(/^Waiting for you/);
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...waiting,
+            event("session.status.changed", { status: "running" }, null),
+            event("agent.toolCall.output", { id: "same", output: "approved result" }),
+            event("agent.message.delta", {
+              text: "Continuing the approved work.",
+              phase: "commentary",
+            }),
+          ]}
+          turnSummary={{ rolling: true }}
+        />,
+      );
+      await flush();
+      expect(statusTrigger(r.container)).toBe(trigger);
+      expect(trigger.textContent).toMatch(/^Working/);
+      expect(r.container.textContent).toContain("Approval was needed.");
+      expect(r.container.textContent).not.toContain("waiting on you");
+      expect(r.container.textContent).not.toContain("the turn is paused");
+      expect(topLevelMessages(r.container)).toEqual(["Continuing the approved work."]);
+      expect(r.container.querySelectorAll("[data-og-exchange-status]")).toHaveLength(1);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("completed standalone compaction remains visible without an eternal Working header", async () => {
+    sequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          event("turn.started", {}, "maintenance"),
+          event("session.context.compaction.started", { trigger: "operator" }, "maintenance"),
+          event("session.context.compacted", { trigger: "operator" }, "maintenance"),
+          event("turn.completed", { maintenance: "context_compaction" }, "maintenance"),
+          event("session.status.changed", { status: "idle" }, "maintenance"),
+        ]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.querySelector("[data-og-exchange-status]")).toBeNull();
+      expect(r.container.textContent).toContain("Conversation history compacted");
+      expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("declared answer duration remains fixed at its first delta after completion", async () => {
     sequence = 0;
     const working = [
-      event("user.message", { text: "Check the config" }, null),
       event("turn.started", {}),
       ...tool("read", "exec_command"),
-      // Identified deltas without a phase, exactly as the runtime records them.
-      event("agent.message.delta", {
-        text: "Checking `OPENGENI_SANDBOX_BACKEND` ",
-        messageId: "n1",
-      }),
-      event("agent.message.delta", {
-        text: "in user_accounts_table and **the** _env_.",
-        messageId: "n1",
-      }),
+      ...tool("query", "exec_command"),
+      event("agent.message.delta", { text: "Answer", messageId: "a", phase: "final_answer" }),
     ];
     const r = await renderComponent(
       <MessageTimeline events={working} turnSummary={{ rolling: true }} />,
     );
     try {
       await flush();
-      expect(statusTrigger(r.container).textContent).toMatch(/^Working · /);
-      expect(
-        r.container
-          .querySelector("[data-og-exchange-status]")
-          ?.getAttribute("data-og-exchange-status"),
-      ).toBe("working");
-      expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
-        "Checking OPENGENI_SANDBOX_BACKEND in user_accounts_table and the env.",
+      const span = r.container.querySelector("[data-og-exchange-status]")?.textContent;
+      expect(span).toBe("Worked for 20s");
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...working,
+            event("agent.message.completed", { text: "Answer", phase: "final_answer" }),
+            event("turn.completed", {}),
+          ]}
+          turnSummary={{ rolling: true }}
+        />,
       );
-      expect(topLevelMessages(r.container)).toEqual([]);
+      await flush();
+      expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toBe(span);
     } finally {
       await r.unmount();
     }
   });
 
-  test("the worked time stays the same when the streaming answer completes", async () => {
-    sequence = 0;
-    const long = "Signups come from three sources that need reconciling. ".repeat(24);
-    const streaming = [
-      event("user.message", { text: "Explain the signups" }, null),
-      event("turn.started", {}),
-      ...tool("read", "exec_command"),
-      ...tool("query", "exec_command"),
-      event("agent.message.delta", { text: long, messageId: "a1" }),
-    ];
-    const done = [
-      event("agent.message.completed", { text: long }),
-      event("turn.completed", { output: long }),
-    ];
-    const timeline = (events: SessionEvent[]) => (
-      <MessageTimeline events={events} turnSummary={{ rolling: true }} />
-    );
-    const r = await renderComponent(timeline(streaming));
-    try {
-      await flush();
-      const live = statusTrigger(r.container).textContent ?? "";
-      expect(live).toMatch(/^Worked for 20s · 2 steps/);
-      await r.rerender(timeline([...streaming, ...done]));
-      await flush();
-      expect(statusTrigger(r.container).textContent).toMatch(/^Worked for 20s · 2 steps/);
-    } finally {
-      await r.unmount();
-    }
-  });
-
-  test("an answer stays a visible message when a machine-triggered turn follows it", async () => {
-    // Anonymized replay of a recorded exchange: the answer (bullets, an image,
-    // and a question) settles, then an agent message starts one more short
-    // turn that ends without prose.
+  test("recorded answer, including its image and approval question, survives a machine turn", async () => {
+    const events = recordedAnswerExchange as SessionEvent[];
     const r = await renderComponent(
-      <MessageTimeline
-        events={recordedAnswerExchange as SessionEvent[]}
-        turnSummary={{ rolling: true }}
-      />,
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
     );
     try {
       await flush();
-      const question = "Do you approve this four-at-a-time layout?";
-      // The answer is not demoted to the row's muted two-line preview.
-      for (const note of r.container.querySelectorAll("[data-og-exchange-note]")) {
-        expect(note.textContent).not.toContain(question);
-      }
-      expect(topLevelMessages(r.container).some((text) => text.includes(question))).toBe(true);
+      expect(
+        topLevelMessages(r.container).some((text) =>
+          text.includes("Do you approve this four-at-a-time layout?"),
+        ),
+      ).toBe(true);
+      expect(r.container.querySelectorAll("[data-og-exchange-status]").length).toBeGreaterThan(1);
     } finally {
       await r.unmount();
     }
   });
 
-  test("the classic grouping keeps every note and wait as its own row", async () => {
+  test("classic grouping remains available without rolling presentation", async () => {
     const { first, resumed, answer } = exchange();
     const r = await renderComponent(<MessageTimeline events={[...first, ...resumed, ...answer]} />);
     try {
