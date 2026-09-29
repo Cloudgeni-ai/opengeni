@@ -1,6 +1,7 @@
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError } from "./errors";
 import { proxySessionEventStream } from "./proxy";
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type { CreateSessionRequest } from "./types";
 
 /**
@@ -209,7 +210,17 @@ export function createSessionProxyHandler(
       const [root, ...rest] = segments;
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
-          return await read("/v1/config/client");
+          // The browser speaks this proxy's contract, not the upstream deployment's:
+          // report the server SDK's revision so an OpenGeni deploy never makes the
+          // embedded page look stale (and never triggers a host reload).
+          const config = await client.requestJson<Record<string, unknown>>(
+            "GET",
+            "/v1/config/client",
+            undefined,
+            query,
+            call,
+          );
+          return json({ ...config, apiContractRevision: OPENGENI_API_CONTRACT_REVISION });
         }
         return errorJson(404, "route_not_allowed", "Not found.");
       }
@@ -518,7 +529,11 @@ async function listEvents(
   const upstream = await client.requestJsonResponse(path, query, call);
   const headers: Record<string, string> = {};
   upstream.headers.forEach((value, name) => {
-    if (name.toLowerCase().startsWith("x-opengeni-")) headers[name] = value;
+    const lower = name.toLowerCase();
+    // Paging metadata only; the upstream contract revision stays behind the proxy.
+    if (lower.startsWith("x-opengeni-") && lower !== OPENGENI_API_CONTRACT_HEADER) {
+      headers[name] = value;
+    }
   });
   return new Response(await upstream.text(), {
     headers: {

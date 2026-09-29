@@ -6,6 +6,7 @@ import {
   type SessionProxyHandlerOptions,
 } from "../src/index";
 import { parseSseStream } from "../src/sse";
+import { OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 const OTHER_WORKSPACE_ID = "99999999-9999-4999-8999-999999999999";
@@ -50,8 +51,16 @@ function upstreamServer() {
     }
     if (path.endsWith("/events") && request.method === "GET") {
       return Response.json([makeEvent(1)], {
-        headers: { "X-OpenGeni-Has-More": "true", "X-OpenGeni-Next-Before": "1" },
+        headers: {
+          "X-OpenGeni-Has-More": "true",
+          "X-OpenGeni-Next-Before": "1",
+          // Upstream's own revision header must stay behind the proxy.
+          "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION,
+        },
       });
+    }
+    if (path === "/v1/config/client") {
+      return Response.json({ apiContractRevision: "upstream-deployed-later", defaultModel: "m" });
     }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "POST") {
       return Response.json({ session: { id: SESSION_ID } });
@@ -360,5 +369,19 @@ describe("createSessionProxyHandler", () => {
     const stream = upstream.requests.find((request) => request.url.pathname.endsWith("/stream"))!;
     expect(stream.url.searchParams.get("after")).toBe("5");
     expect(stream.headers.get("x-opengeni-external-actor")).not.toBeNull();
+  });
+
+  test("never leaks the upstream contract revision to the embedded browser", async () => {
+    const { browser, handler } = setup();
+    // The browser SDK throws on a revision mismatch; through the proxy it matches.
+    const config = await browser.getClientConfig();
+    expect(config.defaultModel).toBe("m");
+    const events = await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
+      ),
+    );
+    expect(events.headers.get("x-opengeni-api-contract")).toBeNull();
+    expect(events.headers.get("X-OpenGeni-Has-More")).toBe("true");
   });
 });

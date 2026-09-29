@@ -100,6 +100,11 @@ Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
 the product needs a materially different interaction model. These components do
 not consume the text-only `@opengeni/sdk/chat` fallback protocol.
 
+`OpenGeniProvider` never blocks or reloads the host page when OpenGeni deploys
+a new API contract revision. The stock OpenGeni console opts into that
+stale-tab protection with `reloadOnApiContractChange`; embedded products
+should leave it off.
+
 ### Exact conversation search navigation
 
 `useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
