@@ -11,13 +11,17 @@
  * - Requires an explicit `--yes`.
  * - Uses the public API and Better Auth endpoints. Direct SQL (through the
  *   worktree's loopback migrations DSN) is used only where no API exists:
- *   making API keys already expired, and writing finished conversation history
- *   (user/assistant events and nested child sessions) into sessions whose
- *   shells were created by the API.
- * - Never sends a model turn: schedules are created paused, session shells are
- *   created empty in realtime start mode, and the SQL history creates no turns,
- *   workflow wakes or outbox rows, so no worker ever picks the sessions up.
- *   Sending a new message in a seeded session would start a real turn.
+ *   expired API keys; finished conversation history (real-shaped tool calls,
+ *   approvals, questions, sub-agents, goals; see dev-seed-design-preview/);
+ *   file publications; schedule run history; Knowledge proposals awaiting
+ *   review; and Insights usage facts.
+ * - Never sends a model turn: session shells are created empty in realtime
+ *   start mode and the SQL history creates no workflow wakes or outbox rows.
+ *   Sessions left waiting on a person get a closed requires_action attempt,
+ *   the state a real worker leaves behind. Schedules are paused, `manual`
+ *   (fires only on Run now), or active in the database only while their
+ *   Temporal schedule stays paused. Sending a message, answering, approving,
+ *   Run now, or editing/resuming a schedule would start real turns.
  *
  * Idempotent: every object is looked up by name first and reused.
  *
@@ -25,12 +29,33 @@
  * into, the credentials file (mode 0600). Other fake people share a derived
  * password (generated) stored in the same file.
  */
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SQL } from "bun";
+import { buildSeedFiles, type SeedFile } from "./dev-seed-design-preview/files";
+import {
+  PERSONAL_RICH_SESSIONS,
+  SHARED_RICH_SESSIONS,
+  type ArtifactRef,
+  type RichSessionSeed,
+} from "./dev-seed-design-preview/rich-sessions";
+import { COST_REVIEW_HTML, FLEET_SITE_HTML, ONCALL_HTML } from "./dev-seed-design-preview/sites";
+import {
+  CAPABILITIES,
+  DISPLAY_ACTIVE_SCHEDULES,
+  EXTRA_SCHEDULES,
+  PENDING_KNOWLEDGE,
+  PERSONAL_KNOWLEDGE,
+  SCHEDULE_RUNS,
+  USAGE_MODELS,
+  scheduledRunSessions,
+  type ScheduleSeed,
+} from "./dev-seed-design-preview/surfaces";
+import { LIVE_CONTENT, applyLiveBatch } from "./dev-seed-design-preview/live-edit";
+import { ConversationBuilder, type SeedEventRow } from "./dev-seed-design-preview/timeline";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -1229,6 +1254,105 @@ const EDITABLE_SEEDS: { title: string; modality: "document" | "spreadsheet" | "p
   { title: "Platform roadmap", modality: "presentation" },
 ];
 
+type ArtifactPlanEntry = {
+  key: string;
+  /** Import the uploaded Office file as an editable artifact. */
+  editable?: { modality: "document" | "spreadsheet" | "presentation"; title: string };
+  /** Session that produced it: publishes files, links editable artifacts. */
+  session?: string;
+};
+
+// Editable documents, spreadsheets and decks live in shared workspaces: the
+// Personal workspace has no workspace membership row, and editable-artifact
+// authorization currently requires one (so its owner is denied there).
+const ARTIFACT_PLAN: Record<string, ArtifactPlanEntry[]> = {
+  Personal: [
+    { key: "latencyChart", session: "Why is p95 latency up on /checkout?" },
+    { key: "pgQueueTs", session: "Migrate billing worker to the Postgres queue" },
+    { key: "contract" },
+    { key: "pricing" },
+  ],
+  "Platform engineering": [
+    {
+      key: "postmortemDoc",
+      editable: { modality: "document", title: "INC-2291 postmortem" },
+      session: "Postmortem: INC-2291 checkout outage",
+    },
+    {
+      key: "reliabilityDeck",
+      editable: { modality: "presentation", title: "Q4 reliability sprint" },
+      session: "Plan the Q4 reliability sprint",
+    },
+    { key: "errorRateChart", session: "Postmortem: INC-2291 checkout outage" },
+    { key: "pg17Doc", editable: { modality: "document", title: "Postgres 17 upgrade plan" } },
+    {
+      key: "awsSheet",
+      editable: { modality: "spreadsheet", title: "AWS cost by service" },
+      session: "Break down September AWS spend",
+    },
+    // The three empty editable artifacts seeded earlier get real content.
+    { key: "roadmapDeck", editable: { modality: "presentation", title: "Platform roadmap" } },
+    { key: "headcountSheet", editable: { modality: "spreadsheet", title: "Headcount plan 2027" } },
+    {
+      key: "incidentTemplateDoc",
+      editable: { modality: "document", title: "Incident review template" },
+    },
+    { key: "awsChart", session: "Break down September AWS spend" },
+    { key: "runbookMd", session: "Triage disk pressure alert on db-2" },
+  ],
+  "Finance ops": [
+    {
+      key: "spendSheet",
+      editable: { modality: "spreadsheet", title: "Q3 spend by category" },
+      session: "Build the Q3 spend overview",
+    },
+  ],
+};
+
+type SitePlanEntry = {
+  key: string;
+  title: string;
+  description: string;
+  html: string;
+  marker: string;
+};
+
+const SITE_PLAN: Record<string, SitePlanEntry[]> = {
+  Personal: [
+    {
+      key: "fleetSite",
+      title: "Fleet health",
+      description: "Uptime, firmware spread and robots needing attention (sample data).",
+      html: FLEET_SITE_HTML,
+      marker: "fleet-v1",
+    },
+  ],
+  "Platform engineering": [
+    {
+      key: "costSite",
+      title: "Q3 cost review",
+      description: "Cloud spend by team with the three largest savings.",
+      html: COST_REVIEW_HTML,
+      marker: "cost-v3",
+    },
+    {
+      key: "oncallSite",
+      title: "On-call handbook",
+      description: "Escalation paths and runbooks for the platform rotation.",
+      html: ONCALL_HTML,
+      marker: "oncall-v2",
+    },
+  ],
+};
+
+/** Artifact seeds that must be published/linked once sessions exist. */
+const pendingSessionLinks: {
+  workspaceId: string;
+  accountId: string;
+  session: string;
+  ref: ArtifactRef;
+}[] = [];
+
 const owner = await ownerClient();
 
 // Organization
@@ -1344,11 +1468,138 @@ let people = await membersByKey();
 const workspaceUrls: string[] = [];
 let sql: SQL | null = null;
 const expiredKeyIds: string[] = [];
-const conversationPlan: {
+type ConversationPlan = {
+  name: string;
   workspaceId: string;
   accountId: string;
   shells: { id: string; seed: SessionSeed }[];
-}[] = [];
+  rich: { id: string; seed: RichSessionSeed & { scheduledTask?: string } }[];
+};
+const conversationPlan: ConversationPlan[] = [];
+/** Scheduled task ids by workspace name ("Personal" for the owner's workspace). */
+const taskIdsByWorkspace: Record<string, Record<string, string>> = {};
+
+// Schedules. Every task is created paused through the API except `manual`
+// ones (no Temporal schedule exists; only Run now fires them). "Display
+// active" tasks are flipped to active in the database later, so the UI shows
+// a live cadence while their Temporal schedule stays paused.
+async function seedSchedules(
+  base: string,
+  workspaceName: string,
+  schedules: (WorkspaceSeed["schedules"][number] & Pick<ScheduleSeed, "active">)[],
+  setIds: Record<string, string>,
+): Promise<Record<string, string>> {
+  const tasks = await owner.get<any[]>(`${base}/scheduled-tasks`);
+  const displayActive = new Set(DISPLAY_ACTIVE_SCHEDULES[workspaceName] ?? []);
+  const ids: Record<string, string> = {};
+  for (const task of schedules) {
+    const found = tasks.find((t) => t.name === task.name);
+    if (found) {
+      const keepActive =
+        task.active === "manual" || task.active === "display" || displayActive.has(task.name);
+      if (found.status !== "paused" && !keepActive) {
+        await owner.post(`${base}/scheduled-tasks/${found.id}/pause`);
+      }
+      ids[task.name] = found.id;
+      continue;
+    }
+    const created = await owner.post<any>(`${base}/scheduled-tasks`, {
+      name: task.name,
+      status: task.active === "manual" ? "active" : "paused",
+      schedule: task.schedule,
+      runMode: "new_session_per_run",
+      ...(task.overlapPolicy ? { overlapPolicy: task.overlapPolicy } : {}),
+      ...(task.variableSet ? { variableSetId: setIds[task.variableSet] } : {}),
+      agentConfig: { prompt: task.prompt },
+    });
+    ids[task.name] = created.id;
+  }
+  return ids;
+}
+
+// Knowledge collections (deterministic local embeddings only; see .env).
+async function seedKnowledgeGroups(
+  base: string,
+  label: string,
+  groups: WorkspaceSeed["knowledge"],
+  scope: "workspace" | "personal",
+) {
+  const entries: any[] = [];
+  for (let cursor: string | null = null; ;) {
+    const page: any = await owner.get<any>(
+      `${base}/knowledge/entries?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    );
+    entries.push(...(page.entries ?? page.items ?? []));
+    cursor = page.nextCursor ?? null;
+    if (!cursor) break;
+  }
+  const groupIds = new Map<string, string>();
+  for (const group of groups) {
+    let groupEntry = entries.find(
+      (e) =>
+        (e.revision?.title ?? e.title) === group.group && (e.revision?.kind ?? "group") === "group",
+    );
+    let groupId: string = groupEntry?.id ?? groupEntry?.entryId;
+    const parentId = group.parent ? groupIds.get(group.parent) : undefined;
+    if (group.parent && !parentId)
+      fail(`Seed collection ${group.parent} must come before ${group.group}`);
+    if (!groupEntry) {
+      groupId = randomUUID();
+      await owner.post(`${base}/knowledge/entries`, {
+        operationId: randomUUID(),
+        entryId: groupId,
+        expectedVersion: 0,
+        scope,
+        entry: {
+          title: group.group,
+          kind: "group",
+          content: `${group.group} for ${label}.`,
+          ...(parentId ? { groupIds: [parentId] } : {}),
+        },
+      });
+    }
+    groupIds.set(group.group, groupId);
+    for (const entry of group.entries) {
+      if (entries.some((e) => (e.revision?.title ?? e.title) === entry.title)) continue;
+      await owner.post(`${base}/knowledge/entries`, {
+        operationId: randomUUID(),
+        entryId: randomUUID(),
+        expectedVersion: 0,
+        scope,
+        entry: { ...entry, groupIds: [groupId] },
+      });
+    }
+  }
+}
+
+// Session shells: empty realtime sessions via the API (no model turn). The
+// finished conversation history is written with SQL (see seedConversations).
+async function sessionShells<T extends { title: string }>(
+  base: string,
+  ws: string,
+  seeds: T[],
+): Promise<{ id: string; seed: T }[]> {
+  const sessionsPage = await owner.get<any>(`${base}/sessions?limit=200`);
+  const sessions: any[] = Array.isArray(sessionsPage)
+    ? sessionsPage
+    : (sessionsPage.sessions ?? sessionsPage.items ?? []);
+  const shells: { id: string; seed: T }[] = [];
+  for (const session of seeds) {
+    let id = sessions.find((s) => s.title === session.title && !s.parentSessionId)?.id as
+      | string
+      | undefined;
+    if (!id) {
+      const created = await owner.post<any>(`${base}/sessions`, {
+        startMode: "realtime",
+        idempotencyKey: `design-preview:${ws}:${session.title}`,
+      });
+      id = (created.id ?? created.session?.id) as string;
+      await owner.patch(`${base}/sessions/${id}`, { title: session.title });
+    }
+    shells.push({ id, seed: session });
+  }
+  return shells;
+}
 
 for (const seed of WORKSPACES) {
   const all = await owner.get<any[]>("/v1/workspaces");
@@ -1409,24 +1660,13 @@ for (const seed of WORKSPACES) {
     setIds[set.name] = found.id;
   }
 
-  // Schedules (always paused)
-  const tasks = await owner.get<any[]>(`${base}/scheduled-tasks`);
-  for (const task of seed.schedules) {
-    const found = tasks.find((t) => t.name === task.name);
-    if (found) {
-      if (found.status !== "paused") await owner.post(`${base}/scheduled-tasks/${found.id}/pause`);
-      continue;
-    }
-    await owner.post(`${base}/scheduled-tasks`, {
-      name: task.name,
-      status: "paused",
-      schedule: task.schedule,
-      runMode: "new_session_per_run",
-      ...(task.overlapPolicy ? { overlapPolicy: task.overlapPolicy } : {}),
-      ...(task.variableSet ? { variableSetId: setIds[task.variableSet] } : {}),
-      agentConfig: { prompt: task.prompt },
-    });
-  }
+  // Schedules
+  taskIdsByWorkspace[seed.name] = await seedSchedules(
+    base,
+    seed.name,
+    [...seed.schedules, ...(EXTRA_SCHEDULES[seed.name] ?? [])],
+    setIds,
+  );
 
   // Workspace API keys
   const keys = (await owner.get<{ apiKeys: any[] }>(`${base}/api-keys`)).apiKeys;
@@ -1479,79 +1719,17 @@ for (const seed of WORKSPACES) {
     }
   }
 
-  // Knowledge (deterministic local embeddings only; see .env)
-  const entries: any[] = [];
-  for (let cursor: string | null = null; ;) {
-    const page: any = await owner.get<any>(
-      `${base}/knowledge/entries?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
-    );
-    entries.push(...(page.entries ?? page.items ?? []));
-    cursor = page.nextCursor ?? null;
-    if (!cursor) break;
-  }
-  const groupIds = new Map<string, string>();
-  for (const group of seed.knowledge) {
-    let groupEntry = entries.find(
-      (e) =>
-        (e.revision?.title ?? e.title) === group.group && (e.revision?.kind ?? "group") === "group",
-    );
-    let groupId: string = groupEntry?.id ?? groupEntry?.entryId;
-    const parentId = group.parent ? groupIds.get(group.parent) : undefined;
-    if (group.parent && !parentId)
-      fail(`Seed collection ${group.parent} must come before ${group.group}`);
-    if (!groupEntry) {
-      groupId = randomUUID();
-      await owner.post(`${base}/knowledge/entries`, {
-        operationId: randomUUID(),
-        entryId: groupId,
-        expectedVersion: 0,
-        scope: "workspace",
-        entry: {
-          title: group.group,
-          kind: "group",
-          content: `${group.group} for ${seed.name}.`,
-          ...(parentId ? { groupIds: [parentId] } : {}),
-        },
-      });
-    }
-    groupIds.set(group.group, groupId);
-    for (const entry of group.entries) {
-      if (entries.some((e) => (e.revision?.title ?? e.title) === entry.title)) continue;
-      await owner.post(`${base}/knowledge/entries`, {
-        operationId: randomUUID(),
-        entryId: randomUUID(),
-        expectedVersion: 0,
-        scope: "workspace",
-        entry: { ...entry, groupIds: [groupId] },
-      });
-    }
-  }
+  await seedKnowledgeGroups(base, seed.name, seed.knowledge, "workspace");
 
-  // Sessions: empty realtime shells via the API (no model turn), then the
-  // finished conversation history is written with SQL (see seedConversations).
-  const sessionsPage = await owner.get<any>(`${base}/sessions?limit=100`);
-  const sessions: any[] = Array.isArray(sessionsPage)
-    ? sessionsPage
-    : (sessionsPage.sessions ?? sessionsPage.items ?? []);
-  const shells: { id: string; seed: SessionSeed }[] = [];
-  for (const session of seed.sessions) {
-    let id = sessions.find((s) => s.title === session.title && !s.parentSessionId)?.id as
-      | string
-      | undefined;
-    if (!id) {
-      const created = await owner.post<any>(`${base}/sessions`, {
-        startMode: "realtime",
-        idempotencyKey: `design-preview:${ws}:${session.title}`,
-      });
-      id = (created.id ?? created.session?.id) as string;
-      await owner.patch(`${base}/sessions/${id}`, { title: session.title });
-    }
-    shells.push({ id, seed: session });
-  }
   conversationPlan.push({
+    name: seed.name,
     workspaceId: ws,
     accountId: workspace.accountId ?? orgId,
-    shells,
+    shells: await sessionShells(base, ws, seed.sessions),
+    rich: await sessionShells(base, ws, [
+      ...(SHARED_RICH_SESSIONS[seed.name] ?? []),
+      ...scheduledRunSessions(seed.name),
+    ]),
   });
   log(`Seeded ${seed.name}`);
 }
@@ -1571,48 +1749,133 @@ for (const seed of WORKSPACES) {
   }
 }
 
+// Personal workspace: rich sessions, schedules and personal Knowledge.
+const personalWs = ownerMembership.personalWorkspaceId;
+{
+  const base = `/v1/workspaces/${personalWs}`;
+  taskIdsByWorkspace.Personal = await seedSchedules(
+    base,
+    "Personal",
+    EXTRA_SCHEDULES.Personal ?? [],
+    {},
+  );
+  await seedKnowledgeGroups(base, "Bendik's notes", PERSONAL_KNOWLEDGE, "personal");
+  conversationPlan.push({
+    name: "Personal",
+    workspaceId: personalWs,
+    accountId: orgId,
+    shells: [],
+    rich: await sessionShells(base, personalWs, [
+      ...PERSONAL_RICH_SESSIONS,
+      ...scheduledRunSessions("Personal"),
+    ]),
+  });
+  log("Seeded Personal workspace");
+}
+const workspaceIdByName: Record<string, string> = Object.fromEntries(
+  conversationPlan.map((plan) => [plan.name, plan.workspaceId]),
+);
+
+if (!migrationsUrl) {
+  fail("no OPENGENI_MIGRATIONS_DATABASE_URL in .env.runtime; conversation history needs it.");
+}
+sql = new SQL(migrationsUrl);
+
 // Expired API keys: no API sets a past expiry, so move it with SQL.
-if (expiredKeyIds.length && migrationsUrl) {
-  sql = new SQL(migrationsUrl);
+if (expiredKeyIds.length) {
   await sql`update api_keys set expires_at = now() - interval '3 days' where id in ${sql(expiredKeyIds)} and expires_at > now()`;
-  await sql.close();
+}
+
+// Artifacts: static Sites and empty editable documents for Platform
+// engineering, then real files (Office imports, charts, code, PDF) and richer
+// Sites. Plain API writes, no sessions or model turns. Looked up by title or
+// content hash so reruns reuse them.
+if (workspaceIdByName["Platform engineering"]) {
+  await seedArtifacts(owner, workspaceIdByName["Platform engineering"]);
+}
+const artifactsByWorkspace: Record<string, Record<string, ArtifactRef>> = {};
+{
+  const seedFiles = await buildSeedFiles();
+  for (const [name, entries] of Object.entries(ARTIFACT_PLAN)) {
+    const ws = workspaceIdByName[name];
+    if (!ws) continue;
+    artifactsByWorkspace[name] = await seedRichArtifacts(sql, ws, entries, seedFiles);
+  }
+  for (const [name, sites] of Object.entries(SITE_PLAN)) {
+    const ws = workspaceIdByName[name];
+    if (!ws) continue;
+    for (const site of sites) {
+      (artifactsByWorkspace[name] ??= {})[site.key] = await ensureSite(ws, site);
+    }
+  }
 }
 
 // Finished conversations: no API writes history without running a model, so
 // the events are inserted directly, following the same session-activity commit
-// gate the API uses. Nothing here creates turns, workflow wakes or outbox rows:
-// the sessions stay idle and no worker ever picks them up.
-if (migrationsUrl) {
-  sql = new SQL(migrationsUrl);
+// gate the API uses. Nothing here creates workflow wakes or outbox rows, so no
+// worker ever picks the sessions up. Sessions left waiting on a person get a
+// closed turn attempt, exactly like a real paused turn (see seedWaitingTurn).
+{
   let seededCount = 0;
-  for (const plan of conversationPlan) seededCount += await seedConversations(sql, plan);
-  await sql.close();
+  for (const plan of conversationPlan) {
+    seededCount += await seedConversations(sql, plan, artifactsByWorkspace[plan.name] ?? {});
+  }
   if (seededCount) log(`Wrote conversation history for ${seededCount} sessions`);
 }
 
-// Artifacts for Platform engineering: static Sites (with a second version and
-// one archived) and empty editable documents. Plain API writes, no sessions or
-// model turns. Looked up by title so reruns reuse them.
-{
-  const all = await owner.get<any[]>("/v1/workspaces");
-  const ws = all.find((w) => w.kind === "shared" && w.name === "Platform engineering")?.id;
-  if (ws) await seedArtifacts(owner, ws as string);
-}
+await linkArtifactsToSessions(sql);
+await seedScheduleRuns(sql);
+await seedPendingKnowledge(sql);
+await seedUsage(sql);
+await sql.close();
+
+// Pins, folders (channels), Agent learning and connected capabilities.
+await seedRailOrganization();
+await seedAgentLearning();
+await seedCapabilities();
+await refreshScheduleAccess();
 
 log("\nDone. Workspaces:");
 for (const line of workspaceUrls) log(`  ${line}`);
-log(`Owner Personal workspace: ${ORIGIN}/workspaces/${ownerMembership.personalWorkspaceId}`);
+log(`Owner Personal workspace: ${ORIGIN}/workspaces/${personalWs}`);
 log(`Credentials: ${credentialsPath}`);
+
+/** The simple exchange seeds, expressed as builder scripts. */
+function exchangesScript(builder: ConversationBuilder, exchanges: Exchange[]) {
+  for (const [userText, answer] of exchanges) {
+    builder.user(userText, { after: 360 }).answer(answer, 30 + answer.length / 8);
+  }
+}
+
+function simpleToRich(seed: SessionSeed): RichSessionSeed {
+  return {
+    title: seed.title,
+    hoursAgo: seed.hoursAgo,
+    ...(seed.unread ? { unread: true } : {}),
+    ...(seed.children
+      ? {
+          children: seed.children.map((child, index) => ({
+            key: `child${index}`,
+            title: child.title,
+            script: (builder: ConversationBuilder) => exchangesScript(builder, child.exchanges),
+          })),
+        }
+      : {}),
+    script: (builder) => exchangesScript(builder, seed.exchanges),
+  };
+}
 
 async function seedConversations(
   db: SQL,
-  plan: {
-    workspaceId: string;
-    accountId: string;
-    shells: { id: string; seed: SessionSeed }[];
-  },
+  plan: ConversationPlan,
+  artifacts: Record<string, ArtifactRef>,
 ): Promise<number> {
   const ws = plan.workspaceId;
+  const all: { id: string; seed: RichSessionSeed }[] = [
+    ...plan.shells.map(({ id, seed }) => ({ id, seed: simpleToRich(seed) })),
+    ...plan.rich,
+  ];
+  if (!all.length) return 0;
   let count = 0;
   await db.begin(async (tx) => {
     await tx`select pg_advisory_xact_lock_shared(hashtextextended(${"workspace-control:" + ws}, 0))`;
@@ -1625,123 +1888,28 @@ async function seedConversations(
       return Number(row?.last_sequence ?? 0);
     };
     const [shellRow] = await tx`select created_by_subject_id from sessions
-      where workspace_id = ${ws} and id = ${plan.shells[0]!.id}`;
+      where workspace_id = ${ws} and id = ${all[0]!.id}`;
     const subjectId = String(shellRow.created_by_subject_id);
-    const initiator = { kind: "subject", label: OWNER.email, subjectId };
+    const ownerInitiator = { kind: "subject" as const, label: OWNER.email, subjectId };
 
-    const writeHistory = async (
-      sessionId: string,
-      exchanges: Exchange[],
-      endAt: Date,
-      unread: boolean,
-    ) => {
-      const minutesPerExchange = 7;
-      let at = new Date(endAt.getTime() - exchanges.length * minutesPerExchange * 60_000);
-      const startAt = at;
-      let sequence = await cursor(sessionId);
-      const rows: [
-        string,
-        string | null,
-        number | null,
-        string | null,
-        number,
-        string,
-        unknown,
-        Date,
-      ][] = [];
-      for (const [index, [userText, answer]] of exchanges.entries()) {
-        const userEventId = randomUUID();
-        const turnId = randomUUID();
-        const t = (offsetSeconds: number) => new Date(at.getTime() + offsetSeconds * 1000);
-        rows.push([
-          userEventId,
-          null,
-          null,
-          null,
-          ++sequence,
-          "user.message",
-          { text: userText, routing: "accepted_for_execution", initiator },
-          t(0),
-        ]);
-        rows.push([
-          randomUUID(),
-          turnId,
-          null,
-          null,
-          ++sequence,
-          "turn.queued",
-          {
-            source: "user",
-            turnId,
-            routing: "accepted_for_execution",
-            initiator,
-            triggerEventId: userEventId,
-          },
-          t(0),
-        ]);
-        rows.push([
-          randomUUID(),
-          turnId,
-          1,
-          "current",
-          ++sequence,
-          "turn.started",
-          { triggerEventId: userEventId },
-          t(2),
-        ]);
-        const done = t(40 + index * 25 + answer.length / 8);
-        rows.push([
-          randomUUID(),
-          turnId,
-          1,
-          "current",
-          ++sequence,
-          "agent.message.completed",
-          {
-            text: answer,
-            phase: "final_answer",
-            messageId: `msg_seed_${turnId.slice(0, 8)}`,
-          },
-          done,
-        ]);
-        rows.push([
-          randomUUID(),
-          turnId,
-          1,
-          "current",
-          ++sequence,
-          "turn.completed",
-          { output: answer },
-          done,
-        ]);
-        rows.push([
-          randomUUID(),
-          turnId,
-          1,
-          "current",
-          ++sequence,
-          "session.status.changed",
-          { status: "idle" },
-          done,
-        ]);
-        at = new Date(at.getTime() + minutesPerExchange * 60_000);
-      }
+    const insertRows = async (sessionId: string, rows: SeedEventRow[], startAt: Date) => {
+      const existing = await cursor(sessionId);
+      let sequence = existing;
       const params: unknown[] = [];
       const values = rows.map((row) => {
-        const [id, turnId, generation, association, seq, type, payload, occurredAt] = row;
-        // Bun serializes objects bound to a jsonb parameter; do not stringify twice.
         params.push(
-          id,
+          row.id,
           plan.accountId,
           ws,
           sessionId,
-          turnId,
-          generation,
-          association,
-          seq,
-          type,
-          payload,
-          occurredAt,
+          row.turnId,
+          row.generation,
+          row.association,
+          ++sequence,
+          row.type,
+          // Bun serializes objects bound to a jsonb parameter; do not stringify twice.
+          row.payload,
+          new Date(startAt.getTime() + row.offsetMs),
         );
         const n = params.length - 10;
         return `($${n}::uuid, $${n + 1}::uuid, $${n + 2}::uuid, $${n + 3}::uuid, $${n + 4}::uuid, $${n + 5}::int, $${n + 6}, $${n + 7}::int, $${n + 8}, $${n + 9}::jsonb, 1, $${n + 10}::timestamptz, $${n + 10}::timestamptz)`;
@@ -1752,56 +1920,164 @@ async function seedConversations(
          values ${values.join(", ")}`,
         params,
       );
-      const lastAt = rows.at(-1)![7];
+      // The shell's own creation events move to the start of the conversation.
       await tx`update session_events set occurred_at = ${startAt}, created_at = ${startAt}
-        where workspace_id = ${ws} and session_id = ${sessionId} and sequence <= 2`;
-      await tx`update sessions set created_at = ${startAt}, updated_at = ${lastAt}
-        where workspace_id = ${ws} and id = ${sessionId}`;
-      if (!unread) {
-        await tx`insert into session_pins (account_id, workspace_id, subject_id, session_id, pinned,
-            pinned_at, version, acknowledged_sequence, attention_version, archive_version)
-          values (${plan.accountId}, ${ws}, ${subjectId}, ${sessionId}, false, null, 0, ${sequence}, 1, 0)
-          on conflict (subject_id, workspace_id, session_id) do update
-            set acknowledged_sequence = greatest(session_pins.acknowledged_sequence, excluded.acknowledged_sequence),
-                manually_unread_through = null,
-                attention_version = session_pins.attention_version + 1`;
-      }
-      count += 1;
+        where workspace_id = ${ws} and session_id = ${sessionId} and sequence <= ${existing}`;
+      const lastAt = new Date(startAt.getTime() + (rows.at(-1)?.offsetMs ?? 0));
+      return { lastSequence: sequence, lastAt };
     };
 
-    for (const { id, seed } of plan.shells) {
-      const endAt = new Date(Date.now() - seed.hoursAgo * 3_600_000);
-      if ((await cursor(id)) <= 2)
-        await writeHistory(id, seed.exchanges, endAt, seed.unread ?? false);
-      for (const [index, child] of (seed.children ?? []).entries()) {
-        const existing = await tx`select id from sessions
-          where workspace_id = ${ws} and parent_session_id = ${id} and title = ${child.title}`;
-        if (existing.length) continue;
-        const childId = randomUUID();
-        await tx`insert into sessions (id, status, initial_message, resources, tools, metadata, model,
-            sandbox_backend, temporal_workflow_id, account_id, workspace_id, parent_session_id, sandbox_os,
-            sandbox_group_id, title, title_source, tool_policy, created_by_kind, created_by_subject_id,
-            created_by_context, root_session_id, nested_agent_depth, effective_max_nested_agent_depth,
-            nested_agent_depth_policy_source, skills, first_party_mcp_tools, codex_compaction_mode,
-            reasoning_effort, latency_mode, visibility, create_requested_visibility, variable_set_ids,
-            agent_access, memory_scope, mcp_approval_policies, initial_xai_provider_account_authority_snapshot)
-          select ${childId}, 'idle', '', p.resources, p.tools, '{}'::jsonb, p.model, p.sandbox_backend,
-            ${"session-" + childId}, p.account_id, p.workspace_id, p.id, p.sandbox_os, gen_random_uuid(),
-            ${child.title}, 'user', jsonb_build_object('mode', 'workspace_default', 'inheritedFromSessionId', p.id::text),
-            p.created_by_kind, p.created_by_subject_id, p.created_by_context, p.root_session_id,
-            p.nested_agent_depth + 1, p.effective_max_nested_agent_depth, p.nested_agent_depth_policy_source,
-            p.skills, p.first_party_mcp_tools, p.codex_compaction_mode, p.reasoning_effort, p.latency_mode,
-            p.visibility, p.create_requested_visibility, '[]'::jsonb, p.agent_access, p.memory_scope,
-            p.mcp_approval_policies, p.initial_xai_provider_account_authority_snapshot
-          from sessions p where p.workspace_id = ${ws} and p.id = ${id}`;
-        const [created] = await tx`select payload from session_events
-          where workspace_id = ${ws} and session_id = ${id} and sequence = 1`;
-        await tx`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload,
-            payload_codec_version, occurred_at, created_at)
-          values (${plan.accountId}, ${ws}, ${childId}, 1, 'session.created', ${created.payload}, 1, now(), now())`;
-        const childEnd = new Date(endAt.getTime() - (index + 1) * 4 * 60_000);
-        await writeHistory(childId, child.exchanges, childEnd, false);
+    const acknowledge = async (sessionId: string, sequence: number) => {
+      await tx`insert into session_pins (account_id, workspace_id, subject_id, session_id, pinned,
+          pinned_at, version, acknowledged_sequence, attention_version, archive_version)
+        values (${plan.accountId}, ${ws}, ${subjectId}, ${sessionId}, false, null, 0, ${sequence}, 1, 0)
+        on conflict (subject_id, workspace_id, session_id) do update
+          set acknowledged_sequence = greatest(session_pins.acknowledged_sequence, excluded.acknowledged_sequence),
+              manually_unread_through = null,
+              attention_version = session_pins.attention_version + 1`;
+    };
+
+    // Children are real nested sessions copied from their parent's settings.
+    const ensureChild = async (parentId: string, title: string): Promise<string> => {
+      const [existing] = await tx`select id from sessions
+        where workspace_id = ${ws} and parent_session_id = ${parentId} and title = ${title}`;
+      if (existing) return String(existing.id);
+      const childId = randomUUID();
+      await tx`insert into sessions (id, status, initial_message, resources, tools, metadata, model,
+          sandbox_backend, temporal_workflow_id, account_id, workspace_id, parent_session_id, sandbox_os,
+          sandbox_group_id, title, title_source, tool_policy, created_by_kind, created_by_subject_id,
+          created_by_context, root_session_id, nested_agent_depth, effective_max_nested_agent_depth,
+          nested_agent_depth_policy_source, skills, first_party_mcp_tools, codex_compaction_mode,
+          reasoning_effort, latency_mode, visibility, create_requested_visibility, variable_set_ids,
+          agent_access, memory_scope, mcp_approval_policies, initial_xai_provider_account_authority_snapshot)
+        select ${childId}, 'idle', '', p.resources, p.tools, '{}'::jsonb, p.model, p.sandbox_backend,
+          ${"session-" + childId}, p.account_id, p.workspace_id, p.id, p.sandbox_os, gen_random_uuid(),
+          ${title}, 'user', jsonb_build_object('mode', 'workspace_default', 'inheritedFromSessionId', p.id::text),
+          p.created_by_kind, p.created_by_subject_id, p.created_by_context, p.root_session_id,
+          p.nested_agent_depth + 1, p.effective_max_nested_agent_depth, p.nested_agent_depth_policy_source,
+          p.skills, p.first_party_mcp_tools, p.codex_compaction_mode, p.reasoning_effort, p.latency_mode,
+          p.visibility, p.create_requested_visibility, '[]'::jsonb, p.agent_access, p.memory_scope,
+          p.mcp_approval_policies, p.initial_xai_provider_account_authority_snapshot
+        from sessions p where p.workspace_id = ${ws} and p.id = ${parentId}`;
+      const [created] = await tx`select payload from session_events
+        where workspace_id = ${ws} and session_id = ${parentId} and sequence = 1`;
+      await tx`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload,
+          payload_codec_version, occurred_at, created_at)
+        values (${plan.accountId}, ${ws}, ${childId}, 1, 'session.created', ${created.payload}, 1, now(), now())`;
+      return childId;
+    };
+
+    // A turn waiting on a person is a real `requires_action` turn whose attempt
+    // already closed (the steady state a real worker leaves behind). There is
+    // no workflow wake, so nothing resumes it unless someone answers in the UI.
+    const seedWaitingTurn = async (
+      sessionId: string,
+      builder: ConversationBuilder,
+      startAt: Date,
+      lastAt: Date,
+    ) => {
+      const turnId = builder.requiresActionTurnId!;
+      const at = (row: SeedEventRow) => new Date(startAt.getTime() + row.offsetMs);
+      const queued = builder.rows.find(
+        (row) => row.type === "turn.queued" && row.turnId === turnId,
+      )!;
+      const started = builder.rows.find(
+        (row) => row.type === "turn.started" && row.turnId === turnId,
+      )!;
+      const trigger = builder.rows.find((row) => row.id === queued.payload.triggerEventId)!;
+      const attemptId = randomUUID();
+      // Admission triggers accept only the live attempt of a running turn, so
+      // the turn is admitted as running and then settled to requires_action in
+      // the same transaction, exactly as a worker leaves it. Nothing outside
+      // this transaction ever sees it running.
+      await tx`insert into session_turns (id, session_id, trigger_event_id, temporal_workflow_id, status,
+          source, position, prompt, model, reasoning_effort, sandbox_backend, sandbox_os, account_id,
+          workspace_id, started_at, created_at, updated_at, execution_generation, active_attempt_id,
+          initiator_kind, initiator_subject_id, initiator_context, initiating_human_subject_id,
+          latency_mode, prompt_routing, surface)
+        select ${turnId}, s.id, ${trigger.id}, coalesce(s.temporal_workflow_id, 'session-' || s.id::text),
+          'running', 'user', 1, ${String(trigger.payload.text)}, s.model, s.reasoning_effort,
+          s.sandbox_backend, s.sandbox_os, s.account_id, s.workspace_id, ${at(started)}, ${at(queued)},
+          ${lastAt}, 1, ${attemptId}, 'subject', ${subjectId}, ${{ label: OWNER.email }}, ${subjectId},
+          s.latency_mode, 'accepted_for_execution', 'web'
+        from sessions s where s.workspace_id = ${ws} and s.id = ${sessionId}`;
+      await tx`update sessions set active_turn_id = ${turnId}
+        where workspace_id = ${ws} and id = ${sessionId}`;
+      await tx`insert into session_turn_attempts (id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, temporal_workflow_id, temporal_workflow_run_id,
+          temporal_activity_id, worker_id, verified_control_revision, started_at, updated_at,
+          mcp_approval_policies, authority_epoch, authority_visibility,
+          authority_owner_organization_membership_id)
+        select ${attemptId}, s.account_id, s.workspace_id, s.id, ${turnId}, 1, 'running',
+          coalesce(s.temporal_workflow_id, 'session-' || s.id::text), ${"design-preview-" + attemptId},
+          'runAgentTurn-1', 'design-preview-seed', s.control_version, ${at(started)}, ${lastAt},
+          s.mcp_approval_policies, s.authority_epoch, s.visibility, s.owner_organization_membership_id
+        from sessions s where s.workspace_id = ${ws} and s.id = ${sessionId}`;
+      await tx`update session_turn_attempts
+        set state = 'closed', outcome = 'requires_action', closed_at = ${lastAt}, quiesced_at = ${lastAt},
+            updated_at = ${lastAt}
+        where workspace_id = ${ws} and id = ${attemptId}`;
+      await tx`update session_turns set status = 'requires_action', updated_at = ${lastAt}
+        where workspace_id = ${ws} and id = ${turnId}`;
+      const request = builder.pendingHumanInput;
+      if (request) {
+        const askedAt = at(
+          builder.rows.find(
+            (row) =>
+              row.type === "session.humanInput.requested" &&
+              (row.payload.request as { id: string }).id === request.requestId,
+          )!,
+        );
+        const questions = request.questions.map((question) => ({
+          options: [],
+          required: true,
+          allowOther: question.kind !== "text",
+          ...question,
+        }));
+        await tx`insert into session_human_input_requests (id, account_id, workspace_id, session_id,
+            turn_id, turn_generation, creation_attempt_id, tool_call_id, status, questions, allow_skip,
+            expires_at, created_at, updated_at)
+          values (${request.requestId}, ${plan.accountId}, ${ws}, ${sessionId}, ${turnId}, 1, ${attemptId},
+            ${request.toolCallId}, 'pending', ${questions}, ${request.allowSkip}, null, ${askedAt}, ${askedAt})`;
       }
+    };
+
+    const writeSession = async (sessionId: string, seed: RichSessionSeed, endAt: Date) => {
+      const builder = new ConversationBuilder(seed.initiator ?? ownerInitiator);
+      const children: Record<string, string> = {};
+      for (const child of seed.children ?? []) {
+        children[child.key] = await ensureChild(sessionId, child.title);
+      }
+      seed.script(builder, { workspaceId: ws, children, artifacts });
+      const startAt = new Date(endAt.getTime() - builder.durationMs);
+      const { lastSequence, lastAt } = await insertRows(sessionId, builder.rows, startAt);
+      await tx`update sessions set created_at = ${startAt}, updated_at = ${lastAt}, status = ${builder.outcome}
+        where workspace_id = ${ws} and id = ${sessionId}`;
+      if (builder.requiresActionTurnId) await seedWaitingTurn(sessionId, builder, startAt, lastAt);
+      if (!seed.unread) await acknowledge(sessionId, lastSequence);
+      if (seed.goal) {
+        await tx`insert into session_goals (account_id, workspace_id, session_id, status, text,
+            success_criteria, evidence, paused_reason, created_by, created_at, updated_at)
+          values (${plan.accountId}, ${ws}, ${sessionId}, ${seed.goal.status}, ${seed.goal.text},
+            ${seed.goal.successCriteria ?? null}, ${seed.goal.evidence ?? null},
+            ${seed.goal.pausedReason ?? null}, 'api', ${startAt}, ${lastAt})
+          on conflict do nothing`;
+      }
+      count += 1;
+      for (const [index, child] of (seed.children ?? []).entries()) {
+        const childId = children[child.key]!;
+        if ((await cursor(childId)) > 1) continue;
+        await writeSession(
+          childId,
+          { title: child.title, hoursAgo: 0, script: (b) => child.script(b) },
+          new Date(endAt.getTime() - 60_000 - index * 35_000),
+        );
+      }
+    };
+
+    for (const { id, seed } of all) {
+      if ((await cursor(id)) > 2) continue;
+      await writeSession(id, seed, new Date(Date.now() - seed.hoursAgo * 3_600_000));
     }
 
     // Finalize the session-activity gate exactly as the API does.
@@ -1823,6 +2099,573 @@ async function seedConversations(
     );
   });
   return count;
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts with real content
+// ---------------------------------------------------------------------------
+
+async function uploadSeedFile(db: SQL, ws: string, file: SeedFile) {
+  const sha256 = createHash("sha256").update(file.bytes).digest("hex");
+  const find = async () =>
+    (
+      await db`select id, filename, content_type, size_bytes, sha256, updated_at from files
+        where workspace_id = ${ws} and filename = ${file.filename} and sha256 = ${sha256}
+          and status = 'ready' order by created_at limit 1`
+    )[0];
+  let row = await find();
+  if (!row) {
+    const base = `/v1/workspaces/${ws}`;
+    const upload = await owner.post<any>(`${base}/files/uploads`, {
+      filename: file.filename,
+      contentType: file.contentType,
+      sizeBytes: file.bytes.byteLength,
+      sha256,
+    });
+    const put = await fetch(upload.putUrl, {
+      method: "PUT",
+      headers: upload.requiredHeaders ?? { "content-type": file.contentType },
+      body: new Blob([file.bytes as unknown as ArrayBuffer]),
+    });
+    if (!put.ok) fail(`upload of ${file.filename} failed: ${put.status} ${await put.text()}`);
+    await owner.post(`${base}/files/uploads/${upload.uploadId}/complete`);
+    row = await find();
+    if (!row) fail(`uploaded file ${file.filename} is not ready`);
+  }
+  return {
+    id: String(row.id),
+    filename: String(row.filename),
+    contentType: String(row.content_type),
+    sizeBytes: Number(row.size_bytes),
+    sha256: String(row.sha256),
+    updatedAt: new Date(row.updated_at).toISOString(),
+    ...(file.contentType.startsWith("image/") ? { dimensions: { width: 960, height: 540 } } : {}),
+  };
+}
+
+async function seedRichArtifacts(
+  db: SQL,
+  ws: string,
+  entries: ArtifactPlanEntry[],
+  files: Record<string, SeedFile>,
+): Promise<Record<string, ArtifactRef>> {
+  const base = `/v1/workspaces/${ws}`;
+  const catalog = new Map<string, string>();
+  for (const status of ["active", "archived"]) {
+    const page = await owner.get<any>(`${base}/artifact-catalog?status=${status}&limit=100`);
+    for (const item of page.items ?? []) catalog.set(`${item.kind}:${item.title}`, item.id);
+  }
+  const refs: Record<string, ArtifactRef> = {};
+  let filled = 0;
+  for (const entry of entries) {
+    let ref: ArtifactRef;
+    if (entry.editable) {
+      let id = catalog.get(`${entry.editable.modality}:${entry.editable.title}`);
+      if (!id) {
+        const created = await owner.post<any>(`${base}/editable-artifacts`, {
+          title: entry.editable.title,
+          modality: entry.editable.modality,
+          replicaId: "de51a9f0e0000001",
+          idempotencyKey: `design-preview.${entry.editable.modality}.${entry.key}`,
+        });
+        id = String(created.id ?? created.artifact?.id);
+      }
+      // Only a never-edited artifact is filled, so reruns and human edits stay.
+      const [row] = await db`select head_sequence from editable_artifacts where id = ${id}`;
+      const content = LIVE_CONTENT[entry.key];
+      if (content && Number(row?.head_sequence ?? 1) === 0) {
+        try {
+          await applyLiveBatch({
+            apiBase: API,
+            origin: ORIGIN,
+            workspaceBase: base,
+            post: (path, body) => owner.post(path, body),
+            artifactId: id,
+            replicaId: randomBytes(8).toString("hex"),
+            batch: content,
+          });
+          filled++;
+        } catch (error) {
+          // Spreadsheet commits currently fail server-side on this stack; the
+          // artifact stays empty and a later rerun fills it once that works.
+          log(`  ${entry.editable.title}: content not written (${(error as Error).message})`);
+        }
+      }
+      ref = { kind: "editable", id, href: `/workspaces/${ws}/artifacts/editable/${id}` };
+    } else {
+      const file = files[entry.key] ?? fail(`unknown seed file ${entry.key}`);
+      const uploaded = await uploadSeedFile(db, ws, file);
+      ref = { kind: "file", id: uploaded.id, href: `artifact:${uploaded.id}`, file: uploaded };
+    }
+    refs[entry.key] = ref;
+    if (entry.session) {
+      const accountId = conversationPlan.find((plan) => plan.workspaceId === ws)!.accountId;
+      pendingSessionLinks.push({ workspaceId: ws, accountId, session: entry.session, ref });
+    }
+  }
+  if (filled) log(`Wrote content into ${filled} editable artifacts`);
+  return refs;
+}
+
+async function ensureSite(ws: string, site: SitePlanEntry): Promise<ArtifactRef> {
+  const base = `/v1/workspaces/${ws}`;
+  const page = await owner.get<any>(`${base}/artifact-catalog?status=active&limit=100`);
+  const found = (page.items ?? []).find(
+    (item: any) => item.kind === "site" && item.title === site.title,
+  );
+  const key = `design-preview:${ws}:site:${site.title}`;
+  if (!found) {
+    const createdSite = await owner.post<any>(`${base}/published-artifacts`, {
+      title: site.title,
+      description: site.description,
+      html: site.html,
+      idempotencyKey: `${key}:${site.marker}`,
+    });
+    log(`Published Site ${site.title}`);
+    return {
+      kind: "site",
+      id: createdSite.artifact.id,
+      href: `/workspaces/${ws}/artifacts/${createdSite.artifact.id}`,
+      title: site.title,
+      revision: createdSite.version.revision,
+    };
+  }
+  const current = await owner.get<any>(`${base}/published-artifacts/${found.id}`);
+  let revision = Number(current.artifact.currentVersion?.revision ?? 1);
+  const html = await owner.get<any>(`${base}/published-artifacts/${found.id}/html`);
+  if (typeof html !== "string" || !html.includes(`data-seed="${site.marker}"`)) {
+    const next = await owner.post<any>(`${base}/published-artifacts/${found.id}/versions`, {
+      html: site.html,
+      expectedCurrentVersionId: current.artifact.currentVersion.id,
+      idempotencyKey: `${key}:${site.marker}`,
+    });
+    revision = Number(next.version.revision);
+    log(`Published ${site.title} version ${revision}`);
+  }
+  return {
+    kind: "site",
+    id: found.id,
+    href: `/workspaces/${ws}/artifacts/${found.id}`,
+    title: site.title,
+    revision,
+  };
+}
+
+/** Publish files into the catalog and link editable artifacts to their sessions. */
+async function linkArtifactsToSessions(db: SQL) {
+  for (const link of pendingSessionLinks) {
+    const [session] = await db`select id from sessions
+      where workspace_id = ${link.workspaceId} and title = ${link.session} and parent_session_id is null
+      limit 1`;
+    if (!session) continue;
+    if (link.ref.kind === "file") {
+      await db.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${link.accountId}, true),
+                        set_config('opengeni.workspace_id', ${link.workspaceId}, true)`;
+        const [published] = await tx`select 1 from opengeni_private.sandbox_file_publications
+          where workspace_id = ${link.workspaceId} and file_id = ${link.ref.id}`;
+        if (!published) {
+          await tx`select opengeni_private.record_sandbox_file_publication(
+            ${link.accountId}::uuid, ${link.workspaceId}::uuid, ${link.ref.id}::uuid, ${session.id}::uuid)`;
+        }
+      });
+    } else if (link.ref.kind === "editable") {
+      await db`insert into editable_artifact_session_links (account_id, workspace_id, session_id, artifact_id)
+        values (${link.accountId}, ${link.workspaceId}, ${session.id}, ${link.ref.id})
+        on conflict do nothing`;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Schedule run history
+// ---------------------------------------------------------------------------
+
+async function seedScheduleRuns(db: SQL) {
+  let inserted = 0;
+  for (const plan of conversationPlan) {
+    const tasks = taskIdsByWorkspace[plan.name] ?? {};
+    const displayActive = [
+      ...(DISPLAY_ACTIVE_SCHEDULES[plan.name] ?? []),
+      ...(EXTRA_SCHEDULES[plan.name] ?? [])
+        .filter((task) => task.active === "display")
+        .map((task) => task.name),
+    ];
+    for (const name of displayActive) {
+      const taskId = tasks[name];
+      if (taskId) {
+        await db`update scheduled_tasks set status = 'active'
+          where workspace_id = ${plan.workspaceId} and id = ${taskId} and status = 'paused'`;
+      }
+    }
+    for (const [name, runs] of Object.entries(SCHEDULE_RUNS[plan.name] ?? {})) {
+      const taskId = tasks[name];
+      if (!taskId) continue;
+      const [existing] = await db`select 1 from scheduled_task_runs
+        where workspace_id = ${plan.workspaceId} and task_id = ${taskId} limit 1`;
+      if (existing) continue;
+      await db.begin(async (tx) => {
+        await tx`select pg_advisory_xact_lock_shared(hashtextextended(${"session-tenancy:" + plan.workspaceId}, 0))`;
+        // Historical terminal runs only. The admission triggers accept a run
+        // only for an active task with a live execution snapshot; a finished
+        // run from the past has neither, so they are bypassed for this insert.
+        await tx.unsafe(
+          "ALTER TABLE scheduled_task_runs DISABLE TRIGGER scheduled_agent_run_execution_admission",
+        );
+        await tx.unsafe(
+          "ALTER TABLE scheduled_task_runs DISABLE TRIGGER scheduled_run_owner_matches",
+        );
+        for (const run of runs) {
+          const firedAt = new Date(Date.now() - run.daysAgo * 86_400_000);
+          const completedAt = new Date(firedAt.getTime() + Math.max(run.minutes, 0.2) * 60_000);
+          let sessionId: string | null = null;
+          const runId = randomUUID();
+          if (run.session) {
+            const [session] = await tx`select id, metadata from sessions
+              where workspace_id = ${plan.workspaceId} and title = ${run.session.title}
+                and parent_session_id is null limit 1`;
+            if (session) {
+              sessionId = String(session.id);
+              await tx`update sessions set metadata = metadata || ${{
+                scheduledTaskId: taskId,
+                scheduledTaskRunId: runId,
+                scheduledTaskRunMode: "new_session_per_run",
+              }}::jsonb where workspace_id = ${plan.workspaceId} and id = ${sessionId}`;
+            }
+          }
+          await tx`insert into scheduled_task_runs (id, account_id, workspace_id, task_id,
+              task_authority_revision, task_execution_digest, status, trigger_type, action_kind,
+              scheduled_at, fired_at, completed_at, session_id, error, created_at, updated_at)
+            select ${runId}, t.account_id, t.workspace_id, t.id, t.authority_revision, t.execution_digest,
+              ${run.status}, ${run.trigger ?? "scheduled"}, 'agent_turn',
+              ${(run.trigger ?? "scheduled") === "scheduled" ? firedAt : null}, ${firedAt},
+              ${completedAt}, ${sessionId}, ${run.error ?? null}, ${firedAt}, ${completedAt}
+            from scheduled_tasks t where t.workspace_id = ${plan.workspaceId} and t.id = ${taskId}`;
+          inserted++;
+        }
+        // Deferred FK checks must run before the table can be altered again.
+        await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
+        await tx.unsafe(
+          "ALTER TABLE scheduled_task_runs ENABLE TRIGGER scheduled_agent_run_execution_admission",
+        );
+        await tx.unsafe(
+          "ALTER TABLE scheduled_task_runs ENABLE TRIGGER scheduled_run_owner_matches",
+        );
+      });
+    }
+  }
+  if (inserted) log(`Wrote ${inserted} schedule runs`);
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge proposals waiting for review (an agent's Review-first saves)
+// ---------------------------------------------------------------------------
+
+async function seedPendingKnowledge(db: SQL) {
+  let inserted = 0;
+  for (const plan of conversationPlan) {
+    const seeds = PENDING_KNOWLEDGE[plan.name];
+    if (!seeds?.length) continue;
+    const personal = plan.name === "Personal";
+    const [owned] = await db`select created_by_subject_id from sessions
+      where workspace_id = ${plan.workspaceId} limit 1`;
+    const ownerSubject = String(owned?.created_by_subject_id ?? "");
+    const ownerKey = personal ? `personal:${ownerSubject}` : `workspace:${plan.workspaceId}`;
+    for (const seed of seeds) {
+      const [exists] = await db`select 1 from knowledge_entry_revisions r
+        join knowledge_entries e on e.id = r.entry_id
+        where e.account_id = ${plan.accountId} and r.body ->> 'title' = ${seed.title} limit 1`;
+      if (exists) continue;
+      const [session] = await db`select id from sessions
+        where workspace_id = ${plan.workspaceId} and title = ${seed.fromSession}
+          and parent_session_id is null limit 1`;
+      if (!session) continue;
+      const batchId = randomUUID();
+      const entryId = randomUUID();
+      const revisionId = randomUUID();
+      const body = {
+        title: seed.title,
+        kind: seed.kind,
+        content: seed.content,
+        evidence: [],
+        groupIds: [],
+        relationships: [],
+      };
+      await db.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${plan.accountId}, true)`;
+        await tx`insert into knowledge_review_batches (id, account_id, origin_workspace_id, owner_key,
+            session_id, turn_id)
+          values (${batchId}, ${plan.accountId}, ${plan.workspaceId}, ${ownerKey}, ${session.id},
+            gen_random_uuid())`;
+        await tx`insert into knowledge_entries (id, account_id, origin_workspace_id, scope,
+            scope_workspace_id, scope_subject_id, version, latest_revision_id)
+          values (${entryId}, ${plan.accountId}, ${plan.workspaceId}, ${personal ? "personal" : "workspace"},
+            ${personal ? null : plan.workspaceId}, ${personal ? ownerSubject : null}, 1, ${revisionId})`;
+        await tx`insert into knowledge_entry_revisions (id, account_id, entry_id, number, body, preview,
+            actor, created_by_session_id, review_batch_id)
+          values (${revisionId}, ${plan.accountId}, ${entryId}, 1, ${body}, ${seed.content.slice(0, 512)},
+            ${{ kind: "agent", sessionId: String(session.id) }}, ${session.id}, ${batchId})`;
+        await tx`insert into knowledge_entry_decisions (account_id, entry_id, revision_id, version,
+            outcome, actor)
+          values (${plan.accountId}, ${entryId}, ${revisionId}, 1, 'pending', ${{ kind: "agent" }})`;
+        await tx`select knowledge_index_revision(${plan.accountId}::uuid, ${entryId}::uuid,
+            ${revisionId}::uuid, ${`${seed.title}\n${seed.content}`})`;
+      });
+      inserted++;
+    }
+  }
+  if (inserted) log(`Wrote ${inserted} Knowledge proposals waiting for review`);
+}
+
+// ---------------------------------------------------------------------------
+// Usage for Insights: model calls, sandbox time and runs over 30 days
+// ---------------------------------------------------------------------------
+
+async function seedUsage(db: SQL) {
+  let inserted = 0;
+  const weights: Record<string, number> = {
+    "Platform engineering": 1,
+    Personal: 0.7,
+    "Customer success": 0.45,
+    "Design preview": 0.35,
+    "Finance ops": 0.25,
+  };
+  for (const plan of conversationPlan) {
+    const [seeded] = await db`select 1 from model_call_facts
+      where workspace_id = ${plan.workspaceId} and source_key like 'design-preview:%' limit 1`;
+    if (seeded) continue;
+    const sessions = await db`select id, created_by_subject_id from sessions
+      where workspace_id = ${plan.workspaceId} order by updated_at desc limit 40`;
+    if (!sessions.length) continue;
+    const weight = weights[plan.name] ?? 0.3;
+    let seed = plan.workspaceId.charCodeAt(0);
+    const random = () => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280;
+    };
+    await db.begin(async (tx) => {
+      for (let day = 29; day >= 0; day--) {
+        const weekday = new Date(Date.now() - day * 86_400_000).getUTCDay();
+        const busy = weekday === 0 || weekday === 6 ? 0.25 : 1;
+        const calls = Math.round((6 + random() * 14) * weight * busy);
+        for (let call = 0; call < calls; call++) {
+          const session = sessions[Math.floor(random() * sessions.length)]!;
+          const pick = random();
+          let cumulative = 0;
+          const model =
+            USAGE_MODELS.find((candidate) => (cumulative += candidate.share) >= pick) ??
+            USAGE_MODELS[0];
+          const input = Math.round(8_000 + random() * 60_000);
+          const cached = Math.round(input * (0.3 + random() * 0.5));
+          const output = Math.round(300 + random() * 3_500);
+          const reasoning = Math.round(output * random() * 0.6);
+          const cost = Math.round(
+            ((input - cached + output * 4) / 1000) * model.costPerKToken * 1000,
+          );
+          const occurredAt = new Date(
+            Date.now() - day * 86_400_000 - Math.floor(random() * 10 * 3_600_000),
+          );
+          const turnId = randomUUID();
+          const subject = String(session.created_by_subject_id);
+          await tx`insert into model_call_facts (account_id, workspace_id, session_id, turn_id, source_key,
+              provider, provider_api, model, billing_path, turn_source, initiator_kind, initiator_subject_id,
+              input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens,
+              priced_cost_micros, occurred_at, recorded_at)
+            values (${plan.accountId}, ${plan.workspaceId}, ${session.id}, ${turnId},
+              ${`design-preview:${turnId}`}, ${model.provider}, 'responses', ${model.model},
+              ${model.billing}, 'user', 'subject', ${subject}, ${input}, ${output}, ${cached},
+              ${reasoning}, ${input + output}, ${model.billing === "external" ? 0 : cost},
+              ${occurredAt}, ${occurredAt})`;
+          await tx`insert into usage_events (account_id, workspace_id, subject_id, event_type, quantity,
+              unit, source_resource_type, source_resource_id, idempotency_key, occurred_at, recorded_at,
+              initiator_kind, initiator_subject_id, origin)
+            values (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'model.tokens', ${input + output},
+              'tokens', 'model', ${model.model}, ${`design-preview:tokens:${turnId}`}, ${occurredAt},
+              ${occurredAt}, 'subject', ${subject}, 'user')`;
+          if (model.billing !== "external") {
+            await tx`insert into usage_events (account_id, workspace_id, subject_id, event_type, quantity,
+                unit, source_resource_type, source_resource_id, idempotency_key, occurred_at, recorded_at,
+                initiator_kind, initiator_subject_id, origin)
+              values (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'model.cost', ${cost},
+                'usd_micros', 'model', ${model.model}, ${`design-preview:cost:${turnId}`}, ${occurredAt},
+                ${occurredAt}, 'subject', ${subject}, 'user')`;
+          }
+          if (call % 3 === 0) {
+            await tx`insert into usage_events (account_id, workspace_id, subject_id, event_type, quantity,
+                unit, source_resource_type, source_resource_id, idempotency_key, occurred_at, recorded_at,
+                initiator_kind, initiator_subject_id, origin)
+              values (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'agent_run.created', 1, 'run',
+                'session', ${String(session.id)}, ${`design-preview:run:${turnId}`}, ${occurredAt},
+                ${occurredAt}, 'subject', ${subject}, 'user'),
+                (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'sandbox.warm_seconds',
+                ${Math.round(120 + random() * 1500)}, 'seconds', 'sandbox',
+                ${`${randomUUID()}:1`}, ${`design-preview:warm:${turnId}`}, ${occurredAt},
+                ${occurredAt}, 'subject', ${subject}, 'user')`;
+          }
+          inserted++;
+        }
+      }
+    });
+  }
+  if (inserted) log(`Wrote ${inserted} model calls of usage history`);
+}
+
+// ---------------------------------------------------------------------------
+// Rail organization, Agent learning and capabilities (public API)
+// ---------------------------------------------------------------------------
+
+async function seedRailOrganization() {
+  for (const plan of conversationPlan) {
+    const base = `/v1/workspaces/${plan.workspaceId}`;
+    const folders = [
+      ...new Set(plan.rich.map(({ seed }) => seed.folder).filter(Boolean)),
+    ] as string[];
+    const channels = new Map<string, string>();
+    if (folders.length) {
+      const existing = await owner.get<any>(`${base}/channels`);
+      const list: any[] = Array.isArray(existing)
+        ? existing
+        : (existing.channels ?? existing.items ?? []);
+      for (const channel of list) channels.set(channel.name, channel.id);
+      for (const folder of folders) {
+        if (channels.has(folder)) continue;
+        const created = await owner.post<any>(`${base}/channels`, { name: folder });
+        channels.set(folder, created.id);
+      }
+    }
+    const page = await owner.get<any>(`${base}/sessions?limit=200`);
+    const sessions: any[] = Array.isArray(page) ? page : (page.sessions ?? page.items ?? []);
+    for (const { id, seed } of plan.rich) {
+      const session = sessions.find((candidate) => candidate.id === id);
+      if (seed.folder && session?.channelId !== channels.get(seed.folder)) {
+        await owner.put(`${base}/sessions/${id}/channel`, { channelId: channels.get(seed.folder) });
+      }
+      if (seed.pinned && !session?.pinned && !session?.pin?.pinned) {
+        await owner.put(`${base}/sessions/${id}/pin`, { pinned: true });
+      }
+    }
+  }
+}
+
+/**
+ * Connecting capabilities after the schedules exist leaves every schedule
+ * "out of date". Refresh all but one, so the drift banner appears once as an
+ * example. Refreshing re-freezes the schedule's tools only; it does not touch
+ * the Temporal schedule.
+ */
+async function refreshScheduleAccess() {
+  const keepDrift = "Weekly dependency update PR";
+  for (const plan of conversationPlan) {
+    const base = `/v1/workspaces/${plan.workspaceId}`;
+    const tasks = await owner.get<any[]>(`${base}/scheduled-tasks`);
+    for (const task of tasks) {
+      if (task.name === keepDrift || !task.policyDrift || !task.executionDigest) continue;
+      await owner.post(`${base}/scheduled-tasks/${task.id}/refresh-access`, {
+        executionDigest: task.executionDigest,
+      });
+    }
+  }
+}
+
+async function seedAgentLearning() {
+  const ws = workspaceIdByName["Platform engineering"];
+  if (!ws) return;
+  const base = `/v1/workspaces/${ws}`;
+  const current = await owner.post<any>(`${base}/agent-learning/read`, { scope: "workspace" });
+  if (current.settings?.knowledge === "review_first") return;
+  await owner.post(`${base}/agent-learning`, {
+    scope: "workspace",
+    operationId: randomUUID(),
+    expectedVersion: current.version,
+    settings: {
+      knowledge: "review_first",
+      instructions: current.settings?.instructions ?? "review_first",
+      skills: current.settings?.skills ?? "review_first",
+    },
+  });
+  log("Set Platform engineering Knowledge learning to Review first");
+}
+
+/**
+ * Catalog MCP servers shown as connected: a workspace connection row holding
+ * a fake credential, bound through `connectionRef`. Enabling this way stores
+ * the capability as auth-deferred and never contacts the provider.
+ */
+async function seedCapabilities() {
+  const plans: Record<
+    string,
+    { catalogName?: string; name?: string; domain: string; description?: string }[]
+  > = {
+    "Platform engineering": [
+      { catalogName: "Linear", domain: "linear.app" },
+      { catalogName: "PagerDuty", domain: "pagerduty.com" },
+      { catalogName: "Sentry", domain: "sentry.io" },
+      ...(CAPABILITIES["Platform engineering"] ?? []),
+    ],
+    "Customer success": [{ catalogName: "HubSpot", domain: "hubspot.com" }],
+    Personal: [{ catalogName: "Notion", domain: "notion.com" }, ...(CAPABILITIES.Personal ?? [])],
+  };
+  let enabled = 0;
+  for (const [name, entries] of Object.entries(plans)) {
+    const ws = workspaceIdByName[name];
+    if (!ws) continue;
+    const base = `/v1/workspaces/${ws}`;
+    const catalog = await owner.get<any>(`${base}/capabilities`);
+    const connections: any[] = (await owner.get<any>(`${base}/connections`)).connections ?? [];
+    for (const entry of entries) {
+      try {
+        let item = (catalog.items ?? []).find((candidate: any) =>
+          entry.catalogName
+            ? candidate.name === entry.catalogName && candidate.providerDomain === entry.domain
+            : candidate.name === entry.name,
+        );
+        if (!item && entry.name) {
+          item = await owner.post<any>(`${base}/capabilities`, {
+            kind: "mcp",
+            name: entry.name,
+            description: entry.description,
+            endpointUrl: `https://${entry.domain}/mcp`,
+            homepageUrl: `https://${entry.domain.replace(/^mcp\./, "")}`,
+          });
+        }
+        if (!item) continue;
+        if (
+          (catalog.installations ?? []).some(
+            (installation: any) => installation.capabilityId === item.id,
+          )
+        ) {
+          continue;
+        }
+        const domain = item.providerDomain ?? entry.domain;
+        let connection = connections.find(
+          (candidate) => candidate.providerDomain === domain && candidate.status === "active",
+        );
+        if (!connection) {
+          const createdConnection = await owner.post<any>(`${base}/connections`, {
+            providerDomain: domain,
+            kind: "api_key",
+            ownership: "workspace",
+            credential: {
+              access_token: `design-preview-fake-${randomUUID()}`,
+              token_type: "Bearer",
+            },
+            metadata: { designPreview: true },
+          });
+          connection = createdConnection.connection ?? createdConnection;
+          connections.push(connection);
+        }
+        await owner.post(`${base}/capabilities/${encodeURIComponent(item.id)}/enable`, {
+          connectionRef: { connectionId: connection.id, providerDomain: domain, kind: "api_key" },
+        });
+        enabled++;
+      } catch (error) {
+        log(
+          `  capability ${entry.catalogName ?? entry.name} skipped: ${(error as Error).message.slice(0, 200)}`,
+        );
+      }
+    }
+  }
+  if (enabled) log(`Connected ${enabled} capabilities`);
 }
 
 async function seedArtifacts(client: Client, ws: string) {
