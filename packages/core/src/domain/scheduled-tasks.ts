@@ -10,7 +10,6 @@ import {
 } from "@opengeni/config";
 import type {
   AccessGrant,
-  FirstPartyMcpToolName,
   KnowledgeSourceSyncAction,
   Permission,
   ScheduledTask,
@@ -270,12 +269,6 @@ export async function createValidatedScheduledTask(input: {
     workspaceId: input.grant.workspaceId,
   });
   agentConfig.connectionAccounts = input.payload.connectionAccounts ?? [];
-  const explicitFirstPartyPolicy = explicitScheduledTaskFirstPartyPolicy({
-    settings: input.settings,
-    grant: input.grant,
-    payload: input.payload,
-    goal: agentConfig.goal ?? null,
-  });
   await validateScheduledTaskSlackChannel({
     grant: input.grant,
     authorization: input.authorization,
@@ -413,18 +406,7 @@ export async function createValidatedScheduledTask(input: {
           resources: target?.resources ?? agentConfig.resources,
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAccounts,
-          ...scheduledConnectionSurfaceEligibility(
-            effectiveRuntimeSettings,
-            target ??
-              (explicitFirstPartyPolicy
-                ? {
-                    firstPartyMcpTools:
-                      explicitFirstPartyPolicy.firstPartyMcpTools ??
-                      resolveFirstPartyMcpToolPolicy(input.settings).default,
-                    firstPartyMcpPermissions: explicitFirstPartyPolicy.firstPartyMcpPermissions,
-                  }
-                : null),
-          ),
+          ...scheduledConnectionSurfaceEligibility(effectiveRuntimeSettings, target),
         });
   const { personalConnectionDelegations, mcpAccountBindings } = acceptedConnections;
   if (!knowledgeAction) {
@@ -450,12 +432,6 @@ export async function createValidatedScheduledTask(input: {
     input.authorization,
     creationInitiator.actor,
   );
-  if (creationInitiator.actor && explicitFirstPartyPolicy) {
-    throw new HTTPException(422, {
-      message:
-        "an agent-created schedule inherits its session's OpenGeni tools; omit firstPartyMcpTools/firstPartyMcpPermissions",
-    });
-  }
   const creatorPolicy = creationInitiator.actor
     ? await frozenScheduledTaskCreatorPolicy({
         db: input.db,
@@ -463,7 +439,7 @@ export async function createValidatedScheduledTask(input: {
         grant: input.grant,
         sessionId: creationInitiator.actor.sessionId,
       })
-    : explicitFirstPartyPolicy;
+    : null;
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
       ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
@@ -535,63 +511,6 @@ export async function createValidatedScheduledTask(input: {
  * projection when it exposes those facts; each absent fact is stored as null
  * so a generated session keeps its own default for that key.
  */
-/**
- * An explicit OpenGeni tool/permission boundary chosen by a person or API
- * caller at create, frozen exactly like an agent creator's policy so every
- * generated session runs with it. Mirrors session create: tools must be
- * enabled by deployment policy, every permission must be held by the creating
- * grant, and a goal needs goals:manage plus the goal tools. Null keeps the
- * deployment default (today's behavior).
- */
-function explicitScheduledTaskFirstPartyPolicy(input: {
-  settings: Settings;
-  grant: AccessGrant;
-  payload: CreateScheduledTaskPayload;
-  goal: ScheduledTaskAgentConfig["goal"] | null;
-}): ScheduledTaskCreatorPolicy | null {
-  const requested = input.payload as {
-    firstPartyMcpTools?: FirstPartyMcpToolName[];
-    firstPartyMcpPermissions?: Permission[];
-  };
-  const tools = requested.firstPartyMcpTools;
-  const permissions = requested.firstPartyMcpPermissions;
-  if (tools === undefined && permissions === undefined) return null;
-  const policy = resolveFirstPartyMcpToolPolicy(input.settings);
-  const disallowed = tools?.find((tool) => !policy.allowed.includes(tool));
-  if (disallowed) {
-    throw new HTTPException(422, {
-      message: `first-party MCP tool is disabled by deployment policy: ${disallowed}`,
-    });
-  }
-  for (const permission of permissions ?? []) {
-    if (!hasPermission(input.grant.permissions, permission)) {
-      throw new HTTPException(403, {
-        message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}`,
-      });
-    }
-  }
-  if (input.goal) {
-    if (permissions && !permissions.includes("goals:manage")) {
-      throw new HTTPException(422, {
-        message: "goal-bearing schedules require goals:manage in firstPartyMcpPermissions",
-      });
-    }
-    const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
-      (name) => tools && !tools.includes(name as FirstPartyMcpToolName),
-    );
-    if (missingGoalTools.length > 0) {
-      throw new HTTPException(422, {
-        message: `goal-bearing schedules require first-party MCP tools: ${missingGoalTools.join(", ")}`,
-      });
-    }
-  }
-  return {
-    firstPartyMcpTools: tools ? [...new Set(tools)] : null,
-    firstPartyMcpPermissions: permissions ? [...new Set(permissions)] : null,
-    sessionPolicy: null,
-  };
-}
-
 async function frozenScheduledTaskCreatorPolicy(input: {
   db: Database;
   settings: Settings;

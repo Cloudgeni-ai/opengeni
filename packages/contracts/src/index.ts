@@ -10385,30 +10385,9 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     // session's own environment for an existing-session task. null means none.
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
-    // Same meaning as on CreateSessionRequest, frozen for every session the
-    // schedule generates: the model-visible OpenGeni tools and the permission
-    // set their worker token carries. Each may only narrow the creator (the
-    // deployment's allowed tools; the creating grant's permissions). Omitted
-    // keeps the deployment default. An agent-created schedule already freezes
-    // its creating session's policy and cannot set these.
-    firstPartyMcpTools: z.array(FirstPartyMcpToolName).max(512).optional(),
-    firstPartyMcpPermissions: z.array(Permission).min(1).max(128).optional(),
   },
   { rejectKeys: ["selectedHostMcpDelegations"] },
 ).superRefine((value, context) => {
-  if (
-    value.runMode === "existing_session" &&
-    (value.firstPartyMcpTools !== undefined || value.firstPartyMcpPermissions !== undefined)
-  ) {
-    context.addIssue({
-      code: "custom",
-      path: [
-        value.firstPartyMcpTools !== undefined ? "firstPartyMcpTools" : "firstPartyMcpPermissions",
-      ],
-      message:
-        "an existing-session task runs with its target session's OpenGeni tools; omit firstPartyMcpTools/firstPartyMcpPermissions",
-    });
-  }
   if (value.runMode === "existing_session" && !value.targetSessionId) {
     context.addIssue({
       code: "custom",
