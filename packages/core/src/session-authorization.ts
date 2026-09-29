@@ -220,6 +220,16 @@ export async function requireSessionAuthorization(
     input.sessionId,
   );
 
+  // The projection is read under the caller's own RLS context, so a missing
+  // session and one the caller may not see (another member's private session)
+  // are the same answer. Every request-facing surface refuses both here,
+  // before a route-specific read can observe the difference or fail on the
+  // absent row. In-process `core` callers keep the standalone null result and
+  // their own not-found handling.
+  if (!authority && input.surface !== "core") {
+    throw new SessionAuthorizationDeniedError("not_found");
+  }
+
   // Preserve the standalone workspace-shared path. Private sessions continue
   // through the durable actor and ownership checks even without a host port.
   if (
