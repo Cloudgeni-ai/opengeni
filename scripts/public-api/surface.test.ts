@@ -59,6 +59,7 @@ describe("SDK path extraction", () => {
   test("normalizes template placeholders and strips query suffixes", () => {
     expect(normalizeSdkPath("/v1/workspaces/\0/sessions/\0")).toBe("/v1/workspaces/:p/sessions/:p");
     expect(normalizeSdkPath("/v1/workspaces/\0/files\0")).toBe("/v1/workspaces/:p/files");
+    expect(normalizeSdkPath("/v1/")).toBeNull();
     expect(normalizeSdkPath("/v1/workspaces?limit=1")).toBe("/v1/workspaces");
     expect(normalizeSdkPath("/v1/\0")).toBeNull();
     expect(normalizeSdkPath("/healthz")).toBeNull();

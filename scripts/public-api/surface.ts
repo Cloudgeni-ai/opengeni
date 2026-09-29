@@ -178,8 +178,9 @@ export function normalizeSdkPath(raw: string): string | null {
   // segment is a query-string suffix, not part of the route.
   const last = normalized.length - 1;
   if (/^[^:]+:p$/.test(normalized[last]!)) normalized[last] = normalized[last]!.slice(0, -2);
-  // `/v1/${dynamic}` is an asset or passthrough URL, not a route call.
-  if (normalized[1]!.includes(":p")) return null;
+  // `/v1/${dynamic}` is an asset or passthrough URL, not a route call, and a
+  // bare `/v1/` prefix (for example a proxy parsing incoming paths) names no route.
+  if (normalized[1] === "" || normalized[1]!.includes(":p")) return null;
   const path = `/${normalized.join("/")}`.replace(/\/+$/, "");
   return path;
 }
