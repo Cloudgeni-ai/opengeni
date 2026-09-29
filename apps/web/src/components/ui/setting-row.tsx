@@ -134,7 +134,12 @@ export interface SettingRowProps extends Omit<ComponentProps<"div">, "title" | "
   hint?: ReactNode;
   /** What went wrong and what to do. Linked to the control with `aria-describedby`. */
   error?: ReactNode;
-  /** Conditional sub-rows (more SettingRows). Render them only when they apply. */
+  /**
+   * Dependent rows (more SettingRows) that apply only while this row's setting
+   * is on. They render as ordinary sibling rows below this one, split by the
+   * same hairline and with the same indentation: never an indented sub-block.
+   * Render them only when they apply (hide them while the parent is off).
+   */
   children?: ReactNode;
 }
 
@@ -205,7 +210,7 @@ export function SettingRow({
           : "responsive";
   // Control left keeps one text column: rows without a leading switch leave its
   // column empty, so every label on the list starts at the same edge.
-  const gutter = variant === "control-left" && placement !== "left" && !nested;
+  const gutter = variant === "control-left" && placement !== "left";
 
   // With the control under the text (stacked), the hint and error follow the control.
   const trailingNotes = placement === "below";
@@ -277,7 +282,7 @@ export function SettingRow({
         <div
           className={cn(
             "grid min-w-0 gap-x-6 gap-y-3",
-            nested ? "min-h-11 py-2" : "min-h-14 py-3",
+            "min-h-14 py-3",
             gutter
               ? `${LEFT_COLUMNS} content-center *:col-start-2`
               : [
@@ -306,14 +311,9 @@ export function SettingRow({
           <SettingRowDepthContext.Provider value={depth + 1}>
             <div
               data-slot="setting-row-children"
-              className={cn(
-                "mb-3 min-w-0",
-                variant === "control-left"
-                  ? // Line up with the parent's label, past the switch column.
-                    "pl-12"
-                  : // A 24px indent with a quiet guide line.
-                    "ml-[7px] border-l border-border pl-4",
-              )}
+              // Dependent rows are siblings, not an indented block: the same
+              // hairline as the rows around them and the same left edge.
+              className="flex min-w-0 flex-col divide-y divide-border border-t border-border"
             >
               {children}
             </div>

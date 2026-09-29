@@ -303,7 +303,7 @@ export function SettingsShell({
           }
         />
       ) : null}
-      <div className={page ? "mt-6" : undefined}>{children}</div>
+      <div className={page ? "mt-8" : undefined}>{children}</div>
     </>
   );
 

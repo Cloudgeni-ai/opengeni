@@ -297,7 +297,7 @@ function WorkspaceGeneralSettings({
 
   return (
     <SectionStack>
-      <Section aria-label="Workspace">
+      <Section title="Details">
         <SettingRow
           label="Name"
           description={<RowValue>{activeWorkspace.name}</RowValue>}
@@ -774,7 +774,7 @@ function OrganizationManagedWorkspaceSettings({
       {accessNavigation.view ? null : <div className="mb-6">{scopeNotice}</div>}
       {section === "general" ? (
         <SectionStack>
-          <Section aria-label="Workspace">
+          <Section title="Details">
             <SettingRow
               label="Name"
               description={<RowValue>{workspace.name}</RowValue>}

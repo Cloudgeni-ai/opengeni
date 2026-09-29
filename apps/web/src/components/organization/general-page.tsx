@@ -36,7 +36,7 @@ export function OrganizationGeneralPage() {
   }
 
   return (
-    <Section aria-label="Organization">
+    <Section title="Details">
       <SettingRowGroup>
         {!organization ? (
           <SettingRowSkeleton />
