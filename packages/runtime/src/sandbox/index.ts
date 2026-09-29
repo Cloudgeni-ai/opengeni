@@ -441,6 +441,8 @@ export {
   type ChannelAExecResult,
   type ChannelAEmitter,
   type SandboxChannelAServiceOptions,
+  type FsWriteFilesRequest,
+  type FsWriteFilesResponse,
   type RepositoryDiscoveryDegradedReason,
   type RepositoryDiscoveryResult,
   type NumstatEntry,

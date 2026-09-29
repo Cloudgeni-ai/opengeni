@@ -18,6 +18,7 @@ export default function ConversationFind(props: {
   open: boolean;
   focusRevision: number;
   initial: SessionSearchRoute;
+  showBackToSessionSearch: boolean;
   onClose: () => void;
   onTarget: (target: TimelineSearchTarget | null) => void;
   onJump: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
@@ -278,13 +279,15 @@ export default function ConversationFind(props: {
               ? "Loading passage…"
               : "All saved user and completed assistant messages"}
         </span>
-        <button
-          type="button"
-          onClick={() => requestSessionSearch(props.workspaceId)}
-          className="rounded-sm text-fg-muted underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          Back to session search
-        </button>
+        {props.showBackToSessionSearch ? (
+          <button
+            type="button"
+            onClick={() => requestSessionSearch(props.workspaceId)}
+            className="rounded-sm text-fg-muted underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Back to session search
+          </button>
+        ) : null}
       </div>
       {search.error ? (
         <div className="mt-2 flex items-center gap-2 text-sm" role="alert">

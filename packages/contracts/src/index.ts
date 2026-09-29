@@ -22,6 +22,13 @@ import {
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
+import {
+  FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+  AnalyticsModelProvider,
+  SessionTurnSurface,
+  ToolFamily,
+} from "./product-analytics";
 export const HostMcpCreateSelections = z
   .array(
     z
@@ -51,6 +58,7 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
+import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
@@ -75,6 +83,7 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./signup-attribution";
+export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
@@ -86,6 +95,7 @@ export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
+export * from "./product-analytics";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -954,8 +964,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_list_files",
   "slack_bot_file_info",
   "slack_bot_file_content",
+  "slack_bot_upload_file",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -1089,6 +1102,23 @@ export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filt
     !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
     !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_TOOL_FAMILY_NAME_SET: ReadonlySet<string> = new Set<string>([
+  ...FIRST_PARTY_MCP_TOOL_NAMES,
+  ...FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  ...FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+]);
+
+/**
+ * Analytics tool family for a tool OpenGeni itself defines. Only names from
+ * OpenGeni's fixed first-party lists qualify; anything else returns null, so a
+ * model-invented or third-party name never becomes an exported value.
+ */
+export function firstPartyToolFamily(toolName: string | null | undefined): ToolFamily | null {
+  return typeof toolName === "string" && FIRST_PARTY_TOOL_FAMILY_NAME_SET.has(toolName)
+    ? toolName
+    : null;
+}
 
 /** Authored CodeMode paths for the canonical collaborative artifact surface. */
 export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
@@ -2189,6 +2219,10 @@ export const SlackReactionChannelListResponse = z.object({
   nextCursor: z.string().max(1_024).nullable(),
 });
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
+
+/** Active, non-shared channels the bot belongs to, offered as a task's fixed destination. */
+export const ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
+export type ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
 
 /** Where one Slack channel starts work. */
 export const SlackChannelRoute = z.object({
@@ -9238,6 +9272,19 @@ export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
+// Declared ahead of the scheduled-task projections that name it; the
+// `tool.auth_needed` payload below uses the same enum.
+export const ToolAuthNeededReason = z.enum([
+  "missing_connection",
+  "expired",
+  "insufficient_scope",
+  "refresh_failed",
+  "personal_authority_unavailable",
+  "unsupported_auth",
+  "resource_scope_unavailable",
+]);
+export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
+
 export const ScheduledTaskStatus = /* @__PURE__ */ z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
@@ -9587,6 +9634,21 @@ export const ScheduledTaskMetadataInput =
     "scheduled task metadata",
   );
 
+/** A Slack public or private channel ID. Direct messages are not destinations. */
+export const ScheduledTaskSlackChannelId = z
+  .string()
+  .regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789");
+
+/**
+ * The only first-party tools that post as the OpenGeni bot. A generated
+ * session receives them only when a person chose its task's Slack channel,
+ * and they refuse every other destination.
+ */
+export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
     .object({
@@ -9620,6 +9682,10 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
+    // The one Slack channel this task's runs may post to as the OpenGeni bot.
+    // Only a person chooses it (never an agent attempt); it requires
+    // slackBotConnectionId and is read from the task at every post.
+    slackBotChannelId: ScheduledTaskSlackChannelId.optional(),
     model: bounded
       ? scheduledTaskBoundedString(512, "scheduled task model").optional()
       : z.string().min(1).optional(),
@@ -9742,6 +9808,57 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
   });
 export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
+/** One connector named in a scheduled task's access report. */
+export const ScheduledTaskAccessConnector = /* @__PURE__ */ z
+  .object({
+    id: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+  })
+  .strict();
+export type ScheduledTaskAccessConnector = z.infer<typeof ScheduledTaskAccessConnector>;
+
+export const SCHEDULED_TASK_ACCESS_CONNECTORS_MAX = 64;
+
+/**
+ * What a scheduled task's frozen tools and connector accounts lack compared
+ * with what its owner would get by saving it again now. A task freezes its
+ * connectors, its connector accounts and (when an agent created it, migration
+ * 0428) its OpenGeni tool policy, so later workspace changes never reach its
+ * runs on their own. This read-only projection names what
+ * `POST .../scheduled-tasks/:taskId/refresh-access` would add or remove; the
+ * refresh adds only the OpenGeni permissions those named tools need and drops
+ * frozen permissions the refreshing person no longer holds.
+ *
+ * Present only for a viewer who can act on it: the task owner, or anyone who
+ * manages schedules for a task without an owner. `null` or absent means there
+ * is nothing to refresh or the viewer cannot refresh it.
+ */
+export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
+  .object({
+    /** Workspace default connectors that new schedules get and this one lacks. */
+    missingConnectors: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
+    unavailableConnectors: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+    missingOpenGeniTools: z.array(FirstPartyMcpToolName).max(FIRST_PARTY_MCP_TOOL_NAMES.length),
+    /** Connectors whose chosen account can no longer be used by this schedule. */
+    unavailableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Connectors this schedule has no account for, although one is now available. */
+    attachableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
+    canRefresh: z.boolean(),
+  })
+  .strict();
+export type ScheduledTaskPolicyDrift = z.infer<typeof ScheduledTaskPolicyDrift>;
+
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -9775,6 +9892,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /** Read-only response projection; never stored and never execution authority. */
+  policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
@@ -9987,6 +10106,60 @@ export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
 });
 export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
 
+/** Non-secret evidence of a refused connection selection, never execution authority. */
+export const ConnectionAccountSelectionDiagnostic = /* @__PURE__ */ z
+  .object({
+    version: z.literal(1),
+    reason: z.enum([
+      "selected_account_unavailable",
+      "owner_access_unavailable",
+      "ambiguous_account",
+      "parent_accounts_required",
+      "selection_unavailable",
+    ]),
+    accounts: z.array(
+      z
+        .object({
+          serverId: z.string().min(1).max(256),
+          connectionId: z.string().uuid().nullable(),
+          reason: z.enum([
+            "connector_unavailable",
+            "account_not_visible",
+            "account_inactive",
+            "account_mismatch",
+            "selection_unavailable",
+          ]),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+export type ConnectionAccountSelectionDiagnostic = z.infer<
+  typeof ConnectionAccountSelectionDiagnostic
+>;
+
+/**
+ * A connector a scheduled run could not use: its own scheduled turn recorded a
+ * `tool.auth_needed` fact (the run failed closed on a missing connection or
+ * personal authority). Derived at read time from durable session events;
+ * credential-free.
+ */
+export const ScheduledTaskRunAccessFailure = /* @__PURE__ */ z
+  .object({
+    /** Configured connector id (the account route is folded into its connector). */
+    serverId: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    providerDomain: z.string().min(1).max(512),
+    reason: ToolAuthNeededReason,
+    /** How many times the run hit this connector and reason. */
+    count: z.number().int().positive(),
+    firstOccurredAt: z.string(),
+  })
+  .strict();
+export type ScheduledTaskRunAccessFailure = z.infer<typeof ScheduledTaskRunAccessFailure>;
+
+export const SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX = 8;
+
 export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -10009,10 +10182,98 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
   completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
+  admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /**
+   * Connectors this run could not use. Projected only for a viewer who can act
+   * on the task (see `ScheduledTaskPolicyDrift`); absent otherwise.
+   */
+  accessFailures: z
+    .array(ScheduledTaskRunAccessFailure)
+    .max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX)
+    .optional(),
 });
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
+
+/**
+ * A schedule that needs its owner's attention because of connector access:
+ * - its latest run with a turn failed closed on a connector and no later run
+ *   has cleared it (`runId`, `firedAt` and `failures`); and/or
+ * - a connector account it chose can no longer be used
+ *   (`unavailableAccounts`), so every fresh occurrence is refused before it
+ *   creates a run. There is no run to point at, so `runId` and `firedAt` are
+ *   null when only this applies.
+ * At least one of `failures` and `unavailableAccounts` is non-empty. Listed
+ * for its owner; a task without an owner is listed only for a key or service
+ * that manages schedules.
+ */
+export const ScheduledTaskAccessAttention = /* @__PURE__ */ z
+  .object({
+    taskId: z.string().uuid(),
+    taskName: z.string(),
+    /** The task head this item was computed against; a new head is a new notice. */
+    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    runId: z.string().uuid().nullable(),
+    firedAt: z.string().nullable(),
+    failures: z.array(ScheduledTaskRunAccessFailure).max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
+    /** Connectors whose chosen account can no longer be used; new runs cannot start. */
+    unavailableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+  })
+  .strict()
+  .refine((item) => item.failures.length > 0 || item.unavailableAccounts.length > 0, {
+    message: "an attention item names a failed connector or an unavailable account",
+  })
+  .refine((item) => (item.runId === null) === (item.firedAt === null), {
+    message: "runId and firedAt are both set or both null",
+  })
+  .refine((item) => item.failures.length === 0 || item.runId !== null, {
+    message: "a run's access failures name the run",
+  });
+export type ScheduledTaskAccessAttention = z.infer<typeof ScheduledTaskAccessAttention>;
+
+export const SCHEDULED_TASK_ACCESS_ATTENTION_MAX = 100;
+
+export const ListScheduledTaskAccessAttentionResponse = /* @__PURE__ */ z
+  .object({
+    tasks: z.array(ScheduledTaskAccessAttention).max(SCHEDULED_TASK_ACCESS_ATTENTION_MAX),
+  })
+  .strict();
+export type ListScheduledTaskAccessAttentionResponse = z.infer<
+  typeof ListScheduledTaskAccessAttentionResponse
+>;
+
+/**
+ * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+ * with the calling person's current authority. `executionDigest` is the task
+ * head the person reviewed; a changed task is refused with 409.
+ */
+export const RefreshScheduledTaskAccessRequest = /* @__PURE__ */ z
+  .object({
+    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    /**
+     * Workspace default connectors and OpenGeni tools the person chose to keep
+     * off this schedule (the drift they dismissed). It only narrows what the
+     * refresh adds; it never removes anything the schedule already has.
+     */
+    leaveOut: z
+      .object({
+        connectors: z
+          .array(z.string().min(1).max(256))
+          .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX)
+          .optional(),
+        openGeniTools: z
+          .array(FirstPartyMcpToolName)
+          .max(FIRST_PARTY_MCP_TOOL_NAMES.length)
+          .optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type RefreshScheduledTaskAccessRequest = z.infer<typeof RefreshScheduledTaskAccessRequest>;
 
 const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
   {
@@ -13230,17 +13491,6 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
   return { includeTypes: [...included], excludeTypes: [...excluded] };
 }
 
-export const ToolAuthNeededReason = z.enum([
-  "missing_connection",
-  "expired",
-  "insufficient_scope",
-  "refresh_failed",
-  "personal_authority_unavailable",
-  "unsupported_auth",
-  "resource_scope_unavailable",
-]);
-export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
-
 export const ToolAuthNeededPayload = z
   .object({
     serverId: z.string().min(1),
@@ -14531,6 +14781,14 @@ const HostExportAttribution = {
   initiator: HostExportInitiator.nullable(),
   initiatorContext: HostExportInitiatorContext,
   origin: SessionTurnSource.nullable(),
+  /**
+   * Product surface of the attributed turn (see `SessionTurnSurface`). Null
+   * for facts without a turn and for turns captured before surfaces existed.
+   * Optional so an older writer's batch still parses during a rolling upgrade.
+   */
+  surface: SessionTurnSurface.nullable().optional(),
+  /** Model provider family of the attributed turn's accepted execution policy. */
+  modelProvider: AnalyticsModelProvider.nullable().optional(),
 } as const;
 
 /**
@@ -14577,6 +14835,11 @@ export const HostEventExport = z.object({
    */
   rootSessionId: z.string().uuid().nullable(),
   ...HostExportAttribution,
+  /**
+   * Content-free family of an `agent.toolCall.created` event's tool (see
+   * `ToolFamily`). Null for every other event type and for older rows.
+   */
+  toolFamily: ToolFamily.nullable().optional(),
   event: HostSessionEvent,
 });
 export type HostEventExport = z.infer<typeof HostEventExport>;
@@ -14618,9 +14881,58 @@ export const HostUsageExportBatch = z.object({
 export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
 
 /**
+ * One content-free per-person lifecycle fact (`lifecycle_fact` export kind).
+ * `accountId` is null for facts that belong to a person rather than an
+ * organization (sign-up, email verification, sign-in); `workspaceId` is set
+ * only for workspace-scoped setup facts. `subjectId` is present only for opaque
+ * managed-user and API-key subjects. Type and attribute are bounded tokens so an
+ * older consumer can carry a newer writer's fact during a rolling upgrade; the
+ * known values are `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES`.
+ */
+export const HostLifecycleFact = z.object({
+  id: z.string().uuid(),
+  type: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z_]*\.[a-z][a-z_]*$/),
+  attribute: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .nullable(),
+  subjectKind: z
+    .string()
+    .max(32)
+    .regex(/^[a-z][a-z_]*$/),
+  subjectId: z.string().regex(PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN).nullable(),
+  occurredAt: z.string(),
+});
+export type HostLifecycleFact = z.infer<typeof HostLifecycleFact>;
+
+export const HostLifecycleFactExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  idempotencyKey: z.string().min(1).max(2048),
+  accountId: z.string().uuid().nullable(),
+  workspaceId: z.string().uuid().nullable(),
+  fact: HostLifecycleFact,
+});
+export type HostLifecycleFactExport = z.infer<typeof HostLifecycleFactExport>;
+
+export const HostLifecycleFactExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostLifecycleFactExport).min(1).max(256),
+});
+export type HostLifecycleFactExportBatch = z.infer<typeof HostLifecycleFactExportBatch>;
+
+/**
  * Optional embedded-host sinks. Delivery is at least once: the same batch may
  * be repeated after a process dies between sink success and checkpoint commit,
- * so sinks must deduplicate by event/usage idempotency key.
+ * so sinks must deduplicate by event/usage/fact idempotency key.
  */
 export type HostEventSink = {
   consumerId: HostExportConsumerId;
@@ -14630,6 +14942,11 @@ export type HostEventSink = {
 export type HostUsageSink = {
   consumerId: HostExportConsumerId;
   deliverUsage: (batch: HostUsageExportBatch) => Promise<void>;
+};
+
+export type HostLifecycleFactSink = {
+  consumerId: HostExportConsumerId;
+  deliverLifecycleFacts: (batch: HostLifecycleFactExportBatch) => Promise<void>;
 };
 
 export const SESSION_EVENT_TYPE_MAX_BYTES = 256;

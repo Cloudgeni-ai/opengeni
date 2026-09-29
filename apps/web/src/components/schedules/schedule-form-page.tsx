@@ -5,7 +5,7 @@ import { Link } from "@tanstack/react-router";
  * cadence sentence and its next runs) -> an optional Name -> one closed
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
-import { useEffect, useId, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useId, useMemo, useState } from "react";
 import { LaptopIcon, ServerIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
@@ -40,6 +40,12 @@ import { cn } from "@/lib/utils";
 import type { ScheduledTask, Session } from "@/types";
 
 import { useCanCreateScheduleWithAgent, useCreateWithOpenGeni } from "./create-with-opengeni";
+
+// Slack posting pulls in the Slack bot helpers shared with Capabilities; load
+// it on demand so it does not reshape the chunks every session page shares.
+const ScheduleSlackPosting = lazy(async () => ({
+  default: (await import("@/components/schedule-slack-posting")).ScheduleSlackPosting,
+}));
 import { ComposerField } from "./schedule-composer";
 import {
   NAME_MAX_LENGTH,
@@ -552,6 +558,8 @@ function AgentScheduleForm({
       ? []
       : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
     ...(eachRun === "existing_session" ? [] : [whereLabel]),
+    // A task that continues an existing chat never posts on its own.
+    ...(eachRun !== "existing_session" && draft.slackBotChannelId ? ["Posts to Slack"] : []),
     learningCustom ? "Custom agent learning" : "Workspace learning defaults",
   ].join(" · ");
 
@@ -720,6 +728,7 @@ function AgentScheduleForm({
         }
         submitLabel={editing ? "Save changes" : "Create schedule"}
         pendingLabel={editing ? "Saving…" : "Creating…"}
+        submitAnalyticsAction={editing ? null : "create_schedule"}
         onSubmit={onSubmit}
         onCancel={back.onClick}
         back={back}
@@ -934,6 +943,20 @@ function AgentScheduleForm({
                 <p className="-mt-3 text-xs leading-4.5 text-danger">
                   Connected machines couldn't load. Refresh the page and try again.
                 </p>
+              ) : null}
+              {eachRun !== "existing_session" ? (
+                <Suspense fallback={null}>
+                  <ScheduleSlackPosting
+                    workspaceId={workspaceId}
+                    connectionId={draft.slackBotConnectionId}
+                    channelId={draft.slackBotChannelId}
+                    disabled={false}
+                    active={advancedOpen}
+                    onChange={({ connectionId, channelId }) =>
+                      update({ slackBotConnectionId: connectionId, slackBotChannelId: channelId })
+                    }
+                  />
+                </Suspense>
               ) : null}
               {learningLoading ? (
                 <p role="status" className="m-0 text-sm text-fg-muted">

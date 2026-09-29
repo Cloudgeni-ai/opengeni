@@ -174,6 +174,8 @@ async function dispatchMaintenanceSession(
     accountId: maintenance.accountId,
     workspaceId: maintenance.workspaceId,
     initialMessage: maintenancePrompt(maintenance),
+    // OpenGeni's own periodic check: no human or product surface entered it.
+    surface: "system",
     resources: [],
     tools: [{ kind: "mcp", id: "opengeni" }],
     toolPolicy: { mode: "explicit", inheritedFromSessionId: null },

@@ -19,10 +19,9 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is a self-hostable agent runtime: Postgres persists state, Temporal
-coordinates execution, and NATS transports reconstructible events. The API
-authorizes clients and browser access; workers use sandboxes or Connected Machines.
-Subsystem ownership and access boundaries follow below.
+OpenGeni is self-hostable: Postgres persists state, Temporal coordinates execution,
+and NATS transports reconstructible events. The API authorizes clients; workers
+use sandboxes or Connected Machines.
 
 External users require live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
@@ -812,9 +811,10 @@ These producers all converge on the ordinary session/turn runtime:
   session rather than copying the parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
-Schedule indicators derive from authorized, non-deleted reusable-session targets,
-including paused schedules, through existing lineage refreshes. Creation metadata
-is historical provenance; the schedules API filters by `sessionId`.
+Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
+Schedules API filtering uses `sessionId`.
+
+Connection-account refusals retain immutable [diagnostic-only run receipts](scheduled-admission-diagnostics.md), never execution authority.
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;
 `tools: []` remains an empty override. Standalone scheduler-owned turns use a
@@ -1427,22 +1427,19 @@ provisional until traversal ends. Labeled, bounded Markdown source excerpts
 prevent raw offsets selecting wrong rendered occurrences. Closing Find removes
 highlights but preserves excerpt/reading position; formatted restoration is explicit.
 
-Web imports `@opengeni/sdk/browser`; operator Document-authority/tenancy backfills
-use `@opengeni/sdk/document-authority`. Root/`core` retain compatibility.
-Bundle-boundary/browser-surface tests keep non-web methods in optional entries,
-outside direct-session bundles.
+Web imports `@opengeni/sdk/browser`; operator backfills use
+`@opengeni/sdk/document-authority`. Root/`core` retain compatibility.
+Bundle tests keep non-web methods outside direct-session bundles.
 
-Web loads structured questions, command controls and file attachments on mount;
-message text and repository chips stay eager. Local Suspense fallbacks preserve
-the transcript. `test/e2e/session-lazy-panels.browser.e2e.ts` checks production
-desktop/mobile chunk boundaries.
+Web lazily mounts questions, commands and attachments; text/repository chips stay
+eager. Suspense preserves transcripts; `test/e2e/session-lazy-panels.browser.e2e.ts`
+checks desktop/mobile chunks.
 
-Products normally use server-side SDK proxies with optional React surfaces;
-in-process embedding preserves these boundaries.
+Products use server-side SDK proxies and optional React surfaces; in-process
+embedding preserves boundaries.
 
-The repository Skill `.agents/skills/opengeni-client` guides implementation
-sessions. Product backends independently select their end-user runtime Skills;
-implementation guidance must not be attached to those sessions. See
+`.agents/skills/opengeni-client` guides implementation only. Product backends
+select end-user runtime Skills independently; never attach implementation guidance. See
 [`product-integration.md`](product-integration.md).
 
 Package READMEs and [embedding](embedding.md) document these surfaces.
@@ -1661,7 +1658,7 @@ Subsystem routing; complete topic map: [`README.md`](README.md).
 | Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
-| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
+| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
 | Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
@@ -1716,6 +1713,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |

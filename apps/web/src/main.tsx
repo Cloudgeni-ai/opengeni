@@ -15,6 +15,8 @@ import {
   setClientErrorReporter,
 } from "./lib/client-error-reporting";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
+import { setAnalyticsConsentDecisionSender } from "./lib/analytics-consent";
+import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
 import {
   availableSessionStorage,
   currentViteBuildId,
@@ -31,6 +33,8 @@ setClientErrorReporter(
   }),
 );
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
+// Content-free count of analytics banner answers; see lib/analytics-consent.ts.
+setAnalyticsConsentDecisionSender(beaconSender(`${apiBaseUrl}${ANALYTICS_CONSENT_PATH}`));
 // Before the recovery listener, so the report is sent before a reload starts.
 installVitePreloadErrorReporting({ target: window, routePattern: appDestinationRoutePattern });
 const preloadRecoveryStorage = availableSessionStorage(window);

@@ -288,6 +288,7 @@ const SANDBOX_OPERATION_LABELS: Record<string, string> = {
   "sandbox.provision": "Starting sandbox",
   "repository-clone": "Preparing repository",
   "file-resource-download": "Preparing files",
+  "optional-repository-access": "Unavailable optional repositories skipped",
 };
 
 /** The named op on a `sandbox.operation.*` payload, or null. */

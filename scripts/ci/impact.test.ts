@@ -43,6 +43,7 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SESSION_SIDEBAR_E2E = "test/e2e/session-sidebar.browser.e2e.ts";
 const SESSION_SKILL_REVIEW_E2E = "test/e2e/session-skill-review.browser.e2e.ts";
 const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
 const SETUP_ACCOUNT_TOKEN_E2E = "test/e2e/setup-account-token.browser.e2e.ts";
@@ -273,6 +274,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
@@ -534,6 +536,36 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("session sidebar coverage follows web fixtures and shared dependencies without widening browserd plans", () => {
+    for (const path of [
+      "apps/web/src/components/rail/session-list.tsx",
+      "apps/web/src/lib/session-group-window.ts",
+      "apps/web/test/session-sidebar-context.ts",
+      "apps/web/test/session-sidebar-fixture.tsx",
+      "apps/web/test/session-sidebar-preview.html",
+      "apps/web/test/session-sidebar-preview.vite.config.ts",
+      "apps/web/test/session-sidebar-tsconfig.json",
+      "packages/react/src/hooks/use-workspace-sessions.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+      SESSION_SIDEBAR_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(SESSION_SIDEBAR_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_SIDEBAR_E2E);
+      expect(plan.integrationTests, path).not.toContain(SESSION_SIDEBAR_E2E);
+    }
+    expect(usesBrowserRunner(SESSION_SIDEBAR_E2E)).toBe(true);
+    expect(discoverTestFiles().e2e).toContain(SESSION_SIDEBAR_E2E);
+    expect(OPT_IN_TESTS[SESSION_SIDEBAR_E2E]).toBeUndefined();
+    expect(createImpactPlan(["bun.lock"]).e2eTests).toContain(SESSION_SIDEBAR_E2E);
+
+    const browserd = createImpactPlan(["packages/browserd/src/index.ts"]);
+    expect(browserd.mode).toBe("focused");
+    expect(browserd.e2eTests).not.toContain(SESSION_SIDEBAR_E2E);
+  });
+
   test("failed-session recovery follows its real route and shared dependencies without widening leaf plans", () => {
     for (const path of [
       FAILED_SESSION_RECOVERY_E2E,
@@ -720,6 +752,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",

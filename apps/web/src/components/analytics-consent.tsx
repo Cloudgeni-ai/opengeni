@@ -4,12 +4,51 @@ import {
   OPEN_ANALYTICS_PREFERENCES_EVENT,
   analyticsPreferencesAvailable,
   persistAnalyticsConsent,
+  reportAnalyticsConsentDecision,
   storedAnalyticsConsent,
   takePendingAnalyticsPreferencesOpen,
   type AnalyticsConsent,
 } from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
 import { journeyAction, journeyPage } from "@/lib/analytics-journey";
+
+/**
+ * Project a trusted click to its content-free event: the destination page of a
+ * same-origin link, or the kind of other control. A closed
+ * `data-analytics-action` label on the control itself is attached to either.
+ * Visible text, input values, and URLs are never read.
+ */
+export function analyticsClickEvent(
+  target: EventTarget | null,
+  origin: string,
+): {
+  name: "navigation_clicked" | "product_clicked";
+  properties: Record<string, string>;
+} | null {
+  const element = target instanceof Element ? target : null;
+  const control = element?.closest("button,a,[role=button],[role=tab],[role=menuitem]");
+  if (!control) return null;
+  const action = journeyAction(control.getAttribute("data-analytics-action"));
+  if (control instanceof HTMLAnchorElement && control.origin === origin) {
+    const destination = journeyPage(control.pathname, control.search);
+    return {
+      name: "navigation_clicked",
+      properties: {
+        destination_page: String(destination.page),
+        ...(destination.section ? { destination_section: String(destination.section) } : {}),
+        ...(action ? { action } : {}),
+      },
+    };
+  }
+  return {
+    name: "product_clicked",
+    properties: {
+      ...(action ? { action } : {}),
+      control_kind:
+        control.tagName === "BUTTON" ? "button" : (control.getAttribute("role") ?? "link"),
+    },
+  };
+}
 
 const BUTTON_CLASS =
   "inline-flex h-9 pointer-coarse:h-11 cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
@@ -21,6 +60,7 @@ export function AnalyticsManager({
   pathname,
   search = "",
   analyticsAccountId,
+  analyticsAccountResolved,
   analyticsUserId,
 }: {
   config: ClientConfig["analytics"];
@@ -29,6 +69,8 @@ export function AnalyticsManager({
   pathname: string;
   search?: string;
   analyticsAccountId: string | null;
+  /** False while the signed-in user's account is still loading. */
+  analyticsAccountResolved: boolean;
   analyticsUserId: string | null;
 }) {
   const [choice, setChoice] = useState<AnalyticsConsent | null>(() => storedAnalyticsConsent());
@@ -40,7 +82,13 @@ export function AnalyticsManager({
       ({ suspendAnalytics, syncAnalytics, syncAnalyticsIdentity }) => {
         if (cancelled) return;
         syncAnalyticsIdentity(
-          analyticsUserId ? { userId: analyticsUserId, accountId: analyticsAccountId } : null,
+          analyticsUserId
+            ? {
+                userId: analyticsUserId,
+                accountId: analyticsAccountId,
+                accountResolved: analyticsAccountResolved,
+              }
+            : null,
         );
         if (isPublicAuthRoute) {
           suspendAnalytics();
@@ -60,6 +108,7 @@ export function AnalyticsManager({
     search,
     analyticsUserId,
     analyticsAccountId,
+    analyticsAccountResolved,
   ]);
 
   useEffect(() => {
@@ -77,23 +126,8 @@ export function AnalyticsManager({
       const click = (event: MouseEvent) => {
         if (!event.isTrusted) return;
         activity();
-        const target = event.target instanceof Element ? event.target : null;
-        const control = target?.closest("button,a,[role=button],[role=tab],[role=menuitem]");
-        if (!control) return;
-        if (control instanceof HTMLAnchorElement && control.origin === window.location.origin) {
-          const destination = journeyPage(control.pathname, control.search);
-          captureAnalyticsEvent("navigation_clicked", {
-            destination_page: destination.page!,
-            ...(destination.section ? { destination_section: destination.section } : {}),
-          });
-        } else {
-          const action = journeyAction(control.getAttribute("data-analytics-action"));
-          captureAnalyticsEvent("product_clicked", {
-            ...(action ? { action } : {}),
-            control_kind:
-              control.tagName === "BUTTON" ? "button" : (control.getAttribute("role") ?? "link"),
-          });
-        }
+        const clicked = analyticsClickEvent(event.target, window.location.origin);
+        if (clicked) captureAnalyticsEvent(clicked.name, clicked.properties);
       };
       const key = (event: KeyboardEvent) => {
         if (event.isTrusted) activity();
@@ -124,6 +158,10 @@ export function AnalyticsManager({
   const showPreferences = analyticsPreferencesAvailable(config);
 
   const choose = (nextChoice: AnalyticsConsent) => {
+    // Content-free server count of choices, so reports can state how much of
+    // the audience the consent-gated providers cannot see. Unchanged
+    // re-confirmations from Account preferences are not counted again.
+    if (nextChoice !== choice) reportAnalyticsConsentDecision(nextChoice);
     persistAnalyticsConsent(nextChoice);
     setChoice(nextChoice);
     setEditing(false);

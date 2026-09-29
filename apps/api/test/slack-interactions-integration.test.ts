@@ -69,6 +69,7 @@ import {
   SLACK_SESSION_INSTRUCTIONS,
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
+import { assertSlackTaskUploadTarget } from "../src/integrations/slack-task-file-upload";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const signingMaterial = ["slack", "interaction", crypto.randomUUID()].join("-");
@@ -83,6 +84,7 @@ const SLACK_READ_ONLY_CONTEXT_TOOLS = [
   "slack_bot_list_files",
   "slack_bot_file_info",
   "slack_bot_file_content",
+  "slack_bot_upload_file",
 ] as const;
 
 let available = true;
@@ -2977,6 +2979,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(new Set(postPrincipals.map((row) => row.subject_id))).toEqual(
       new Set(["service:slack-interaction"]),
     );
+    // Analytics: the reaction-started task entered through Slack, not the web.
+    const reactionSurfaces = await shared!.admin<{ surface: string | null }[]>`
+      select surface from session_turns
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${route!.session_id}
+        and source in ('user', 'api')`;
+    expect(reactionSurfaces.map((row) => row.surface)).toEqual(["slack"]);
   });
 
   test("distinct same-owner reactions concurrently create one route with one durable message per Slack event", async () => {
@@ -4536,6 +4545,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and session_id = ${routes[0]!.session_id}
         and type = 'user.message'`;
     expect(continued!.count).toBe(2);
+    // Analytics: both new DM tasks and the thread reply entered through Slack,
+    // although Slack acts with the linked person's ordinary access.
+    const dmSurfaces = await shared!.admin<{ surface: string | null }[]>`
+      select surface from session_turns
+      where workspace_id = ${value.owner.workspaceId}
+        and source in ('user', 'api')`;
+    expect(dmSurfaces).toHaveLength(3);
+    expect(dmSurfaces.every((row) => row.surface === "slack")).toBe(true);
     const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
       select
         (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
@@ -7368,6 +7385,15 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         delivery_attempt_count: 0,
         delivery_last_error_code: null,
       });
+      expect(() =>
+        assertSlackTaskUploadTarget({
+          visibility: "private",
+          slackChannelId: boundBeforeRekey.slack_channel_id,
+          slackThreadTs: boundBeforeRekey.slack_thread_ts,
+          routeKey: boundBeforeRekey.route_key,
+          ackSlackMessageTs: boundBeforeRekey.ack_slack_message_ts,
+        }),
+      ).toThrow("committed bot-DM thread");
       await appendSessionEvents(client.db, value.owner.workspaceId, sessionId, [
         { type: "turn.completed", payload: { output: "Private rekeyed result" } },
       ]);
@@ -7440,6 +7466,15 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         delivery_attempt_count: 0,
         delivery_last_error_code: null,
       });
+      expect(() =>
+        assertSlackTaskUploadTarget({
+          visibility: "private",
+          slackChannelId: rekeyed!.slack_channel_id,
+          slackThreadTs: rekeyed!.slack_thread_ts,
+          routeKey: rekeyed!.route_key,
+          ackSlackMessageTs: rekeyed!.ack_slack_message_ts,
+        }),
+      ).not.toThrow();
 
       expect(await drainSlackInteractionsOnce(replicaDeps)).toBe(true);
       expect(value.slack.posts).toHaveLength(2);

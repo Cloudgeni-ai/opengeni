@@ -1,3 +1,4 @@
+import type { AnalyticsConsentDecision } from "@opengeni/contracts/analytics-consent-report";
 import type { ClientConfig } from "@/types";
 
 export type AnalyticsConsent = "granted" | "denied";
@@ -64,6 +65,27 @@ export function persistAnalyticsConsent(
   } catch {
     // Embedded/private browsing contexts may deny storage. The in-memory choice
     // still governs this page; the banner will be shown again on a future visit.
+  }
+}
+
+let consentDecisionSender: ((body: string) => void) | null = null;
+
+/** Install the beacon transport once at boot; tests and non-browser hosts leave it unset. */
+export function setAnalyticsConsentDecisionSender(send: ((body: string) => void) | null): void {
+  consentDecisionSender = send;
+}
+
+/**
+ * Count a banner answer on the server (`opengeni_analytics_consent_total`).
+ * The body is only the closed decision: no identifier, URL, or cookie. This is
+ * a first-party operational count, not provider analytics, so it is sent for
+ * `denied` too and never starts a provider.
+ */
+export function reportAnalyticsConsentDecision(decision: AnalyticsConsentDecision): void {
+  try {
+    consentDecisionSender?.(JSON.stringify({ decision }));
+  } catch {
+    // Optional operational telemetry cannot affect the consent choice.
   }
 }
 

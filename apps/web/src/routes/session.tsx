@@ -39,6 +39,7 @@ import {
   type TimelineSearchTarget,
 } from "@opengeni/react/session-ui";
 import type { SessionSearchRoute } from "@/lib/session-search-route";
+import { expireArtifactCatalog } from "@/lib/artifact-catalog-cache";
 import {
   creditExhaustedFromEvents,
   conversationTimeline,
@@ -292,6 +293,18 @@ export function SessionRoute({
       replace: true,
     });
   }, [navigate, sessionId, workspaceId]);
+  // The session-search origin only labels the navigation that opened the find
+  // bar. Drop it once the bar closes so a reload or shared link starts plain.
+  const hasSearchOrigin = searchTarget.searchOrigin === "session-search";
+  const consumeSearchOrigin = useCallback(() => {
+    if (!hasSearchOrigin) return;
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId },
+      search: ({ searchOrigin: _searchOrigin, ...rest }) => rest,
+      replace: true,
+    });
+  }, [hasSearchOrigin, navigate, sessionId, workspaceId]);
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
@@ -1114,6 +1127,7 @@ export function SessionRoute({
       launch={launch}
       realtimeAutostartModel={realtimeAutostartModel}
       onRealtimeAutostartConsumed={consumeRealtimeAutostart}
+      onSearchOriginConsumed={consumeSearchOrigin}
       approvals={approvals}
       humanInput={humanInput}
       failure={failure}
@@ -1271,6 +1285,11 @@ function SessionDock(props: {
     }
     return 0;
   }, [props.events]);
+  // Tool output may have published a file or Site: let the Artifacts page show
+  // its cached rows on the next visit but refetch them.
+  useEffect(() => {
+    if (artifactRefreshSequence) expireArtifactCatalog(context.client, props.workspaceId);
+  }, [artifactRefreshSequence, context.client, props.workspaceId]);
   const artifactState = useSessionEditableArtifactSummaries({
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
@@ -1524,6 +1543,7 @@ function SessionChatPane(props: {
   launch?: ComposerLaunchSearch;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed: () => void;
+  onSearchOriginConsumed: () => void;
   approvals: PendingApproval[];
   humanInput: ReturnType<typeof useHumanInputRequests>;
   failure: ReturnType<typeof summarizeSessionFailure> | null;
@@ -1581,11 +1601,15 @@ function SessionChatPane(props: {
     setFindOpen(true);
     setFindFocusRevision((value) => value + 1);
   }, []);
+  // The back link follows the URL's session-search origin, which closing the
+  // bar removes, so Ctrl/Cmd+F and the Find button then open a plain bar.
+  const { onSearchOriginConsumed } = props;
   const closeFind = useCallback(() => {
     setFindOpen(false);
     setActiveSearchTarget(null);
+    onSearchOriginConsumed();
     requestAnimationFrame(() => findButton.current?.focus({ preventScroll: true }));
-  }, []);
+  }, [onSearchOriginConsumed]);
   useEffect(() => {
     if (props.searchTarget.find) openFind();
   }, [
@@ -2609,6 +2633,7 @@ function SessionChatPane(props: {
             open={findOpen}
             focusRevision={findFocusRevision}
             initial={props.searchTarget}
+            showBackToSessionSearch={props.searchTarget.searchOrigin === "session-search"}
             onClose={closeFind}
             onTarget={setActiveSearchTarget}
             onJump={props.onJumpToSequence}

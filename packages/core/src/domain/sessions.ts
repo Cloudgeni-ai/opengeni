@@ -6,7 +6,12 @@ import {
   retryFailedSessionInTransaction,
   SessionRetryConflictError,
 } from "@opengeni/db";
-import type { SessionRetryRequest, SessionRetryResponse } from "@opengeni/contracts";
+import type {
+  SessionRetryRequest,
+  SessionRetryResponse,
+  SessionTurnSurface,
+} from "@opengeni/contracts";
+import { resolveTurnSurface } from "../turn-surface";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
@@ -19,6 +24,7 @@ import {
   withCodexCatalogProvider,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
+  allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
@@ -742,6 +748,15 @@ type AgentChildSessionCreatePresentation = {
   automaticTitleCandidate?: string | null;
 };
 
+/** Trusted entry-point options for creating a session outside the REST body. */
+export type SessionCreateRequestOptions = {
+  /**
+   * Product surface when the entry point knows it (for example Slack or an
+   * in-process embedding host). Omitted derives it from the grant.
+   */
+  surface?: SessionTurnSurface;
+};
+
 const AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY = "agentChildAutomaticTitle" as const;
 
 /** @internal Exported for the keyed-create repair regression. */
@@ -804,6 +819,8 @@ export async function createAndStartSessionWithOutcome(input: {
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
   initialMessage: string;
+  /** Content-free product surface the create request entered through. */
+  surface?: SessionTurnSurface | null;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
@@ -1251,6 +1268,7 @@ async function finishStartSession(
       turnId: string,
     ) => Promise<void>;
     deferInitialTurn?: boolean;
+    surface?: SessionTurnSurface | null;
     modelContext?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
@@ -1344,6 +1362,7 @@ async function finishStartSession(
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
     reasoningEffortFallback: input.reasoningEffort,
     turnExecutionPolicy: input.turnExecutionPolicy,
+    surface: input.surface ?? null,
     createdEventPayload: {
       toolPolicy: input.toolPolicy,
       ...(input.variableSets?.length
@@ -1610,6 +1629,8 @@ type PostUserMessageTurnInput = {
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
+  /** Content-free product surface the request entered through. */
+  surface?: SessionTurnSurface | null;
   actor?: string;
   actorLabel?: string;
   commandActor?: SessionCommandActor;
@@ -1809,6 +1830,7 @@ export async function postUserMessageTurn(
                 input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
               turnExecutionPolicy: input.turnExecutionPolicy,
               source: input.origin === "operator" ? "api" : "user",
+              surface: input.surface ?? null,
               ...(input.recordAgentRunUsage !== undefined
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
@@ -2189,8 +2211,15 @@ async function createSessionForRequestInFileScope(
   rawPayload: unknown,
   authorization?: AccessGrantAuthorization,
   agentChildPresentation?: AgentChildSessionCreatePresentation,
+  requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  // Read before any await: the Site scope is request-local provenance.
+  const surface = resolveTurnSurface({
+    grant,
+    authorization,
+    requested: requestOptions.surface,
+  });
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
   const externalBeforeCreateCommit = externalContinuationCommitAuthorizer(authorization);
@@ -3307,6 +3336,7 @@ async function createSessionForRequestInFileScope(
       workspaceId,
       visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
+      surface,
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
       resources,
@@ -3485,9 +3515,18 @@ export async function createSessionForRequest(
   workspaceId: string,
   rawPayload: unknown,
   authorization?: AccessGrantAuthorization,
+  requestOptions?: SessionCreateRequestOptions,
 ): Promise<CreateSessionResponse> {
   return (
-    await createSessionForRequestWithOutcome(deps, grant, workspaceId, rawPayload, authorization)
+    await createSessionForRequestWithOutcome(
+      deps,
+      grant,
+      workspaceId,
+      rawPayload,
+      authorization,
+      undefined,
+      requestOptions,
+    )
   ).session;
 }
 
@@ -3565,6 +3604,11 @@ async function acceptSessionUserMessageInFileScope(
     connectionAccounts?: McpConnectionAccountSelection[];
     delivery?: "send" | "steer";
     origin?: "human" | "operator";
+    /**
+     * Product surface when the entry point knows it (for example Slack or an
+     * in-process embedding host). Omitted derives it from the grant.
+     */
+    surface?: SessionTurnSurface;
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -3860,6 +3904,11 @@ async function acceptSessionUserMessageInFileScope(
           : {}),
         delivery,
         origin: source === "api" ? "operator" : "human",
+        surface: resolveTurnSurface({
+          grant,
+          authorization: input.authorization,
+          requested: input.surface,
+        }),
         actor: grant.subjectId,
         ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
         commandActor,
@@ -4184,18 +4233,13 @@ export async function updateSessionToolPolicy(
         return withFirstPartyTools(validatedTools, runtimeSettings);
       })()
     : null;
-  const explicitRequestedFirstPartyTools = explicitRequest
-    ? [...explicitRequest.firstPartyMcpTools]
-    : null;
   const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(deps.settings);
-  const disallowedFirstPartyMcpTool = explicitRequestedFirstPartyTools?.find(
-    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
-  );
-  if (disallowedFirstPartyMcpTool) {
-    throw new HTTPException(422, {
-      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
-    });
-  }
+  // Echoing the session's stored catalog (or create defaults) can include a
+  // tool the deployment later removed. Runtime already strips those; failing
+  // the whole connector save would block unrelated MCP toggles.
+  const explicitRequestedFirstPartyTools = explicitRequest
+    ? allowedFirstPartyMcpToolsForSession(deps.settings, explicitRequest.firstPartyMcpTools)
+    : null;
   const workspaceDefaultTools = withFirstPartyTools(
     withWorkspaceDefaultMcpTools(
       [],

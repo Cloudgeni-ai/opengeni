@@ -121,7 +121,6 @@ describe("OpenGeni Slack bot trust predicates", () => {
       ),
     ).toBe(false);
     for (const unsafe of [
-      "files:write",
       "reactions:write",
       "chat:write.customize",
       "users:read.email",

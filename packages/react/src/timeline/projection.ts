@@ -884,8 +884,13 @@ export function buildTimeline(
         // Rendering either every turn reads as churn. Only FAILURES surface, and
         // they surface loudly — the failed event below creates its own item even
         // without a started row.
+        //   - optional-repository-access: the worker's per-turn report of an
+        //     automatically attached repository that sat the turn out, reported
+        //     like a skipped optional clone (event payload + log, no row).
         if (
-          (name === "repository-clone" || name === "file-resource-download") &&
+          (name === "repository-clone" ||
+            name === "file-resource-download" ||
+            name === "optional-repository-access") &&
           status !== "failed"
         ) {
           break;
