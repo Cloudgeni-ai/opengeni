@@ -832,6 +832,54 @@ describe("generic lazy tool dispatch", () => {
     ]);
   });
 
+  test("omits the router when nothing is hidden behind search", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set([SERVER_ID]),
+      undefined,
+      new Set(),
+    );
+    const model = new ScriptedStreamingModel([[finalMessage("done")]]);
+    await runStreamed(agent, model, runtime);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([WEATHER_TOOL]);
+  });
+
+  test("keeps the router for a hidden non-MCP tool or a conversation that used it", async () => {
+    const hidden = agentWith(firstPartyTool("browser_open", "Open a browser page"));
+    const hiddenRuntime = installLazyToolRuntime(
+      hidden,
+      "generic_dispatch",
+      new Set([SERVER_ID]),
+      undefined,
+      new Set(),
+    );
+    const model = new ScriptedStreamingModel([[finalMessage("done")]]);
+    await runStreamed(hidden, model, hiddenRuntime);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      "tool_search",
+      "tool_invoke",
+      "tool_list",
+    ]);
+
+    const idle = installLazyToolRuntime(
+      agentWith(weatherTool()),
+      "openai_native",
+      new Set([SERVER_ID]),
+      undefined,
+      new Set(),
+    );
+    expect(idle.routerRequired([])).toBe(false);
+    expect(
+      idle.routerRequired([
+        { type: "function_call", callId: "c1", name: "tool_list", arguments: "{}" },
+      ] as never),
+    ).toBe(true);
+    // Sticky: once exposed, a later request keeps it.
+    expect(idle.routerRequired([])).toBe(true);
+  });
+
   test("joins deferred preparation before an eager direct tool call", async () => {
     let releasePreparation!: () => void;
     const preparation = new Promise<void>((resolve) => {

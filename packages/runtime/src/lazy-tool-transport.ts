@@ -182,6 +182,7 @@ export class LazyToolRuntime {
   private preparedToolsLoaded = false;
   private activeAgent: object | null = null;
   private activeRunContext: unknown;
+  private routerExposed = false;
   readonly controlTools: Tool[];
 
   constructor(
@@ -317,6 +318,28 @@ export class LazyToolRuntime {
         this.searchableToolNames.add(tool.name);
       }
     }
+  }
+
+  /**
+   * The router (tool_search/tool_list, plus tool_invoke on generic dispatch)
+   * only discloses tools hidden behind search. With no deferred MCP server,
+   * settled preparation, and no lazily hidden tool registered it has nothing
+   * to disclose, so it is left off the request. Once exposed in this runtime, or when the conversation
+   * already used it, it stays: a request's tool block never loses a tool the
+   * model has seen, and history that calls it keeps a matching declaration.
+   */
+  routerRequired(input: ModelRequest["input"]): boolean {
+    if (
+      !this.routerExposed &&
+      (this.deferredMcpServerIds.size > 0 ||
+        this.searchableToolNames.size > 0 ||
+        // Hidden tools may still materialize; keep the conservative shape.
+        !this.preparationSettled ||
+        inputReferencesRouter(input))
+    ) {
+      this.routerExposed = true;
+    }
+    return this.routerExposed;
   }
 
   shouldHideSerializedTool(tool: SerializedTool): boolean {
@@ -813,13 +836,46 @@ export function transformGenericDispatchResponse(
 
 function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime): ModelRequest {
   const input = restoreGenericSearchResults(request.input);
+  const routerRequired = runtime.routerRequired(request.input);
   return {
     ...request,
     // Historical generic-dispatch calls must be restored even after switching
     // the current turn to native OpenAI search.
     input: restoreGenericDispatchHistory(input),
-    tools: request.tools.filter((tool) => !runtime.shouldHideSerializedTool(tool)),
+    tools: request.tools.filter(
+      (tool) =>
+        !runtime.shouldHideSerializedTool(tool) &&
+        (routerRequired || !isRouterSerializedTool(tool)),
+    ),
   };
+}
+
+const ROUTER_FUNCTION_NAMES: ReadonlySet<string> = new Set([
+  TOOL_SEARCH_NAME,
+  TOOL_LIST_NAME,
+  TOOL_INVOKE_NAME,
+]);
+
+function isRouterSerializedTool(tool: SerializedTool): boolean {
+  if (tool.type === "function") return ROUTER_FUNCTION_NAMES.has(tool.name);
+  return tool.type === "hosted_tool" && tool.providerData?.type === "tool_search";
+}
+
+/** Any prior search/list/dispatch item means the router must stay declared. */
+function inputReferencesRouter(input: ModelRequest["input"]): boolean {
+  if (!Array.isArray(input)) return false;
+  return input.some((candidate) => {
+    if (!isRecord(candidate)) return false;
+    if (candidate.type === "tool_search_call" || candidate.type === "tool_search_output")
+      return true;
+    if (candidate.type !== "function_call") return false;
+    if (typeof candidate.name === "string" && ROUTER_FUNCTION_NAMES.has(candidate.name))
+      return true;
+    const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
+    return Boolean(
+      providerData && (DISPATCH_MARKER_KEY in providerData || SEARCH_MARKER_KEY in providerData),
+    );
+  });
 }
 
 class LazyToolModel implements Model {

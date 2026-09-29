@@ -843,9 +843,13 @@ deployment/model capability; session opt-outs are frozen at creation and
 inherited by children, which may add more. Web search is removed from the
 provider request itself, including the `web_search`/`x_search` tools the
 SuperGrok transport would otherwise append. The progressive-disclosure router
-(`tool_search`, `tool_list`, `tool_invoke`) is present whenever a selected MCP
-server is not `eager`, including the mandatory first-party server; it only
-reveals already-authorized tools. Read-only `list_models` is a base tool.
+(`tool_search`, `tool_list`, `tool_invoke`) is sent only while something is
+hidden behind search: a selected MCP server that is not `eager`, or a lazily
+disclosed built-in tool. With `firstPartyMcpTools: []` the first-party server
+registers nothing and is not connected at all, so a session whose own servers
+are `eager` gets no router. Once the router has been sent in a turn, or the
+conversation already used it, it stays declared. Read-only `list_models` is a
+base tool.
 
 Resources are unaffected by that selection. File/document/repository
 attachments still materialize when `firstPartyMcpTools` is empty or contains

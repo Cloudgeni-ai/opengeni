@@ -8451,10 +8451,11 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      await prepared.mcpServers[0]!.listTools();
-      expect(seenSelections.length).toBeGreaterThan(0);
-      expect(seenSelections.every((selection) => JSON.stringify(selection) === "[]")).toBe(true);
-      expect(seenPrincipalKinds.every((kind) => kind === "service")).toBe(true);
+      // Stronger than signing []: an empty remote selection registers nothing,
+      // so the server is not connected at all and can never widen to defaults.
+      expect(prepared.mcpServers).toEqual([]);
+      expect(seenSelections).toEqual([]);
+      expect(seenPrincipalKinds).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();

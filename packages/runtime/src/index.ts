@@ -4315,9 +4315,10 @@ class DeferredPreparedMcpServer implements MCPServer {
 
 export async function prepareAgentTools(
   settings: Settings,
-  tools: ToolRef[],
+  requestedTools: ToolRef[],
   options: PrepareToolsOptions = {},
 ): Promise<PreparedAgentTools> {
+  const tools = withoutEmptyFirstPartyMcpServer(settings, requestedTools, options.firstPartyTools);
   const inputWaitYield = new InputWaitYield();
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
@@ -6691,6 +6692,27 @@ function isCodexAppsMcpServer(config: Settings["mcpServers"][number]): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The remote first-party `opengeni` server registers exactly the signed
+ * `firstPartyTools` selection. An explicit empty selection therefore
+ * registers nothing, so connecting it would only add a network round trip and
+ * a deferred server that keeps the progressive-disclosure router in every
+ * request. In-process first-party tools are attempt definitions and are
+ * unaffected; `files` and `docs` have their own selection through `tools`.
+ */
+export function withoutEmptyFirstPartyMcpServer(
+  settings: Settings,
+  tools: ToolRef[],
+  firstPartyTools: readonly string[] | undefined,
+): ToolRef[] {
+  if (firstPartyTools === undefined || firstPartyTools.length > 0) return tools;
+  return tools.filter((tool) => {
+    if (tool.id !== "opengeni") return true;
+    const config = settings.mcpServers.find((server) => server.id === tool.id);
+    return !config || !isFirstPartyMcpServer(settings, config) || Boolean(config.connectionRef);
+  });
 }
 
 function isFirstPartyMcpServer(
