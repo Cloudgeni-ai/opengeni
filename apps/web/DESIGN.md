@@ -177,7 +177,8 @@ opacity-muted text.
 - A block that is not a SettingRow list (e.g. "Linked product access") takes the same heading
   plus card treatment; its empty or loading line is a row inside the card.
 - **Never a card inside a card.** Nothing inside a settings card draws its own box: a list is
-  rows split by the card's hairlines, a Notice drops its border, and choice cards become flat
+  rows split by the card's hairlines, a Notice, an inline form, a one-time secret or Technical
+  details is a row with no border of its own, and choice cards become flat
   radio rows (radio, title, consequence line) on the card's text column; the filled radio marks
   the choice, with no fill or inset of its own.
   `ChoiceCards` and `ListRow` do this themselves when they sit in a card. A section whose content
@@ -277,7 +278,13 @@ Cancel and the action as the primary.
   CopyField.
 - Unavailable: say why and who can fix it, and disable or hide the action.
 - Errors: what happened + what to do. Never a raw `OpenGeni API 404 ... Reference: <uuid>` string;
-  the reference goes in Technical details.
+  the reference goes in Technical details. Use `lib/api-error.ts`: `userErrorText` for toasts and
+  form errors, `ErrorMessage {...apiErrorDetails(error)}` for a failed section (what happened, the
+  advice, Try again, the reference behind Technical details).
+- Permission refusals are not errors. A 403 or a missing permission replaces the rows with one
+  calm muted line naming who can grant it ("Only workspace admins can manage webhooks. Ask a
+  workspace admin for access."), with no red and no Retry (`isPermissionDenied` picks it). In a
+  Personal workspace, where nobody administers the workspace, say where it can be done instead.
 - One name per object across rail, title, back link, buttons and toasts. One noun per concept
   (schedule, not "scheduled task").
 - Descriptions say what the setting does, and what Off keeps if that matters: "Summarizes long
