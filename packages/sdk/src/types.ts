@@ -3678,6 +3678,7 @@ export type CodexUsagePayload = {
     meteredFeature: string;
     fiveHour: CodexUsageWindow | null;
     weekly: CodexUsageWindow | null;
+    unknownWindowExhausted: boolean;
   }>;
   credits?: {
     hasCredits: boolean;
