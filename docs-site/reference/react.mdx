@@ -15,7 +15,9 @@ bun add @opengeni/react @opengeni/sdk
 | Export                      | Purpose                                                                                |
 | --------------------------- | -------------------------------------------------------------------------------------- |
 | `OpenGeniProvider`          | Supplies the client and workspace to everything below it                               |
-| `SessionConversation`       | The complete conversation for one session. The default embed                           |
+| `OpenGeniChat`              | The default embed: the user's chats (sidebar or drawer) plus the conversation          |
+| `SessionConversation`       | The complete conversation for one session                                              |
+| `SessionList`               | The user's chats with rename and archive, for your own layout                          |
 | `MessageTimeline`           | The timeline alone: streaming replies, tool calls, approvals, and child-session status |
 | `ChatComposer`              | The composer alone, with queue, Steer, attachments, and model picker                   |
 | `createDefaultToolRegistry` | Register your own renderers for your tools                                             |
@@ -24,15 +26,16 @@ See [Conversation UI & theming](/integrate/conversation-ui) for props, tool rend
 
 ## Entry points
 
-| Import                         | Contents                                                                     |
-| ------------------------------ | ---------------------------------------------------------------------------- |
-| `@opengeni/react`              | Provider, conversation, timeline, composer, hooks, and the sandbox workbench |
-| `@opengeni/react/session`      | Headless session hooks with no styles or optional peers                      |
-| `@opengeni/react/composer`     | Advanced composer composition                                                |
-| `@opengeni/react/machines`     | Connected Machines dashboard and enrollment flow                             |
-| `@opengeni/react/realtime`     | Voice controls, lazily loadable                                              |
-| `@opengeni/react/compiled.css` | Scoped styles; needs no Tailwind                                             |
-| `@opengeni/react/tokens.css`   | The `--og-*` design tokens alone                                             |
+| Import                         | Contents                                                                      |
+| ------------------------------ | ----------------------------------------------------------------------------- |
+| `@opengeni/react`              | Provider, conversation, timeline, composer, hooks, and the sandbox workbench  |
+| `@opengeni/react/session`      | Headless session hooks with no styles or optional peers                       |
+| `@opengeni/react/composer`     | Advanced composer composition                                                 |
+| `@opengeni/react/machines`     | Connected Machines dashboard and enrollment flow                              |
+| `@opengeni/react/realtime`     | Voice controls, lazily loadable                                               |
+| `@opengeni/react/diffs`        | `enablePierreDiffs()` for highlighted diffs with the optional `@pierre/diffs` |
+| `@opengeni/react/compiled.css` | Scoped styles; needs no Tailwind                                              |
+| `@opengeni/react/tokens.css`   | The `--og-*` design tokens alone                                              |
 
 ## Hooks
 

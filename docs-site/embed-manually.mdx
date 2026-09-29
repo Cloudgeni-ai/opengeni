@@ -4,7 +4,7 @@ description: "Add the full OpenGeni conversation to your product in four steps."
 icon: "code"
 ---
 
-The default integration is the complete OpenGeni conversation inside your product: `SessionConversation` in the browser, backed by a packaged proxy on your backend. The browser talks only to your backend, and the organization API key never leaves it.
+The default integration is the complete OpenGeni conversation inside your product: `OpenGeniChat` (the user's chats plus the conversation) in the browser, backed by a packaged proxy on your backend. The browser talks only to your backend, and the organization API key never leaves it.
 
 ```bash
 bun add @opengeni/sdk @opengeni/react
@@ -53,6 +53,7 @@ Install both packages from the same release.
           "sessions:control",
           "files:upload",
           "files:read",
+          // add "mcp_servers:attach" when sessions carry per-session MCP servers
         ],
         operationId, // a UUID you persist first; reuse it only to retry this request
       });
@@ -63,54 +64,53 @@ Install both packages from the same release.
     `ensureWorkspace` is idempotent. Without membership the API answers `403`. See [Users, tenants & privacy](/integrate/users-and-tenants).
 
   </Step>
-  <Step title="Mount the proxy and create sessions">
-    Mount one handler at a catch-all route such as `/api/opengeni/*` (Next.js, Hono, Bun.serve, or a worker):
+  <Step title="Mount the proxy">
+    Add one catch-all route. With the Next.js App Router, in `app/api/opengeni/[...path]/route.ts`:
 
     ```ts
-    import { createSessionProxyHandler } from "@opengeni/sdk";
-    import { authenticate, verifyCsrf } from "./auth"; // your product's own checks
+    import { createSessionProxyRoute } from "@opengeni/sdk/next";
+    import { authenticate, verifyCsrf } from "@/lib/auth"; // your product's own checks
 
-    export const handleOpenGeni = createSessionProxyHandler(og, {
+    export const dynamic = "force-dynamic";
+    export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
       resolve: async (request) => {
         const me = await authenticate(request);
         if (!me) return new Response("Unauthorized", { status: 401 });
         return { workspaceId: me.workspaceId, user: me.userId, source };
       },
       authorizeMutation: (request) => verifyCsrf(request),
+      // New chats: the browser sends only the first message; you choose the rest.
+      createSession: ({ initialMessage, idempotencyKey }) => ({
+        initialMessage,
+        idempotencyKey,
+        tools: [], // add your product's tools: see "Give the agent your data"
+        firstPartyMcpTools: [],
+        sandboxBackend: "none", // a chat-and-tools agent needs no sandbox
+      }),
     });
     ```
 
-    Your server creates sessions as the user, with an explicit tool selection and a stable idempotency key:
-
-    ```ts
-    const session = await og.asUser(me.userId, { source }).createSession(me.workspaceId, {
-      initialMessage: `Help me with ticket ${ticket.id}`,
-      idempotencyKey: `ticket:${ticket.id}:${me.userId}`,
-      tools: [], // add your product's tools: see "Give the agent your data"
-      firstPartyMcpTools: [],
-      sandboxBackend: "none", // a chat-and-tools agent needs no sandbox
-    });
-    ```
+    For Express or Connect, use `app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)))` from `@opengeni/sdk/express`; for Hono, `app.all("/api/opengeni/*", toHonoHandler(...))` from `@opengeni/sdk/hono`. See the [SDK reference](/reference/sdk#framework-adapters).
 
   </Step>
   <Step title="Render the conversation">
     ```tsx
     import { OpenGeniClient } from "@opengeni/sdk";
-    import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+    import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
     import "@opengeni/react/compiled.css";
 
     const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
-    export function Assistant({ workspaceId, sessionId }: { workspaceId: string; sessionId: string }) {
+    export function Assistant({ workspaceId }: { workspaceId: string }) {
       return (
         <OpenGeniProvider client={client} workspaceId={workspaceId}>
-          <SessionConversation sessionId={sessionId} />
+          <OpenGeniChat />
         </OpenGeniProvider>
       );
     }
     ```
 
-    The stylesheet is scoped and needs no Tailwind setup. See [Conversation UI & theming](/integrate/conversation-ui).
+    `OpenGeniChat` lists the chats the signed-in user started (a sidebar when wide, a drawer when narrow) and starts new ones through your `createSession` hook. For an assistant bound to one record, create the session on your server as the user (`og.asUser(userId, { source }).createSession(...)` with a stable `idempotencyKey`) and render `<SessionConversation sessionId={id} />`. The stylesheet is scoped and needs no Tailwind setup. See [Conversation UI & theming](/integrate/conversation-ui).
 
   </Step>
 </Steps>

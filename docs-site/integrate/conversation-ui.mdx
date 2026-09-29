@@ -4,6 +4,16 @@ description: "Render the full OpenGeni conversation, brand it, and customize how
 icon: "palette"
 ---
 
+`OpenGeniChat` is the default: the signed-in user's chats plus the conversation. The list is a sidebar when the component is wide and a drawer behind a menu button when it is narrow, measured on its own container, so it works in a side panel as well as a full page. It starts new chats from their first message through the proxy's `createSession` hook, and lets users rename and archive chats.
+
+```tsx
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <OpenGeniChat conversationProps={{ toolRegistry }} />
+</OpenGeniProvider>
+```
+
+The proxy lists only the chats the user created (`sessionList: "mine"`, the default); `sessionList: "visible"` lists every chat the user may read in the workspace. Control the selection with `sessionId` and `onSessionChange` (for example from the URL), or mount `SessionList` and `SessionConversation` separately.
+
 `SessionConversation` is the complete conversation for one session: streaming replies, tool activity, approvals, structured questions, file attachments, the message queue, Steer, and Pause/Resume. It uses the SDK client from `OpenGeniProvider`, so it works unchanged behind [the session proxy](/embed-manually).
 
 ```tsx
@@ -76,7 +86,7 @@ const toolRegistry = createDefaultToolRegistry({
 
 ## Start sessions from the browser
 
-By default your server creates sessions. To let users start one from the page, add a `createSession` hook to the proxy. The browser sends only the first message and an idempotency key; your hook returns the full request, so tools, skills, and model policy stay server-side:
+`OpenGeniChat`'s new-chat composer, and any browser `createSession` call, go through the proxy's `createSession` hook; without it, browser-started sessions are refused. The browser sends only the first message and an idempotency key; your hook returns the full request, so tools, skills, and model policy stay server-side:
 
 ```ts
 createSessionProxyHandler(og, {

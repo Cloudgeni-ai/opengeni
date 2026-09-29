@@ -15,6 +15,9 @@ bun add @opengeni/sdk
 | Import                                          | Use it for                                                                                    |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `@opengeni/sdk`                                 | `OpenGeniClient`: sessions, workspaces, files, tools, events, and `createSessionProxyHandler` |
+| `@opengeni/sdk/next`                            | `createSessionProxyRoute` and `toNextRouteHandlers` for the App Router                        |
+| `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                      |
+| `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                      |
 | `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                   |
 | `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                     |
 | `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                     |
@@ -76,8 +79,31 @@ The complete method list is in [packages/sdk/README.md](https://github.com/Cloud
 | `beforeForwardMessage` | Runs before each forwarded message. Returns `modelContext` and `mcpCredentialUpdates`, or a `Response` to reject           |
 | `modelSelection`       | `false` removes per-message model choices and hides the model picker                                                       |
 | `files`                | `false` disables attachment routes                                                                                         |
+| `sessionList`          | Chat list for `OpenGeniChat`: `"mine"` (default), `"visible"`, or `false`                                                  |
+| `archive`              | `false` disables archiving chats                                                                                           |
 | `maxBodyBytes`         | Request body limit. Defaults to 1 MiB                                                                                      |
 | `basePath`             | Mount prefix. Defaults to everything before the first `/v1/`                                                               |
+
+### Framework adapters
+
+The adapters wrap any web-standard handler, including `createChatHandler`:
+
+```ts
+// Next.js App Router: app/api/opengeni/[...path]/route.ts
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, options);
+
+// Express / Connect / node:http
+import { toNodeMiddleware } from "@opengeni/sdk/express";
+app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)));
+
+// Hono
+import { toHonoHandler } from "@opengeni/sdk/hono";
+app.all("/api/opengeni/*", toHonoHandler(createSessionProxyHandler(og, options)));
+```
+
+The Next adapter passes the full URL, including any `basePath`. The Node middleware rebuilds the URL from `originalUrl`, streams bodies and SSE, forwards bodies a parser already read, and aborts the request when the client disconnects.
 
 Pass the chat facade's `OpenGeni` instead of a client to resolve `{ tenant, user }` rather than a workspace id. Never replace the proxy with a passthrough that forwards arbitrary paths under the organization key.
 

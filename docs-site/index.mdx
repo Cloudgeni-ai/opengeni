@@ -7,8 +7,6 @@ icon: "house"
 
 OpenGeni gives your product an agent that does real work: it calls your APIs, asks for approval before it acts, pauses for answers, and keeps going until the job is done. You add one backend route and one React component. OpenGeni runs the sessions, streaming, approvals, history, and compute.
 
-{/* TODO: replace with the final screenshot or GIF of the embedded conversation. */}
-
 <img
   src="/images/embedded-conversation.png"
   alt="The OpenGeni conversation embedded in a product, working a support ticket"
@@ -35,7 +33,7 @@ Most teams integrate OpenGeni with a coding agent such as Claude Code, Codex, or
 
 ## What you get
 
-- **A complete conversation UI.** `SessionConversation` renders streaming replies, tool calls, approvals, questions, attachments, queueing, and steering. Brand it with CSS tokens.
+- **A complete conversation UI.** `OpenGeniChat` gives each user their chats and a conversation with streaming replies, tool calls, approvals, questions, attachments, queueing, and steering. Brand it with CSS tokens.
 - **Your tools, your users.** The agent calls your product through an MCP server or an OpenAPI description, as the signed-in user, with short-lived tokens you mint.
 - **Durable sessions.** Every event lands in a Postgres log. Reloads, new clients, and audits replay the same history, and work survives worker restarts.
 - **Agents that finish.** Give a session a goal with success criteria and it keeps working until it completes the goal with evidence or pauses with a reason.
