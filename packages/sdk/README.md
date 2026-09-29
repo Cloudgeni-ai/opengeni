@@ -1062,6 +1062,9 @@ await client.cancelSession(workspaceId, sessionId, {
   reason: "host record deleted",
   clientEventId: crypto.randomUUID(),
 });
+// approvalId is `approvals[].id` from the latest `session.requiresAction`
+// event (type SessionApprovalRequest: { id, name, arguments }); it is the
+// pending tool call id, not the event id.
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
