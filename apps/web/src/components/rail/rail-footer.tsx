@@ -140,7 +140,7 @@ export function RailFooter() {
                   </span>
                   {!rail.collapsed ? (
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-medium text-fg">
+                      <span className="block truncate text-xs font-normal text-fg">
                         {displayName}
                       </span>
                       {secondary && secondary !== displayName ? (
@@ -289,7 +289,7 @@ function AccountTrigger(props: {
       </Avatar>
       {!props.collapsed ? (
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-medium text-fg">{props.displayName}</span>
+          <span className="block truncate text-xs font-normal text-fg">{props.displayName}</span>
           {props.secondary !== props.displayName ? (
             <span className="block truncate text-2xs text-fg-subtle">{props.secondary}</span>
           ) : null}

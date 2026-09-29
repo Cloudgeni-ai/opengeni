@@ -113,7 +113,7 @@ function RailBody() {
                   tabIndex={mobileSection === "sessions" ? 0 : -1}
                   onClick={() => setMobileSection("sessions")}
                   className={cn(
-                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
                     mobileSection === "sessions"
                       ? "bg-surface-3 text-fg shadow-sm"
                       : "text-fg-label hover:text-fg",
@@ -132,7 +132,7 @@ function RailBody() {
                   tabIndex={mobileSection === "workspace" ? 0 : -1}
                   onClick={() => setMobileSection("workspace")}
                   className={cn(
-                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
                     mobileSection === "workspace"
                       ? "bg-surface-3 text-fg shadow-sm"
                       : "text-fg-label hover:text-fg",
@@ -442,7 +442,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
       <Link
         to="/workspaces/$workspaceId/sessions"
         params={{ workspaceId: rail.workspaceId }}
-        className="flex items-center gap-2 text-sm font-semibold"
+        className="flex items-center gap-2 text-sm font-medium"
       >
         <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
           <BrandMark className="size-3.5" />

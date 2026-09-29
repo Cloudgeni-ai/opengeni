@@ -108,7 +108,7 @@ export function PrimaryNav() {
       <NewSessionLink
         aria-label={`New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}`}
         className={cn(
-          "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-label outline-none transition-colors pointer-coarse:h-10",
+          "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10",
           "hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
           newSessionActive && "bg-surface-2 text-fg",
           rail.collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",
@@ -203,7 +203,7 @@ export function PrimaryNav() {
                 data-active={activeWorkspaceSection ? "true" : undefined}
                 onClick={() => setShortcutsExpanded(true)}
                 className={cn(
-                  "group relative w-full justify-start gap-2.5 px-2.5 text-fg-label pointer-coarse:h-10",
+                  "group relative w-full justify-start gap-2.5 px-2.5 font-normal text-fg-label pointer-coarse:h-10",
                   activeWorkspaceSection && "bg-surface-2 text-fg",
                 )}
               >

@@ -52,7 +52,7 @@ export interface NavItemProps extends Omit<ComponentProps<"a">, "children"> {
 }
 
 const ITEM_BASE =
-  "group/nav-item relative flex min-w-0 items-center rounded-[10px] text-sm font-medium text-fg-label transition-colors duration-[120ms] outline-none select-none hover:bg-surface-2 hover:text-fg data-[active=true]:bg-surface-2 data-[active=true]:text-fg aria-disabled:cursor-not-allowed aria-disabled:text-fg-subtle aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg-subtle";
+  "group/nav-item relative flex min-w-0 items-center rounded-[10px] text-sm font-normal text-fg-label transition-colors duration-[120ms] outline-none select-none hover:bg-surface-2 hover:text-fg data-[active=true]:bg-surface-2 data-[active=true]:text-fg aria-disabled:cursor-not-allowed aria-disabled:text-fg-subtle aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg-subtle";
 
 function textLabel(label: ReactNode): string | undefined {
   return typeof label === "string" ? label : undefined;
@@ -218,7 +218,7 @@ export function NavGroup({
       className={cn("min-w-0", className)}
     >
       {showLabel ? (
-        <p id={labelId} className="mb-1 px-2.5 text-xs leading-4.5 font-medium text-fg-muted">
+        <p id={labelId} className="mb-1 px-2.5 text-xs leading-4.5 font-normal text-fg-muted">
           {label}
         </p>
       ) : null}

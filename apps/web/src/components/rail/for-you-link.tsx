@@ -42,7 +42,7 @@ export function ForYouLink(props: { embedded?: boolean }) {
       data-active={active ? "true" : undefined}
       aria-label={needsYou > 0 ? `For you. ${needsYou} need you.` : "For you"}
       className={cn(
-        "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-label transition-colors pointer-coarse:h-10",
+        "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10",
         "hover:bg-surface-2 hover:text-fg",
         "data-[active=true]:bg-surface-2 data-[active=true]:text-fg",
         rail.collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",

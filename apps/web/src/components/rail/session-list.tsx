@@ -2790,7 +2790,7 @@ export function SessionList() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg-label">
+        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
           {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
         </span>
         <Tooltip>
@@ -3359,7 +3359,7 @@ function SessionGroupPaginationControl(
             : `${action} older sessions in ${group.label}`
         }
         onClick={() => void loadWithFocus()}
-        className="min-h-8 rounded-md px-2 text-xs font-medium text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
+        className="min-h-8 rounded-md px-2 text-xs font-normal text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
       >
         {revealCount !== undefined
           ? loading
@@ -3590,7 +3590,7 @@ function SessionGroup(props: {
           className={
             props.hideHeading
               ? "sr-only"
-              : "px-1.5 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+              : "px-1.5 pb-0.5 pt-2 text-2xs font-normal uppercase tracking-wider text-fg-muted"
           }
         >
           {props.label}
@@ -3897,7 +3897,7 @@ function SessionRow(props: {
     "group relative flex h-8 w-full items-center gap-1.5 rounded-md border py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
     props.active
-      ? "border-brand/20 bg-selection font-medium text-fg"
+      ? "border-brand/20 bg-selection text-fg"
       : "border-transparent text-fg-label hover:bg-surface-2 hover:text-fg",
     props.focused && !props.active ? "bg-surface-2/60" : "",
   );

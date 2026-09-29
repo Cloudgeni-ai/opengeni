@@ -18,7 +18,7 @@ export function RailHeader() {
       <Link
         to="/workspaces/$workspaceId/sessions"
         params={{ workspaceId: rail.workspaceId }}
-        className="flex shrink-0 items-center gap-2 rounded-md text-[15px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex shrink-0 items-center gap-2 rounded-md text-[15px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label="Opengeni home"
       >
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
