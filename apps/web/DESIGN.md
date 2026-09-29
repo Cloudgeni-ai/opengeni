@@ -272,14 +272,26 @@ Main column: DetailSection ...        | Quiet aside card:
 organization or personal settings URL, and the Agents, Insights and runtime pages listed in the
 settings rail) swaps the main rail for the settings rail, drawn by `SettingsShell`
 (`components/settings/settings-sidebar.tsx`, sections from `settings-rail.tsx`): a back link that
-leaves settings ("Back to sessions"), then every settings page the person can use in one rail, in
-labeled sections: **Workspace** (a switcher naming the workspace, then its pages, Activity and
-Runtime), **Organization** (a switcher naming the organization, then only the organization pages
-this person can use) and **Your account**. Workspace, organization and personal settings all draw
-this same rail, so the scope of every page is visible and nothing jumps to a second rail. Each
-switcher changes only its own scope and keeps the same kind of page. Leaving restores the main
-rail. Below 1024px the settings rail folds into a header with the back link, the current page and
-its scope ("Organization · Acme Robotics"), and a Menu button that opens it in a drawer. Settings pages render full width beside
+leaves settings ("Back to sessions"), then the one workspace picker (the same component and menu as
+the main rail's: workspace name, organization under it), then every settings page the person can
+use in one rail, in three sections: **Workspace** (its settings and dashboards, then its runtime
+pages), **Organization** (only the organization pages this person can use) and **Your
+account**. Each section starts with a plain text header in 14/600 naming only the scope
+("Workspace", "Organization", "Your account"): the picker already names the workspace and
+organization, so headers don't repeat them (only where there is no picker, as for a workspace an
+admin manages without access, does the header add the name as quiet 12px meta). These are the only
+headings. Inside a section, pages fall into at most two groups set apart by space, never by a
+second level of labels: Workspace = its settings and dashboards, then its runtime (Variable sets,
+Sandbox environments, Machines); Organization = the organization and its people (General, People,
+Workspaces, Organization identity), then what it provides, pays for and protects (Models,
+Integrations, Billing & usage, Developer, Security & data). Sections are split by one hairline.
+There are no per-section switchers. Workspace, organization and personal settings all draw this
+same rail, so the scope of every page is visible and nothing jumps to a second rail. Switching
+workspace or organization in the picker keeps the same kind of page;
+switching organization returns to the workspace last used there. Leaving
+restores the main rail. Below 1024px the settings rail folds into a header with the back link, the current page and
+its scope ("Organization · Acme Robotics", since the picker is out of sight until the drawer
+opens), and a Menu button that opens it in a drawer. Settings pages render full width beside
 the rail in the standard 960px column, with the section's page header; a sub-page (an account, a
 key, a person, a form) hides that header and declares its own back link and title. Pages that own
 their layout (Agents, Insights, Variable sets) render their own `ContentPage`. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
@@ -317,7 +329,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | --- | --- |
 | Page header | Icon on main-rail pages only; settings pages drop the icon because the settings rail gives context. |
 | Navigation | Settings swaps the rail for the settings rail (240px, grouped, icons) with a back link that restores the main rail. No settings sub-nav inside the content. |
-| Workspace picker | The trigger names the workspace and, under it, its organization. The menu shows the current organization as a header with its workspaces and "New workspace in <organization>" (disabled with the reason when the person can't create there; never created in another organization), then Organization settings, then the other organizations under "Switch organization" and New organization. Switching organization opens a workspace there. |
+| Workspace picker | The trigger names the workspace and, under it, its organization; a Personal workspace shows a person tile and "Personal · <organization>" instead of a chip, so names keep the width (menu rows use the same person tile, no chip). The same picker heads the settings rail. The menu shows the current organization as a header with its workspaces and "New workspace in <organization>" (disabled with the reason when the person can't create there; never created in another organization), then Organization settings, then the other organizations under "Switch organization" and New organization. Switching organization returns to the workspace last used there (else its first shared workspace, else the Personal one). New workspace is one flow: the organization's New workspace page (Organization settings > Workspaces), opened with a back link to where you were; created from the picker, you land in the new workspace. |
 | Section | Open section: 16px title (one step above the 14px row titles), 12px description, rows below, one hairline between sections, no box. |
 | Tabs and toolbar | Underline tabs; search, filter and the primary action in a toolbar that keeps its shape. Status filters are not a second tab row. |
 | List row | Divided resource row (56-64px, 32px tile, one meta line) for things you own; the catalog row (76px, 40px tile, 2 columns) for discovery. Same tile, type and hover. |
