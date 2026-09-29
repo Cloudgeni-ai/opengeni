@@ -17,7 +17,8 @@ export function exactLogoutAllSessionListSearch(search: string): boolean {
     exactly("archivedOnly", "true");
   const pins = keys.length === 3 && exactly("limit", "1") && exactly("pinsOnly", "true");
   const currentActiveRoots =
-    keys.length === 5 &&
+    // The Default project adds only its explicit null channel to the same read.
+    (keys.length === 5 || (keys.length === 6 && exactly("channelId", "null"))) &&
     exactly("limit", "50") &&
     exactly("parentSessionId", "null") &&
     exactly("sortBy", "updatedAt") &&
