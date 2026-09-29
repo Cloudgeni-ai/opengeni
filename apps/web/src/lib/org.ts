@@ -88,15 +88,20 @@ export function organizationSettingsWorkspaceId(
 }
 
 /**
- * Where switching to an organization lands: its first shared workspace, else
- * the person's Personal workspace there. Null when nothing in it is open to them.
+ * Where switching to an organization lands: the workspace last used there
+ * while it is still open to the person, else its first shared workspace, else
+ * their Personal workspace there. Null when nothing in it is open to them.
  */
 export function organizationLandingWorkspaceId(
   workspaces: Workspace[],
   accountId: string,
+  rememberedWorkspaceId?: string | null,
 ): string | null {
   const candidates = workspacesInOrg(workspaces, accountId);
   return (
-    candidates.find((workspace) => workspace.kind !== "personal")?.id ?? candidates[0]?.id ?? null
+    candidates.find((workspace) => workspace.id === rememberedWorkspaceId)?.id ??
+    candidates.find((workspace) => workspace.kind !== "personal")?.id ??
+    candidates[0]?.id ??
+    null
   );
 }

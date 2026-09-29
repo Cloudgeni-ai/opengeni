@@ -266,6 +266,14 @@ export function OrgSettingsRoute({
             workspaceId={workspaceId}
             workspace={workspace}
             view={organizationView === "new-workspace" ? "new-workspace" : undefined}
+            returnTo={returnTo}
+            onEnterWorkspace={(createdId) => {
+              context.resetSessionView();
+              void navigate({
+                to: "/workspaces/$workspaceId/sessions",
+                params: { workspaceId: createdId },
+              });
+            }}
           />
         ) : null}
 

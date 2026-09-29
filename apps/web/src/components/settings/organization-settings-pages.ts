@@ -24,12 +24,21 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
   { id: "general", label: "General", icon: SlidersHorizontalIcon },
   { id: "people", label: "People", icon: UsersIcon },
   { id: "workspaces", label: "Workspaces", icon: SquareStackIcon },
+  { id: "identity", label: "Organization identity", icon: FingerprintIcon },
   { id: "models", label: "Models", icon: CpuIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
-  { id: "identity", label: "Organization identity", icon: FingerprintIcon },
   { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },
   { id: "security", label: "Security & data", icon: ShieldIcon },
+];
+
+/**
+ * The rail's two unlabeled groups: the organization and its people, then what
+ * it provides, pays for and protects.
+ */
+export const ORGANIZATION_SETTINGS_GROUPS: readonly (readonly OrganizationAdminSection[])[] = [
+  ["general", "people", "workspaces", "identity"],
+  ["models", "integrations", "billing", "developer", "security"],
 ];
 
 export function organizationSettingsLabel(section: OrganizationAdminSection): string {

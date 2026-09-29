@@ -28,11 +28,7 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
         {
           id: "account",
           label: "Your account",
-          scope: (
-            <p className="truncate px-2.5 text-sm leading-5 font-semibold text-fg" title={email}>
-              {email}
-            </p>
-          ),
+          meta: email,
           groups: [
             {
               items: [

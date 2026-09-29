@@ -100,6 +100,8 @@ import {
   isAuthorizedWorkspaceId,
   workspaceNavigationPreferenceStorageId,
   writeLastWorkspaceId,
+  writeLastWorkspaceIdForOrganization,
+  organizationWorkspacePreferenceStorageId,
 } from "@/lib/workspace-navigation-preference";
 import {
   buildResources,
@@ -1122,6 +1124,15 @@ export function RootRouteComponent() {
       workspaceNavigationPreferenceStorageId(accessContext.subjectId),
       workspaceId,
     );
+    // Switching back to this organization returns to this workspace.
+    const accountId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+    if (accountId) {
+      writeLastWorkspaceIdForOrganization(
+        organizationWorkspacePreferenceStorageId(accessContext.subjectId),
+        accountId,
+        workspaceId,
+      );
+    }
   }, [accessContext, pathname, workspaces]);
 
   // New-chat policy follows the active workspace. Explicit composer choices

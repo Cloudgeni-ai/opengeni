@@ -1,6 +1,6 @@
 // Pure helpers behind the workspace switcher's create/rename affordances.
 import { hasAccountPermission } from "@/lib/permissions";
-import type { AccessContext, Workspace } from "@/types";
+import type { AccessContext, ClientConfig, Workspace } from "@/types";
 
 /** Sentinel <option> value for the "New workspace…" entry in the switcher. */
 export const CREATE_WORKSPACE_OPTION = "__create-workspace__";
@@ -30,15 +30,28 @@ export function workspaceCreationAccountId(
 }
 
 /**
- * Whether a new workspace can be created in this exact organization. The
- * switcher names the organization it creates in and never falls back to
- * another one.
+ * Whether this person administers the organization: an owner or admin in a
+ * session that may administer one (a signed-in person, or the single local
+ * user). Administrators manage its workspaces, so this also decides whether the
+ * picker's "New workspace in <organization>" is available. Kept here, in the
+ * startup graph, because the rail's picker needs it; organization settings
+ * build on it.
  */
-export function canCreateWorkspaceInOrganization(
-  context: AccessContext,
-  accountId: string | null,
-): accountId is string {
-  return Boolean(accountId && hasAccountPermission(context, accountId, "workspace:create"));
+export function administersOrganization(input: {
+  accessContext: AccessContext;
+  clientConfig: Pick<ClientConfig, "productAccessMode"> & {
+    auth: Pick<ClientConfig["auth"], "mode">;
+  };
+  accountId: string | null;
+}): boolean {
+  if (!input.accountId) return false;
+  const role = input.accessContext.accountGrants.find(
+    (grant) => grant.accountId === input.accountId,
+  )?.role;
+  const administratorSession =
+    input.clientConfig.auth.mode === "managedSession" ||
+    input.clientConfig.productAccessMode === "local";
+  return administratorSession && (role === "owner" || role === "admin");
 }
 
 /** Replace-or-append a workspace in the cached list (create + rename share it). */

@@ -107,6 +107,7 @@ export function WorkspaceManagementShell({
       label="Settings"
       back={rail.back}
       home={rail.home}
+      scope={rail.picker}
       sections={rail.sections}
       activeId={activeId}
       currentPage={currentPage}

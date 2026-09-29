@@ -5,7 +5,6 @@ import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "./organization-settings-access";
-import { canCreateWorkspaceInOrganization } from "./workspaces";
 import type { AccessContext, Workspace } from "@/types";
 
 const managed = { productAccessMode: "managed", auth: { mode: "managedSession" } } as const;
@@ -104,22 +103,23 @@ describe("organization helpers for the picker", () => {
     expect(organizationSettingsWorkspaceId(workspaces, "empty", "ws-a")).toBeNull();
   });
 
-  test("creating a workspace needs permission in that exact organization", () => {
-    expect(canCreateWorkspaceInOrganization(context("owner", ["workspace:create"]), "acme")).toBe(
-      true,
-    );
-    expect(canCreateWorkspaceInOrganization(context("admin", ["account:admin"]), "acme")).toBe(
-      true,
-    );
-    expect(canCreateWorkspaceInOrganization(context("member", ["account:read"]), "acme")).toBe(
-      false,
-    );
-    // Never another organization the person could create in.
-    expect(canCreateWorkspaceInOrganization(context("owner", ["workspace:create"]), "other")).toBe(
-      false,
-    );
-    expect(canCreateWorkspaceInOrganization(context("owner", ["workspace:create"]), null)).toBe(
-      false,
-    );
+  test("switching organization returns to the workspace last used there, while it is still open", () => {
+    expect(organizationLandingWorkspaceId(workspaces, "b", "ws-b-personal")).toBe("ws-b-personal");
+    // Gone, or in another organization: fall back to the first shared workspace.
+    expect(organizationLandingWorkspaceId(workspaces, "b", "ws-deleted")).toBe("ws-b-z");
+    expect(organizationLandingWorkspaceId(workspaces, "b", "ws-a")).toBe("ws-b-z");
+    expect(organizationLandingWorkspaceId(workspaces, "b", null)).toBe("ws-b-z");
+  });
+
+  test("creating workspaces follows Organization settings > Workspaces: owners and admins only", () => {
+    const pages = (role: "owner" | "admin" | "member", permissions: string[]) =>
+      organizationSettingsAccess({
+        accessContext: context(role, permissions),
+        clientConfig: managed as never,
+        accountId: "acme",
+      }).visibleSections.has("workspaces");
+    expect(pages("owner", ["account:admin"])).toBe(true);
+    expect(pages("admin", ["account:read", "workspace:create"])).toBe(true);
+    expect(pages("member", ["account:read"])).toBe(false);
   });
 });

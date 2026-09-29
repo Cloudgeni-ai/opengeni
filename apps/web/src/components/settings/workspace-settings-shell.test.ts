@@ -188,9 +188,10 @@ describe("settings rail", () => {
       ).map((section) => section.getAttribute("data-settings-section"));
       expect(sections).toEqual(["workspace", "organization", "account"]);
 
+      // The one picker names the workspace and organization; headers name only the scope.
       const workspaceSection = view.section("workspace");
-      expect(workspaceSection?.textContent).toContain("Workspace");
-      expect(workspaceSection?.textContent).toContain("Design preview");
+      expect(workspaceSection?.firstElementChild?.textContent).toBe("Workspace");
+      expect(workspaceSection?.textContent).not.toContain("Design preview");
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
@@ -203,23 +204,32 @@ describe("settings rail", () => {
         "Sandbox environments",
         "Machines",
       ]);
-      expect(workspaceSection?.textContent).toContain("Activity");
-      expect(workspaceSection?.textContent).toContain("Runtime");
+      // The scope header is the only heading in a section: two unlabeled groups,
+      // the workspace's settings and dashboards, then its runtime.
+      for (const retired of ["Activity", "Runtime", "Workspace activity"]) {
+        expect(workspaceSection?.textContent).not.toContain(retired);
+      }
+      expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
+      expect(
+        Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
+      ).toEqual([7, 3]);
 
       const organizationSection = view.section("organization");
-      expect(organizationSection?.textContent).toContain("Organization");
-      expect(organizationSection?.textContent).toContain("Acme Robotics");
+      expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
       expect(linkLabels(organizationSection)).toEqual([
         "General",
         "People",
         "Workspaces",
+        "Organization identity",
         "Models",
         "Integrations",
-        "Organization identity",
         "Billing & usage",
         "Developer",
         "Security & data",
       ]);
+      expect(
+        Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
+      ).toEqual([4, 5]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
@@ -248,6 +258,8 @@ describe("settings rail", () => {
         "Organization identity",
         "Security & data",
       ]);
+      // Two pages stay one group, not two lone rows.
+      expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
       // Insights needs workspace admin.
       expect(linkLabels(view.section("workspace"))).toContain("Agents");
       expect(linkLabels(view.section("workspace"))).not.toContain("Insights");
@@ -289,25 +301,49 @@ describe("settings rail", () => {
     }
   });
 
-  test("switching organization keeps the organization page and opens a shared workspace there", async () => {
+  test("one picker at the top of the rail: the main rail's workspace picker, no per-section switchers", async () => {
+    const view = await renderShell({ kind: "settings", section: "models" });
+    try {
+      const pickers = view.rail().querySelectorAll('button[aria-haspopup="menu"]');
+      expect(pickers).toHaveLength(1);
+      const picker = pickers[0] as HTMLElement;
+      expect(picker.closest("[data-settings-section]")).toBeNull();
+      expect(picker.getAttribute("aria-label")).toBe(
+        "Workspace: Design preview, in Acme Robotics. Switch workspace or organization",
+      );
+      await openMenu(picker);
+      const labels = menuItems().map((item) => item.textContent ?? "");
+      expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
+      expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
+      expect(labels).toContain("New workspace in Acme Robotics");
+      expect(labels).toContain("Organization settings");
+      expect(labels.slice(-3)).toEqual(["Beta Partners", "Northwind Labs", "New organization"]);
+      // Switching workspace keeps the settings page.
+      await act(async () =>
+        menuItems()
+          .find((item) => item.textContent?.includes("Personal workspace"))!
+          .click(),
+      );
+      expect(resetSessionView).toHaveBeenCalledTimes(1);
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId: personalWorkspaceId },
+        search: { section: "models" },
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("switching organization from the picker keeps the organization page", async () => {
     const view = await renderShell({ kind: "organization", section: "people" });
     try {
-      await openMenu(
-        view.section("organization")!.querySelector<HTMLElement>('button[aria-haspopup="menu"]')!,
-      );
-      const labels = menuItems().map((item) => item.textContent);
-      expect(labels).toEqual([
-        "Acme Robotics",
-        "Beta Partners",
-        "Northwind Labs",
-        "New organization",
-      ]);
+      await openMenu(view.rail().querySelector<HTMLElement>('button[aria-haspopup="menu"]')!);
       await act(async () =>
         menuItems()
           .find((item) => item.textContent === "Northwind Labs")!
           .click(),
       );
-      expect(resetSessionView).toHaveBeenCalledTimes(1);
       expect(navigate).toHaveBeenCalledWith({
         to: "/workspaces/$workspaceId/organization",
         params: { workspaceId: northwindWorkspaceId },
@@ -318,28 +354,26 @@ describe("settings rail", () => {
     }
   });
 
-  test("the workspace switcher lists this organization's workspaces and names where it creates", async () => {
-    const view = await renderShell({ kind: "settings", section: "models" });
+  test("switching organization returns to the workspace last used there", async () => {
+    localStorage.setItem(
+      "og.workspace.navigation.organizations:v1:user%3Aalex",
+      JSON.stringify({ [northwind]: northwindPersonalId }),
+    );
+    const view = await renderShell({ kind: "organization", section: "people" });
     try {
-      await openMenu(
-        view.section("workspace")!.querySelector<HTMLElement>('button[aria-haspopup="menu"]')!,
-      );
-      expect(document.body.textContent).toContain("Workspaces in Acme Robotics");
-      const labels = menuItems().map((item) => item.textContent ?? "");
-      expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
-      expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
-      expect(labels.at(-1)).toBe("New workspace in Acme Robotics");
+      await openMenu(view.rail().querySelector<HTMLElement>('button[aria-haspopup="menu"]')!);
       await act(async () =>
         menuItems()
-          .find((item) => item.textContent?.includes("Personal workspace"))!
+          .find((item) => item.textContent === "Northwind Labs")!
           .click(),
       );
       expect(navigate).toHaveBeenCalledWith({
-        to: "/workspaces/$workspaceId/settings",
-        params: { workspaceId: personalWorkspaceId },
-        search: { section: "models" },
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId: northwindPersonalId },
+        search: { section: "people" },
       });
     } finally {
+      localStorage.clear();
       await view.unmount();
     }
   });
@@ -410,6 +444,8 @@ describe("settings rail", () => {
       },
     );
     try {
+      // No picker for a workspace you can't open: the headers name it and its organization.
+      expect(rendered.rail().querySelector('button[aria-haspopup="menu"]')).toBeNull();
       const workspaceSection = rendered.section("workspace");
       expect(workspaceSection?.textContent).toContain("Managed without content access");
       expect(linkLabels(workspaceSection)).toEqual(["General", "Access"]);

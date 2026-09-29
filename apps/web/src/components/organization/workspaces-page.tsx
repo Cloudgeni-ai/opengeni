@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
   CalendarIcon,
@@ -61,6 +61,7 @@ import {
   workspaceRoleOptions,
 } from "./organization-people-model";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import type { ReturnTo } from "@/lib/return-to";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Workspaces: every shared workspace, who is in it
@@ -82,14 +83,24 @@ export function OrganizationWorkspacesPage({
   workspaceId,
   workspace,
   view,
+  returnTo,
+  onEnterWorkspace,
 }: {
   workspaceId: string;
   workspace?: string;
   view?: "new-workspace";
+  /**
+   * New workspace opened from outside this list (the workspace picker): its
+   * back link returns there, and a created workspace opens with `onEnterWorkspace`.
+   */
+  returnTo?: ReturnTo | undefined;
+  onEnterWorkspace?: ((workspaceId: string) => void) | undefined;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
-  if (view === "new-workspace") return <NewWorkspacePage nav={nav} />;
+  if (view === "new-workspace") {
+    return <NewWorkspacePage nav={nav} returnTo={returnTo} onEnterWorkspace={onEnterWorkspace} />;
+  }
   if (workspace) return <WorkspacePage key={workspace} workspaceId={workspace} nav={nav} />;
   return <WorkspacesList directory={directory} nav={nav} />;
 }
@@ -686,7 +697,21 @@ function RenameWorkspaceDialog({
 
 /* --------------------------------------------------------------- create */
 
-function NewWorkspacePage({ nav }: { nav: OrganizationNavigation }) {
+/**
+ * The one New workspace flow, from this list or from the workspace picker
+ * ("New workspace in Acme"). From the list, a created workspace opens as its
+ * page here; from the picker, it opens itself, like switching to it.
+ */
+function NewWorkspacePage({
+  nav,
+  returnTo,
+  onEnterWorkspace,
+}: {
+  nav: OrganizationNavigation;
+  returnTo?: ReturnTo | undefined;
+  onEnterWorkspace?: ((workspaceId: string) => void) | undefined;
+}) {
+  const navigate = useNavigate();
   const directory = useOrganizationDirectory();
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -695,8 +720,10 @@ function NewWorkspacePage({ nav }: { nav: OrganizationNavigation }) {
     <ModelsFormPage
       title="New workspace"
       description={`A shared space for a team in ${organizationName}. You'll be its workspace admin.`}
-      backLabel="Workspaces"
-      onClose={() => nav.openSection("workspaces")}
+      backLabel={returnTo?.label ?? "Workspaces"}
+      onClose={() =>
+        returnTo ? void navigate({ href: returnTo.path }) : nav.openSection("workspaces")
+      }
       submitLabel="Create workspace"
       pendingLabel="Creating…"
       onSubmit={async () => {
@@ -715,7 +742,8 @@ function NewWorkspacePage({ nav }: { nav: OrganizationNavigation }) {
         }
         const id = await directory.createWorkspace(trimmed);
         toast.success(`Created ${trimmed}. You're its workspace admin.`);
-        if (id) nav.openWorkspace(id);
+        if (id && returnTo && onEnterWorkspace) onEnterWorkspace(id);
+        else if (id) nav.openWorkspace(id);
         else nav.openSection("workspaces");
         return true;
       }}

@@ -1,10 +1,14 @@
 import { Link } from "@tanstack/react-router";
-import { Building2Icon, CheckIcon, PauseIcon, PlusIcon, SettingsIcon } from "lucide-react";
-import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { toast } from "sonner";
+import {
+  Building2Icon,
+  CheckIcon,
+  PauseIcon,
+  PlusIcon,
+  SettingsIcon,
+  UserIcon,
+} from "lucide-react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
-import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
-import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
 import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
 import {
   DropdownMenu,
@@ -25,8 +29,13 @@ import {
   type OrgOption,
 } from "@/lib/org";
 import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
+import { currentPageReturnTo, returnToSearch, type ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
-import { canCreateWorkspaceInOrganization } from "@/lib/workspaces";
+import { administersOrganization } from "@/lib/workspaces";
+import {
+  organizationWorkspacePreferenceStorageId,
+  readLastWorkspaceIdsByOrganization,
+} from "@/lib/workspace-navigation-preference";
 import type { Workspace } from "@/types";
 
 /** Menus in the switchers: 16px radius, shadow-md, 14/500 rows. */
@@ -37,6 +46,24 @@ export const SWITCHER_MENU_LABEL_CLASS =
 
 function workspaceInitial(workspace: Workspace | null): string {
   return (workspace?.name.trim()[0] ?? "W").toUpperCase();
+}
+
+/**
+ * A workspace's tile: its initial, or a person for a Personal workspace. The
+ * tile says "personal" quietly, so names keep the width a chip would take.
+ */
+function WorkspaceGlyph({
+  workspace,
+  personal,
+}: {
+  workspace: Workspace | null;
+  personal: boolean;
+}) {
+  return personal ? (
+    <UserIcon aria-hidden="true" className="size-3.5" />
+  ) : (
+    <>{workspaceInitial(workspace)}</>
+  );
 }
 
 export function activeOrganizationLabel(orgs: OrgOption[], activeAccountId: string | null): string {
@@ -65,68 +92,39 @@ export function OrganizationTile({ className }: { className?: string }) {
 }
 
 /**
- * The create-workspace flow for one exact organization: the dialog names it,
- * and the request is pinned to it.
+ * Whether this person can create workspaces in the organization: the same rule
+ * that shows Organization settings > Workspaces, where workspaces are created.
  */
-export function useCreateWorkspaceFlow(input: {
-  /** The workspace the request is made from (its transition fence). */
-  workspaceId: string;
-  organization: { accountId: string; label: string } | null;
-  onCreated: (workspaceId: string) => void;
-}): { start: () => void; dialog: ReactNode } {
+export function useCanCreateWorkspaceIn(accountId: string | null): boolean {
   const context = useAppContext();
-  const [open, setOpen] = useState(false);
-  const [nameDraft, setNameDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const organization = input.organization;
+  return administersOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId,
+  });
+}
 
-  async function submit() {
-    const name = nameDraft.trim();
-    if (!name || !organization) return;
-    const acceptedTransition = context.captureWorkspaceInvocation(input.workspaceId);
-    if (!acceptedTransition) return;
-    setBusy(true);
-    try {
-      const created = await context.createWorkspace({ name, accountId: organization.accountId });
-      if (!created) return;
-      if (!context.ownsWorkspaceInvocation(input.workspaceId, acceptedTransition)) return;
-      toast.success(`Workspace ${created.name} created in ${organization.label}`);
-      setOpen(false);
-      setNameDraft("");
-      input.onCreated(created.id);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return {
-    start: () => setOpen(true),
-    dialog: (
-      <WorkspaceNameDialog
-        mode={open ? "create" : null}
-        organizationName={organization?.label}
-        name={nameDraft}
-        busy={busy}
-        onNameChange={setNameDraft}
-        onOpenChange={(next) => {
-          setOpen(next);
-          if (!next) setNameDraft("");
-        }}
-        onSubmit={() => void submit()}
-      />
-    ),
-  };
+/** The last workspace used in each organization, for switching back to it. */
+export function useRememberedWorkspaceIds(): Record<string, string> {
+  const context = useAppContext();
+  return readLastWorkspaceIdsByOrganization(
+    organizationWorkspacePreferenceStorageId(context.accessContext.subjectId),
+  );
 }
 
 /**
  * "New workspace in Acme": the create action always names the organization it
- * creates in. Without permission there, it says so instead of creating
- * somewhere else.
+ * creates in, and opens that organization's New workspace page (the one create
+ * flow, also reached from Organization settings > Workspaces). Its back link
+ * returns here. Without permission there, it says so instead.
  */
 export function CreateWorkspaceMenuItem(props: {
   organizationLabel: string;
   canCreate: boolean;
-  onCreate: () => void;
+  /** A workspace of that organization, to open its organization settings through. */
+  workspaceId: string;
+  /** Where the page's back link returns: the page the menu was opened on. */
+  returnTo?: ReturnTo | undefined;
 }) {
   if (!props.canCreate) {
     return (
@@ -148,20 +146,24 @@ export function CreateWorkspaceMenuItem(props: {
     );
   }
   return (
-    <DropdownMenuItem
-      className={SWITCHER_MENU_ITEM_CLASS}
-      onSelect={(event) => {
-        event.preventDefault();
-        props.onCreate();
-      }}
-    >
-      <PlusIcon className="size-4" />
-      <span
-        className="min-w-0 flex-1 truncate"
-        title={`New workspace in ${props.organizationLabel}`}
+    <DropdownMenuItem asChild className={SWITCHER_MENU_ITEM_CLASS}>
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId: props.workspaceId }}
+        search={{
+          section: "workspaces",
+          view: "new-workspace",
+          ...returnToSearch(props.returnTo),
+        }}
       >
-        New workspace in {props.organizationLabel}
-      </span>
+        <PlusIcon className="size-4" />
+        <span
+          className="min-w-0 flex-1 truncate"
+          title={`New workspace in ${props.organizationLabel}`}
+        >
+          New workspace in {props.organizationLabel}
+        </span>
+      </Link>
     </DropdownMenuItem>
   );
 }
@@ -210,6 +212,8 @@ export function WorkspaceSwitcherMenu(props: {
   onCreateOrganization?: () => void;
   className?: string;
   compact?: boolean;
+  /** What New workspace's back link says; defaults to the workspace name. */
+  createReturnLabel?: string;
 }) {
   const context = useAppContext();
   const activeWorkspace =
@@ -219,11 +223,8 @@ export function WorkspaceSwitcherMenu(props: {
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
-  const createWorkspace = useCreateWorkspaceFlow({
-    workspaceId: props.workspaceId,
-    organization: activeAccountId ? { accountId: activeAccountId, label: currentOrgLabel } : null,
-    onCreated: props.onSelect,
-  });
+  const canCreate = useCanCreateWorkspaceIn(activeAccountId);
+  const rememberedWorkspaceIds = useRememberedWorkspaceIds();
 
   return (
     <>
@@ -233,9 +234,12 @@ export function WorkspaceSwitcherMenu(props: {
         workspaces={context.workspaces}
         activeWorkspaceId={props.workspaceId}
         activeAccountId={activeAccountId}
-        canCreate={canCreateWorkspaceInOrganization(context.accessContext, activeAccountId)}
+        canCreate={canCreate}
+        createReturnTo={currentPageReturnTo(
+          props.createReturnLabel ?? activeWorkspace?.name ?? "Back",
+        )}
+        rememberedWorkspaceIds={rememberedWorkspaceIds}
         onSelect={props.onSelect}
-        onCreate={createWorkspace.start}
         onCreateOrganization={props.onCreateOrganization}
         managedSelfContext={context.managedSelfContext}
         align={props.align}
@@ -249,7 +253,6 @@ export function WorkspaceSwitcherMenu(props: {
           className={props.className}
         />
       </WorkspaceMenu>
-      {createWorkspace.dialog}
     </>
   );
 }
@@ -292,7 +295,7 @@ export const WorkspaceSwitcherTrigger = forwardRef<
           className,
         )}
       >
-        {workspaceInitial(activeWorkspace)}
+        <WorkspaceGlyph workspace={activeWorkspace} personal={personal} />
       </button>
     );
   }
@@ -305,9 +308,8 @@ export const WorkspaceSwitcherTrigger = forwardRef<
       className={className}
       compact={compact}
       label={activeWorkspace?.name ?? "Select workspace"}
-      meta={organizationLabel}
-      icon={workspaceInitial(activeWorkspace)}
-      badge={personal ? <PersonalWorkspaceBadge decorative /> : null}
+      meta={personal ? `Personal · ${organizationLabel}` : organizationLabel}
+      icon={<WorkspaceGlyph workspace={activeWorkspace} personal={personal} />}
     />
   );
 });
@@ -319,8 +321,11 @@ export function WorkspaceMenu(props: {
   activeWorkspaceId: string;
   activeAccountId: string | null;
   canCreate: boolean;
+  /** Where New workspace's back link returns. */
+  createReturnTo?: ReturnTo | undefined;
+  /** The last workspace used in each organization. */
+  rememberedWorkspaceIds?: Record<string, string>;
   onSelect: (workspaceId: string) => void;
-  onCreate: () => void;
   onCreateOrganization?: () => void;
   managedSelfContext: ManagedSelfContext | null;
   align: "start" | "end";
@@ -342,7 +347,11 @@ export function WorkspaceMenu(props: {
     .filter((org) => org.accountId !== props.activeAccountId)
     .map((org) => ({
       org,
-      landing: organizationLandingWorkspaceId(props.workspaces, org.accountId),
+      landing: organizationLandingWorkspaceId(
+        props.workspaces,
+        org.accountId,
+        props.rememberedWorkspaceIds?.[org.accountId],
+      ),
     }))
     .filter(({ landing }) => landing !== null);
   const trigger = <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>;
@@ -386,7 +395,8 @@ export function WorkspaceMenu(props: {
             <CreateWorkspaceMenuItem
               organizationLabel={currentOrg.label}
               canCreate={props.canCreate}
-              onCreate={props.onCreate}
+              workspaceId={props.activeWorkspaceId}
+              returnTo={props.createReturnTo}
             />
           </DropdownMenuGroup>
         ) : null}
@@ -460,10 +470,12 @@ export function WorkspaceMenuItemContent(props: {
         aria-hidden="true"
         className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
       >
-        {workspaceInitial(props.workspace)}
+        <WorkspaceGlyph workspace={props.workspace} personal={personal} />
       </span>
-      <span className="min-w-0 flex-1 truncate">{props.workspace.name}</span>
-      {personal ? <PersonalWorkspaceBadge /> : null}
+      <span className="min-w-0 flex-1 truncate">
+        {props.workspace.name}
+        {personal ? <span className="sr-only">, your Personal workspace</span> : null}
+      </span>
       {paused ? (
         <>
           <PauseIcon aria-hidden="true" className="size-3.5 fill-current text-status-waiting" />

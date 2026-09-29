@@ -40,6 +40,7 @@ const shellSource = [
 const workspaceShellSource = await Bun.file(
   `${import.meta.dir}/components/settings/workspace-settings-shell.tsx`,
 ).text();
+const workspacesLibSource = await Bun.file(`${import.meta.dir}/lib/workspaces.ts`).text();
 // Which organization pages a person can use: one rule for the rail and the route.
 const accessSource = await Bun.file(
   `${import.meta.dir}/lib/organization-settings-access.ts`,
@@ -139,7 +140,9 @@ describe("organization administration surface", () => {
     expect(accessSource).toContain('input.clientConfig.productAccessMode === "local"');
     expect(routeSource).toContain("organizationAdministratorSession");
     expect(routeSource).toContain("singleUser={singleUser}");
-    expect(accessSource).toContain('actorRole === "owner" || actorRole === "admin"');
+    // Owners and admins in an administrator session: one rule, shared with the picker.
+    expect(accessSource).toContain("administersOrganization(input)");
+    expect(workspacesLibSource).toContain('role === "owner" || role === "admin"');
     // Models is shown only to organization administrators.
     expect(accessSource).toMatch(/if \(administrator\) \{[^}]*visible\.add\("models"\)/u);
     expect(organizationCodexSource).toContain("setLoadError(");

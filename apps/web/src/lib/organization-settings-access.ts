@@ -7,6 +7,7 @@ import {
   type OrganizationAdminSection,
 } from "@/lib/organization-admin";
 import { hasAccountPermission } from "@/lib/permissions";
+import { administersOrganization } from "@/lib/workspaces";
 import type { AccessContext, ClientConfig, OrganizationMembershipRole } from "@/types";
 
 export type OrganizationSettingsAccess = {
@@ -61,8 +62,8 @@ export function organizationSettingsAccess(input: {
   const singleUser = input.clientConfig.productAccessMode === "local";
   const managedHumanSession = input.clientConfig.auth.mode === "managedSession";
   const organizationAdministratorSession = managedHumanSession || singleUser;
-  const administrator =
-    organizationAdministratorSession && (actorRole === "owner" || actorRole === "admin");
+  // The one rule the rail's picker also uses for "New workspace in <organization>".
+  const administrator = administersOrganization(input);
 
   const visible = new Set<OrganizationAdminSection>();
   if (administrator) {

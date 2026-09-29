@@ -49,6 +49,61 @@ export function writeLastWorkspaceId(
   }
 }
 
+/**
+ * The last workspace used in each organization, so switching organization
+ * returns there. Browser-local, namespaced by subject like the landing
+ * preference, and only a hint: callers validate it against the current list.
+ */
+export function organizationWorkspacePreferenceStorageId(subjectId: string): string {
+  return [
+    "og.workspace.navigation.organizations",
+    `v${WORKSPACE_NAVIGATION_PREFERENCE_VERSION}`,
+    encodeURIComponent(subjectId),
+  ].join(":");
+}
+
+const MAX_REMEMBERED_ORGANIZATIONS = 50;
+
+export function readLastWorkspaceIdsByOrganization(
+  preferenceStorageId: string,
+  storage: WorkspaceNavigationStorage | null = browserStorage(),
+): Record<string, string> {
+  if (!storage) return {};
+  try {
+    const parsed: unknown = JSON.parse(storage.getItem(preferenceStorageId) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const remembered: Record<string, string> = {};
+    for (const [accountId, workspaceId] of Object.entries(parsed)) {
+      const id = boundedWorkspaceId(workspaceId);
+      if (boundedWorkspaceId(accountId) && id) remembered[accountId] = id;
+    }
+    return remembered;
+  } catch {
+    return {};
+  }
+}
+
+export function writeLastWorkspaceIdForOrganization(
+  preferenceStorageId: string,
+  accountId: string,
+  workspaceId: string,
+  storage: WorkspaceNavigationStorage | null = browserStorage(),
+): void {
+  if (!storage || !boundedWorkspaceId(accountId) || !boundedWorkspaceId(workspaceId)) return;
+  const remembered = readLastWorkspaceIdsByOrganization(preferenceStorageId, storage);
+  if (remembered[accountId] === workspaceId) return;
+  delete remembered[accountId];
+  // Most recent last; the oldest organizations fall off past the bound.
+  const entries = [...Object.entries(remembered), [accountId, workspaceId] as const].slice(
+    -MAX_REMEMBERED_ORGANIZATIONS,
+  );
+  try {
+    storage.setItem(preferenceStorageId, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // Switching falls back to the organization's first workspace.
+  }
+}
+
 export function isAuthorizedWorkspaceId(
   workspaceId: string | null | undefined,
   workspaces: readonly Workspace[],

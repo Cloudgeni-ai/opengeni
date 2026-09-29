@@ -32,30 +32,33 @@ function grant(accountId: string, name: string, role: "owner" | "member") {
     metadata: { accountName: name },
   };
 }
-const createWorkspace = mock(async (request: { name: string; accountId?: string }) =>
-  workspace("ws-new", request.accountId ?? "", request.name),
-);
 
 mock.module("@tanstack/react-router", () => ({
   Link: ({
     children,
     to,
     params,
+    search,
     ...props
   }: {
     children: ReactNode;
     to: string;
     params: { workspaceId: string };
-  }) => (
-    <a {...props} href={to.replace("$workspaceId", params.workspaceId)}>
-      {children}
-    </a>
-  ),
+    search?: Record<string, string>;
+  }) => {
+    const query = search ? `?${new URLSearchParams(search).toString()}` : "";
+    return (
+      <a {...props} href={`${to.replace("$workspaceId", params.workspaceId)}${query}`}>
+        {children}
+      </a>
+    );
+  },
 }));
 mock.module("@/context", () => ({
   useAppContext: () => ({
     workspaces,
     managedSelfContext: null,
+    clientConfig: { productAccessMode: "managed", auth: { mode: "managedSession" } },
     accessContext: {
       mode: "managed",
       subjectId: "user:alex",
@@ -68,13 +71,10 @@ mock.module("@/context", () => ({
       ],
       workspaceGrants: [],
     },
-    captureWorkspaceInvocation: () => ({ revision: 1 }),
-    ownsWorkspaceInvocation: () => true,
-    createWorkspace,
   }),
 }));
 
-GlobalRegistrator.register();
+GlobalRegistrator.register({ url: "http://homeserver/workspaces/ws-design/sessions" });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { WorkspaceSwitcherMenu } = await import("./workspace-switcher");
 
@@ -83,7 +83,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 beforeEach(() => {
-  createWorkspace.mockClear();
+  localStorage.clear();
   document.body.replaceChildren();
 });
 
@@ -136,6 +136,21 @@ describe("workspace picker", () => {
       expect(picker.trigger.getAttribute("aria-label")).toBe(
         "Workspace: Design preview, in Acme Robotics. Switch workspace or organization",
       );
+    } finally {
+      await picker.unmount();
+    }
+  });
+
+  test('a Personal workspace reads as a person tile and "Personal · <organization>", not a chip', async () => {
+    const picker = await renderPicker("ws-acme-personal");
+    try {
+      expect(picker.trigger.textContent).toBe("Personal workspacePersonal · Acme Robotics");
+      expect(picker.trigger.getAttribute("aria-label")).toContain("Personal workspace:");
+      expect(picker.trigger.querySelector("svg.lucide-user")).not.toBeNull();
+      const row = item("Personal workspace")!;
+      expect(row.querySelector("svg.lucide-user")).not.toBeNull();
+      // No chip: the name keeps the width; screen readers still hear it.
+      expect(row.textContent).toBe("Personal workspace, your Personal workspace");
     } finally {
       await picker.unmount();
     }
@@ -196,34 +211,40 @@ describe("workspace picker", () => {
     }
   });
 
-  test("creates the new workspace in the organization it names", async () => {
+  test("switching organization returns to the workspace last used there", async () => {
+    localStorage.setItem(
+      "og.workspace.navigation.organizations:v1:user%3Aalex",
+      JSON.stringify({ [northwind]: "ws-northwind-personal", [beta]: "ws-gone" }),
+    );
     const picker = await renderPicker("ws-design");
     try {
-      await act(async () => item("New workspace in Acme Robotics")!.click());
-      const dialog = document.body.querySelector('[role="dialog"]')!;
-      expect(dialog.textContent).toContain("New workspace in Acme Robotics");
-      expect(dialog.textContent).toContain("A separate space in Acme Robotics");
-      const input = dialog.querySelector<HTMLInputElement>("#workspace-name")!;
-      await act(async () => {
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
-          input,
-          "Research",
-        );
-        const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
-        (
-          input as unknown as Record<
-            string,
-            { onChange: (event: { target: HTMLInputElement }) => void }
-          >
-        )[key]!.onChange({ target: input });
+      await act(async () => item("Northwind Labs")!.click());
+      expect(picker.selected).toEqual(["ws-northwind-personal"]);
+    } finally {
+      await picker.unmount();
+    }
+    // A remembered workspace that is no longer open falls back to the first shared one.
+    const again = await renderPicker("ws-design");
+    try {
+      await act(async () => item("Beta Partners")!.click());
+      expect(again.selected).toEqual(["ws-launch"]);
+    } finally {
+      await again.unmount();
+    }
+  });
+
+  test("New workspace opens the organization's one create page, named and returning here", async () => {
+    const picker = await renderPicker("ws-design");
+    try {
+      const create = item("New workspace in Acme Robotics")!;
+      const href = new URL(create.getAttribute("href")!, "http://homeserver");
+      expect(href.pathname).toBe("/workspaces/ws-design/organization");
+      expect(Object.fromEntries(href.searchParams)).toEqual({
+        section: "workspaces",
+        view: "new-workspace",
+        from: "/workspaces/ws-design/sessions",
+        fromLabel: "Design preview",
       });
-      await act(async () => {
-        dialog
-          .querySelector("form")!
-          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      });
-      expect(createWorkspace).toHaveBeenCalledWith({ name: "Research", accountId: acme });
-      expect(picker.selected).toEqual(["ws-new"]);
     } finally {
       await picker.unmount();
     }
@@ -235,9 +256,9 @@ describe("workspace picker", () => {
       const create = item("New workspace in Beta Partners")!;
       expect(create.hasAttribute("data-disabled")).toBe(true);
       expect(create.textContent).toContain("Only owners and admins can create workspaces here.");
+      expect(create.getAttribute("href")).toBeNull();
       await act(async () => create.click());
       expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-      expect(createWorkspace).not.toHaveBeenCalled();
       // Creating in an organization they administer starts by switching to it.
       expect(item("Acme Robotics")).toBeDefined();
     } finally {

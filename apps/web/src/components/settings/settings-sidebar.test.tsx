@@ -54,11 +54,12 @@ function shell(currentPage = "General", page: { title: string } | null = { title
           ),
         }}
         home={settingsHomeLink("workspace")}
+        scope={<button type="button">Switch workspace</button>}
         sections={[
           {
             id: "workspace",
             label: "Workspace",
-            scope: <button type="button">Switch workspace</button>,
+            meta: "Design preview",
             groups: [
               {
                 items: [
@@ -76,7 +77,7 @@ function shell(currentPage = "General", page: { title: string } | null = { title
           {
             id: "organization",
             label: "Organization",
-            scope: <p>Acme Robotics</p>,
+            meta: "Acme Robotics",
             groups: [
               {
                 items: [
@@ -123,15 +124,16 @@ test("desktop settings draw the settings rail in place of the main rail, with a 
     expect(rail?.querySelector('a[href="#general"]')?.getAttribute("aria-current")).toBe("page");
     // Workspace and organization pages sit in one rail, each under its labeled section.
     const sections = Array.from(rail!.querySelectorAll<HTMLElement>("[data-settings-section]"));
-    expect(sections.map((section) => section.getAttribute("aria-labelledby") !== null)).toEqual([
-      true,
-      true,
+    expect(sections.map((section) => section.getAttribute("aria-label"))).toEqual([
+      "Workspace",
+      "Organization",
     ]);
     const [workspaceSection, organizationSection] = sections;
-    expect(workspaceSection?.textContent).toContain("Workspace");
+    // One picker sits above the sections; each section is headed by its scope and name.
+    expect(workspaceSection?.textContent).not.toContain("Switch workspace");
+    expect(workspaceSection?.firstElementChild?.textContent).toBe("WorkspaceDesign preview");
     expect(workspaceSection?.querySelector('a[href="#models"]')).not.toBeNull();
-    expect(organizationSection?.textContent).toContain("Organization");
-    expect(organizationSection?.textContent).toContain("Acme Robotics");
+    expect(organizationSection?.firstElementChild?.textContent).toBe("OrganizationAcme Robotics");
     expect(organizationSection?.querySelector('a[href="#organization-models"]')).not.toBeNull();
     expect(workspaceSection?.querySelector('a[href="#organization-models"]')).toBeNull();
     // The page renders full width beside the rail with its own header.

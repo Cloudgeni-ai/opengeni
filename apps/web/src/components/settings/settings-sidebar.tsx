@@ -2,7 +2,6 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import {
   useEffect,
-  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -60,13 +59,18 @@ export interface SettingsRailGroup {
   items: SettingsRailItem[];
 }
 
-/** One scope of settings: "Workspace", "Organization" or "Your account". */
+/**
+ * One scope of settings: "Workspace", "Organization" or "Your account". Its
+ * header is the only heading in the section: the scope, with the workspace or
+ * organization it configures as quiet meta. Groups inside are set apart by
+ * space, without labels.
+ */
 export interface SettingsRailSection {
   id: string;
   /** The scope, in sentence case: "Workspace". */
   label: string;
-  /** Which workspace or organization: a switcher, or its name. */
-  scope?: ReactNode;
+  /** Which one: "Design preview", "Acme Robotics", the account's email. */
+  meta?: string;
   groups: SettingsRailGroup[];
 }
 
@@ -84,6 +88,8 @@ export interface SettingsShellProps {
   back: { link: ReactElement; label: string };
   /** The brand link at the top of the rail, without children. */
   home: ReactElement;
+  /** The one picker under the back link: the same workspace picker as the main rail. */
+  scope?: ReactNode;
   /** Workspace, Organization and Your account, in that order. */
   sections: SettingsRailSection[];
   /** The item that is current. */
@@ -154,19 +160,20 @@ function SettingsRailSectionView({
   activeId: string | null;
   first: boolean;
 }) {
-  const labelId = useId();
   return (
     <div
       role="group"
-      aria-labelledby={labelId}
+      aria-label={section.label}
       data-settings-section={section.id}
-      className={cn("flex min-w-0 flex-col gap-4", !first && "border-t border-border pt-4")}
+      className={cn("flex min-w-0 flex-col gap-3", !first && "border-t border-border pt-4")}
     >
-      <div className="grid min-w-0 gap-1.5">
-        <p id={labelId} className="px-2.5 text-xs leading-4.5 font-medium text-fg-subtle">
-          {section.label}
-        </p>
-        {section.scope ? <div className="min-w-0">{section.scope}</div> : null}
+      <div className="min-w-0 px-2.5">
+        <p className="text-sm leading-5 font-semibold text-fg">{section.label}</p>
+        {section.meta ? (
+          <p className="truncate text-xs leading-4.5 text-fg-subtle" title={section.meta}>
+            {section.meta}
+          </p>
+        ) : null}
       </div>
       {section.groups.map((group, index) => (
         <NavGroup key={group.label ?? `group-${index}`} label={group.label}>
@@ -195,11 +202,12 @@ function SettingsRail({
   label,
   back,
   home,
+  scope,
   sections,
   activeId,
   className,
   onNavigate,
-}: Pick<SettingsShellProps, "label" | "back" | "home" | "sections" | "activeId"> & {
+}: Pick<SettingsShellProps, "label" | "back" | "home" | "scope" | "sections" | "activeId"> & {
   className?: string;
   onNavigate?: () => void;
 }) {
@@ -238,6 +246,7 @@ function SettingsRail({
           <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
             {back.link}
           </NavItem>
+          {scope ? <div className="min-w-0">{scope}</div> : null}
         </div>
       }
     >
@@ -257,6 +266,7 @@ export function SettingsShell({
   label,
   back,
   home,
+  scope,
   sections,
   activeId,
   currentPage,
@@ -274,7 +284,7 @@ export function SettingsShell({
   }, [narrow]);
   useEffect(() => setMenuOpen(false), [activeId, currentPage]);
 
-  const railProps = { label, back, home, sections, activeId };
+  const railProps = { label, back, home, scope, sections, activeId };
 
   const navigation = narrow ? (
     <header className="flex min-w-0 items-center gap-2 border-b border-border bg-surface/40 px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">

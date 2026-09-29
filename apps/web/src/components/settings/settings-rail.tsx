@@ -1,8 +1,10 @@
-// The one settings rail: every settings page the person can use, in labeled
+// The one settings rail: every settings page the person can use, in three
 // sections. "Workspace" lists the current workspace's pages, "Organization"
 // the pages of the organization it belongs to, "Your account" the person's own.
-// Workspace, organization and personal settings all draw this same rail, so a
-// page never moves to another rail and the scope of every page is visible.
+// One picker at the top (the main rail's workspace picker) changes workspace or
+// organization and keeps the same kind of page. Workspace, organization and
+// personal settings all draw this same rail, so a page never moves to another
+// rail and the scope of every page is visible.
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
@@ -18,21 +20,19 @@ import {
   VariableIcon,
   WebhookIcon,
 } from "lucide-react";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 
 import {
+  ORGANIZATION_SETTINGS_GROUPS,
   ORGANIZATION_SETTINGS_ITEMS,
   organizationSettingsLabel,
 } from "./organization-settings-pages";
-import {
-  SettingsOrganizationSwitcher,
-  SettingsWorkspaceSwitcher,
-} from "./settings-scope-switchers";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
-import { OrganizationTile } from "@/components/rail/workspace-switcher";
+import { useCreateOrganizationFlow } from "@/components/rail/switcher-block";
+import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { orgLabel, organizationLandingWorkspaceId } from "@/lib/org";
+import { orgLabel } from "@/lib/org";
 import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
@@ -148,6 +148,14 @@ export function workspacePageLabel(location: WorkspaceManagementLocation): strin
   return "Settings";
 }
 
+/** Groups set apart by space, only when each has at least two pages. */
+function splitIntoGroups(groups: SettingsRailSection["groups"][number]["items"][]) {
+  const filled = groups.filter((items) => items.length > 0);
+  return filled.every((items) => items.length >= 2)
+    ? filled.map((items) => ({ items }))
+    : [{ items: filled.flat() }];
+}
+
 /** The rail id of a destination, unique across the three sections. */
 export function settingsRailItemId(location: SettingsLocation): string | null {
   switch (location.kind) {
@@ -176,6 +184,8 @@ export type ManagedWorkspaceScope = {
 };
 
 export type SettingsRail = {
+  /** The one picker under the back link; null where there is nothing to switch. */
+  picker: ReactNode;
   sections: SettingsRailSection[];
   back: { link: ReactElement; label: string };
   home: ReactElement;
@@ -254,10 +264,35 @@ export function useSettingsRail(input: {
     }
   }
 
-  function openOrganization(nextAccountId: string) {
-    const landing = organizationLandingWorkspaceId(context.workspaces, nextAccountId);
-    if (landing) openWorkspace(landing);
-  }
+  const workspaceName = managedWorkspace?.name ?? workspace?.name ?? null;
+  // This page, as the return target of pages the rail opens outside settings'
+  // own URLs (Your account, New workspace).
+  const hereLabel =
+    location.kind === "organization"
+      ? `${organizationName ?? "Organization"} · ${organizationSettingsLabel(organizationSection ?? "identity")}`
+      : location.kind === "account"
+        ? "Your account"
+        : `${workspaceName ?? "Workspace"} · ${workspacePageLabel(location)}`;
+  const here = location.kind === "account" ? undefined : currentPageReturnTo(hereLabel);
+
+  // The same picker as the main rail: switching workspace or organization keeps
+  // the same kind of settings page. A workspace managed without access has none.
+  const createOrganization = useCreateOrganizationFlow(openWorkspace);
+  const picker =
+    workspace && !managedWorkspace ? (
+      <>
+        <WorkspaceSwitcherMenu
+          workspaceId={workspace.id}
+          collapsed={false}
+          align="start"
+          onSelect={openWorkspace}
+          onCreateOrganization={createOrganization.canCreate ? createOrganization.start : undefined}
+          createReturnLabel={hereLabel}
+          className="w-full"
+        />
+        {createOrganization.dialog}
+      </>
+    ) : null;
 
   const sections: SettingsRailSection[] = [];
 
@@ -265,14 +300,7 @@ export function useSettingsRail(input: {
     sections.push({
       id: "workspace",
       label: "Workspace",
-      scope: (
-        <div className="min-w-0 px-2.5">
-          <p className="truncate text-sm leading-5 font-semibold text-fg">
-            {managedWorkspace.name}
-          </p>
-          <p className="text-xs leading-4.5 text-fg-subtle">Organization management</p>
-        </div>
-      ),
+      meta: `${managedWorkspace.name} · Organization management`,
       groups: [
         {
           items: (["general", "access"] as const).map((section) => ({
@@ -300,40 +328,34 @@ export function useSettingsRail(input: {
     const activityPages = ACTIVITY_PAGES.filter((page) => !page.requiresAdmin || canReadInsights);
     sections.push({
       id: "workspace",
+      // The picker names the workspace; the header only names the scope.
       label: "Workspace",
-      scope: (
-        <SettingsWorkspaceSwitcher
-          workspaceId={workspaceId}
-          organizationName={organizationName ?? "your organization"}
-          onSelect={openWorkspace}
-        />
-      ),
+      // Two groups set apart by space, no labels: the workspace's own settings and
+      // dashboards, then the runtime it runs on.
       groups: [
         {
-          items: SECTION_ORDER.map((section) => ({
-            id: `workspace:${section}`,
-            label: WORKSPACE_SETTINGS_COPY[section].title,
-            icon: SECTION_ICONS[section],
-            link: (
-              <Link
-                to="/workspaces/$workspaceId/settings"
-                params={{ workspaceId }}
-                search={{ section }}
-              />
-            ),
-          })),
+          items: [
+            ...SECTION_ORDER.map((section) => ({
+              id: `workspace:${section}`,
+              label: WORKSPACE_SETTINGS_COPY[section].title,
+              icon: SECTION_ICONS[section],
+              link: (
+                <Link
+                  to="/workspaces/$workspaceId/settings"
+                  params={{ workspaceId }}
+                  search={{ section }}
+                />
+              ),
+            })),
+            ...activityPages.map((page) => ({
+              id: `workspace:${page.to}`,
+              label: page.label,
+              icon: page.icon,
+              link: <Link to={page.to} params={{ workspaceId }} />,
+            })),
+          ],
         },
         {
-          label: "Activity",
-          items: activityPages.map((page) => ({
-            id: `workspace:${page.to}`,
-            label: page.label,
-            icon: page.icon,
-            link: <Link to={page.to} params={{ workspaceId }} />,
-          })),
-        },
-        {
-          label: "Runtime",
           items: RUNTIME_PAGES.map((page) => ({
             id: `workspace:${page.to}`,
             label: page.label,
@@ -350,30 +372,16 @@ export function useSettingsRail(input: {
     sections.push({
       id: "organization",
       label: "Organization",
-      scope:
-        workspace && !managedWorkspace ? (
-          <SettingsOrganizationSwitcher
-            accountId={accountId}
-            organizationName={organizationName}
-            onSelect={openOrganization}
-            onCreated={openWorkspace}
-          />
-        ) : (
-          <div className="flex min-w-0 items-center gap-2 px-2.5 py-1">
-            <OrganizationTile className="size-6 rounded-md" />
-            <p
-              className="truncate text-sm leading-5 font-semibold text-fg"
-              title={organizationName}
-            >
-              {organizationName}
-            </p>
-          </div>
-        ),
+      // Without a picker (a workspace managed without access), the header names it.
+      ...(picker ? {} : { meta: organizationName }),
+      // Two groups set apart by space: the organization and its people, then
+      // what it provides, pays for and protects. A short list (a member's two
+      // pages) stays one group rather than two lone rows.
       groups: anchor
-        ? [
-            {
-              items: ORGANIZATION_SETTINGS_ITEMS.filter((item) =>
-                access.visibleSections.has(item.id),
+        ? splitIntoGroups(
+            ORGANIZATION_SETTINGS_GROUPS.map((group) =>
+              ORGANIZATION_SETTINGS_ITEMS.filter(
+                (item) => group.includes(item.id) && access.visibleSections.has(item.id),
               ).map((item) => ({
                 id: `organization:${item.id}`,
                 label: item.label,
@@ -387,23 +395,14 @@ export function useSettingsRail(input: {
                   />
                 ),
               })),
-            },
-          ]
+            ),
+          )
         : [],
     });
   }
 
-  const workspaceName = managedWorkspace?.name ?? workspace?.name ?? null;
   if (context.clientConfig.auth.mode === "managedSession") {
     // Your account opens outside workspace settings; its back link returns here.
-    const here =
-      location.kind === "account"
-        ? undefined
-        : currentPageReturnTo(
-            location.kind === "organization"
-              ? `${organizationName ?? "Organization"} · ${organizationSettingsLabel(organizationSection ?? "identity")}`
-              : `${workspaceName ?? "Workspace"} · ${workspacePageLabel(location)}`,
-          );
     sections.push({
       id: "account",
       label: "Your account",
@@ -440,6 +439,7 @@ export function useSettingsRail(input: {
 
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   return {
+    picker,
     sections,
     back,
     home: settingsHomeLink(sessionsWorkspaceId ?? undefined),
