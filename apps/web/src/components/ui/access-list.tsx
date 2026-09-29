@@ -522,7 +522,7 @@ function ListVariant({ props }: { props: AccessListProps<string> }) {
       ) : null}
       {services.length > 0 ? (
         <div className="border-t border-border pt-4">
-          <h3 id={servicesId} className="px-3 text-xs leading-4.5 font-medium text-fg-subtle">
+          <h3 id={servicesId} className="px-3 text-xs leading-4.5 font-medium text-fg">
             Service accounts
           </h3>
           <ul aria-labelledby={servicesId} className={cn(listClass, "mt-1")}>

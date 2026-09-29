@@ -1442,7 +1442,7 @@ export function PreferenceRegistryAdministration({
         <div className="min-w-0">
           {compact ? null : (
             <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg">
                 Authorized registry records
               </h3>
               <span className="text-2xs text-fg-subtle">Up to 100 records</span>
@@ -1472,7 +1472,7 @@ export function PreferenceRegistryAdministration({
           ) : null}
           {compact && pendingSkills.length > 0 ? (
             <div className="mb-5 grid gap-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg">
                 Finish saving
               </h3>
               {pendingSkills.map((preference) => (
@@ -1493,7 +1493,7 @@ export function PreferenceRegistryAdministration({
               personalWorkspace ? (
                 <div className="grid gap-5">
                   <div>
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg">
                       Your personal Skills
                     </h3>
                     {personalSkills.length > 0 ? (
@@ -1511,7 +1511,7 @@ export function PreferenceRegistryAdministration({
                   </div>
                   {inheritedSkills.length > 0 ? (
                     <div>
-                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg">
                         Company and workspace Skills available here
                       </h3>
                       <div className="grid gap-3 sm:grid-cols-2">
@@ -1551,7 +1551,7 @@ export function PreferenceRegistryAdministration({
 
         {compact ? null : (
           <div className="min-w-0">
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg">
               Selected preference
             </h3>
             {!selectedId ? <EmptyState>Select a registry record to inspect it.</EmptyState> : null}

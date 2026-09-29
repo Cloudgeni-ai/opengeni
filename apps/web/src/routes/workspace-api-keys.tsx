@@ -710,7 +710,7 @@ function CustomPermissions({
       <div className="grid min-w-0 gap-x-6 gap-y-6 @[34rem]/permissions:grid-cols-2">
         {WORKSPACE_KEY_PERMISSION_GROUPS.map((group) => (
           <fieldset key={group.label} className="m-0 min-w-0 border-0 p-0">
-            <legend className="mb-2 p-0 text-xs leading-4.5 font-medium text-fg-muted">
+            <legend className="mb-2 p-0 text-xs leading-4.5 font-medium text-fg">
               {group.label}
             </legend>
             <div className="flex min-w-0 flex-col gap-3">

@@ -255,7 +255,7 @@ export function ConnectionAccessFormPage({
             </ChoiceCards>
             {draft.allowedWorkspaces !== null ? (
               <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
-                <legend className="mb-2 text-xs leading-4.5 font-medium text-fg-subtle">
+                <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">
                   Shared workspaces
                 </legend>
                 {data.workspaces.map((workspace) => (
@@ -318,9 +318,7 @@ export function ConnectionAccessFormPage({
           </ChoiceCards>
           {draft.allowedModels !== null ? (
             <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
-              <legend className="mb-2 text-xs leading-4.5 font-medium text-fg-subtle">
-                Models
-              </legend>
+              <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">Models</legend>
               {[
                 ...data.models,
                 ...draft.allowedModels

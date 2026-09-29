@@ -970,7 +970,7 @@ function CollectionMembers({
 }
 
 function MembersLabel({ children }: { children: string }) {
-  return <h3 className="m-0 text-xs leading-4.5 font-medium text-fg-subtle">{children}</h3>;
+  return <h3 className="m-0 text-xs leading-4.5 font-medium text-fg">{children}</h3>;
 }
 
 function EntryHistory({

@@ -659,7 +659,7 @@ function ChecklistGroup({ label, children }: { label: string; children: ReactNod
   const id = useId();
   return (
     <section aria-labelledby={id} className="min-w-0">
-      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg-subtle">
+      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg">
         {label}
       </h3>
       <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">{children}</ul>

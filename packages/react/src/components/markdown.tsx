@@ -116,7 +116,7 @@ const baseComponents: Components = {
   ),
   h4: ({ children, ...props }) => (
     <h4
-      className="mt-4 mb-1.5 text-og-sm font-semibold uppercase tracking-[0.04em] text-og-fg-muted first:mt-0"
+      className="mt-4 mb-1.5 text-og-sm font-semibold uppercase tracking-[0.04em] text-og-fg first:mt-0"
       {...props}
     >
       {children}

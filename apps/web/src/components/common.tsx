@@ -118,7 +118,7 @@ function ConnectionPillContent({ meta }: { meta: ConnectionPillMeta }) {
 export function InspectorSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="min-w-0 space-y-2">
-      <h3 className="text-xs font-medium uppercase tracking-wider text-fg-subtle">{title}</h3>
+      <h3 className="text-xs font-medium uppercase tracking-wider text-fg">{title}</h3>
       <div className="min-w-0 overflow-hidden rounded-lg border border-border bg-surface/45 p-3">
         {children}
       </div>

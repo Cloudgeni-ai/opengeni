@@ -58,7 +58,7 @@ export function NewSessionStarters({
 }) {
   return (
     <section className="mt-8" aria-label="Starter suggestions">
-      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
         Suggestions
       </h2>
       <div className="grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2">

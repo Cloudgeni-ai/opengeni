@@ -1829,7 +1829,7 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
 
   return (
     <section className="mt-12">
-      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
         Recent sessions
       </h2>
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full

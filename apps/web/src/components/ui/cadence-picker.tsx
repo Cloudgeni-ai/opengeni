@@ -2252,15 +2252,11 @@ function PresetField({
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       {htmlFor ? (
-        <label
-          htmlFor={htmlFor}
-          id={labelId}
-          className="text-xs leading-4.5 font-medium text-fg-muted"
-        >
+        <label htmlFor={htmlFor} id={labelId} className="text-xs leading-4.5 font-medium text-fg">
           {label}
         </label>
       ) : (
-        <span id={labelId} className="text-xs leading-4.5 font-medium text-fg-muted">
+        <span id={labelId} className="text-xs leading-4.5 font-medium text-fg">
           {label}
         </span>
       )}
@@ -2285,7 +2281,7 @@ function PresetsVariant(props: PartProps) {
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 flex-col gap-2">
-        <span id={repeatsId} className="text-xs leading-4.5 font-medium text-fg-muted">
+        <span id={repeatsId} className="text-xs leading-4.5 font-medium text-fg">
           Repeats
         </span>
         <PresetChips
