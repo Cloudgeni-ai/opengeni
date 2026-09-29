@@ -1532,12 +1532,18 @@ function SessionChatPane(props: {
   );
   const [activeSearchTarget, setActiveSearchTarget] = useState<TimelineSearchTarget | null>(null);
   const findButton = useRef<HTMLButtonElement>(null);
-  const openFind = useCallback((fromSessionSearch = false) => {
+  const openFind = useCallback((fromSessionSearch: boolean) => {
     setFindMounted(true);
     setFindOpen(true);
     setFindFromSessionSearch(fromSessionSearch);
     setFindFocusRevision((value) => value + 1);
   }, []);
+  // Ctrl/Cmd+F and the Find button open a plain bar, but only refocus one that
+  // is already open, keeping its way back to session search.
+  const openFindManually = useCallback(() => {
+    if (findOpen) setFindFocusRevision((value) => value + 1);
+    else openFind(false);
+  }, [findOpen, openFind]);
   const { onSearchOriginConsumed } = props;
   const closeFind = useCallback(() => {
     setFindOpen(false);
@@ -1577,11 +1583,11 @@ function SessionChatPane(props: {
       )
         return;
       event.preventDefault();
-      openFind();
+      openFindManually();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openFind]);
+  }, [openFindManually]);
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
@@ -2558,7 +2564,7 @@ function SessionChatPane(props: {
           type="button"
           variant="ghost"
           size="sm"
-          onClick={() => openFind()}
+          onClick={openFindManually}
           aria-label="Find in conversation"
           title="Find in conversation (Ctrl/Cmd+F)"
           className="text-xs text-fg-muted"

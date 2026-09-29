@@ -434,6 +434,10 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await expectTextInTimelineView(page, /ledger-north/);
       expect(landed.searchParams.get("searchOrigin")).toBe("session-search");
       expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(1);
+      // Ctrl/Cmd+F on the open strip only refocuses it and keeps the way back.
+      await page.keyboard.press("Control+f");
+      await expectFocused(find.getByRole("searchbox", { name: "Find in conversation" }));
+      expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(1);
 
       // Closing the strip drops the origin mark, so a reload or shared link
       // starts plain, and the strip stays closed.
