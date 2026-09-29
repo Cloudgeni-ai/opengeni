@@ -78,7 +78,9 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import { isRequestBodyValidationError, requestBodyValidationHttpError } from "./http/request-body";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
+import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   boundedRegisteredRouteLabel,
@@ -714,6 +716,37 @@ export function createAppComposition(deps: AppDependencies): {
       return;
     }
     return await accessKeyBoundary(c, next);
+  });
+
+  // A request no registered handler answers is a 404 (or a 405 when the path
+  // exists for other methods) before any authentication, authorization, or
+  // contract middleware can turn it into a misleading 401/409/503. This runs
+  // after the deployment perimeter so an unauthenticated caller of a
+  // key-protected deployment learns nothing new.
+  app.use("/v1/*", async (c, next) => {
+    const unmatched = unmatchedRoute(app, c);
+    if (!unmatched) {
+      await next();
+      return;
+    }
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    if (unmatched.status === 405) c.header("allow", unmatched.allow.join(", "));
+    return c.json(
+      ErrorEnvelope.parse({
+        error: {
+          status: unmatched.status,
+          code: "not_found",
+          message:
+            unmatched.status === 405
+              ? `Method ${c.req.method} is not supported for this resource. Allowed: ${unmatched.allow.join(", ")}.`
+              : "Resource not found.",
+          retryable: false,
+          requestId,
+        },
+      }),
+      unmatched.status,
+    );
   });
 
   app.use("/v1/*", async (c, next) => {
@@ -1468,7 +1501,9 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (workspaceControlBusyHttpError(rawError) ?? rawError);
+        : (workspaceControlBusyHttpError(rawError) ??
+          requestBodyValidationHttpError(rawError) ??
+          rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
@@ -1748,6 +1783,9 @@ export function httpStatusForError(error: unknown): number {
   if (workspaceControlBusyHttpError(error)) {
     return 503;
   }
+  if (isRequestBodyValidationError(error)) {
+    return 400;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }
@@ -1761,7 +1799,7 @@ export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 401) return "unauthenticated";
   if (status === 402) return "payment_required";
   if (status === 403) return "forbidden";
-  if (status === 404) return "not_found";
+  if (status === 404 || status === 405) return "not_found";
   if (status === 409) return "conflict";
   if (status === 413 || status === 422 || status === 400) return "validation_failed";
   if (status === 429) return "limit_exceeded";

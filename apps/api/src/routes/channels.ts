@@ -16,6 +16,7 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { parseRequestJson } from "../http/request-body";
 
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Deliberately session-permission-gated (not workspace:admin):
@@ -42,7 +43,7 @@ export function registerChannelRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/channels", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const payload = CreateChannelRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateChannelRequest);
     try {
       const channel = await createChannel(db, {
         accountId: grant.accountId,
@@ -63,7 +64,7 @@ export function registerChannelRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/channels/:channelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const payload = UpdateChannelRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateChannelRequest);
     try {
       const channel = await updateChannel(
         db,
@@ -86,7 +87,7 @@ export function registerChannelRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put("/v1/workspaces/:workspaceId/channels/order", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const payload = ReorderChannelsRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, ReorderChannelsRequest);
     const channels = await reorderChannels(db, workspaceId, payload.channelIds);
     if (!channels) {
       throw new HTTPException(409, { message: "projects changed; refresh and try again" });

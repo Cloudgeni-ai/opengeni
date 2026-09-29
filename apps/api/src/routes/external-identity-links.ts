@@ -28,6 +28,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
+import { parseRequestJson } from "../http/request-body";
 
 function nativeConfirmation(authorization: AccessGrantAuthorization) {
   if (
@@ -78,7 +79,7 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!continuation || continuation.actor.actingMode !== "external")
       throw new HTTPException(403, { message: "Start linking as the external product user" });
-    const input = BeginExternalIdentityLinkRequest.parse(await c.req.json());
+    const input = await parseRequestJson(c, BeginExternalIdentityLinkRequest);
     if (input.expiresAt !== null && Date.parse(input.expiresAt) <= Date.now())
       throw new HTTPException(422, { message: "Link expiry must be in the future" });
     const commit = externalContinuationCommitAuthorizer(authorization)!;

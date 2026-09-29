@@ -46,6 +46,7 @@ import {
   requirePersonalGitHubRepositoryConnection,
   verifyLivePersonalGitHubRepositories,
 } from "../integrations/personal-github-repositories";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 
 export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/github", async (c) => {
@@ -69,7 +70,10 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
-    const payload = PersonalGitHubOAuthStartRequest.parse(await c.req.json().catch(() => ({})));
+    const payload = parseRequestBody(
+      PersonalGitHubOAuthStartRequest,
+      await c.req.json().catch(() => ({})),
+    );
     return c.json(
       await startPersonalGitHubOAuth(deps, {
         access,
@@ -168,7 +172,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         subjectId: access.grant.subjectId,
         connectionId,
       });
-      const request = ReplacePersonalGitHubRepositorySelectionsRequest.parse(await c.req.json());
+      const request = await parseRequestJson(c, ReplacePersonalGitHubRepositorySelectionsRequest);
       try {
         const current = await loadRepositorySelectionState(deps, access.grant, connection);
         assertRepositoryConnectionAuthorityFence(current, request);
@@ -249,7 +253,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         subjectId: access.grant.subjectId,
         connectionId,
       });
-      const request = VerifyPersonalGitHubRepositorySelectionsRequest.parse(await c.req.json());
+      const request = await parseRequestJson(c, VerifyPersonalGitHubRepositorySelectionsRequest);
       try {
         const current = await loadRepositorySelectionState(deps, access.grant, connection);
         assertRepositoryConnectionAuthorityFence(current, request);

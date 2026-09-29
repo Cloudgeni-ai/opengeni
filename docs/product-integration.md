@@ -368,9 +368,12 @@ workspace through this mapping. Within one organization, retries preserve the
 existing workspace ID and presentation. Namespace `externalSource` to the product
 to avoid collisions between products in the same organization.
 
-The organization API key identifies the organization boundary. Never accept an
-organization id, external mapping identity, or OpenGeni workspace id directly
-from an unauthenticated browser request.
+The organization API key identifies the organization boundary, so it may omit
+`accountId` from `ensureWorkspace`; the workspace is then created in the key's
+own organization. Other callers must send `accountId` and receive
+`400 validation_failed` naming it otherwise. Never accept an organization id,
+external mapping identity, or OpenGeni workspace id directly from an
+unauthenticated browser request.
 
 The `externalId` identifies the product boundary; it does not create an
 OpenGeni human or membership. Provision lazily on first use, from the product's
@@ -642,6 +645,8 @@ requests, failures, cancellation, reconnect state, and credit/policy denials.
 | `409` from `ensureWorkspace` | The external source/id pair is already owned by another organization or resolves to a non-product workspace | Verify the stable product namespace and tenant ID instead of treating the response as replay success |
 | API-key creation limit denial | The managed plan's active-key cap was reached | Rotate by revoking an unused key or change the plan; do not delete tenant mappings |
 | SDK response validation/version mismatch | The installed SDK and server are not compatible or the client hard-coded a stale shape | Read `/v1/config/client`, inspect installed SDK types, and align supported major versions before retrying |
+| `400 validation_failed` | The request body failed its schema; `message` and `details.issues` name each field | Fix the named fields; do not retry unchanged |
+| `404` / `405` | The path or method does not exist (`405` carries `Allow`) | Check the route and method; never retry |
 
 An ambiguous network result is not itself a provisioning failure. Retry
 `ensureWorkspace` with the exact same external source/id pair; a successful

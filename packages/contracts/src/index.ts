@@ -3304,7 +3304,10 @@ export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
 
 export const EnsureWorkspaceRequest = z
   .object({
-    accountId: z.string().uuid(),
+    // Owning organization. An organization API key may omit it: the key's own
+    // organization is the only one it can create workspaces in. Every other
+    // caller (a human may belong to several organizations) must send it.
+    accountId: z.string().uuid().optional(),
     externalSource: z.string().trim().min(1).max(200),
     externalId: z.string().trim().min(1).max(1024),
     name: z.string().trim().min(1).max(200),

@@ -4784,7 +4784,12 @@ export type CreateWorkspaceRequest = {
 };
 
 export type EnsureWorkspaceRequest = {
-  accountId: string;
+  /**
+   * Owning organization id. An organization API key may omit it and the
+   * workspace is created in the key's own organization; every other caller
+   * must send it.
+   */
+  accountId?: string | undefined;
   externalSource: string;
   externalId: string;
   name: string;

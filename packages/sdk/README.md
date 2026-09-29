@@ -200,7 +200,11 @@ if (workspace.kind !== "shared") {
 ```
 
 The response is `{ workspace, created }`. Replays return the original nested
-workspace with `created: false`. For an organization key, `getAccessContext()`
+workspace with `created: false`. An organization API key may omit `accountId`:
+the workspace is created in the key's own organization. Every other caller must
+send it (a human may belong to several organizations) and receives
+`400 validation_failed` naming `accountId` otherwise. For an organization key,
+`getAccessContext()`
 does not enumerate every workspace grant; call `listWorkspaces()` for the
 complete organization-workspace inventory.
 
