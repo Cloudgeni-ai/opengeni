@@ -148,6 +148,14 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
+export { createSessionProxyHandler } from "./session-proxy";
+export type {
+  SessionProxyContext,
+  SessionProxyCreateInput,
+  SessionProxyHandlerOptions,
+  SessionProxyResolution,
+  SessionProxyResolve,
+} from "./session-proxy";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
