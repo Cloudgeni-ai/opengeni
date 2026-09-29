@@ -542,6 +542,7 @@ function App() {
             turnSummary={{ rolling: compact }}
             hasOlder={windowStart > 0}
             hasNewer={historyMode && count < drafts.length}
+            onJumpToStart={() => setWindowStart(0)}
             onJumpToLatestQuestion={async () => {
               const end = historyMode ? drafts.length : count;
               const target =
