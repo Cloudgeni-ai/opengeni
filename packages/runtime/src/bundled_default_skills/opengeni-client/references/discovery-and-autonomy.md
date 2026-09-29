@@ -79,7 +79,8 @@ Use product language for the relevant unresolved choices:
   only when they are part of the requested product.
 - **When things run:** on demand, or on a schedule (time and time zone).
 - **Where results land:** the chat, a product record or screen, or a channel;
-  OpenGeni has no outbound webhooks, so delivery goes through product tools.
+  delivery goes through product tools, or signed workspace webhooks where the
+  deployment offers them.
 
 For example, if all three choices are unresolved for a simple dashboard, propose
 “Private chats, no learning between chats, and current-page data only” with a short

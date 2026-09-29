@@ -71,17 +71,18 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 ## Default: the full conversation behind a packaged proxy
 
 Default to OpenGeni's complete conversation experience: `@opengeni/react`'s
-`SessionConversation` plus `@opengeni/react/compiled.css` (brand it with
-`--og-*` tokens), backed by the normal session SDK through
-`createSessionProxyHandler`, a tenant/user-scoped same-origin proxy on the
-product server. It already provides streaming, replay, queue, steer, approvals,
+`OpenGeniChat` (the user's chat list plus `SessionConversation`) and
+`@opengeni/react/compiled.css` (brand it with `--og-*` tokens), backed by the
+normal session SDK through `createSessionProxyHandler`, a tenant/user-scoped
+same-origin proxy on the product server with Next.js, Express, and Hono adapters. It already provides streaming, replay, queue, steer, approvals,
 human input, attachments, and pause/resume. Deviate only when the product needs
 a materially different interaction model, a non-React frontend, or compute
 surfaces, and record why.
 
 ```ts
 // Server only: the organization API key never reaches the browser.
-import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
+import { OpenGeniClient } from "@opengeni/sdk";
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
 const og = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!, // the deployment you target
@@ -101,21 +102,12 @@ await og.addExternalWorkspaceMember(workspace.id, {
   operationId,
 });
 
-// 2. The server creates sessions: the product's MCP server with a short-lived
-//    per-user token, explicit tools, and a stable idempotency key.
+// 2. The proxy, as a Next.js App Router catch-all: app/api/opengeni/[...path]/route.ts.
+//    Express: toNodeMiddleware(createSessionProxyHandler(og, options)) from
+//    "@opengeni/sdk/express"; Hono: toHonoHandler(...) from "@opengeni/sdk/hono".
 const acme = (token: string) => ({ id: "acme", headers: { Authorization: `Bearer ${token}` } });
-const session = await og.asUser(user.id, { source }).createSession(workspace.id, {
-  initialMessage: `Help me with ticket ${ticket.id}`,
-  idempotencyKey: `ticket:${ticket.id}:${user.id}`,
-  skills: productSkills, // product-owned, inline
-  mcpServers: [{ ...acme(await mintUserToken(user)), url: ACME_MCP_URL, allowedTools }],
-  tools: [{ kind: "mcp", id: "acme" }], // a per-session server must also be selected here
-  firstPartyMcpTools: [],
-  sandboxBackend: "none", // pure chat/tool agent: no sandbox to start or shell around tools
-});
-
-// 3. Mount at /api/opengeni/* (Next.js route handler, Hono, Bun.serve, workers).
-export const handler = createSessionProxyHandler(og, {
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: async (request) => {
     const me = await authenticate(request); // the product's own session check
     return me
@@ -123,6 +115,16 @@ export const handler = createSessionProxyHandler(og, {
       : new Response("Unauthorized", { status: 401 });
   },
   authorizeMutation: verifyCsrf, // the product's existing CSRF policy
+  // New chats: the browser sends only the first message; the server picks the rest.
+  createSession: async ({ initialMessage, idempotencyKey }, { user }) => ({
+    initialMessage,
+    idempotencyKey,
+    skills: productSkills, // product-owned, inline
+    mcpServers: [{ ...acme(await mintUserToken(user)), url: ACME_MCP_URL, allowedTools }],
+    tools: [{ kind: "mcp", id: "acme" }], // a per-session server must also be selected here
+    firstPartyMcpTools: [],
+    sandboxBackend: "none", // pure chat/tool agent: no sandbox to start or shell around tools
+  }),
   // Every forwarded message: fresh per-user token and server-owned page context.
   beforeForwardMessage: async (_message, { user }) => ({
     mcpCredentialUpdates: [acme(await mintUserToken(user))],
@@ -134,18 +136,21 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at the mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 <OpenGeniProvider client={client} workspaceId={workspaceId}>
-  <SessionConversation sessionId={session.id} />
+  <OpenGeniChat /> {/* the user's chats (sidebar/drawer) + conversation */}
 </OpenGeniProvider>;
 ```
 
+For an assistant bound to one record (a ticket, a dashboard), create the session
+server-side as the user (`og.asUser(user.id, { source }).createSession(...)`
+with a stable `idempotencyKey`) and render `<SessionConversation sessionId>`.
 The proxy calls `resolve` per request, acts only through `asUser`, pins the
-workspace, and serves only provider/conversation routes. Browser creation needs
-a server `createSession` hook returning the full request. Never replace the
+workspace, and serves only provider/conversation routes; the chat list shows
+only chats the user created (`sessionList: "visible"` widens it). Never replace the
 proxy with a raw passthrough of arbitrary paths under the organization key.
 Reset UI state when the user or tenant changes.
 
@@ -208,8 +213,16 @@ Read selectively: [Product integration shapes](references/product-integration-sh
   explicit schedule and time zone), or an inbound automation webhook for
   events. Their agents reference a workspace OpenAPI Integration or MCP
   connection by id in `tools` (scheduled tasks take no inline `mcpServers`) and
-  write results back through the product's own tools. OpenGeni sends no
-  outbound webhooks.
+  write results back through the product's own tools. On deployments with
+  workspace integrations (check `/v1/config/client` and the SDK exports), a
+  signed workspace webhook (`createWorkspaceWebhook`, verify with
+  `verifyWebhookEvent`) tells the product when turns finish or need a person;
+  treat it as an at-least-once, unordered signal and read the session.
+- Advanced, not the default path: products that need background work with
+  host-owned access can add a workspace credential provider (short-lived
+  sandbox credentials, including Git) and recognize the calling turn from the
+  informational `_meta.opengeni` on MCP calls. See the workspace integrations
+  guide in the OpenGeni repository.
 
 ## Choose The Credential
 

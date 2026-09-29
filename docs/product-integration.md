@@ -97,14 +97,21 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at the mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 <OpenGeniProvider client={client} workspaceId={workspaceId}>
-  <SessionConversation sessionId={session.id} />
+  <OpenGeniChat /> {/* chat list + conversation; or <SessionConversation sessionId={session.id} /> */}
 </OpenGeniProvider>;
 ```
+
+Mount the handler with a framework adapter: `createSessionProxyRoute` from
+`@opengeni/sdk/next` (App Router catch-all route), `toNodeMiddleware` from
+`@opengeni/sdk/express`, or `toHonoHandler` from `@opengeni/sdk/hono`.
+`OpenGeniChat` lists the chats the resolved user created (`sessionList:
+"mine"`, the proxy default) and starts new ones through the `createSession`
+hook.
 
 The proxy calls `resolve` on every request and acts only through
 `asUser(user, { source })`; there is no fallback to the key's service

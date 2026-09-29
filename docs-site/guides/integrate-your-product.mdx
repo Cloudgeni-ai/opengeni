@@ -108,15 +108,19 @@ export const handleOpenGeni = createSessionProxyHandler(og, {
 
 `authenticate` is your existing cookie or bearer verifier. Never take the tenant, workspace, or user from the request body or an unverified header. On every request the proxy calls `resolve`, acts as that user through `asUser` (never with the key's own service authority), rejects any other workspace, and serves only the native routes `OpenGeniProvider` and the conversation use, including the workspace live control stream and workspace Resume. Other routes and methods return `404`; cancel and workspace Pause are refused.
 
-| Option              | Purpose                                                                                                                           |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `resolve`           | Required. Returns `{ workspaceId, user, source? }` or a `Response` to reject                                                      |
-| `authorizeMutation` | Your CSRF check for non-GET requests. Without it, only cross-site (`Sec-Fetch-Site`) mutations are refused                        |
-| `authorizeSession`  | Optional product-level check that this user may open this session                                                                 |
-| `createSession`     | Allows browser-started sessions. The browser sends only `initialMessage` and `idempotencyKey`; your hook returns the full request |
-| `modelSelection`    | `false` removes per-message model choices from the browser                                                                        |
-| `files`             | `false` disables attachment routes                                                                                                |
-| `maxBodyBytes`      | Request body limit; defaults to 1 MiB                                                                                             |
+| Option                 | Purpose                                                                                                                           |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `resolve`              | Required. Returns `{ workspaceId, user, source? }` or a `Response` to reject                                                      |
+| `authorizeMutation`    | Your CSRF check for non-GET requests. Without it, only cross-site (`Sec-Fetch-Site`) mutations are refused                        |
+| `authorizeSession`     | Optional product-level check that this user may open this session                                                                 |
+| `createSession`        | Allows browser-started sessions. The browser sends only `initialMessage` and `idempotencyKey`; your hook returns the full request |
+| `modelSelection`       | `false` removes per-message model choices from the browser                                                                        |
+| `files`                | `false` disables attachment routes                                                                                                |
+| `maxBodyBytes`         | Request body limit; defaults to 1 MiB                                                                                             |
+| `sessionList`          | Chat list for `OpenGeniChat`: `"mine"` (default, chats the user created), `"visible"`, or `false`                                 |
+| `beforeForwardMessage` | Server-owned `modelContext` and MCP credential rotation for every forwarded message                                               |
+
+Thin adapters mount the same handler: `createSessionProxyRoute(og, options)` from `@opengeni/sdk/next` returns `{ GET, POST, PUT, PATCH, DELETE }` for an App Router `app/api/opengeni/[...path]/route.ts`, `toNodeMiddleware(handler)` from `@opengeni/sdk/express` serves Express and Connect (`app.use("/api/opengeni", ...)`), and `toHonoHandler(handler)` from `@opengeni/sdk/hono` serves Hono.
 
 Browsers cannot choose tools, MCP servers, Skills, instructions, or model policy for a new session, rotate MCP credentials, or attach anything but files. Do not replace this handler with a raw passthrough that forwards arbitrary paths under the organization key. The [Northstar support example](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/northstar-support) shows the whole default path with a product MCP server.
 
@@ -124,19 +128,21 @@ Browsers cannot choose tools, MCP servers, Skills, instructions, or model policy
 
 ```tsx
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
-export function Assistant({ workspaceId, sessionId }: { workspaceId: string; sessionId: string }) {
+export function Assistant({ workspaceId }: { workspaceId: string }) {
   return (
     <OpenGeniProvider client={client} workspaceId={workspaceId}>
-      <SessionConversation sessionId={sessionId} />
+      <OpenGeniChat />
     </OpenGeniProvider>
   );
 }
 ```
+
+`OpenGeniChat` is the user's chat list (a sidebar when wide, a drawer when narrow) plus the conversation, with new chats created through your `createSession` hook. For an assistant bound to one record, create the session on your server and render `<SessionConversation sessionId={sessionId} />` instead.
 
 The stylesheet is scoped and needs no Tailwind setup. Brand it by overriding `--og-*` tokens. On sign-out or user or tenant changes, abort old requests and clear private UI state; your backend still owns authorization.
 

@@ -2,8 +2,9 @@
 
 > Most customer products do **not** need this integration shape. When OpenGeni
 > remains a standalone service and the product presents an OpenGeni-backed agent
-> in its own UI, mount `SessionConversation` from `@opengeni/react` behind the
-> packaged `createSessionProxyHandler` from `@opengeni/sdk`. See
+> in its own UI, mount `OpenGeniChat` or `SessionConversation` from
+> `@opengeni/react` behind the packaged `createSessionProxyHandler` from
+> `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
 > [product integration](product-integration.md) and the `opengeni-client` skill. This guide is for the rarer case where the
 > host mounts OpenGeni's router or calls its core domain packages in-process.
 
