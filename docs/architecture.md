@@ -1388,7 +1388,7 @@ selection; connection-only setup never mutates sessions.
 Canonical mechanics: [shared connection presentation](connection-presentation.md).
 
 `SessionConversation` includes feed, queue/actions, durable composer, model policy,
-human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
+tool approvals, attachments, human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
 

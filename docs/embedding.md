@@ -64,7 +64,7 @@ should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
 under `OpenGeniProvider`. A standalone product backs both with
 `createSessionProxyHandler`. It wires queue actions, composer drafts, model policy,
-pause/resume, human-input forms, optimistic delivery, and paged timeline history.
+pause/resume, tool approvals, attachments, human-input forms, optimistic delivery, and paged timeline history.
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 

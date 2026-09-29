@@ -172,3 +172,60 @@ test("complete conversation loads queue and provides queue actions beside compos
     await view.unmount();
   }
 });
+
+test("complete conversation surfaces tool approvals and wires attachments when uploads are enabled", async () => {
+  const decisions: unknown[] = [];
+  const base = fakeClient({});
+  const client = fakeClient({
+    getClientConfig: async () => ({
+      ...(await base.getClientConfig()),
+      fileUploads: { enabled: true, maxSizeBytes: 1_000_000 },
+    }),
+    listEvents: async () =>
+      [
+        {
+          id: "33333333-3333-4333-8333-333333333334",
+          sessionId: SESSION_ID,
+          workspaceId: WORKSPACE_ID,
+          sequence: 1,
+          type: "session.requiresAction",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          occurredAt: "2026-09-07T00:00:00Z",
+          payload: {
+            approvals: [{ rawItem: { callId: "call-1", name: "deploy" }, name: "deploy" }],
+          },
+        },
+      ] as never,
+    getSession: async () => ({ id: SESSION_ID, status: "requires_action" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    sendApprovalDecision: async (_workspace, _session, decision) => {
+      decisions.push(decision);
+      return {} as never;
+    },
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  const view = await renderComponent(
+    <SessionConversation sessionId={SESSION_ID} client={client} workspaceId={WORKSPACE_ID} />,
+  );
+  try {
+    await flush(200);
+    expect(view.container.querySelector("[aria-label='Attach files']")).not.toBeNull();
+    const approve = [...view.container.querySelectorAll("button")].find(
+      (node) => node.textContent === "Approve",
+    );
+    expect(approve).toBeDefined();
+    await actRun(() => approve!.click());
+    await flush(50);
+    expect(decisions).toMatchObject([{ approvalId: "call-1", decision: "approve" }]);
+  } finally {
+    await view.unmount();
+  }
+});
