@@ -4,19 +4,21 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, ArtifactCatalogListResponse } from "@opengeni/sdk";
 import { defaultArtifactFilters } from "./artifact-catalog";
+import { expireArtifactCatalog } from "./artifact-catalog-cache";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "./use-artifact-catalog";
 
 type Request = {
   workspaceId: string;
+  cursor?: string;
   resolve: (result: ArtifactCatalogListResponse) => void;
   reject: (error: unknown) => void;
 };
 let requests: Request[] = [];
 let accessKeyVersion = 0;
 const client = {
-  listArtifactCatalog: (workspaceId: string) =>
+  listArtifactCatalog: (workspaceId: string, options: { cursor?: string } = {}) =>
     new Promise<ArtifactCatalogListResponse>((resolve, reject) =>
-      requests.push({ workspaceId, resolve, reject }),
+      requests.push({ workspaceId, cursor: options.cursor, resolve, reject }),
     ),
 };
 let ownsDom = false;
@@ -250,6 +252,72 @@ test("Site mutations invalidate all views and access denials discard cached meta
     await act(async () => root.render(<Probe workspaceId="cache-revoked" />));
     expect(container.textContent).toBe("");
     expect(requests).toHaveLength(5);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a refresh after Load more refetches every shown page instead of collapsing to the first", async () => {
+  requests = [];
+  accessKeyVersion = 0;
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Probe workspaceId="cache-pages" />));
+    await act(async () => requests[0]!.resolve({ items: [item("A")], nextCursor: "p2" }));
+    await act(async () => catalog.loadMore());
+    expect(requests[1]!.cursor).toBe("p2");
+    await act(async () => requests[1]!.resolve({ items: [item("B")], nextCursor: "p3" }));
+    expect(container.textContent).toBe("A,B");
+
+    now += 30_001;
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(requests[2]!.cursor).toBeUndefined();
+    await act(async () => requests[2]!.resolve({ items: [item("A2")], nextCursor: "q2" }));
+    // Still refreshing: the shown rows stay until every page has been refetched.
+    expect(container.textContent).toBe("A,B");
+    expect(requests[3]!.cursor).toBe("q2");
+    await act(async () => requests[3]!.resolve({ items: [item("B2")], nextCursor: "q3" }));
+    expect(container.textContent).toBe("A2,B2");
+    expect(catalog.nextCursor).toBe("q3");
+    expect(requests).toHaveLength(4);
+
+    await act(async () => catalog.loadMore());
+    expect(requests[4]!.cursor).toBe("q3");
+    await act(async () => requests[4]!.resolve({ items: [item("C2")], nextCursor: null }));
+    expect(container.textContent).toBe("A2,B2,C2");
+  } finally {
+    Date.now = originalNow;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("expiring a workspace keeps cached rows visible and refetches them on the next view", async () => {
+  requests = [];
+  accessKeyVersion = 0;
+  const container = document.createElement("div");
+  document.body.append(container);
+  let root = createRoot(container);
+  try {
+    await act(async () => root.render(<Probe workspaceId="cache-expired" />));
+    await act(async () => requests[0]!.resolve({ items: [item("Before")], nextCursor: null }));
+    await act(async () => root.unmount());
+
+    expireArtifactCatalog(client, "cache-expired");
+    root = createRoot(container);
+    await act(async () => root.render(<Probe workspaceId="cache-expired" />));
+    expect(container.textContent).toBe("Before");
+    expect(requests).toHaveLength(2);
+    await act(async () =>
+      requests[1]!.resolve({ items: [item("Published"), item("Before")], nextCursor: null }),
+    );
+    expect(container.textContent).toBe("Published,Before");
   } finally {
     await act(async () => root.unmount());
     container.remove();
