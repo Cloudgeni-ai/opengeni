@@ -1429,8 +1429,6 @@ Web imports `@opengeni/sdk/browser`; operator backfills use
 `@opengeni/sdk/document-authority`. Root/`core` retain compatibility.
 Bundle tests keep non-web methods outside direct-session bundles.
 
-Updates offer reload; API-contract incompatibility retains its guard.
-
 Web lazily mounts questions, commands and attachments; text/repository chips stay
 eager. Suspense preserves transcripts; `test/e2e/session-lazy-panels.browser.e2e.ts`
 checks desktop/mobile chunks.

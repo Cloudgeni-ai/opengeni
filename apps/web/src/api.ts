@@ -13,7 +13,6 @@ import type { AuthSession, ClientConfig } from "./types";
 import { beginAnalyticsRequest } from "./lib/analytics-observer";
 import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
-import { notifyDeploymentUpdate } from "./lib/deployment-update";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -24,6 +23,7 @@ export const bundleDeploymentRevision = String(
   import.meta.env.VITE_OPENGENI_DEPLOYMENT_REVISION ?? "",
 );
 const accessKeyStorageKey = "opengeni.accessKey";
+const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
 const boundedHttp1SseBatchContentType = "application/vnd.opengeni.sse-batch";
@@ -1115,11 +1115,7 @@ export async function fetchClientConfig(signal?: AbortSignal): Promise<ClientCon
   const config = await request<ClientConfig>("/v1/config/client", { signal });
   signal?.throwIfAborted();
   reloadIfStaleApiContract(config);
-  void notifyDeploymentUpdate(config.deploymentRevision, bundleDeploymentRevision).catch(
-    (error) => {
-      console.warn("Unable to show deployment update notice", error);
-    },
-  );
+  reloadIfStaleDeployment(config);
   configureClientAuth(config.auth);
   return config;
 }
@@ -1189,5 +1185,37 @@ function showApiUpdateNotice(willReload: boolean): void {
   });
   if (!existing) {
     document.body.append(notice);
+  }
+}
+
+export function shouldReloadForDeploymentRevision(
+  config: Pick<ClientConfig, "deploymentRevision">,
+  bundleRevision = bundleDeploymentRevision,
+  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof sessionStorage === "undefined"
+    ? null
+    : sessionStorage,
+): boolean {
+  if (
+    !bundleRevision ||
+    !config.deploymentRevision ||
+    bundleRevision === config.deploymentRevision ||
+    !storage
+  ) {
+    return false;
+  }
+  const key = `${deploymentReloadStoragePrefix}${config.deploymentRevision}`;
+  if (storage.getItem(key) === bundleRevision) {
+    return false;
+  }
+  storage.setItem(key, bundleRevision);
+  return true;
+}
+
+function reloadIfStaleDeployment(config: ClientConfig): void {
+  if (!shouldReloadForDeploymentRevision(config)) {
+    return;
+  }
+  if (typeof window !== "undefined") {
+    window.location.reload();
   }
 }
