@@ -377,6 +377,33 @@ const SCENARIOS: Record<string, () => Draft[]> = {
     return drafts;
   },
   "machine-follow-up": machineFollowUpScenario,
+  "legacy-attention": () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Check the archived signup totals." }, null);
+    add(
+      "agent.toolCall.created",
+      {
+        id: "legacy-read",
+        name: "exec_command",
+        arguments: { cmd: "cat signup-totals.txt" },
+      },
+      null,
+    );
+    add("agent.toolCall.output", { id: "legacy-read", output: "312 signups" }, null);
+    add("session.status.changed", { status: "requires_action" }, null);
+    add("session.status.changed", { status: "cancelled" }, null);
+    add("user.message", { text: "Now check the archived source breakdown." }, null);
+    add(
+      "agent.toolCall.created",
+      {
+        id: "legacy-next",
+        name: "exec_command",
+        arguments: { cmd: "cat signup-sources.txt" },
+      },
+      null,
+    );
+    return drafts;
+  },
 };
 
 const STAGES = [

@@ -110,6 +110,44 @@ describe("readable timeline browser regression", () => {
     return page;
   }
 
+  for (const width of [390, 1280]) {
+    test(`legacy attention updates the owning work row at ${width}px`, async () => {
+      const page = await openHarness("legacy-attention", width, width === 390);
+      const evidenceDir = `${repoRoot}/.agent/evidence/timeline-legacy-work`;
+      mkdirSync(evidenceDir, { recursive: true });
+      try {
+        await page.evaluate(() => window.exchangeFoldHarness!.show(4));
+        const statuses = page.locator("[data-og-exchange-status]");
+        await page.waitForFunction(
+          () => document.querySelector('[data-og-exchange-status="waiting"]') !== null,
+        );
+        expect(await statuses.count()).toBe(1);
+        expect(await statuses.innerText()).toContain("Waiting for you");
+        await page.screenshot({ path: `${evidenceDir}/legacy-waiting-${width}.png` });
+        await page.evaluate(() => window.exchangeFoldHarness!.show(5));
+        await page.waitForFunction(
+          () => document.querySelector('[data-og-exchange-status="worked"]') !== null,
+        );
+        expect(await statuses.count()).toBe(1);
+        await page.screenshot({ path: `${evidenceDir}/legacy-cancelled-${width}.png` });
+        await page.evaluate(() => window.exchangeFoldHarness!.show(7));
+        await page.waitForFunction(
+          () => document.querySelectorAll("[data-og-exchange-status]").length === 2,
+        );
+        expect(
+          await statuses.evaluateAll((nodes) =>
+            nodes.map((node) => node.getAttribute("data-og-exchange-status")),
+          ),
+        ).toEqual(["worked", "working"]);
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+        ).toBeLessThanOrEqual(1);
+      } finally {
+        await page.context().close();
+      }
+    });
+  }
+
   for (const mode of [
     "pending",
     "started",
