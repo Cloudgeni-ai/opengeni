@@ -52,16 +52,16 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Before building, confirm the few choices only the user can make, in ONE
-  bundled question (the structured question UI when available) with a
-  recommended default for each: who shares what (a per-user or shared agent and
-  chats), when things run (schedule and time zone), where outputs land (which
-  screen, record, or channel), and whether the agent may write. Never ask what
-  the repository answers; skip settled choices. See
+- Four choices belong to the user: who shares what (a per-user or shared agent
+  and chats), when things run (schedule and time zone), where outputs land
+  (which screen, record, or channel), and whether the agent may write. If the
+  request or repository does not settle any of them, ask ONE bundled question
+  (the structured question UI when available) with a recommended answer for
+  each, before building. This is the expected step, not an option: asking once
+  is cheap, rebuilding is not. Never ask what the repository answers. See
   [Discovery and autonomy](references/discovery-and-autonomy.md).
-- Use a reversible, clearly stated default when an unresolved choice is
-  low-risk. Resolve privacy, tenant authority, data writes, cost exposure, and
-  ambiguous external mutations before crossing those boundaries.
+- Use a reversible, clearly stated default only for choices outside those four,
+  or when the user explicitly said not to ask. A busy user is not that signal.
 - Match the requested delivery autonomy. Repository or cloud access is
   technical capability, not permission to push, deploy, merge, or change
   production.
