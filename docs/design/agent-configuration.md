@@ -1,4 +1,4 @@
-# Agent configuration: persona, capabilities, boundary
+# Agent configuration: identity, capabilities, boundary
 
 Status: proposal for discussion (not implemented).
 
@@ -24,7 +24,7 @@ showed the consequences:
   `packages/runtime/src/operational-instructions.ts` plus CORE in
   `packages/runtime/src/index.ts`) describe goals, Knowledge, subagents, Sites,
   artifacts, and Connected Machines whether or not the session has them.
-- Workspace `agentInstructions` (the persona) is silently ignored once any
+- Workspace `agentInstructions` (the white-label identity) is silently ignored once any
   instruction policy is active (`governance-model.ts` →
   `structuredWorkspacePolicyActive` → `agent-build.ts`).
 - `memoryScope` / chat-facade `memory` are mostly vestigial: the Knowledge MCP
@@ -42,16 +42,16 @@ An agent is three decisions. Everything else is derived.
 
 | Decision | Question it answers | Default |
 | --- | --- | --- |
-| **Persona** | Who is this agent and how does it talk? | OpenGeni's persona |
+| **Identity** | Who is this agent (name, product, voice)? | OpenGeni's identity |
 | **Capabilities** | What can it do? | the preset for the surface |
 | **Boundary** | Who shares chats, knowledge, and agent reach? | private chats in a shared tenant workspace |
 
 A **preset** names a coherent combination:
 
 - `workspace-agent`: today's behavior and the stock web app (all capabilities the
-  workspace has, OpenGeni persona, workspace-shared chats).
+  workspace has, OpenGeni identity, OpenGeni renderer, workspace-shared chats).
 - `assistant`: the embedded default (product tools only plus human input and skill
-  reading, embedder persona, private chats).
+  reading, embedder identity, private chats).
 
 Presets never hide anything: the resolved configuration is always inspectable.
 
@@ -70,7 +70,9 @@ export const { GET, POST } = createSessionProxyRoute(og, {
     ...input,
     agent: {
       preset: "assistant",
-      persona: "You are Acme Analytics' assistant. Answer with numbers first.",
+      identity: "You are Acme Analytics' assistant. Friendly and brief.",
+      instructions: "Lead with the number, then one sentence of context.",
+      renderer: "opengeni", // OpenGeniChat or SessionConversation; "markdown" for a custom UI
       capabilities: { webSearch: false },
     },
     mcpServers: [{ id: "acme", url: ACME_MCP_URL, headers: userToken(ctx.user) }],
@@ -80,7 +82,8 @@ export const { GET, POST } = createSessionProxyRoute(og, {
 
 Result: the model sees the `acme` tools (visible upfront), `request_human_input`,
 and nothing else. The prompt contains the runtime contract modules for those
-capabilities, the persona, and nothing about goals, Knowledge, or subagents.
+capabilities, base behavior, the embedder's identity and instructions, and
+nothing about goals, Knowledge, subagents, or repositories.
 
 ### Embedded background agent with writes
 
@@ -159,35 +162,70 @@ Rules:
    refinements inside the resolved capabilities; when `agent` is omitted, resolution
    reproduces today's behavior exactly.
 
-## Persona and instructions
+## Identity and instructions
 
-Three tiers replace today's layers:
+The current system text is the operational contract
+(`packages/runtime/src/operational-instructions.ts`, ~28.8k chars), CORE
+(`coreInstructions()` in `packages/runtime/src/index.ts`, ~5.9k), and the default
+template (`DEFAULT_AGENT_INSTRUCTIONS` in `packages/config/src/index.ts`, ~1.4k).
+Read in full, it falls into four buckets:
 
-| Tier | Contents | Controlled by |
+| Bucket | Today's text | End state |
 | --- | --- | --- |
-| Runtime contract | Mechanics required for tools to work, as per-capability modules | OpenGeni only; composed from resolved capabilities |
-| Persona | Identity, tone, writing style, formatting, answer length, domain | default persona ← deployment ← workspace ← session (replace) |
-| Instructions and context | session `instructions` (append), `modelContext`, goal snapshot, date | embedder |
+| **Identity** | opening line ("You are an agent for the current workspace…"), `# Personality`, the template's first sentence ("You are an OpenGeni workspace agent…"); ~0.6k | Replaceable. The only part an embedder rewrites: name, product, domain, voice. |
+| **Base behavior** | writing style (outcome first, minimal formatting, CommonMark); match effort; progress updates (short commentary, skipped under ~20 s; the runtime already separates commentary from the final answer); final-answer rules; autonomy by request type (answer, diagnose, change, monitor), no inferred authorization, stated assumptions, stop for new authority; no unsolicited disclaimers; verification matched to scope | Always on, no knobs. Tuned through instructions, which take explicit precedence (below). |
+| **Runtime mechanics** | `wait_for_input` semantics, new messages arriving mid-turn (steer/queue), continuing after compaction, command yields | Always on: every agent on the durable runtime needs them. Moved out of "working with the user" into their own section. |
+| **Capability modules** | everything below | Included only when the capability or resource is present. |
 
-Mapping of today's text (sizes in characters):
+Capability modules (current size in characters):
 
-- Personality, writing style, match-effort, progress updates, final-answer and
-  formatting rules (~7.5k): **default persona**. Rendering rules that depend on
-  the OpenGeni timeline (`sandbox:` and `artifact:` links, visuals) become the
-  `artifacts`/sandbox modules because a product UI may not render them.
-- Rules for getting work done, file editing, autonomy, destructive actions (~7k):
-  **sandbox module**.
-- Using skills (~1k): **skills module**. Integration setup (~1k): **admin module**.
-- Session coordination (~6.9k): split into **subagents** (children, waits) and
-  **sandbox** (yielded commands).
-- CORE goal loop (~0.5k): **goals module**. Knowledge doctrine and storage rules
-  (~5.4k): **knowledge module**. Variable set, rig, codemode, code search, and git
-  directives are already conditional and become modules as-is.
-- Workspace governance (company profile, charter, policies) stays an organization
-  feature composed after the persona; it no longer disables the persona.
+- **sandbox** (any sandbox attached): `rg`, `apply_patch`, shell escaping, temp
+  directories, destructive-command safety, `sandbox:` file links (when the client
+  renders them), yielded commands (`command_read`, `command_wait`). Most embedded
+  agents use the sandbox for arbitrary file and data work, so this is common.
+- **repositories** (repository resources or git credentials attached): mount paths
+  `repos/<host>/<owner>/<repo>`, pre-authenticated `gh`/`glab`/`az`, focused branch
+  and pull request policy, dirty worktree and `git reset`/`checkout` rules, the git
+  binding directive. Most embedders never attach repositories.
+- **attachments** (files attached): `.opengeni/files/<file-id>/` mounts and
+  read-only copies.
+- **machines** (Connected Machine target): host-native paths and link examples.
+- **artifacts** (artifacts capability and an OpenGeni renderer): document artifact
+  delivery via `opengeni-documents`, `artifact:` links and previews, publication,
+  Sites and inline visuals (`opengeni-visualize`, `opengeni-sites`), goal
+  deliverable evidence (~3.5k).
+- **goals**: goal loop from CORE (~0.5k) plus goal-deliverable rules.
+- **subagents**: child creation, `session_wait`, `session_events`, supervision and
+  receipt correlation (~5k of session coordination).
+- **knowledge**: storage-choice rules, instruction-policy editing, Knowledge
+  doctrine (~5.4k of CORE).
+- **skills** (~1k), **admin** or integration setup (~1k), plus the already
+  conditional variable-set, rig, codemode, and code-search directives.
 
-There is no "replace everything" option: persona replacement covers branding and
-voice without breaking tool mechanics.
+Two additions the current text lacks:
+
+1. **Precedence.** One explicit rule: product, workspace, and session
+   instructions override base-behavior defaults (for example "answer in one
+   sentence"), never runtime mechanics or safety. Today nothing states this, so an
+   embedder's style instruction competes with ours.
+2. **Renderer.** `sandbox:` and `artifact:` links only render in OpenGeni's React
+   timeline. The session declares its client renderer (`opengeni` or `markdown`);
+   with `markdown`, link-syntax rules and inline visuals are omitted and the agent
+   uses ordinary Markdown links. This is the only behavior option.
+
+Resulting tiers:
+
+| Tier | Controlled by |
+| --- | --- |
+| Identity | OpenGeni default, then deployment, workspace, session (each replaces) |
+| Base behavior and runtime mechanics | OpenGeni, always on |
+| Capability modules | derived from resolved capabilities and attached resources |
+| Instructions and context | session `instructions` (append, with precedence over base behavior), `modelContext`, goal snapshot, date |
+
+Workspace governance (company profile, charter, policies) stays an organization
+feature composed after identity; it no longer disables the workspace identity
+(today `agentInstructions` is dropped whenever a policy is active). There is no
+"replace everything" option.
 
 ## Boundary
 
@@ -212,12 +250,12 @@ One option on the proxy, chat handler, and session create:
 
 | Area | Change | Size | Migration |
 | --- | --- | --- | --- |
-| Contracts | `AgentConfig` (`preset`, `persona`, `capabilities`), `SessionAgentProjection`, preview request/response; capability ids and group membership of every first-party tool name | M | no |
+| Contracts | `AgentConfig` (`preset`, `identity`, `instructions`, `capabilities`, `renderer`), `SessionAgentProjection`, preview request/response; capability ids and group membership of every first-party tool name | M | no |
 | Capability registry | New module (runtime/contracts): per capability its tool matchers, prompt module id, defaults per preset, dependencies, availability probe | M | no |
 | Session create (`packages/core/src/domain/sessions.ts`, `session-tool-policy.ts`) | Resolve `agent` + legacy fields into one frozen resolution; child narrowing; caps; 422s | M | rolling: `sessions.agent_config` jsonb (null = legacy resolution) |
 | Worker tool assembly (`tool-policy.ts`, `tool-environment.ts`, `skill-tools.ts`, `agent-build.ts`, runtime hosted tools, `xai-subscription`) | Filter every tool family through the frozen resolution; remove the implicit base set; router only when something is deferred | L | no |
 | First-party MCP (`apps/api/src/mcp/server.ts`) | Register by capability group; `opengeni` server attached only when a first-party capability is on | M | no |
-| Prompt (`operational-instructions.ts`, `coreInstructions`, `inspectPersistentAgentInstructions`) | Split into persona + modules; compose from resolution; session persona tier; governance no longer drops persona | L | rolling: `sessions.persona` text (or inside `agent_config`) |
+| Prompt (`operational-instructions.ts`, `coreInstructions`, `inspectPersistentAgentInstructions`) | Split into identity, base behavior, runtime mechanics, and capability modules; precedence rule; renderer option; session identity tier; governance no longer drops identity | L | inside `agent_config` |
 | Scheduled tasks | `agentConfig.agent` frozen at save; same resolution at run | S | no (jsonb) |
 | Workspace settings | default agent + caps; replaces `agentHumanInputEnabled`/`sessionToolDefaults` over time | M | settings jsonb |
 | Boundary | proxy/chat option; onboarding enables org private sessions; `memoryScope` derived | M | no |
@@ -237,7 +275,7 @@ the `workspace-agent` preset switches to the modular composer.
    filtering, preview, `session.agent`). Ships the exact tool set and visibility.
 2. **Modular prompt** behind the same resolution; `assistant` preset first,
    `workspace-agent` after eval parity.
-3. **Persona tier and boundary presets** (session persona, governance fix, `chats`
+3. **Identity tier and boundary presets** (session identity, governance fix, `chats`
    option, org private-session onboarding, `memoryScope` deprecation).
 4. **Web app** on the same object; workspace default agent and caps.
 5. **Inline tools** as another capability source (separate design).
@@ -249,6 +287,9 @@ the `workspace-agent` preset switches to the modular composer.
    workspace presets later.
 2. Default boundary for embedders: `private`? Recommendation: yes.
 3. Should `list_models` belong to `subagents`? Recommendation: yes.
-4. Default persona for `assistant`: neutral product-agnostic voice, not
+4. Default identity for `assistant`: neutral product-agnostic voice, not
    "OpenGeni". Recommendation: yes.
-5. Persona per session allowed? Recommendation: yes (session wins).
+5. Identity per session allowed? Recommendation: yes (session wins).
+6. Renderer default for embedders: `opengeni` when using the React components,
+   `markdown` for the chat facade. Recommendation: derive it from the SDK surface
+   instead of asking the embedder.
