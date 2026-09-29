@@ -163,7 +163,7 @@ const INTEGRATION_ROW_COPY: Record<string, string> = {
 
 /** One row per provider: the outcome sentence for providers with several modes. */
 const SERVICE_ROW_COPY: Record<string, string> = {
-  slack: "Chat with OpenGeni in Slack, or let it read and send messages as you.",
+  slack: "Chat with Opengeni in Slack, or let it read and send messages as you.",
   atlassian: "Read and update the issues and pages you can already see.",
 };
 
@@ -173,10 +173,10 @@ function providerModeCopy(
   optionName: string,
 ): { title: string; description: string } | null {
   if (serviceId === "slack") {
-    return optionName === "OpenGeni bot"
+    return optionName === "Opengeni bot"
       ? {
-          title: "Add OpenGeni to Slack",
-          description: "Everyone can mention or message OpenGeni in your Slack workspace.",
+          title: "Add Opengeni to Slack",
+          description: "Everyone can mention or message Opengeni in your Slack workspace.",
         }
       : {
           title: "Connect your own Slack",
@@ -546,7 +546,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     captureCatalogScroll();
   };
-  const slackBotMode = slack.catalogName === "OpenGeni bot";
+  const slackBotMode = slack.catalogName === "Opengeni bot";
   const allConnectionServices = mergeConnectionServices([
     ...integrations.map(({ model }) => ({
       id: model.id,
@@ -773,7 +773,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     )
       .then(() => {
         toast.success("Slack identity linked", {
-          description: "You can return to Slack and invoke OpenGeni again.",
+          description: "You can return to Slack and invoke Opengeni again.",
         });
       })
       .catch((error) => {
@@ -1448,7 +1448,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         setupLabel={
           openIntegrationModel.id === "slack"
             ? slackBotMode
-              ? "Add OpenGeni to Slack"
+              ? "Add Opengeni to Slack"
               : "Connect your Slack"
             : undefined
         }
@@ -1678,7 +1678,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         <section aria-label="Community" className="mt-6">
                           <h2 className="text-sm font-semibold">Community</h2>
                           <p className="mt-1 mb-2 text-xs leading-4.5 text-fg-muted">
-                            From the public registry. Not reviewed by OpenGeni.
+                            From the public registry. Not reviewed by Opengeni.
                           </p>
                           <ConnectionCatalog
                             grouped={false}

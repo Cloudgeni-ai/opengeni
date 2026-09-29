@@ -99,7 +99,7 @@ export function classifySessionTenancyFailure(error: unknown): SessionTenancyFai
       kind: error instanceof TypeError ? "outcome_unknown" : "other",
       message:
         error instanceof TypeError
-          ? "The server outcome is unknown. OpenGeni is checking the session before retrying."
+          ? "The server outcome is unknown. Opengeni is checking the session before retrying."
           : error instanceof Error
             ? error.message
             : String(error),
@@ -111,7 +111,7 @@ export function classifySessionTenancyFailure(error: unknown): SessionTenancyFai
   if (error.outcomeUnknown) {
     return {
       kind: "outcome_unknown",
-      message: "The server outcome is unknown. OpenGeni is checking the session before retrying.",
+      message: "The server outcome is unknown. Opengeni is checking the session before retrying.",
       retainAttempt: true,
       reconcile: true,
     };

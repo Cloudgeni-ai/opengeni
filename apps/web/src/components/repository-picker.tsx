@@ -67,7 +67,7 @@ export function repositoryBindingPresentation(
     return {
       setupDescription:
         setupMode === "platform"
-          ? "This workspace is connected to OpenGeni's managed GitHub App."
+          ? "This workspace is connected to Opengeni's managed GitHub App."
           : "This workspace has a live GitHub App binding with an explicit repository allowlist.",
       emptyDescription:
         "This workspace has an active GitHub App binding, but none of its explicitly allowed repositories are currently shared by GitHub. Reconfigure the installation or refresh after policy approval.",
@@ -81,7 +81,7 @@ export function repositoryBindingPresentation(
     return {
       setupDescription:
         setupMode === "platform"
-          ? "Install OpenGeni on a GitHub account you own, or connect an existing installation."
+          ? "Install Opengeni on a GitHub account you own, or connect an existing installation."
           : "GitHub App server credentials are configured, but this workspace has no usable installation binding.",
       emptyDescription:
         setupMode === "platform"
@@ -96,11 +96,11 @@ export function repositoryBindingPresentation(
   return {
     setupDescription:
       setupMode === "platform"
-        ? "GitHub is temporarily unavailable for this OpenGeni deployment."
+        ? "GitHub is temporarily unavailable for this Opengeni deployment."
         : "Create a prefilled app, add the generated values to your .env, then restart the API and worker.",
     emptyDescription:
       setupMode === "platform"
-        ? "GitHub integration is unavailable for this OpenGeni deployment."
+        ? "GitHub integration is unavailable for this Opengeni deployment."
         : "GitHub App server credentials are not configured. App registration alone does not connect repositories.",
     connectUrl: null,
     connectLabel: "Connect GitHub",

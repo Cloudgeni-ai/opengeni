@@ -1,4 +1,4 @@
-# OpenGeni web UI spec
+# Opengeni web UI spec
 
 The binding UI spec for `apps/web`. Every new or rebuilt screen follows it. Where it and older
 code disagree, this file wins; bring the code in line when you touch it.
@@ -272,7 +272,7 @@ Main column: DetailSection ...        | Quiet aside card:
 organization or personal settings URL, and the Agents, Insights and runtime pages listed in the
 settings rail) swaps the main rail for the settings rail, drawn by `SettingsShell`
 (`components/settings/settings-sidebar.tsx`): a back link that leaves settings ("Back to sessions";
-organization settings go back to workspace settings, personal settings to OpenGeni), the scope
+organization settings go back to workspace settings, personal settings to Opengeni), the scope
 switcher, the grouped settings pages and an out link (workspace settings -> Organization). Leaving
 restores the main rail. Below 1024px the settings rail folds into a header with the back link, the
 current page and a Menu button that opens it in a drawer. Settings pages render full width beside

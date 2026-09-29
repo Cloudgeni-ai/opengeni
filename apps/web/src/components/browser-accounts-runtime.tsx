@@ -186,13 +186,13 @@ export function BrowserAccountsSignedOutPanel(props: {
                 ? "Continue your invitation"
                 : slots.length > 0
                   ? "Choose an account"
-                  : "Sign in to OpenGeni"}
+                  : "Sign in to Opengeni"}
             </Heading>
             <p className="mt-1 text-sm text-fg-subtle">
               {invitation
                 ? `Use the account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
                 : slots.length > 0
-                  ? "No browser account is active. Choose one explicitly before OpenGeni loads account data."
+                  ? "No browser account is active. Choose one explicitly before Opengeni loads account data."
                   : "Authentication opens in an isolated window so an existing account is never replaced implicitly."}
             </p>
           </div>
@@ -375,7 +375,7 @@ export function BrowserAccountsLoadingGate({ children }: { children?: ReactNode 
     return (
       <ProblemPanel
         title="Browser accounts unavailable"
-        description="OpenGeni couldn't verify the active browser account. No tenant data was shown."
+        description="Opengeni couldn't verify the active browser account. No tenant data was shown."
         action={
           <Button
             type="button"

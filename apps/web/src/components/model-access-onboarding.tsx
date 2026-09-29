@@ -59,7 +59,7 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   supergrok: "SuperGrok",
   vercel_gateway: "Vercel AI Gateway",
   openrouter: "OpenRouter",
-  credits: "OpenGeni credits",
+  credits: "Opengeni credits",
 };
 
 /** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */
@@ -511,11 +511,11 @@ export function ModelAccessOnboardingPanel({
       <div className="mt-6 grid gap-4 border-t border-border pt-6">
         <div>
           <CreditsHeading className="text-sm font-medium">
-            {startingCredits ? "Buy more OpenGeni credits" : "Use OpenGeni credits"}
+            {startingCredits ? "Buy more Opengeni credits" : "Use Opengeni credits"}
           </CreditsHeading>
           <p className="mt-1 text-xs leading-relaxed text-fg-muted">
             {startingCredits
-              ? "Top up anytime to keep chatting on OpenGeni credits."
+              ? "Top up anytime to keep chatting on Opengeni credits."
               : includedModel
                 ? "Pay as you go for more capable hosted models."
                 : "Pay for hosted models as you go."}{" "}
@@ -553,12 +553,12 @@ export function ModelAccessOnboardingPanel({
       <section className="flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
         <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
           <h1 className="text-xl font-semibold tracking-tight">
-            Start chatting with OpenGeni credits
+            Start chatting with Opengeni credits
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
             {startingCredits.balance
-              ? `${formatMoneyMicros(startingCredits.balance.balanceMicros, startingCredits.balance.currency)} of OpenGeni credits included.`
-              : "OpenGeni credits are included with your account."}{" "}
+              ? `${formatMoneyMicros(startingCredits.balance.balanceMicros, startingCredits.balance.currency)} of Opengeni credits included.`
+              : "Opengeni credits are included with your account."}{" "}
             New chats use {describeCreditsModel(startingCredits.model)}. No card or API key needed.
           </p>
           {freeAfterCredits ? (
@@ -579,7 +579,7 @@ export function ModelAccessOnboardingPanel({
             <h2 className="text-sm font-medium">Prefer your own subscription or key? (optional)</h2>
             <p className="mt-1 text-xs leading-relaxed text-fg-muted">
               Connect a subscription or API key you already have
-              {billingMode === "stripe" ? ", or buy more OpenGeni credits" : ""}. You can also do
+              {billingMode === "stripe" ? ", or buy more Opengeni credits" : ""}. You can also do
               this later.
             </p>
             <div className="mt-3">{connectOptions}</div>
@@ -616,7 +616,7 @@ export function ModelAccessOnboardingPanel({
             <h2 className="text-sm font-medium">Want a more capable model? (optional)</h2>
             <p className="mt-1 text-xs leading-relaxed text-fg-muted">
               Connect a subscription or API key you already have
-              {billingMode === "stripe" ? ", or add OpenGeni credits" : ""}. You can also do this
+              {billingMode === "stripe" ? ", or add Opengeni credits" : ""}. You can also do this
               later.
             </p>
             <div className="mt-3">{connectOptions}</div>
@@ -634,7 +634,7 @@ export function ModelAccessOnboardingPanel({
         <h1 className="text-xl font-semibold tracking-tight">Choose how to power your chats</h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
           Connect a service you already use
-          {billingMode === "stripe" ? ", or get started with OpenGeni credits" : ""}.
+          {billingMode === "stripe" ? ", or get started with Opengeni credits" : ""}.
         </p>
 
         <div className="mt-7">{connectOptions}</div>

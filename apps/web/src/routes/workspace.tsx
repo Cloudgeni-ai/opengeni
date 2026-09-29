@@ -179,7 +179,7 @@ export function WorkspaceShellRouteContent({
     (operation: WorkspaceOperationIdentity): boolean => {
       if (!ownsSlackOperation(operation)) return false;
       toast.success("Slack identity linked", {
-        description: "You can return to Slack and invoke OpenGeni again.",
+        description: "You can return to Slack and invoke Opengeni again.",
       });
       clearSlackLinkContinuation();
       revalidatePrincipalAccess();

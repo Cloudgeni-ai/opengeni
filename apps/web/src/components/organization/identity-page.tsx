@@ -193,7 +193,7 @@ function CurrentIdentitySection({
         title="No identity yet."
         description={
           canManage
-            ? "Describe the organization below and OpenGeni drafts a short version for you to check."
+            ? "Describe the organization below and Opengeni drafts a short version for you to check."
             : "An organization owner can add one."
         }
       />
@@ -262,8 +262,8 @@ export function OrganizationIdentityPage({
       <CurrentIdentitySection workspaceId={workspaceId} canManage={canManage} />
       {canManage ? (
         <Section
-          title="Write it with OpenGeni"
-          description="OpenGeni keeps it to identity and mission, asks only what it needs, and shows you the result before saving."
+          title="Write it with Opengeni"
+          description="Opengeni keeps it to identity and mission, asks only what it needs, and shows you the result before saving."
         >
           <OrganizationKnowledgePrompt workspaceId={workspaceId} />
         </Section>

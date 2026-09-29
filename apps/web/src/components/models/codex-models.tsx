@@ -749,7 +749,7 @@ function CodexAccountDetail({
             <Notice tone="waiting" title="Not included in this plan">
               {`${account.planExcludedModels.map((entry) => entry.label).join(", ")} ${
                 account.planExcludedModels.length === 1 ? "isn't" : "aren't"
-              } included in this account's current plan, so OpenGeni skips this account for ${
+              } included in this account's current plan, so Opengeni skips this account for ${
                 account.planExcludedModels.length === 1 ? "that model" : "those models"
               } until ${formatAbsoluteTime(
                 new Date(
@@ -904,7 +904,7 @@ function CodexUsage({ codex, account }: { codex: CodexSubscriptions; account: Co
   const readings = codexUsageReadings(live?.usage, codex.now);
   const fetchedAt = overview?.usage.fetchedAt ?? live?.usage?.fetchedAt ?? null;
   const provenance = overview
-    ? `${overview.usage.source === "provider" ? "Reported by ChatGPT" : "Saved by OpenGeni"}${overview.usage.stale ? ", may be out of date" : ""}`
+    ? `${overview.usage.source === "provider" ? "Reported by ChatGPT" : "Saved by Opengeni"}${overview.usage.stale ? ", may be out of date" : ""}`
     : undefined;
   const error =
     !codex.refreshingUsage && (live?.status === "error" || (!live && codex.usageError))
@@ -1079,7 +1079,7 @@ export function CodexConnectPage({
         <ol className="m-0 flex min-w-0 list-none flex-col gap-5 p-0">
           <Step number={1} title="Sign in with ChatGPT">
             <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
-              ChatGPT opens in a new tab. OpenGeni never sees your password.
+              ChatGPT opens in a new tab. Opengeni never sees your password.
             </p>
           </Step>
           <Step number={2} title="Enter the code when ChatGPT asks for it">

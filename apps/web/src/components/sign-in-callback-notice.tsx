@@ -69,7 +69,7 @@ export function SignInCallbackNotice({
       >
         {shownMessage ?? ownReceipt?.message ?? (
           <>
-            The provider returned to OpenGeni. Sign in with an existing method if asked, then review
+            The provider returned to Opengeni. Sign in with an existing method if asked, then review
             your current connections in{" "}
             <a className="underline underline-offset-2" href="/settings/security">
               Personal settings → Security

@@ -654,7 +654,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       ["Capped account", "ChatGPT returned fewer details than its count, so these are view only."],
       [
         "Unknown account",
-        "ChatGPT returned reset data OpenGeni doesn't recognize, so these are view only.",
+        "ChatGPT returned reset data Opengeni doesn't recognize, so these are view only.",
       ],
       ["Error account", "Couldn't check usage limit resets. Refresh usage to try again."],
     ];

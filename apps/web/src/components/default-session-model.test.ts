@@ -66,7 +66,7 @@ describe("default model row", () => {
 
   test("names the payer and flags a default that cannot run", () => {
     expect(defaultModelSummary([creditsDefault], "gpt-6-astra")).toEqual({
-      text: "GPT-6 Astra · OpenGeni credits",
+      text: "GPT-6 Astra · Opengeni credits",
       unavailable: "Can't run right now: Credentials required",
     });
     expect(defaultModelSummary([codex], "codex/gpt-6-astra")).toEqual({

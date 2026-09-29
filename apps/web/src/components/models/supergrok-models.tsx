@@ -571,7 +571,7 @@ export function SuperGrokConnectPage({
           />
         ) : (
           <p className="text-sm text-fg-muted">
-            xAI opens in a new tab and asks for a code, which shows here. OpenGeni never sees your
+            xAI opens in a new tab and asks for a code, which shows here. Opengeni never sees your
             password.
           </p>
         )}

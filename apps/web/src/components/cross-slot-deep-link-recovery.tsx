@@ -48,7 +48,7 @@ export function CrossSlotDeepLinkRecovery(props: { path: string; fallback: React
     return (
       <ProblemPanel
         title="Destination unavailable"
-        description="OpenGeni couldn't safely verify this link across your browser accounts. No workspace details were disclosed."
+        description="Opengeni couldn't safely verify this link across your browser accounts. No workspace details were disclosed."
         action={
           <Button
             type="button"

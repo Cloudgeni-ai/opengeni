@@ -256,7 +256,7 @@ export function WorkspaceManagementShell({
           ),
         }
       : organizationManagementOnly
-        ? { label: "Back to OpenGeni", link: <Link to="/" /> }
+        ? { label: "Back to Opengeni", link: <Link to="/" /> }
         : {
             label: "Back to sessions",
             link: <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} />,

@@ -56,7 +56,7 @@ export function mcpOAuthCallbackFailureMessage(
   if (stage === "persist") {
     return reason === "timeout"
       ? "Authorization succeeded, but saving the connection timed out. Nothing was committed; try again."
-      : "Authorization succeeded, but OpenGeni couldn't save the connection. Try again.";
+      : "Authorization succeeded, but Opengeni couldn't save the connection. Try again.";
   }
   if (reason === "timeout") {
     const label = stage ? CALLBACK_STAGE_LABELS[stage] : null;

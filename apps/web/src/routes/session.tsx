@@ -3045,7 +3045,7 @@ function SessionChatPane(props: {
                     (props.session.status === "failed" || props.session.status === "idle")
                   ? // "Send a message to revive" is a dead end without credits —
                     // the reply turn dies the same budget death.
-                    "Out of OpenGeni credits — add credits to continue."
+                    "Out of Opengeni credits — add credits to continue."
                   : "Send a follow-up…"
             }
             controls={

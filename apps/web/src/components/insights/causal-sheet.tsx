@@ -131,7 +131,7 @@ export function CausalSheet(props: {
                           ? `${formatUsd(driver.equivalentCreditUsd)} equivalent credits`
                           : "equivalent price unknown"}
                         {" · "}
-                        {formatUsd(driver.creditUsd)} OpenGeni credits
+                        {formatUsd(driver.creditUsd)} Opengeni credits
                       </p>
                     </div>
                   ) : (

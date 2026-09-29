@@ -96,7 +96,7 @@ function PreviewResult({ view }: { view: string }) {
               : "Payment simulated. No money was charged."
             : authorization
               ? "This simulates the external sign-in step. In the real flow, you authorize on the provider’s website using code DEMO-2254."
-              : `You selected $${Number(params.get("amount") || 25).toFixed(2)} in OpenGeni credits. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
+              : `You selected $${Number(params.get("amount") || 25).toFixed(2)} in Opengeni credits. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
         </p>
         {!finished ? (
           <Button
@@ -218,12 +218,12 @@ function AdditionalOrganizationPreview() {
             <span className="flex size-7 items-center justify-center rounded-md bg-brand text-xs font-bold text-white">
               O
             </span>
-            OpenGeni
+            Opengeni
           </div>
           <div className="grid gap-1.5">
             <OrganizationSwitcherLine
-              orgs={[{ accountId: "preview-account", label: "OpenGeni", canManage: true }]}
-              currentLabel="OpenGeni"
+              orgs={[{ accountId: "preview-account", label: "Opengeni", canManage: true }]}
+              currentLabel="Opengeni"
               activeAccountId="preview-account"
               onSelect={() => undefined}
               onCreate={() => setOpen(true)}

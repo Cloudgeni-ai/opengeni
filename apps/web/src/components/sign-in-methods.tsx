@@ -80,7 +80,7 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
           Security
         </h1>
         <p className="mt-1 text-sm leading-6 text-fg-muted">
-          Manage how you sign in to your personal OpenGeni account.
+          Manage how you sign in to your personal Opengeni account.
         </p>
       </div>
       {props.error ? (
@@ -305,7 +305,7 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
         ) : null}
       </section>
       <p className="border-t border-border pt-4 text-sm leading-6 text-fg-subtle">
-        These methods only sign you in to OpenGeni. Repository access, Gmail, and Google Drive are
+        These methods only sign you in to Opengeni. Repository access, Gmail, and Google Drive are
         separate connections managed in workspace Capabilities. Connecting or disconnecting a
         sign-in method does not grant or remove those integrations.
       </p>

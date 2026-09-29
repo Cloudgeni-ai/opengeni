@@ -92,7 +92,7 @@ test("desktop settings draw the settings rail in place of the main rail, with a 
       (link) => link.textContent === "Back to sessions",
     );
     expect(back?.getAttribute("href")).toBe("/workspaces/workspace/sessions");
-    expect(rail?.querySelector('a[aria-label="OpenGeni home"]')?.getAttribute("href")).toBe(
+    expect(rail?.querySelector('a[aria-label="Opengeni home"]')?.getAttribute("href")).toBe(
       "/workspaces/workspace/sessions",
     );
     expect(rail?.textContent).toContain("Switch workspace");

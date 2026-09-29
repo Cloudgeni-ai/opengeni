@@ -64,7 +64,7 @@ export function apiIntegrationOAuthFailureMessage(reason: string | null): string
   if (shared) return shared;
   switch (reason) {
     case "scope_not_granted":
-      return "The provider didn't grant every permission OpenGeni needs. Connect again and approve all requested access.";
+      return "The provider didn't grant every permission Opengeni needs. Connect again and approve all requested access.";
     case "account_mismatch":
       return "You signed in to a different account than the one being reconnected. Connect again with the same account.";
     case "client_unavailable":

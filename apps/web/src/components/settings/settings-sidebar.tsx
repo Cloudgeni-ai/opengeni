@@ -156,13 +156,13 @@ function SettingsRail({
         <div className="flex min-w-0 flex-col gap-3">
           <LinkShell
             link={home}
-            aria-label="OpenGeni home"
+            aria-label="Opengeni home"
             className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-[15px] font-semibold text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
           >
             <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
               <BrandMark className="size-4" />
             </span>
-            OpenGeni
+            Opengeni
           </LinkShell>
           <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
             {back.link}

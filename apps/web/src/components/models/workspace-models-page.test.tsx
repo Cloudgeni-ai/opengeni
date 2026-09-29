@@ -796,7 +796,7 @@ describe("OpenGeni credits", () => {
     const view = await render(true, "organization-a");
     const text = view.container.textContent ?? "";
     expect(text).not.toContain("No accounts connected");
-    const row = button(view.container, "OpenGeni credits");
+    const row = button(view.container, "Opengeni credits");
     expect(row).toBeDefined();
     expect(text).toContain("Pay as you go");
     expect(text).toContain("$12.50 left");
@@ -813,10 +813,10 @@ describe("OpenGeni credits", () => {
     creditsDeployment([]);
     const view = await render(false, "organization-a");
     const text = view.container.textContent ?? "";
-    expect(text).toContain("OpenGeni credits");
+    expect(text).toContain("Opengeni credits");
     expect(text).toContain("Pay as you go");
     expect(text).not.toContain("$12.50");
-    expect(button(view.container, "OpenGeni credits")).toBeUndefined();
+    expect(button(view.container, "Opengeni credits")).toBeUndefined();
     expect(client.getBilling).not.toHaveBeenCalled();
     await cleanup(view);
   });
@@ -825,7 +825,7 @@ describe("OpenGeni credits", () => {
     creditsDeployment(["billing:read"]);
     const view = await render(false, "organization-a");
     expect(view.container.textContent).toContain("$12.50 left");
-    expect(button(view.container, "OpenGeni credits")).toBeUndefined();
+    expect(button(view.container, "Opengeni credits")).toBeUndefined();
     await cleanup(view);
   });
 
@@ -837,7 +837,7 @@ describe("OpenGeni credits", () => {
     };
     const view = await render(true, "organization-a");
     const text = view.container.textContent ?? "";
-    expect(text).not.toContain("OpenGeni credits");
+    expect(text).not.toContain("Opengeni credits");
     expect(client.getBilling).not.toHaveBeenCalled();
     await cleanup(view);
   });

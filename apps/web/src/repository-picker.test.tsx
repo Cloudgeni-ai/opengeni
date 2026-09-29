@@ -41,7 +41,7 @@ describe("repository picker GitHub binding status", () => {
       healthy: false,
       canRefresh: false,
     });
-    expect(presentation.setupDescription).toContain("Install OpenGeni");
+    expect(presentation.setupDescription).toContain("Install Opengeni");
     expect(presentation.emptyDescription).not.toContain("server credentials");
     expect(presentation.emptyDescription).not.toContain(".env");
   });

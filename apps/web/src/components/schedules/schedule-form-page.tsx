@@ -515,7 +515,7 @@ function AgentScheduleForm({
       description: "A fresh cloud sandbox for each run.",
       leading: <ServerIcon className="size-4 text-fg-subtle" />,
       disabled: machineOnly,
-      disabledReason: "This OpenGeni server doesn't run managed sandboxes.",
+      disabledReason: "This Opengeni server doesn't run managed sandboxes.",
     },
     ...scheduledMachines.map((machine) => ({
       value: machine.sandboxId,
@@ -525,7 +525,7 @@ function AgentScheduleForm({
       description: "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
-      disabledReason: "It's offline. Start OpenGeni on it to pick it.",
+      disabledReason: "It's offline. Start Opengeni on it to pick it.",
     })),
     ...(draft.machineSandboxId &&
     !scheduledMachines.some((machine) => machine.sandboxId === draft.machineSandboxId)
@@ -588,7 +588,7 @@ function AgentScheduleForm({
       machineOnly &&
       computeChanged
     ) {
-      next.machine = "This OpenGeni server needs a connected machine for schedules.";
+      next.machine = "This Opengeni server needs a connected machine for schedules.";
     }
     return next;
   };
@@ -684,7 +684,7 @@ function AgentScheduleForm({
       ? "Only the schedule's owner can change it. Duplicate it to make your own."
       : "You need permission to manage schedules in this workspace."
     : cantRunHere && computeChanged
-      ? "Connect a machine first. This OpenGeni server can't run schedules without one."
+      ? "Connect a machine first. This Opengeni server can't run schedules without one."
       : connectionAccounts.requiresAccountChoice
         ? (connectionAccounts.accountChoiceMessage ?? "Pick an account for each tool.")
         : learningLoading || connectionAccounts.loading
@@ -722,7 +722,7 @@ function AgentScheduleForm({
             task?.name
           ) : offerAgent ? (
             <>
-              Rather describe it? <HelpLink onClick={ask.open}>Create with OpenGeni</HelpLink>
+              Rather describe it? <HelpLink onClick={ask.open}>Create with Opengeni</HelpLink>
             </>
           ) : undefined
         }
@@ -754,7 +754,7 @@ function AgentScheduleForm({
                 </Button>
               }
             >
-              This OpenGeni server doesn't run managed sandboxes, and no machine that can run is
+              This Opengeni server doesn't run managed sandboxes, and no machine that can run is
               connected to this workspace yet.
             </Notice>
           ) : null}

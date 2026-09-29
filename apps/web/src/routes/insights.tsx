@@ -325,10 +325,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <Notice tone="muted" title="How prices are calculated">
             <strong className="text-fg">Estimated provider USD</strong> is a hypothetical
             provider-rate comparison from captured list pricing or gateway-reported inference cost,
-            before OpenGeni markup.{" "}
-            <strong className="text-fg">Equivalent OpenGeni credit price</strong>
+            before Opengeni markup.{" "}
+            <strong className="text-fg">Equivalent Opengeni credit price</strong>
             includes the configured markup even when the call was externally paid.{" "}
-            <strong className="text-fg">OpenGeni credit price</strong> is the actual credits-path
+            <strong className="text-fg">Opengeni credit price</strong> is the actual credits-path
             price and is zero for externally paid calls.
           </Notice>
         ) : null}
@@ -370,15 +370,15 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               />
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <Metric
-                  label="Equivalent OpenGeni credit price"
+                  label="Equivalent Opengeni credit price"
                   value={formatUsd(totals.equivalentCreditUsd)}
                   delta={`${formatPctDelta(deltas.equivalentPct, snap.priorLabel)} · ${totals.equivalentPricingCoveragePct}% call coverage`}
                 />
                 <Metric
                   label={
                     snap.modelFilterActive
-                      ? "OpenGeni credit price (filtered)"
-                      : "OpenGeni credit price"
+                      ? "Opengeni credit price (filtered)"
+                      : "Opengeni credit price"
                   }
                   value={formatUsd(totals.creditUsd)}
                   delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · external calls excluded`}
@@ -449,13 +449,13 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                       },
                       {
                         id: "equivalent",
-                        label: "Equivalent OpenGeni credit price",
+                        label: "Equivalent Opengeni credit price",
                         values: series.map((d) => d.equivalentCreditUsd),
                         className: "text-status-running",
                       },
                       {
                         id: "credits",
-                        label: "OpenGeni credit price",
+                        label: "Opengeni credit price",
                         values: series.map((d) => d.modelCostUsd),
                         className: "text-status-waiting",
                       },
@@ -580,7 +580,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <h3 className="text-sm font-medium text-fg">
-              {measure === "tokens" ? "Total tokens" : "Equivalent OpenGeni credit price"}
+              {measure === "tokens" ? "Total tokens" : "Equivalent Opengeni credit price"}
             </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by model · click to filter</p>
             <DonutChart
@@ -623,7 +623,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     "Reasoning",
                     "Est. provider USD",
                     "Equivalent credits",
-                    "OpenGeni credits",
+                    "Opengeni credits",
                   ].map((h) => (
                     <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                       {h}
@@ -730,7 +730,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Reasoning",
                   "Est. provider USD",
                   "Equivalent credits",
-                  "OpenGeni credits",
+                  "Opengeni credits",
                 ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                     {h}
@@ -818,7 +818,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <h3 className="text-sm font-medium text-fg">
-              {measure === "tokens" ? "Total tokens" : "Equivalent OpenGeni credit price"}
+              {measure === "tokens" ? "Total tokens" : "Equivalent Opengeni credit price"}
             </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by provider · click to filter</p>
             <DonutChart
@@ -1066,7 +1066,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="Usage drivers">
         <p className="text-2xs text-fg-subtle">
           Top drivers ranked by total tokens, so externally paid work is never hidden by a zero
-          OpenGeni-credit price. Share is relative to the rows shown.
+          Opengeni-credit price. Share is relative to the rows shown.
         </p>
         <DataScroller aria-label="Usage drivers" className="border border-border">
           <table className="min-w-full text-left text-xs">
@@ -1079,7 +1079,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Cache",
                   "Est. provider USD",
                   "Equivalent credits",
-                  "OpenGeni credits",
+                  "Opengeni credits",
                   "Credit Δ",
                 ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
@@ -1270,7 +1270,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Cache",
                   "Est. provider USD",
                   "Equivalent credits",
-                  "OpenGeni credits",
+                  "Opengeni credits",
                   "Billing",
                 ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">

@@ -213,7 +213,7 @@ export function AccountAuthRoute({
         >
           <h1 className="text-base font-semibold">Invalid account request</h1>
           <p className="mt-2 text-sm text-fg-subtle">
-            Close this window and start the account action again from OpenGeni.
+            Close this window and start the account action again from Opengeni.
           </p>
         </div>
       </section>
@@ -246,7 +246,7 @@ export function AccountAuthRoute({
           <p className="mt-1 text-sm text-fg-subtle">
             {invitation
               ? `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-              : "This window keeps the account you choose separate until OpenGeni verifies the sign-in."}
+              : "This window keeps the account you choose separate until Opengeni verifies the sign-in."}
           </p>
         </div>
         {!invitation ? (

@@ -99,7 +99,7 @@ export function VideoGenerationPreferenceRow({
       await updatePolicy(fundingSource, enabled);
       toast.success(
         fundingSource === "opengeni_credits"
-          ? "Video generation will use OpenGeni credits"
+          ? "Video generation will use Opengeni credits"
           : fundingSource === "supergrok_subscription"
             ? "Video generation will use SuperGrok"
             : "Video generation will use your Gateway",

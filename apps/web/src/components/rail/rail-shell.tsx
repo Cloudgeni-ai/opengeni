@@ -442,7 +442,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
           <BrandMark className="size-3.5" />
         </span>
-        OpenGeni
+        Opengeni
       </Link>
     </header>
   );

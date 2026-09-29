@@ -76,7 +76,7 @@ const COLUMNS: RowListColumn[] = [
 ];
 
 const SERVICE_LOCK = "Service accounts get access from their API key, in Developer.";
-const SINGLE_USER_LOCK = "Single-user mode: only you use this OpenGeni.";
+const SINGLE_USER_LOCK = "Single-user mode: only you use this Opengeni.";
 
 export function OrganizationWorkspacesPage({
   workspaceId,

@@ -428,7 +428,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         ? {
             notice: {
               tone: "muted" as const,
-              title: "GitHub is temporarily unavailable for this OpenGeni deployment.",
+              title: "GitHub is temporarily unavailable for this Opengeni deployment.",
             },
           }
         : {}),
@@ -474,7 +474,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         open={personalDisconnectOpen}
         onOpenChange={setPersonalDisconnectOpen}
         title="Disconnect your GitHub identity?"
-        description="OpenGeni will stop acting as you. The workspace GitHub App is unaffected."
+        description="Opengeni will stop acting as you. The workspace GitHub App is unaffected."
         confirmLabel="Disconnect"
         cancelAutoFocus
         onConfirm={async () => {
@@ -514,7 +514,7 @@ export function githubChip(
 function githubEmptyRepositoriesMessage(installations: GitHubAppInfo["installations"]): string {
   return installations.some((installation) => installation.repositoryScope === "all")
     ? "This installation shares every repository it can see."
-    : "No repositories are shared with OpenGeni yet. Change repositories on GitHub to allow some.";
+    : "No repositories are shared with Opengeni yet. Change repositories on GitHub to allow some.";
 }
 
 function githubActionPolicyOptionId(

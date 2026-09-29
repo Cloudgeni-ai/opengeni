@@ -128,7 +128,7 @@ function SlackReactionChannelsDialogBody({
       draft.channelPolicy.mode === "allowlist" &&
       draft.channelPolicy.channelIds.length === 0
     ) {
-      toast.error("Select at least one conversation, or let it work anywhere OpenGeni is a member");
+      toast.error("Select at least one conversation, or let it work anywhere Opengeni is a member");
       return;
     }
     setSaving(true);
@@ -144,7 +144,7 @@ function SlackReactionChannelsDialogBody({
       <DialogHeader>
         <DialogTitle>Where the reaction shortcut works</DialogTitle>
         <DialogDescription>
-          React with the OpenGeni emoji on a message to start work from it. This reads the selected
+          React with the Opengeni emoji on a message to start work from it. This reads the selected
           message and its thread; it does not sync the channel.
         </DialogDescription>
       </DialogHeader>
@@ -164,7 +164,7 @@ function SlackReactionChannelsDialogBody({
             })
           }
         >
-          <option value="bot_member">Anywhere OpenGeni is a member</option>
+          <option value="bot_member">Anywhere Opengeni is a member</option>
           <option value="allowlist">Selected conversations</option>
         </Select>
       </label>
@@ -174,14 +174,14 @@ function SlackReactionChannelsDialogBody({
           <p className="text-2xs font-medium text-fg-muted">Allowed conversations</p>
           {channelsLoading ? (
             <p className="mt-2 flex items-center gap-2 text-2xs text-fg-subtle">
-              <Loader2Icon className="size-3 animate-spin" /> Loading conversations OpenGeni has
+              <Loader2Icon className="size-3 animate-spin" /> Loading conversations Opengeni has
               joined
             </p>
           ) : channelsError ? (
             <p className="mt-2 text-2xs text-danger">{channelsError}</p>
           ) : channels.length === 0 ? (
             <p className="mt-2 text-2xs text-fg-subtle">
-              OpenGeni has not been invited anywhere yet. Tag @OpenGeni in Slack, then return here.
+              Opengeni has not been invited anywhere yet. Tag @Opengeni in Slack, then return here.
             </p>
           ) : (
             <div className="mt-2 grid max-h-52 gap-2 overflow-y-auto sm:grid-cols-2">

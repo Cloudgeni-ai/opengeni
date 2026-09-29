@@ -178,7 +178,7 @@ export function useGoogleDriveIntegration({
         });
       } else {
         toast.success("Google Drive connected", {
-          description: "Choose the folders OpenGeni may read and turn on sync when ready.",
+          description: "Choose the folders Opengeni may read and turn on sync when ready.",
         });
       }
       void refresh();
@@ -546,7 +546,7 @@ export function useGoogleDriveIntegration({
         open={disconnectOpen}
         onOpenChange={setDisconnectOpen}
         title="Disconnect Google Drive?"
-        description="OpenGeni will stop using this connection. Google may still list the grant because disconnecting here does not revoke every grant for the Google OAuth project."
+        description="Opengeni will stop using this connection. Google may still list the grant because disconnecting here does not revoke every grant for the Google OAuth project."
         confirmLabel="Disconnect Google Drive"
         cancelAutoFocus
         onConfirm={disconnect}
@@ -618,7 +618,7 @@ function googleDriveStateNotice(
       tone: "waiting",
       title: "Google Drive is paused",
       description:
-        "OpenGeni will not browse or use the selected folders until you resume this connection.",
+        "Opengeni will not browse or use the selected folders until you resume this connection.",
     };
   }
   if (state === "token_revoked") {

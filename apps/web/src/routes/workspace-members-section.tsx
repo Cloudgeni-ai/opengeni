@@ -442,7 +442,7 @@ function CustomPermissionsPage({
    -------------------------------------------------------------------------- */
 
 function requestName(request: SlackUserLinkAccessRequest): string {
-  return request.subjectLabel?.trim() || "Signed-in OpenGeni user";
+  return request.subjectLabel?.trim() || "Signed-in Opengeni user";
 }
 
 function ReviewRequestDialog({

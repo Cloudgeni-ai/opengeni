@@ -233,7 +233,7 @@ export function ManagedAuthPanel(props: {
   const resendVerificationControl = verificationEmail ? (
     <div className="mt-2">
       <p className="text-xs text-fg-subtle">
-        Look for “Verify your OpenGeni email” in your inbox or spam folder. After verifying, return
+        Look for “Verify your Opengeni email” in your inbox or spam folder. After verifying, return
         here to sign in.
       </p>
       <Button

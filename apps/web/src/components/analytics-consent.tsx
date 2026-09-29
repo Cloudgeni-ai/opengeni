@@ -183,7 +183,7 @@ export function AnalyticsManager({
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
         <div className="min-w-0 flex-1">
           <p data-contrast-audited className="text-xs leading-relaxed text-fg-muted">
-            <span className="text-sm font-medium text-fg">Help us improve OpenGeni.</span> Optional
+            <span className="text-sm font-medium text-fg">Help us improve Opengeni.</span> Optional
             analytics with first-party cookies. We never send prompts, code, names, emails, or
             secrets.
           </p>

@@ -184,7 +184,7 @@ function HumanInputRequestForm({
       questions.map(async (question) => {
         if (!loadSkillReview)
           throw new Error(
-            "This client cannot preview Skill files. Open this request in OpenGeni to review it.",
+            "This client cannot preview Skill files. Open this request in Opengeni to review it.",
           );
         const reference = question.reference;
         const record = await loadSkillReview(reference);

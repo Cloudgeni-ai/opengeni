@@ -190,7 +190,7 @@ function PrivateChatsRow({
             disabled={unavailable}
             disabledReason={
               unavailable
-                ? "Private chats aren't turned on for this installation. Ask whoever runs your OpenGeni to enable them."
+                ? "Private chats aren't turned on for this installation. Ask whoever runs your Opengeni to enable them."
                 : undefined
             }
             onCheckedChange={async (enabled) => {
@@ -234,7 +234,7 @@ function choiceOf(policy: OrganizationRetentionPolicy): RetentionChoice {
 
 function retentionSentence(choice: RetentionChoice): string {
   return choice === "retain"
-    ? "Kept until someone who runs your OpenGeni deletes it."
+    ? "Kept until someone who runs your Opengeni deletes it."
     : `Deleted ${choice} days after the person is removed.`;
 }
 
@@ -322,7 +322,7 @@ function RetentionRow({
         title="Change how long removed people's data is kept?"
         description={
           draft === "retain"
-            ? "Their personal data is kept until someone who runs your OpenGeni deletes it. This doesn't give back any access."
+            ? "Their personal data is kept until someone who runs your Opengeni deletes it. This doesn't give back any access."
             : `Their personal data becomes eligible for deletion ${draft} days after they're removed. Access still ends right away.`
         }
         submitLabel="Change retention"

@@ -212,7 +212,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other OpenGeni workspaces or deployments already connected to the machine."
+        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other Opengeni workspaces or deployments already connected to the machine."
       />
 
       <div className="mt-5">
@@ -310,7 +310,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             <DialogTitle>Connect a machine</DialogTitle>
             <DialogDescription>
               Run one command to install or update the agent and add this workspace. Existing
-              OpenGeni connections stay intact.
+              Opengeni connections stay intact.
             </DialogDescription>
           </DialogHeader>
           {/* Gated on `enrollOpen` so the body mounts (and mints a fresh token)

@@ -64,12 +64,12 @@ const KIND_DETAILS: Record<
   },
   inbound_trigger: {
     label: "Inbound trigger",
-    description: "Choose what OpenGeni watches for new work from this account.",
+    description: "Choose what Opengeni watches for new work from this account.",
     icon: BellRingIcon,
   },
   delivery_destination: {
     label: "Delivery destination",
-    description: "Control how OpenGeni can deliver through this account.",
+    description: "Control how Opengeni can deliver through this account.",
     icon: SendIcon,
   },
   identity_link: {

@@ -416,7 +416,7 @@ export function ComposerField({
                   <span className="block text-xs leading-4.5 text-fg-muted">
                     {canAttachOpenGeniTool
                       ? "Chats, schedules and other work in this workspace."
-                      : "Not available on this OpenGeni server."}
+                      : "Not available on this Opengeni server."}
                   </span>
                 </span>
               </DropdownMenuCheckboxItem>

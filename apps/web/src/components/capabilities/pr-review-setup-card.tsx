@@ -37,7 +37,7 @@ export function PrReviewSetupCard(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [provider, setProvider] = useState<PrReviewProvider>("github");
-  const [name, setName] = useState("OpenGeni Review Bot");
+  const [name, setName] = useState("Opengeni Review Bot");
   const [providerBaseUrl, setProviderBaseUrl] = useState("");
   const [appId, setAppId] = useState("");
   const [privateKey, setPrivateKey] = useState("");
@@ -174,7 +174,7 @@ export function PrReviewSetupCard(props: {
   if (loading) {
     return (
       <div className="flex items-center gap-2 rounded-xl border border-border bg-surface/50 p-4 text-xs text-fg-muted">
-        <Loader2Icon className="size-4 animate-spin" /> Loading OpenGeni Review Bot setup…
+        <Loader2Icon className="size-4 animate-spin" /> Loading Opengeni Review Bot setup…
       </div>
     );
   }
@@ -186,9 +186,9 @@ export function PrReviewSetupCard(props: {
           <BotIcon className="size-4" />
         </span>
         <div>
-          <h3 className="text-sm font-semibold">Configure OpenGeni Review Bot</h3>
+          <h3 className="text-sm font-semibold">Configure Opengeni Review Bot</h3>
           <p className="mt-1 text-xs leading-5 text-fg-muted">
-            Install OpenGeni Lens on the repositories you want reviewed. Pull-request events start
+            Install Opengeni Lens on the repositories you want reviewed. Pull-request events start
             ordinary exact-head agent sessions through the generic trigger system.
           </p>
         </div>
@@ -203,9 +203,9 @@ export function PrReviewSetupCard(props: {
 
       <div className="grid gap-3 rounded-lg border border-border bg-surface/70 p-3">
         <div>
-          <div className="text-xs font-medium">GitHub · OpenGeni Lens</div>
+          <div className="text-xs font-medium">GitHub · Opengeni Lens</div>
           <p className="mt-1 text-xs leading-5 text-fg-muted">
-            GitHub handles account authorization and repository selection. OpenGeni stores no App
+            GitHub handles account authorization and repository selection. Opengeni stores no App
             private key in this workspace.
           </p>
         </div>
@@ -241,7 +241,7 @@ export function PrReviewSetupCard(props: {
         ) : null}
         {managedGitHub?.status === "unavailable" ? (
           <Notice>
-            OpenGeni Lens is not configured for this deployment.
+            Opengeni Lens is not configured for this deployment.
             {managedGitHub.missing.length > 0
               ? ` Missing: ${managedGitHub.missing.join(", ")}.`
               : " Contact the deployment operator."}
@@ -256,7 +256,7 @@ export function PrReviewSetupCard(props: {
                 scope: { workspaceId: props.workspaceId, transport: connectTransport },
                 providerId: "github-lens",
                 ownership: "workspace",
-                displayName: "OpenGeni Lens",
+                displayName: "Opengeni Lens",
                 returnUrl: window.location.href,
                 idempotencyKey: crypto.randomUUID(),
               })
@@ -467,7 +467,7 @@ export function PrReviewSetupCard(props: {
             <div className="text-xs font-medium">Review execution</div>
             <p className="mt-1 text-xs leading-5 text-fg-muted">
               Choose the model and billing source for each repository. Codex models use the
-              workspace&apos;s connected Codex subscription and do not consume OpenGeni credits. The
+              workspace&apos;s connected Codex subscription and do not consume Opengeni credits. The
               exact choice is frozen into each accepted pull-request run.
             </p>
           </div>
@@ -576,5 +576,5 @@ function ReviewModelSelect(props: {
 }
 
 function messageForError(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "OpenGeni Review Bot setup failed";
+  return reason instanceof Error ? reason.message : "Opengeni Review Bot setup failed";
 }

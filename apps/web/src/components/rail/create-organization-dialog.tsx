@@ -158,7 +158,7 @@ export function CreateOrganizationDialog(
                 {creationState === "committed"
                   ? "Try again to refresh your access and open the new organization. This will not create another one."
                   : creationState === "uncertain"
-                    ? "OpenGeni could not confirm the result. Try again to safely replay this exact request without creating a duplicate."
+                    ? "Opengeni could not confirm the result. Try again to safely replay this exact request without creating a duplicate."
                     : "Create a separate home for another team, with its own members, workspaces, and data."}
               </DialogDescription>
             </DialogHeader>

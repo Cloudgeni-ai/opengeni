@@ -60,7 +60,7 @@ import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-searc
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with OpenGeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -1964,7 +1964,7 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 
 async function signIn(page: Page, account: AccountFixture): Promise<void> {
   await page.goto(publicOrigin, { waitUntil: "domcontentloaded" });
-  await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor();
+  await page.getByRole("heading", { name: "Sign in to Opengeni" }).waitFor();
   await page.evaluate(() => {
     const debugWindow = window as Window & {
       __accountAcceptanceMessages?: Array<{
@@ -4974,7 +4974,7 @@ describe("provider-neutral browser account acceptance", () => {
       await page.getByRole("heading", { name: "Sign out all browser accounts?" }).waitFor();
       await page.getByRole("button", { name: "Sign out all", exact: true }).click();
       try {
-        await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
+        await page.getByRole("heading", { name: "Sign in to Opengeni" }).waitFor({
           timeout: 30_000,
         });
       } catch (error) {
@@ -5030,7 +5030,7 @@ describe("provider-neutral browser account acceptance", () => {
       )?.value;
       expect(authorityAfterLogoutAll).toHaveLength(43);
       expect(authorityAfterLogoutAll).not.toBe(authorityBeforeLogoutAll);
-      await secondTab.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
+      await secondTab.getByRole("heading", { name: "Sign in to Opengeni" }).waitFor({
         timeout: 30_000,
       });
       const signedOutSecondTabProjection = await sessionSet(secondTab);

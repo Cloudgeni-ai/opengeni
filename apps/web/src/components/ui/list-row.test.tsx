@@ -133,7 +133,7 @@ describe("ListRow", () => {
           title="GitHub"
           description="Work on repositories, issues, and pull requests."
           disabled
-          disabledReason="GitHub isn't available on this OpenGeni server yet. An admin needs to add the GitHub App."
+          disabledReason="GitHub isn't available on this Opengeni server yet. An admin needs to add the GitHub App."
           indicator={{ kind: "unavailable", label: "Unavailable" }}
           onOpen={() => {}}
         />

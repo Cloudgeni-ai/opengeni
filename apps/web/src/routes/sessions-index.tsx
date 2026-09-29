@@ -1104,7 +1104,7 @@ function SessionsIndexRouteContent({
       if (realtimeModel && personalMachineSelected) {
         toast.error("Voice can't start on a personal Connected Machine", {
           description:
-            "Start the session with a message first so OpenGeni can attach the machine to an accepted turn.",
+            "Start the session with a message first so Opengeni can attach the machine to an accepted turn.",
         });
         return false;
       }

@@ -262,7 +262,7 @@ export function resetAuthorityNote(overview: CodexAccountOverview): string | nul
     count_only: `ChatGPT reports ${count} reset${count === 1 ? "" : "s"} but no details, so they are view only.`,
     capped: "ChatGPT returned fewer details than its count, so these are view only.",
     unsupported: "This plan doesn't report usage limit resets.",
-    unknown: "ChatGPT returned reset data OpenGeni doesn't recognize, so these are view only.",
+    unknown: "ChatGPT returned reset data Opengeni doesn't recognize, so these are view only.",
     error: "Couldn't check usage limit resets. Refresh usage to try again.",
   };
   if (detail[reset.detailState]) return detail[reset.detailState];
@@ -274,7 +274,7 @@ export function resetAuthorityNote(overview: CodexAccountOverview): string | nul
     case "unowned":
       return "No one is recorded as the owner of this older connection, so its resets are view only. Reconnect the same ChatGPT account while signed in as yourself to claim it.";
     case "managed_human_unavailable":
-      return "Resets are view only here: OpenGeni couldn't confirm who is signed in to this browser, so ownership can't be claimed or changed.";
+      return "Resets are view only here: Opengeni couldn't confirm who is signed in to this browser, so ownership can't be claimed or changed.";
     case "different_human":
       return "Only the person who connected this account can redeem its resets. Disconnecting it is the only way to change who owns it.";
     default:
@@ -421,7 +421,7 @@ export function ResetCreditInventory({
               description={
                 attempt.status === "completed" && attempt.outcome
                   ? redemptionOutcomeCopy(attempt.outcome)
-                  : "ChatGPT no longer lists this reset. Resume only the same uncertain attempt; OpenGeni never starts a new one for it."
+                  : "ChatGPT no longer lists this reset. Resume only the same uncertain attempt; Opengeni never starts a new one for it."
               }
               control={
                 attempt.status !== "completed" ? (
@@ -1111,9 +1111,9 @@ export function CodexRedemptionDialog({ codex }: { codex: CodexSubscriptions }) 
           <dt className="text-fg-muted">Note</dt>
           <dd className="m-0 break-words text-fg-muted">
             {redemption.uncertain
-              ? "The outcome is uncertain. Retry only this same attempt; OpenGeni reuses its original request so it can't be redeemed twice."
+              ? "The outcome is uncertain. Retry only this same attempt; Opengeni reuses its original request so it can't be redeemed twice."
               : redemption.preparation.resumable
-                ? "This resumes the same uncertain attempt; OpenGeni reuses its original request so it can't be redeemed twice."
+                ? "This resumes the same uncertain attempt; Opengeni reuses its original request so it can't be redeemed twice."
                 : `This confirmation expires ${formatAbsoluteTime(toDate(redemption.preparation.expiresAt), { now })}.`}
           </dd>
         </dl>

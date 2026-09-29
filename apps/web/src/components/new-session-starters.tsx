@@ -7,10 +7,10 @@ import { Button } from "@/components/ui/button";
 export const NEW_SESSION_STARTERS = [
   {
     id: "slack",
-    title: "Work with OpenGeni from Slack",
+    title: "Work with Opengeni from Slack",
     description: "Install the bot. Start tasks and follow up on the go.",
     prompt:
-      "Help me install the OpenGeni Slack bot so I can ask questions, start work, and follow up from Slack, including on my phone.",
+      "Help me install the Opengeni Slack bot so I can ask questions, start work, and follow up from Slack, including on my phone.",
   },
   {
     id: "github",

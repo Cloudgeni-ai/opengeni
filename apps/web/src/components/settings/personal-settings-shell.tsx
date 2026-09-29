@@ -9,7 +9,7 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
   return (
     <SettingsShell
       label="Personal settings"
-      back={{ label: "Back to OpenGeni", link: <Link to="/" /> }}
+      back={{ label: "Back to Opengeni", link: <Link to="/" /> }}
       home={settingsHomeLink()}
       scope={
         <div className="min-w-0 px-2.5">

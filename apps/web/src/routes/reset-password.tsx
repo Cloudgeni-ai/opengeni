@@ -87,7 +87,7 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
           <div>
             <h1 className="text-base font-semibold">Reset password</h1>
             <p className="text-sm text-fg-subtle">
-              Choose a new password for your OpenGeni account.
+              Choose a new password for your Opengeni account.
             </p>
           </div>
         </div>

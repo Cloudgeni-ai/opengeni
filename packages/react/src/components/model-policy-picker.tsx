@@ -96,7 +96,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   free: "Free",
 
   billingHints: {
-    opengeni_credits: "Provided by OpenGeni",
+    opengeni_credits: "Provided by Opengeni",
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
@@ -196,7 +196,7 @@ export function BillingClassMark(props: {
   "aria-label"?: string | undefined;
 }) {
   const labels: Record<PickerBillingClass, string> = {
-    opengeni_credits: "OpenGeni",
+    opengeni_credits: "Opengeni",
     external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",

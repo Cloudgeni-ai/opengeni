@@ -85,7 +85,7 @@ export function FeedbackDialog(props: {
           <DialogDescription>
             {props.sessionId
               ? "Share what worked or what could be better."
-              : "Tell us what could make OpenGeni better."}
+              : "Tell us what could make Opengeni better."}
           </DialogDescription>
         </DialogHeader>
         {props.sentiment ? (

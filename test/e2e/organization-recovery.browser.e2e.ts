@@ -298,7 +298,7 @@ async function signInAndReauthenticate(account: ActorAccount): Promise<ActorBrow
   });
   const page = await context.newPage();
   await page.goto(publicOrigin, { waitUntil: "domcontentloaded" });
-  await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor();
+  await page.getByRole("heading", { name: "Sign in to Opengeni" }).waitFor();
   const [initialPopup] = await Promise.all([
     page.waitForEvent("popup"),
     page.getByRole("button", { name: "Continue with email" }).click(),

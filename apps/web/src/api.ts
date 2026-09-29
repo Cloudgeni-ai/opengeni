@@ -1169,8 +1169,8 @@ function showApiUpdateNotice(willReload: boolean): void {
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
   notice.textContent = willReload
-    ? "OpenGeni updated — reloading…"
-    : "OpenGeni updated. Reload this tab to continue.";
+    ? "Opengeni updated — reloading…"
+    : "Opengeni updated. Reload this tab to continue.";
   Object.assign(notice.style, {
     position: "fixed",
     inset: "16px 16px auto auto",

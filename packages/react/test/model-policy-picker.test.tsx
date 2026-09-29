@@ -167,7 +167,7 @@ describe("ModelPolicyPicker", () => {
       />,
     );
     expect(container.querySelector('section[aria-label="Acme Assist"]')).not.toBeNull();
-    expect(container.textContent).not.toContain("OpenGeni");
+    expect(container.textContent).not.toContain("Opengeni");
     expect(container.textContent).toContain("Workspace-provided models");
     expect(container.querySelector('[data-testid="acme-mark"]')).not.toBeNull();
     expect(JSON.stringify(catalogRows)).toBe(before);
@@ -305,7 +305,7 @@ describe("ModelPolicyPicker", () => {
         [...container.querySelectorAll("section")].map((section) =>
           section.getAttribute("aria-label"),
         ),
-      ).toEqual(["Codex", "OpenGeni"]);
+      ).toEqual(["Codex", "Opengeni"]);
       expect(
         container.querySelector('[data-testid="model-picker-choice-free"] [aria-label="Selected"]'),
       ).toBeTruthy();
@@ -363,7 +363,7 @@ describe("ModelPolicyPicker", () => {
       [...container.querySelectorAll("section")].map((section) =>
         section.getAttribute("aria-label"),
       ),
-    ).toEqual(["OpenGeni", "Codex"]);
+    ).toEqual(["Opengeni", "Codex"]);
     expect(calls).toEqual([]);
   });
 
@@ -484,7 +484,7 @@ describe("ModelPolicyPicker", () => {
         onLatencyModeChange={() => {}}
       />,
     );
-    const group = container.querySelector('section[aria-label="OpenGeni"]')!;
+    const group = container.querySelector('section[aria-label="Opengeni"]')!;
     expect(group.querySelectorAll("button").length).toBe(5);
     expect(container.querySelector('section[aria-label="External"]')).toBeNull();
     for (const label of ["Workspace providers", "Organization providers", "Codex"]) {
@@ -1041,6 +1041,6 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
         ?.textContent,
-    ).not.toContain("OpenGeni credits");
+    ).not.toContain("Opengeni credits");
   });
 });

@@ -19,12 +19,12 @@ export function RailHeader() {
         to="/workspaces/$workspaceId/sessions"
         params={{ workspaceId: rail.workspaceId }}
         className="flex shrink-0 items-center gap-2 rounded-md text-[15px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        aria-label="OpenGeni home"
+        aria-label="Opengeni home"
       >
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
           <BrandMark className="size-4" />
         </span>
-        {!rail.collapsed ? <span className="hidden @[280px]:inline">OpenGeni</span> : null}
+        {!rail.collapsed ? <span className="hidden @[280px]:inline">Opengeni</span> : null}
       </Link>
       {!rail.collapsed ? <SwitcherBlock inline /> : null}
       {rail.isMobile ? (

@@ -135,7 +135,7 @@ const VERCEL_AI_GATEWAY_CONFIG: ProviderConnectionConfig = {
   summary: "Use models through your Vercel account, billed to Vercel.",
   keyHelp: "Create one in Vercel under AI Gateway, then API keys.",
   billingDescription:
-    "Use models through this workspace's Vercel account. The workspace's Vercel account is billed directly instead of using OpenGeni credits.",
+    "Use models through this workspace's Vercel account. The workspace's Vercel account is billed directly instead of using Opengeni credits.",
   connectionManagerDescription:
     "Members with connection-management access manage this Vercel AI Gateway connection.",
   keyAriaLabel: "Vercel AI Gateway key",
@@ -143,7 +143,7 @@ const VERCEL_AI_GATEWAY_CONFIG: ProviderConnectionConfig = {
     connected ? "Replace Vercel AI Gateway key" : "Vercel AI Gateway key",
   customModelsHeading: "Custom models",
   customModelsDescription:
-    "Add an exact Vercel model slug. OpenGeni uses the Gateway's routing and does not inspect or pin a provider for custom entries.",
+    "Add an exact Vercel model slug. Opengeni uses the Gateway's routing and does not inspect or pin a provider for custom entries.",
   customModelInputAriaLabel: "Vercel AI Gateway model slug",
   customModelPlaceholder: "anthropic/claude-sonnet-4.6",
   customModelConnectedHelp: "The model becomes selectable when workspace policy allows it.",

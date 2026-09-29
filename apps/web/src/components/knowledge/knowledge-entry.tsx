@@ -280,7 +280,7 @@ function authorOf(
   revision: { createdBySessionId: string | null },
   scope: KnowledgeEntryScope,
 ): string {
-  if (revision.createdBySessionId) return "OpenGeni";
+  if (revision.createdBySessionId) return "Opengeni";
   return scope === "personal" ? "You" : "A teammate";
 }
 

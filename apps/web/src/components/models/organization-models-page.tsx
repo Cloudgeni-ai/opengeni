@@ -617,7 +617,7 @@ function OrgCodexConnectPage({
     >
       <FieldStack>
         <p className="text-sm text-fg-muted">
-          ChatGPT opens in a new tab and asks for a code, which shows here. OpenGeni never sees your
+          ChatGPT opens in a new tab and asks for a code, which shows here. Opengeni never sees your
           password. Every shared workspace can use the account until you limit it.
         </p>
         {codex.pending ? (

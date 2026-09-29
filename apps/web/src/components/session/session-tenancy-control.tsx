@@ -750,7 +750,7 @@ export function SessionTenancyControl({
                   : "Create an independent copy visible only to you. Live credentials, connections, tools, goals, and processes are not copied."
                 : confirmation?.visibility === "workspace"
                   ? "People who can access this workspace will be able to open and continue the session. Current work keeps running with its existing identity and connections."
-                  : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
+                  : "Only you will be able to open the session. Opengeni waits for all current work and sandbox access to settle first."
         }
         confirmLabel={
           confirmation?.kind === "fork"

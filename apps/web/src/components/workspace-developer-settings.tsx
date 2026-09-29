@@ -426,7 +426,7 @@ function CredentialProviderSection({
           Credential provider
         </h2>
         <p className="mt-1 text-xs text-fg-muted">
-          Your service hands the agent short-lived credentials for each run. OpenGeni renews them
+          Your service hands the agent short-lived credentials for each run. Opengeni renews them
           before they expire.
         </p>
       </div>

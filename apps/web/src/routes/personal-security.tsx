@@ -29,7 +29,7 @@ export function PersonalSecurityRoute() {
     return (
       <ProblemPanel
         title="Sign-in methods unavailable"
-        description="Personal sign-in methods are managed by OpenGeni only on deployments with managed browser sign-in."
+        description="Personal sign-in methods are managed by Opengeni only on deployments with managed browser sign-in."
       />
     );
   }
@@ -88,7 +88,7 @@ function BrokerSecurity() {
         setReauthError(null);
         popup.open(() => accounts.beginReauth(slotId), {
           onError: () =>
-            setReauthError("Couldn't open sign-in. Allow popups for OpenGeni and try again."),
+            setReauthError("Couldn't open sign-in. Allow popups for Opengeni and try again."),
           onSettled: () => context.revalidatePrincipalAccess(),
         });
       }}
@@ -159,8 +159,8 @@ export function SecurityController({
             );
           setSuccess(
             usable.length
-              ? `Sign-in methods confirmed: ${usable.join(", ")}. You can use these to access your OpenGeni account.`
-              : "The provider returned to OpenGeni, but no usable sign-in method was confirmed. Review the methods below before continuing.",
+              ? `Sign-in methods confirmed: ${usable.join(", ")}. You can use these to access your Opengeni account.`
+              : "The provider returned to Opengeni, but no usable sign-in method was confirmed. Review the methods below before continuing.",
           );
         }
         if (callback === "error")
@@ -304,7 +304,7 @@ export function SecurityController({
                 connected: method.connected,
                 available: method.available,
                 email: method.connected ? inventory.email : null,
-                emailLabel: "Connected · OpenGeni account: ",
+                emailLabel: "Connected · Opengeni account: ",
                 handle: null,
                 canDisconnect: method.canDisconnect,
                 reconnectRequired: method.implicitRelinkingSuppressed,

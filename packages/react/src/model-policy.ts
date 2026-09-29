@@ -24,7 +24,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
 export type LatencyModeId = "standard" | "priority" | "fast";
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
-  opengeni_credits: "OpenGeni",
+  opengeni_credits: "Opengeni",
   external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
@@ -127,7 +127,7 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Free in this deployment";
   }
   if (model.cost === "credits") {
-    return "OpenGeni credits";
+    return "Opengeni credits";
   }
   if (model.cost === "subscription") {
     return model.source === "supergrok"
@@ -148,7 +148,7 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Route unknown";
   }
   if (billing.metering === "opengeni_credits") {
-    return "OpenGeni credits · automatic managed route";
+    return "Opengeni credits · automatic managed route";
   }
   if (billing.upstreamPayer === "connected_subscription") {
     return model.source === "supergrok"
@@ -162,8 +162,8 @@ export function payerSummaryForModel(model: ClientModel): string {
     return organizationProviderPayerSummary(model);
   }
   return billing.upstreamPayer === "deployment"
-    ? "OpenGeni · no model credits"
-    : "External provider · no OpenGeni credits";
+    ? "Opengeni · no model credits"
+    : "External provider · no Opengeni credits";
 }
 
 export function advancedSourceSummary(model: ClientModel): string | null {

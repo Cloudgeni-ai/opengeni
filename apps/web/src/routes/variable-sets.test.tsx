@@ -256,7 +256,7 @@ describe("Variable sets", () => {
 
       await setInputValue(name(), "github token");
       expect(name().value).toBe("GITHUB_TOKEN");
-      expect(view.container.textContent).toContain("OpenGeni sets GITHUB_TOKEN");
+      expect(view.container.textContent).toContain("Opengeni sets GITHUB_TOKEN");
 
       await setInputValue(name(), "api_token");
       expect(view.container.textContent).toContain("API_TOKEN is already in this set");

@@ -162,7 +162,7 @@ export function ConnectorToolPermissions({
         <div>
           <h3 className="text-sm font-medium">Tool permissions</h3>
           <p className="mt-1 text-xs leading-5 text-fg-subtle">
-            Choose when OpenGeni can use this connector. Changes apply from the next turn. Existing
+            Choose when Opengeni can use this connector. Changes apply from the next turn. Existing
             approvals remain in place.
           </p>
         </div>

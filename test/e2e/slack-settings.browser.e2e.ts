@@ -75,7 +75,7 @@ test("connected page is compact, accessible, and keeps real routing and disconne
     expect(state.routingSaves).toBe(1);
     await sheet.getByRole("button", { name: "More actions for Slack", exact: true }).click();
     await page.getByRole("menuitem", { name: "Disconnect", exact: true }).click();
-    const confirmation = page.getByRole("dialog", { name: "Disconnect the OpenGeni Slack bot?" });
+    const confirmation = page.getByRole("dialog", { name: "Disconnect the Opengeni Slack bot?" });
     await confirmation.getByText(/whole organization/).waitFor();
     expect(state.disconnects).toBe(0);
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -102,7 +102,7 @@ test("sibling workspace finds the verified connection and opens its home setting
     const sheet = page.locator(slackPage);
     await sheet.getByText("Connected", { exact: true }).waitFor();
     expect(
-      await sheet.getByRole("button", { name: "Add OpenGeni to Slack", exact: true }).count(),
+      await sheet.getByRole("button", { name: "Add Opengeni to Slack", exact: true }).count(),
     ).toBe(0);
     await sheet.getByRole("button", { name: "Open Slack settings" }).click();
     await page.waitForURL(
@@ -151,7 +151,7 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
       .waitFor();
-    const setup = sheet.getByRole("button", { name: "Add OpenGeni to Slack", exact: true });
+    const setup = sheet.getByRole("button", { name: "Add Opengeni to Slack", exact: true });
     await setup.waitFor();
     expect(await setup.isDisabled()).toBe(true);
     releaseConnections();
@@ -164,7 +164,7 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     expect(await setup.count()).toBe(0);
     await sheet.getByRole("button", { name: "Dismiss", exact: true }).click();
     expect(new URL(page.url()).searchParams.has("slack")).toBe(false);
-    await sheet.getByRole("button", { name: "Add OpenGeni to Slack", exact: true }).waitFor();
+    await sheet.getByRole("button", { name: "Add Opengeni to Slack", exact: true }).waitFor();
   } finally {
     releaseConnections();
     await context.close();

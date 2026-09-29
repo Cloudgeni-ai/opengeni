@@ -36,7 +36,7 @@ describe("production web handler", () => {
 
     const route = await handler(new Request("https://example.test/workspaces/ws/sessions/id"));
     expect(route.headers.get("cache-control")).toBe("no-cache");
-    expect(await route.text()).toContain("OpenGeni");
+    expect(await route.text()).toContain("Opengeni");
   });
 
   test("serves the protected setup shell so the head bootstrap can inspect query and fragment", async () => {

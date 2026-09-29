@@ -341,7 +341,7 @@ function MemorySlackPublicationSettings({
             ))}
           </Select>
           <span className="mt-1 block font-normal text-fg-subtle">
-            Archived and shared Slack Connect conversations are excluded. OpenGeni never auto-joins.
+            Archived and shared Slack Connect conversations are excluded. Opengeni never auto-joins.
           </span>
         </label>
       </div>

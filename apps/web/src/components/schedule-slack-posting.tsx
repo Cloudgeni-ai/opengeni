@@ -124,14 +124,14 @@ export function ScheduleSlackPosting(props: {
     !botOptions.some((option) => option.connection.id === props.connectionId);
 
   const hint =
-    "Each run can post to one Slack channel as the OpenGeni bot. The agent cannot post to any " +
+    "Each run can post to one Slack channel as the Opengeni bot. The agent cannot post to any " +
     "other channel. Invite the bot to a channel in Slack to see it here.";
   const blocked = !canChoose
     ? "Only people who can manage connections can choose this channel."
     : botsError
       ? `Slack connections could not be loaded. ${botsError}`
       : bots !== null && botOptions.length === 0 && !props.connectionId
-        ? "No OpenGeni Slack bot is installed in this workspace. A task can post only through a " +
+        ? "No Opengeni Slack bot is installed in this workspace. A task can post only through a " +
           "bot installed in its own workspace, from Plugins."
         : null;
   if (blocked) {
@@ -176,7 +176,7 @@ export function ScheduleSlackPosting(props: {
             options={botMenu}
             value={props.connectionId || null}
             onValueChange={(connectionId) => props.onChange({ connectionId, channelId: "" })}
-            placeholder="Choose the OpenGeni bot"
+            placeholder="Choose the Opengeni bot"
             disabled={props.disabled}
             className="max-w-[360px]"
           />
@@ -199,7 +199,7 @@ export function ScheduleSlackPosting(props: {
                 : { connectionId: effectiveConnectionId, channelId: value },
             )
           }
-          placeholder="Choose the OpenGeni bot first"
+          placeholder="Choose the Opengeni bot first"
           searchPlaceholder="Search channels"
           disabled={props.disabled || !effectiveConnectionId}
           loading={channelsLoading}

@@ -90,7 +90,7 @@ export function payerLabel(billingClass: string, fallback?: string): string {
     case "supergrok_subscription":
       return "SuperGrok plan";
     case "opengeni_credits":
-      return "OpenGeni credits";
+      return "Opengeni credits";
     case "byok":
       return "Workspace API key";
     case "organization_byok":

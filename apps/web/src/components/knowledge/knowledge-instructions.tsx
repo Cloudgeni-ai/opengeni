@@ -360,7 +360,7 @@ export function InstructionsTab({
                       className="pointer-coarse:h-11"
                     >
                       <SparklesIcon aria-hidden="true" />
-                      Ask OpenGeni…
+                      Ask Opengeni…
                     </Button>
                     {head ? (
                       <Button
@@ -514,7 +514,7 @@ function AskOpenGeniDialog({
         }
       }}
       size="sm"
-      title="Ask OpenGeni to change the instructions"
+      title="Ask Opengeni to change the instructions"
       description="It starts a chat that proposes the change. Your Learning setting decides whether it applies right away or waits in Review."
       submitLabel="Start chat"
       pendingLabel="Starting…"
@@ -664,7 +664,7 @@ export function instructionRevisions(
         event.actorSubjectId === me
           ? "You"
           : event.actorSubjectId.startsWith("service:") || agent
-            ? "OpenGeni"
+            ? "Opengeni"
             : revision.provenance.source === "onboarding"
               ? "Workspace setup"
               : "A workspace admin";

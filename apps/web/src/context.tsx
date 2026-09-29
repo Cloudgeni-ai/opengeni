@@ -3076,7 +3076,7 @@ function AccessKeyPanel(props: {
             <p className="text-sm text-fg-subtle">
               Enter the{" "}
               {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"}{" "}
-              for this OpenGeni instance.
+              for this Opengeni instance.
             </p>
           </div>
         </div>
