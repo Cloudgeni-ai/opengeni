@@ -506,8 +506,15 @@ OpenGeni can deterministically compile a focused OpenAPI 3.0/3.1 document or a
 GraphQL endpoint into the same model-visible tool shape through the API
 Integration lifecycle:
 
-1. Host the API description and provider endpoint where the OpenGeni control
-   plane can reach them under the deployment network policy.
+1. Host the provider endpoint where the OpenGeni control plane can reach it
+   under the deployment network policy. The API description can be hosted too,
+   or sent inline as `source: { kind: "openapi_document", sourceKey, document,
+   baseUrl? }` (JSON/YAML text up to 8 MiB; `sourceKey` is the stable
+   installation identity; server URLs must be absolute or `baseUrl` given; the
+   preview echoes only `documentSha256`; resend the document on install).
+   Inlining removes only the need to host the description: calls still obey
+   the network policy, so a product on localhost or a private network needs a
+   public tunnel unless the operator enables private targets.
 2. Create a workspace Connection when authentication is required.
 3. Call `previewApiIntegration` with the source and Connection.
 4. Apply the customer's policy to the compiled operations, safety metadata,

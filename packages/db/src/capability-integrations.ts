@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import {
   assertOrganizationIntegrationAllowed,
   stableJson,
-  type IntegrationSource,
+  type IntegrationSourceInput,
   type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
@@ -1229,7 +1229,7 @@ export async function getApiIntegrationReconciliationSnapshot(
     accountId: string;
     workspaceId: string;
     subjectId: string;
-    source: IntegrationSource;
+    source: IntegrationSourceInput;
     connectionId?: string;
     instanceKey?: string;
     expectedRevisionId: string;
@@ -1264,6 +1264,9 @@ export async function getApiIntegrationReconciliationSnapshot(
           runtime.definitionProvenance === "curated" && runtime.definitionId === source.definitionId
         );
       if (runtime.definitionProvenance !== "workspace") return false;
+      // No stored-preview recovery for inline documents: they carry their
+      // full content in the request, so ordinary resolution always applies.
+      if (source.kind === "openapi_document") return false;
       if (source.kind === "graphql")
         return runtime.protocol === "graphql" && source.endpoint === runtime.sourceUrl;
       return (

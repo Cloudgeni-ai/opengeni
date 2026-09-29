@@ -689,6 +689,78 @@ describe("API Integration routes", () => {
     });
   }, 60_000);
 
+  test("previews and installs an inline OpenAPI document by stable source key", async () => {
+    if (!available || !client) return;
+    const fetchesBefore = sourceFetches;
+    const document = JSON.stringify(openApiDocument());
+    const source = { kind: "openapi_document", sourceKey: "inventory-inline", document };
+    const previewResponse = await request("/integrations/preview", {
+      method: "POST",
+      body: JSON.stringify({ source }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json();
+    expect(sourceFetches).toBe(fetchesBefore);
+    expect(preview.source).toEqual({
+      kind: "openapi_document",
+      sourceKey: "inventory-inline",
+      documentSha256: new Bun.CryptoHasher("sha256").update(document).digest("hex"),
+    });
+    expect(JSON.stringify(preview)).not.toContain('"paths"');
+    expect(preview).toMatchObject({ sourceUrl: null, providerDomain: "127.0.0.1" });
+
+    const installed = await request("/integrations/install", {
+      method: "POST",
+      body: JSON.stringify({
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+      }),
+    });
+    expect(installed.status).toBe(201);
+    const install = await installed.json();
+    expect(install.capabilityId).toBe(preview.capabilityId);
+
+    // A revised document under the same key keeps the same Integration identity.
+    const revised = openApiDocument();
+    (revised.info as Record<string, unknown>).version = "2.0.0";
+    const revisedPreview = await (
+      await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: { ...source, document: JSON.stringify(revised) } }),
+      })
+    ).json();
+    expect(revisedPreview.capabilityId).toBe(preview.capabilityId);
+    expect(revisedPreview.revisionId).not.toBe(preview.revisionId);
+
+    const relative = openApiDocument();
+    relative.servers = [{ url: "/v1/" }];
+    const relativeResponse = await request("/integrations/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        source: {
+          kind: "openapi_document",
+          sourceKey: "relative",
+          document: JSON.stringify(relative),
+        },
+      }),
+    });
+    expect(relativeResponse.status).toBe(422);
+    expect(await relativeResponse.text()).toContain("absolute servers[].url");
+
+    const removed = await request(
+      `/integrations/${encodeURIComponent(install.capabilityId)}/instances/${encodeURIComponent(install.instanceKey)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: install.installationVersion,
+          expectedInstanceVersion: install.instanceVersion,
+        }),
+      },
+    );
+    expect(removed.status).toBe(200);
+  }, 60_000);
+
   test("installers can auto-approve selected write tools for unattended runs", async () => {
     if (!available || !client) return;
     const source = { kind: "openapi", url: "https://127.0.0.1/approval-openapi.json" };
