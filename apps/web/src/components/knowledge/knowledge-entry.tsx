@@ -47,7 +47,6 @@ import {
   LineTabsTrigger,
 } from "@/components/ui/line-tabs";
 import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
@@ -65,7 +64,6 @@ import {
   KNOWLEDGE_KIND_HELP,
   KNOWLEDGE_KIND_LABEL,
   KNOWLEDGE_PICKABLE_KINDS,
-  KNOWLEDGE_SCOPE_LABEL,
   KNOWLEDGE_SOURCE_LABEL,
 } from "./knowledge-labels";
 import {
@@ -611,12 +609,8 @@ function EntryPageContent({
         <DetailPageHeader
           leading={<KindTile kind={entry.kind} />}
           title={entry.title}
-          chips={
-            <>
-              <MetaChip variant="soft">{KNOWLEDGE_SCOPE_LABEL[record.scope]}</MetaChip>
-              {status}
-            </>
-          }
+          // Where it lives is in the aside ("Where"); the header says it once there.
+          chips={status}
           meta={[
             KNOWLEDGE_KIND_LABEL[entry.kind],
             firstCollection ? (

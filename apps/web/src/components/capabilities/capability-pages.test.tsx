@@ -148,7 +148,10 @@ describe("IntegrationPage", () => {
     expect(
       view.container.querySelector('button[aria-label="More actions for Outlook Mail"]'),
     ).not.toBeNull();
-    expect(view.container.textContent).toContain("Connected");
+    // Healthy: no Connected badge in the header.
+    expect(
+      view.container.querySelector("[data-slot=detail-page-header]")?.textContent,
+    ).not.toContain("Connected");
     await act(async () => buttons(view.container, "Capabilities")[0]!.click());
     expect(onBack).toHaveBeenCalledTimes(1);
     await view.unmount();

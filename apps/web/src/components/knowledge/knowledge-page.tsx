@@ -496,6 +496,7 @@ export function KnowledgePage({
             onAdd={withScroll(() => nav.openPage("add"))}
             onUpload={() => setUploadOpen(true)}
             onEmptyChange={setLibraryEmpty}
+            personal={personal}
           />
         </LineTabsContent>
         <LineTabsContent value="instructions">

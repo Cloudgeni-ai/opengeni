@@ -342,6 +342,8 @@ export interface LibraryTabProps {
   onUpload: () => void;
   /** The Library has nothing at all: the page hides its Add menu, the empty state has it. */
   onEmptyChange?: (empty: boolean) => void;
+  /** A Personal workspace starts on "Only me"; that is not a filter the person chose. */
+  personal?: boolean;
 }
 
 export function LibraryTab({
@@ -357,6 +359,7 @@ export function LibraryTab({
   onAdd,
   onUpload,
   onEmptyChange,
+  personal = false,
 }: LibraryTabProps) {
   const search = useDebounced(view.query.trim(), 450);
   const searching = search.length > 0;
@@ -383,7 +386,7 @@ export function LibraryTab({
       ...(narrow ? { scope: (scope?.[0] as LibraryScope | undefined) ?? "all" } : {}),
     });
   };
-  const filtered = searching || view.scope !== "all" || narrowed;
+  const filtered = searching || view.scope !== initialLibraryView(personal).scope || narrowed;
   const nothingAtAll =
     !collections && !list.loading && !list.error && list.entries.length === 0 && !filtered;
   useEffect(() => onEmptyChange?.(nothingAtAll), [nothingAtAll, onEmptyChange]);

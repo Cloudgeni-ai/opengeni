@@ -109,8 +109,11 @@ export function ArtifactThumbnail({
 /** An image's own pixels in the 32px row tile, loaded only near the viewport. */
 function ImageTile({ workspaceId, item }: { workspaceId: string; item: ArtifactCatalogItem }) {
   return (
-    <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] bg-surface-2 [&_img]:size-full [&_img]:object-cover">
-      <ArtifactThumbnail>
+    // The image's own pixels; while it loads or when it can't, the image glyph
+    // (the words stay for screen readers, never squeezed into 32px).
+    <span className="relative flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] bg-surface-2 [&_[role=status]]:sr-only [&_img]:relative [&_img]:size-full [&_img]:bg-surface-2 [&_img]:object-cover">
+      <ImageIcon aria-hidden className="absolute size-4 text-fg-subtle" />
+      <ArtifactThumbnail placeholder={null}>
         <Suspense fallback={<ImageIcon className="size-4 text-fg-subtle" aria-hidden />}>
           <InlineChatImage
             workspaceId={workspaceId}
