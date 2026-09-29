@@ -2,7 +2,7 @@ import { ActivityIcon, BoxesIcon, CloudIcon, PaletteIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
-import { BrandMark } from "@/components/brand-mark";
+import { BrandMark, Wordmark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -24,9 +24,9 @@ export function SignedOutPage({ children }: { children: ReactNode }) {
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="og-page-glow flex min-h-full flex-col text-fg">
         <header className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10">
-          <div className="flex items-center gap-2.5">
-            <BrandMark className="size-8 text-fg" />
-            <span className="text-[23px] leading-7 font-semibold tracking-[-1px]">Opengeni</span>
+          <div className="flex items-center gap-2.5 text-fg">
+            <BrandMark className="w-[31px]" />
+            <Wordmark className="text-[23px]" />
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -73,7 +73,7 @@ export function SignedOutPage({ children }: { children: ReactNode }) {
         </div>
         <footer className="border-t border-border">
           <div className="mx-auto flex w-full max-w-[1040px] flex-wrap justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10">
-            <span>Opengeni</span>
+            <Wordmark className="text-[15px] text-fg-muted" />
             <span>Your conversations. Your projects. One workspace.</span>
           </div>
         </footer>

@@ -138,9 +138,17 @@ describe("production web handler", () => {
     expect(referenced).toEqual([
       "/favicon.ico",
       "/favicon.svg",
+      "/favicon-32x32.png",
+      "/favicon-16x16.png",
       "/apple-touch-icon.png",
       "/og-image.png",
     ]);
+    const manifest = /<link\s+rel="manifest"\s+href="([^"]+)"/u.exec(html)?.[1];
+    expect(manifest).toBe("/site.webmanifest");
+    const manifestJson = await Bun.file(new URL(`../public${manifest}`, import.meta.url)).json();
+    for (const icon of manifestJson.icons as Array<{ src: string }>) {
+      expect(await Bun.file(new URL(`../public${icon.src}`, import.meta.url)).exists()).toBe(true);
+    }
     for (const path of referenced) {
       expect(await Bun.file(new URL(`../public${path}`, import.meta.url)).exists()).toBe(true);
     }

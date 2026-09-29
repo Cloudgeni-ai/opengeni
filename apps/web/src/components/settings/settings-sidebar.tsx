@@ -2,7 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, ChevronRightIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactElement, type ReactNode } from "react";
 
-import { BrandMark } from "@/components/brand-mark";
+import { BrandMark, Wordmark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
@@ -158,12 +158,10 @@ function SettingsRail({
           <LinkShell
             link={home}
             aria-label="Opengeni home"
-            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-[15px] font-medium text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
           >
-            <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-              <BrandMark className="size-4" />
-            </span>
-            Opengeni
+            <BrandMark className="w-5" />
+            <Wordmark className="text-[18px]" />
           </LinkShell>
           <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
             {back.link}

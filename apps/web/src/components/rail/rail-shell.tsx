@@ -8,7 +8,7 @@ import type { SessionSummary } from "@opengeni/sdk";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon } from "lucide-react";
 
-import { BrandMark } from "@/components/brand-mark";
+import { BrandMark, Wordmark } from "@/components/brand-mark";
 import {
   useCallback,
   useEffect,
@@ -442,12 +442,10 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
       <Link
         to="/workspaces/$workspaceId/sessions"
         params={{ workspaceId: rail.workspaceId }}
-        className="flex items-center gap-2 text-sm font-medium"
+        className="flex items-center gap-2 text-fg"
       >
-        <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
-          <BrandMark className="size-3.5" />
-        </span>
-        Opengeni
+        <BrandMark className="w-5" />
+        <Wordmark className="text-[17px]" />
       </Link>
     </header>
   );
