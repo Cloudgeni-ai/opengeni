@@ -1,52 +1,5 @@
 # @opengeni/sdk
 
-## External-user admission (implementation branch)
-
-On a product backend, `client.asUser(externalId, { source? })` returns a separate
-client that sends the external actor assertion with the organization key. IDs
-are opaque and case-sensitive; the default source is `default`. Keep the key and
-this client server-side. Each request requires the intersection of the key's
-permissions and the user's explicit workspace membership. API-key rotation does
-not change the external identity.
-
-Use the service client—not an `asUser` client—to call
-`addExternalWorkspaceMember(workspaceId, { identity: { externalId, source? }, permissions })`
-for explicit onboarding. It requires `members:manage`, cannot grant more than
-the key permits, excludes Personal workspaces, and refuses to overwrite an
-existing membership with different permissions. Ordinary `asUser` calls never
-restore removed workspace membership or reactivate disabled identities.
-
-Service `removeWorkspaceMember` supports external members through the existing
-fenced workspace teardown. Account-wide `updateExternalIdentityMembership(
-organizationId, organizationMembershipId, { kind, expectedAuthorizationRevision,
-operationId, reason? })` requires explicit `account:admin` and supports suspend,
-reactivate, and offboard. The membership ID is returned by onboarding; its initial
-authorization revision is 1. Retain the returned revision for subsequent changes.
-Reactivation restores admission, not revoked memberships or work. Offboarding
-follows existing retention policy and cannot be reactivated through this API.
-Native-user targets and `asUser` calls are rejected by this service endpoint.
-
-An `asUser` client can discover/access its own provisioned Personal workspace
-under the key's permission ceiling. Core private session operations retain
-organization readiness/settings and explicit sharing acknowledgments; service
-clients gain no Personal-workspace fallback.
-
-Optional native-account delegation uses `beginIdentityLink`, authenticated native
-`previewIdentityLink`/`confirmIdentityLink`, and explicit server-side
-`asLinkedUser(externalId, { source?, linkId, expectedLinkRevision })`. Confirmation
-requires the actual native login plus the one-time host challenge; an organization
-key cannot confirm for the native user. `listIdentityLinks(workspaceId, cursor?)`
-returns only the effective participant's links in that organization (50 per page).
-`revokeIdentityLink` requires the observed revision. Linking never changes ordinary
-`asUser`, merges histories or transfers credentials. Link-dependent accepted work
-retains revocation checks across schedules and children. Short-lived inline MCP
-credentials remain supported, and durable renewal stays opt-in.
-
-Connect accepts an optional `installationTarget: { instanceKey, displayName,
-expectedInstanceVersion? }`. Keep the exact observed version for an existing named
-account. Setup freezes the target through callback and operation review; omitting
-it creates an independent named account instead of overwriting a default instance.
-
 Framework-agnostic TypeScript SDK for the OpenGeni public API: a typed client,
 session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus
@@ -57,97 +10,150 @@ workspaces, Personal-workspace exclusion, tenant mapping, and external Skill
 ownership—start with the canonical
 [product integration guide](../../docs/product-integration.md).
 
-Zero runtime dependencies. Needs only WHATWG `fetch` and streams, so it runs in
-Node 18+, Bun, Deno, browsers, and edge runtimes.
+Runtime dependencies are the published `@opengeni/contracts` wire schemas (which
+bring Zod) and `@opengeni/connect`; nothing else. It needs only WHATWG `fetch`
+and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
+The package is ESM-only (no `require` entry): use `import`, or `await import()`
+from CommonJS.
+
+Always pass `baseUrl` (for example `process.env.OPENGENI_API_BASE_URL`): the
+chat facade defaults to production `https://app.opengeni.ai`, so omitting it
+against a staging or self-hosted deployment silently talks to production.
 
 Browser clients may call the public API from any origin with an explicitly safe
 bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
-## Chat quick start (`@opengeni/sdk/chat`)
+## Embed the conversation (default)
 
-The fastest way to put OpenGeni behind an existing chat: one option object per
-conversation, one server handler for your endpoint. Tenants map to organization
-workspaces, conversations map to deterministic sessions, and the organization
-API key never leaves your server.
+The default product integration is the full OpenGeni conversation:
+`@opengeni/react`'s `SessionConversation` in the browser, backed by this SDK
+through a tenant/user-scoped same-origin proxy on your server.
+`createSessionProxyHandler` is that proxy, packaged:
 
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+// Server: mount at /api/opengeni/* (see the framework adapters below).
+import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
 
-const og = new OpenGeni({
+const og = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
-  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
-  // baseUrl defaults to https://app.opengeni.ai; source (default "app") labels your product.
 });
 
-// Once per user, when your product admits them to the tenant. Chat requests
-// never grant workspace membership; without it the API answers 403.
-await og.client.addExternalWorkspaceMember(await og.workspaceId({ tenant: "acme" }), {
-  identity: { externalId: "u_42", source: og.source },
-  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
-});
-
-const chat = await og.chat({
-  tenant: "acme", // one workspace per customer, created on first use
-  user: "u_42", // authenticated product user; onboard workspace membership first
-  conversation: "c_9", // stable conversation id, independent of the acting user
-  agentAccess: "session", // "session" (default) | "user" | "workspace"
-  memory: "user", // "user" | "workspace" | false; session-only agent reach defaults to false
-  create: { sandboxBackend: "none" }, // raw create-request passthrough for a pure chat
-});
-
-const reply = await chat.send("hello"); // creates the session on the first send
-console.log(reply.text); // or String(reply); the answer, without progress commentary
-
-for await (const chunk of chat.stream("and then?")) {
-  if (chunk.type === "text") process.stdout.write(chunk.text);
-  if (chunk.type === "pending") await chat.respond({ requestId: chunk.pending.requestId, decision: "approve" });
-}
-
-// Your endpoint. `resolve` is your auth hook: identity comes from the request
-// you authenticated, never from the body. The handler reads the client's
-// conversation id itself (x-opengeni-conversation header, or the wire format's
-// own field) and authorizes as `user`; return `conversation` from resolve only
-// when the host names it, which is required when there is no `user`.
-export const handler = createChatHandler(og, {
+export const handler = createSessionProxyHandler(og, {
   resolve: async (request) => {
-    const session = await getSessionFromCookie(request);
-    if (!session) return new Response("Unauthorized", { status: 401 });
-    return { tenant: session.accountId, user: session.userId };
+    const me = await authenticate(request); // your session/cookie check
+    if (!me) return new Response("Unauthorized", { status: 401 });
+    return { workspaceId: me.openGeniWorkspaceId, user: me.userId, source: "acme-app" };
   },
-  // format: "vercel" | "openai-chat" | "openai-responses" (default "native");
-  // a request may override it with the x-opengeni-chat-format header.
+  authorizeMutation: (request) => verifyCsrf(request), // your existing CSRF policy
+  // Optional. Omit to keep session creation purely server-side.
+  createSession: ({ initialMessage, idempotencyKey }) => ({
+    initialMessage,
+    idempotencyKey: idempotencyKey ?? crypto.randomUUID(),
+    tools: [{ kind: "mcp", id: "acme" }], // explicit, server-chosen tool selection
+    firstPartyMcpTools: [],
+  }),
 });
-export const GET = handler; // conversation history, for restoring the chat on reload
-export const POST = handler; // send a message, or answer a pending request at .../respond
 ```
 
-Conversation IDs do not change with the acting user. Authorized collaborators
-can use the same session; private visibility prevents access by other users.
-Use `chatBySessionId` for existing and legacy user-namespaced conversations.
-User mode requires explicit workspace membership and never restores removed
-membership automatically. Without a `user`, the host must name the conversation
-from `resolve`. The Vercel and OpenAI adapters send only the latest user
-message; the earlier messages in that request are imported once, as context on
-the first message of a conversation, after which OpenGeni owns the history.
+```tsx
+// Browser: the unmodified SDK client, pointed at your mount.
+import { OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
+import "@opengeni/react/compiled.css";
 
-Pick the isolation per session with `agentAccess` (which other sessions the
-agent may reach) and `memory` (what it remembers), all inside one workspace that
-shares the customer's documents, instructions, and integrations:
+const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  {/* The user's chat list plus the conversation; or <SessionConversation sessionId={id} />. */}
+  <OpenGeniChat />
+</OpenGeniProvider>;
+```
 
-| Scenario                                          | `agentAccess` | `memory`      |
-| ------------------------------------------------- | ------------- | ------------- |
-| Agent confined to its chat tree (support desk)    | `"session"`   | `false`       |
-| One user's chats see each other, not other users' | `"user"`      | `"user"`      |
-| Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
-| Shared agent access, no memory                    | any           | `false`       |
+Framework adapters are thin wrappers over the same web-standard handler (they
+also accept `createChatHandler` or any `(Request) => Promise<Response>`):
 
-The chat handler is backend-only: connect a custom or compatible frontend to
-its protocol. For the full React agent experience, use `SessionConversation`
-with `OpenGeniClient` and authenticated session routes, not this simplified
-chat protocol. The normal SDK preserves files, tools, approvals with policies,
-forks, and realtime voice.
+```ts
+// Next.js App Router: app/api/opengeni/[...path]/route.ts
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, { resolve });
+
+// Express / Connect / node:http (mount before body parsers, or they are re-serialized)
+import { toNodeMiddleware } from "@opengeni/sdk/express";
+app.use("/api/opengeni", toNodeMiddleware(handler));
+
+// Hono
+import { toHonoHandler } from "@opengeni/sdk/hono";
+app.all("/api/opengeni/*", toHonoHandler(handler));
+```
+
+The Next adapter passes the full URL, including any `basePath`; the Node
+middleware rebuilds it from `originalUrl`, streams bodies and SSE, and aborts
+the request when the client disconnects.
+
+The chat list (`SessionList` / `OpenGeniChat`) uses `listSessionPage`. By
+default (`sessionList: "mine"`) the proxy adds a creator filter for the
+resolved user server-side, so each user sees only the chats they started;
+`sessionList: "visible"` lists every chat OpenGeni lets the user read in the
+workspace, and `false` disables listing. Archive and restore go through
+`updateSessionArchive` unless `archive: false`. A "New chat" in `OpenGeniChat`
+sends only `{ initialMessage, idempotencyKey }`, so it needs the
+`createSession` hook.
+
+Every request calls `resolve`, then runs through `asUser(user, { source })`
+(there is no service-authority fallback) against exactly the resolved
+workspace. Only the native routes `OpenGeniProvider` and the conversation use
+are served: client config; workspace read, model catalog, live control stream,
+and workspace Resume; session read/rename, events (list and SSE with
+`Last-Event-ID` resume), send/steer/approval/human-input, queue, composer
+draft, pause/resume; and, unless `files: false`, attachment upload and download
+URLs. Every other route or method is a 404 (cancel and workspace Pause are
+refused); unknown query parameters on served reads pass through. Browser session creation is disabled
+unless you supply `createSession`; the browser may then send only
+`initialMessage` and `idempotencyKey`, and your hook returns the full request
+(tools, MCP servers, Skills, instructions, model policy). Message bodies are
+capped by `maxBodyBytes` (1 MiB), cannot rotate MCP credentials or attach
+anything but files, and `modelSelection: false` strips per-message model
+choices. `authorizeSession(sessionId, context)` adds a product-level session
+check on top of OpenGeni's own membership and visibility checks. Without
+`authorizeMutation`, only cross-site (`Sec-Fetch-Site`) mutations are refused,
+so cookie-authenticated hosts should pass their CSRF check.
+
+`beforeForwardMessage(message, context)` runs before every forwarded user
+message (send, steer, composer submit, and a browser-started create) and may
+return server-owned additions, or a `Response` to refuse the message:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve,
+  beforeForwardMessage: async ({ sessionId, delivery }, { user }) => ({
+    // Model-visible, placed before any context the browser sent.
+    modelContext: `Page ${currentPage(user)} · ${timeZone(user)} · ${today()}`,
+    // Header-only rotation of MCP servers already attached to the session,
+    // applied atomically as the message is accepted (ignored on create).
+    mcpCredentialUpdates: [
+      { id: "acme", headers: { Authorization: `Bearer ${await mintUserToken(user)}` } },
+    ],
+  }),
+});
+```
+
+This is the per-user tool token pattern: create the session with
+`mcpServers: [{ id: "acme", url, headers }]` (and `tools: [{ kind: "mcp", id:
+"acme" }]`, which the acting user needs `mcp_servers:attach` to attach), then
+hand the MCP server a fresh short-lived bearer on every message. The browser
+still cannot send `mcpCredentialUpdates` itself. With `modelSelection: false`
+the proxy reports `modelSelection: false` in the client config, and
+`SessionConversation` hides its model picker.
+
+Onboard each user explicitly before their first request (see
+[External users](#external-users-asuser)); the proxy never grants membership.
+The conversation needs `workspace:read`, `sessions:read`, `sessions:control`,
+plus `sessions:create` when the user creates sessions and `files:upload` /
+`files:read` for attachments. Pass the facade from `@opengeni/sdk/chat` instead
+of a client to resolve `{ tenant, user }` through `ensureWorkspace`.
 
 ## Quick start
 
@@ -155,7 +161,7 @@ forks, and realtime voice.
 import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
-  baseUrl: "https://api.example.com",
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
 });
 
@@ -183,7 +189,7 @@ excluded.
 ```ts
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
 
 const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;
@@ -249,10 +255,190 @@ root and `@opengeni/sdk/core` clients, or through the focused
 import { OpenGeniDocumentAuthorityClient } from "@opengeni/sdk/document-authority";
 
 const operatorClient = new OpenGeniDocumentAuthorityClient({
-  baseUrl: "https://api.example.com",
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
 });
 ```
+
+## External users (`asUser`)
+
+On a product backend, `client.asUser(externalId, { source? })` returns a separate
+client that sends the external actor assertion with the organization key. IDs
+are opaque and case-sensitive; the default source is `default`. Keep the key and
+this client server-side. Each request requires the intersection of the key's
+permissions and the user's explicit workspace membership. API-key rotation does
+not change the external identity.
+
+Use the service client—not an `asUser` client—to call
+`addExternalWorkspaceMember(workspaceId, { identity: { externalId, source? }, permissions })`
+for explicit onboarding. It requires `members:manage`, cannot grant more than
+the key permits, excludes Personal workspaces, and refuses to overwrite an
+existing membership with different permissions; change an existing member's permissions with the keyed
+`updateExternalWorkspaceMember(organizationId, workspaceId, organizationMembershipId,
+{ operationId, permissions })`, which never tears down work. Ordinary `asUser` calls never
+restore removed workspace membership or reactivate disabled identities.
+
+Service `removeWorkspaceMember` supports external members through the existing
+fenced workspace teardown. Account-wide `updateExternalIdentityMembership(
+organizationId, organizationMembershipId, { kind, expectedAuthorizationRevision,
+operationId, reason? })` requires explicit `account:admin` and supports suspend,
+reactivate, and offboard. The membership ID is returned by onboarding; its initial
+authorization revision is 1. Retain the returned revision for subsequent changes.
+Reactivation restores admission, not revoked memberships or work. Offboarding
+follows existing retention policy and cannot be reactivated through this API.
+Native-user targets and `asUser` calls are rejected by this service endpoint.
+
+An `asUser` client can discover/access its own provisioned Personal workspace
+under the key's permission ceiling. Core private session operations retain
+organization readiness/settings and explicit sharing acknowledgments; service
+clients gain no Personal-workspace fallback.
+
+Optional native-account delegation uses `beginIdentityLink`, authenticated native
+`previewIdentityLink`/`confirmIdentityLink`, and explicit server-side
+`asLinkedUser(externalId, { source?, linkId, expectedLinkRevision })`. Confirmation
+requires the actual native login plus the one-time host challenge; an organization
+key cannot confirm for the native user. `listIdentityLinks(workspaceId, cursor?)`
+returns only the effective participant's links in that organization (50 per page).
+`revokeIdentityLink` requires the observed revision. Linking never changes ordinary
+`asUser`, merges histories or transfers credentials. Link-dependent accepted work
+retains revocation checks across schedules and children. Short-lived inline MCP
+credentials remain supported, and durable renewal stays opt-in.
+
+Connect accepts an optional `installationTarget: { instanceKey, displayName,
+expectedInstanceVersion? }`. Keep the exact observed version for an existing named
+account. Setup freezes the target through callback and operation review; omitting
+it creates an independent named account instead of overwriting a default instance.
+
+## Chat facade fallback (`@opengeni/sdk/chat`)
+
+Use this only when your product already has its own chat UI speaking Vercel
+`useChat` or an OpenAI-shaped protocol and you want a compatible drop-in
+backend, or for server-side bots (`og.chat(...).send()`). It is a text-only
+projection: tool outputs are dropped (the Vercel adapter emits no tool parts
+by default, and only `output: { status }` with `toolParts: true`), there are no
+files, attachments, artifacts, or images,
+no goals/queue/steer UI, and reopening restores only a text snapshot. For
+anything else, use [the default conversation embed](#embed-the-conversation-default).
+
+One option object per conversation, one server handler for your endpoint.
+Tenants map to organization workspaces, conversations map to deterministic
+sessions, and the organization API key never leaves your server.
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!, // omitted = production https://app.opengeni.ai
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+  source: "acme-app", // labels your product's tenants and users (default "app")
+});
+
+// Once per user, when your product admits them to the tenant. Chat requests
+// never grant workspace membership; without it the API answers 403.
+await og.client.addExternalWorkspaceMember(await og.workspaceId({ tenant: "acme" }), {
+  identity: { externalId: "u_42", source: og.source },
+  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+});
+
+const chat = await og.chat({
+  tenant: "acme", // one workspace per customer, created on first use
+  user: "u_42", // authenticated product user; onboard workspace membership first
+  conversation: "c_9", // stable conversation id, independent of the acting user
+  agentAccess: "session", // "session" (default) | "user" | "workspace"
+  memory: "user", // "user" | "workspace" | false; session-only agent reach defaults to false
+  create: { sandboxBackend: "none" }, // raw create-request passthrough for a pure chat
+});
+
+const reply = await chat.send("hello"); // creates the session on the first send
+console.log(reply.text); // or String(reply); the answer, without progress commentary
+
+// Per message: model policy and model-visible page context (not shown in the transcript).
+await chat.send("Why did revenue dip?", {
+  model: "gpt-5.5",
+  reasoningEffort: "low",
+  modelContext: "Viewing dashboard 42, range 2026-09-01..2026-09-28",
+});
+
+for await (const chunk of chat.stream("and then?")) {
+  if (chunk.type === "text") process.stdout.write(chunk.text);
+  if (chunk.type === "pending") await chat.respond({ requestId: chunk.pending.requestId, decision: "approve" });
+}
+
+// Your endpoint. `resolve` is your auth hook: identity comes from the request
+// you authenticated, never from the body. The handler reads the client's
+// conversation id itself (x-opengeni-conversation header, or the wire format's
+// own field) and authorizes as `user`; return `conversation` from resolve only
+// when the host names it, which is required when there is no `user`.
+export const handler = createChatHandler(og, {
+  resolve: async (request) => {
+    const session = await getSessionFromCookie(request);
+    if (!session) return new Response("Unauthorized", { status: 401 });
+    return { tenant: session.accountId, user: session.userId };
+  },
+  // format: "vercel" | "openai-chat" | "openai-responses" (default "native");
+  // a request may override it with the x-opengeni-chat-format header.
+});
+export const GET = handler; // conversation history, for restoring the chat on reload
+export const POST = handler; // send a message, or answer a pending request at .../respond
+```
+
+Conversation IDs do not change with the acting user. Authorized collaborators
+can use the same session; private visibility prevents access by other users.
+Use `chatBySessionId` for existing and legacy user-namespaced conversations.
+User mode requires explicit workspace membership and never restores removed
+membership automatically. Without a `user`, the host must name the conversation
+from `resolve`. The Vercel and OpenAI adapters send only the latest user
+message; the earlier messages in that request are imported once, as context on
+the first message of a conversation, after which OpenGeni owns the history.
+
+Pick the isolation per session with `agentAccess` (which other sessions the
+agent may reach) and `memory` (what it remembers), all inside one workspace that
+shares the customer's documents, instructions, and integrations:
+
+| Scenario                                          | `agentAccess` | `memory`      |
+| ------------------------------------------------- | ------------- | ------------- |
+| Agent confined to its chat tree (support desk)    | `"session"`   | `false`       |
+| One user's chats see each other, not other users' | `"user"`      | `"user"`      |
+| Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
+| Shared agent access, no memory                    | any           | `false`       |
+
+To keep an existing `useChat` route with its own request body, stream the chat
+into your AI SDK response yourself. The Vercel format speaks the v1 UI message
+stream used by AI SDK 5, 6, and 7 (tool approval requests need 6 or later):
+
+```ts
+import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
+import { uiMessageStreamParts } from "@opengeni/sdk/chat";
+
+export async function POST(request: Request) {
+  const { messages, dashboardId } = await request.json(); // your own body
+  const me = await authenticate(request);
+  const chat = await og.chat({ tenant: me.accountId, user: me.userId, conversation: me.chatId });
+  const text = lastUserText(messages);
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      const chunks = chat.stream(text, { modelContext: `Dashboard ${dashboardId}` });
+      for await (const part of uiMessageStreamParts(chunks, { framing: false })) {
+        writer.write(part as never);
+      }
+    },
+  });
+  return createUIMessageStreamResponse({ stream });
+}
+```
+
+OpenGeni's own tool activity is omitted by default because those tools are not
+in your typed tool set; pass `toolParts: true` (or `createChatHandler(og, {
+toolParts: true })`) to emit them as `dynamic`, provider-executed tool parts.
+Pending approvals are always emitted as dynamic tool parts with a
+`tool-approval-request`.
+
+The chat handler is backend-only: connect a custom or compatible frontend to
+its protocol. For the full React agent experience, use `SessionConversation`
+with `OpenGeniClient` and authenticated session routes, not this simplified
+chat protocol. The normal SDK preserves files, tools, approvals with policies,
+forks, and realtime voice.
 
 ## Related-work discovery
 
@@ -510,7 +696,7 @@ import {
   createBrowserEditableArtifactSession,
 } from "@opengeni/sdk/editable-artifacts";
 
-const client = new OpenGeniClient({ baseUrl: "https://api.example.com" });
+const client = new OpenGeniClient({ baseUrl: process.env.OPENGENI_API_BASE_URL! });
 const artifact = await client.getEditableArtifact(workspaceId, artifactId, {
   replicaId,
 });
@@ -521,7 +707,7 @@ const kernels = {
 } as const;
 const { editableArtifactKernelRuntime } = await kernels[artifact.modality]();
 const session = createBrowserEditableArtifactSession({
-  baseUrl: "https://api.example.com",
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
   workspaceId,
   artifact,
   storageAuthority,
@@ -1125,8 +1311,10 @@ readers. Official server builds expose `serverVersion` on `/healthz` and
 
 ## Proxy through your own API
 
-Keep your organization API key on your server and re-emit the stream to your
-own browser clients. The re-emitted wire format is identical to OpenGeni's SSE
+For the React conversation, use the packaged
+[`createSessionProxyHandler`](#embed-the-conversation-default). For a custom
+backend route, keep your organization API key on your server and re-emit the
+stream to your own browser clients. The re-emitted wire format is identical to OpenGeni's SSE
 stream, so the browser side can consume it with this same SDK (or a plain
 `EventSource`), including resume via `?after=` / `Last-Event-ID`:
 
@@ -1134,7 +1322,10 @@ stream, so the browser side can consume it with this same SDK (or a plain
 // Your server (Hono, Next.js route handler, Bun.serve, workers, ...):
 import { OpenGeniClient, proxySessionEventStream } from "@opengeni/sdk";
 
-const client = new OpenGeniClient({ baseUrl, apiKey });
+const client = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
 
 export function GET(request: Request): Response {
   // authenticate *your* user, resolve their session id, then:

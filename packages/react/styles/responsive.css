@@ -206,3 +206,29 @@
   );
   max-width: calc(100vw - 1rem);
 }
+
+/* OpenGeniChat: the chat list is a sidebar when the component is wide and a
+   drawer behind a menu button when it is narrow. Container-based so it adapts
+   inside host panels, not only to the viewport. */
+.og-chat {
+  container: og-chat / inline-size;
+}
+
+.og-chat .og-chat-sidebar {
+  display: none;
+}
+
+.og-chat .og-chat-menu {
+  display: flex;
+}
+
+@container og-chat (min-width: 44rem) {
+  .og-chat .og-chat-sidebar {
+    display: flex;
+  }
+
+  .og-chat .og-chat-menu,
+  .og-chat .og-chat-drawer {
+    display: none;
+  }
+}

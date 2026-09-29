@@ -333,6 +333,7 @@ describe("the owner is told when a schedule cannot use a connector", () => {
         firedAt: expect.any(String),
         failures: [expect.objectContaining({ serverId: "mail", reason: "expired" })],
         unavailableAccounts: [{ id: "mail", name: "Mail" }],
+        awaitingHuman: null,
       },
     ]);
     console.info(
@@ -420,6 +421,7 @@ describe("the owner is told when a schedule cannot use a connector", () => {
         firedAt: null,
         failures: [],
         unavailableAccounts: [{ id: "mail", name: "mail" }],
+        awaitingHuman: null,
       },
     ]);
     expect((await attentionFor(workspace, person(workspace, workspace.member), [])).items).toEqual(

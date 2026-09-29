@@ -1,6 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { OpenGeniClient, type CreateSessionRequest } from "@opengeni/sdk";
+import {
+  OpenGeniClient,
+  createSessionProxyHandler,
+  type CreateSessionRequest,
+} from "@opengeni/sdk";
+import { uuidV5 } from "@opengeni/sdk/chat";
 import { realpath, stat } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import * as z from "zod/v4";
@@ -37,14 +42,59 @@ const apiBaseUrl = (process.env.OPENGENI_API_BASE_URL ?? "https://app.opengeni.a
 const mcpToken = process.env.OPENGENI_DEMO_MCP_TOKEN?.trim() ?? "";
 const openGeni = new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey });
 
+// The demo has one fixed operator instead of a login. A real product resolves
+// this from its own authenticated session on every request.
+const DEMO_USER = { externalId: "maya.chen", source: "northstar-demo" } as const;
+const DEMO_USER_PERMISSIONS = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  // Sessions carry a per-session MCP server, which the acting user must be allowed to attach.
+  "mcp_servers:attach",
+] as const;
+const IDEMPOTENCY_NAMESPACE = "6f0b8b2e-3d7c-4f7e-9a51-2f1c5e0d9b44";
+
+// Explicit onboarding: the proxy and asUser never grant membership. A stable
+// operation id makes the grant an exact replay on every server start.
+let demoMembership: Promise<void> | null = null;
+function ensureDemoMembership(): Promise<void> {
+  demoMembership ??= (async () => {
+    await openGeni.addExternalWorkspaceMember(workspaceId, {
+      identity: { externalId: DEMO_USER.externalId, source: DEMO_USER.source },
+      permissions: [...DEMO_USER_PERMISSIONS],
+      operationId: await uuidV5(
+        `membership:${workspaceId}:${DEMO_USER.externalId}:${DEMO_USER_PERMISSIONS.join(",")}`,
+        IDEMPOTENCY_NAMESPACE,
+      ),
+    });
+  })().catch((error: unknown) => {
+    demoMembership = null;
+    throw error;
+  });
+  return demoMembership;
+}
+
 const createDemoSessionInput = z.object({
   ticketId: z.string().trim().min(1),
   initialMessage: z.string().trim().min(1).optional(),
-  model: z.string().trim().min(1).max(256),
-  reasoningEffort: z
-    .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
-    .default("medium"),
-  latencyMode: z.enum(["standard", "priority", "fast"]).default("standard"),
+  // One id per intentional start; retries of the same start reuse it.
+  runId: z.string().uuid(),
+});
+
+// The browser's only OpenGeni route: the packaged session proxy. It acts as the
+// demo user through asUser, pins the configured workspace, and serves only the
+// routes <OpenGeniProvider> and <SessionConversation> use.
+const openGeniProxy = createSessionProxyHandler(openGeni, {
+  resolve: async () => {
+    if (!apiKey || !workspaceId) {
+      return json({ error: "OpenGeni credentials are not configured." }, 503);
+    }
+    await ensureDemoMembership();
+    return { workspaceId, user: DEMO_USER.externalId, source: DEMO_USER.source };
+  },
 });
 
 function minutesAgo(minutes: number): string {
@@ -520,15 +570,9 @@ async function createAgentSession(request: Request): Promise<Response> {
   }
   const parsedInput = createDemoSessionInput.safeParse(await request.json().catch(() => ({})));
   if (!parsedInput.success) {
-    return json({ error: "Choose a valid workspace model before starting the agent." }, 400);
+    return json({ error: "Invalid agent start request." }, 400);
   }
-  const {
-    ticketId,
-    initialMessage: requestedMessage,
-    model,
-    reasoningEffort,
-    latencyMode,
-  } = parsedInput.data;
+  const { ticketId, initialMessage: requestedMessage, runId } = parsedInput.data;
   const supportCase = getCase(ticketId);
   if (!supportCase) {
     return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
@@ -551,56 +595,23 @@ async function createAgentSession(request: Request): Promise<Response> {
   const sessionRequest: CreateSessionRequest = {
     initialMessage,
     instructions: `You are the embedded support copilot inside Northstar, a fictional SaaS product. You are working only on ticket ${ticket.id} for ${customer.name}. Always inspect the ticket and customer with Northstar Support tools before drawing conclusions. When evidence warrants action, call update_ticket and add_internal_note immediately. Product actions are pre-approved for this demo, so execute them without asking for confirmation. Never invent customer data. Keep the final answer brief and operational.`,
-    model,
-    reasoningEffort,
-    latencyMode,
     tools: [{ kind: "mcp", id: MCP_SERVER_ID }],
     mcpServers: [mcpServer] as CreateSessionRequest["mcpServers"],
+    // Explicit selections: only the Northstar MCP server, no first-party tools.
+    // A per-session MCP server must also be selected in `tools` to be usable.
+    firstPartyMcpTools: [],
+    // A pure tool agent: no sandbox to start, and no shell around the product tools.
+    sandboxBackend: "none",
     metadata: { demo: "northstar-support", ticketId: ticket.id },
-    clientEventId: crypto.randomUUID(),
-    idempotencyKey: crypto.randomUUID(),
+    // Stable per start: a retried request returns the same session.
+    idempotencyKey: `northstar:${ticket.id}:${runId}`,
   };
-  const session = await openGeni.createSession(workspaceId, sessionRequest);
+  // The deployment's default model applies; the composer can change it per turn.
+  await ensureDemoMembership();
+  const session = await openGeni
+    .asUser(DEMO_USER.externalId, { source: DEMO_USER.source })
+    .createSession(workspaceId, sessionRequest);
   return json(session, 201);
-}
-
-async function proxyOpenGeni(request: Request): Promise<Response> {
-  if (!apiKey || !workspaceId) {
-    return json({ error: "OpenGeni credentials are not configured." }, 503);
-  }
-
-  const incoming = new URL(request.url);
-  const upstreamPath = incoming.pathname.replace(/^\/api\/opengeni/, "");
-  const workspacePrefix = `/v1/workspaces/${workspaceId}`;
-  const isWorkspacePath =
-    upstreamPath === workspacePrefix || upstreamPath.startsWith(`${workspacePrefix}/`);
-  const isClientConfigRead = request.method === "GET" && upstreamPath === "/v1/config/client";
-
-  if (!isWorkspacePath && !isClientConfigRead) {
-    return json({ error: "API path is outside this demo's scope." }, 403);
-  }
-
-  const headers = new Headers(request.headers);
-  headers.set("authorization", `Bearer ${apiKey}`);
-  headers.delete("host");
-  headers.delete("content-length");
-  headers.delete("cookie");
-  const body =
-    request.method === "GET" || request.method === "HEAD" ? null : await request.arrayBuffer();
-  const upstream = await fetch(`${apiBaseUrl}${upstreamPath}${incoming.search}`, {
-    method: request.method,
-    headers,
-    ...(body ? { body } : {}),
-    signal: request.signal,
-  });
-  const responseHeaders = new Headers(upstream.headers);
-  responseHeaders.delete("content-length");
-  responseHeaders.delete("content-encoding");
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: responseHeaders,
-  });
 }
 
 async function productRequest(request: Request): Promise<Response> {
@@ -618,7 +629,7 @@ async function productRequest(request: Request): Promise<Response> {
   }
   if (url.pathname.startsWith("/api/opengeni/")) {
     try {
-      return await proxyOpenGeni(request);
+      return await openGeniProxy(request);
     } catch (error) {
       return json({ error: error instanceof Error ? error.message : String(error) }, 502);
     }

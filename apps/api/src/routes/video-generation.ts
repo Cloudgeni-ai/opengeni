@@ -25,6 +25,7 @@ import {
 } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/video-generation", async (c) => {
@@ -63,7 +64,7 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
   app.put("/v1/workspaces/:workspaceId/video-generation/policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
-    const payload = UpdateVideoGenerationPolicyRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateVideoGenerationPolicyRequest);
     const [connection, supergrokConfigured] = await Promise.all([
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),

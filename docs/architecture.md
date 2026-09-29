@@ -529,6 +529,10 @@ Official server builds expose `serverVersion` through health and client-config
 responses. There is no runtime negotiation protocol: tolerant reading and a
 shared major version are the compatibility mechanism.
 
+`x-opengeni-api-contract` fences only cookie-authenticated browser mutations
+(stale tabs); bearer integrations stay admitted across revisions. See
+[`product-integration.md`](product-integration.md#api-contract-revision).
+
 An optional field that changes execution authority is not an ordinary additive
 response field. Its readers must ship first, new external writes stay behind a
 default-off admission switch until every shared-queue consumer is compatible,
@@ -814,7 +818,7 @@ These producers all converge on the ordinary session/turn runtime:
 Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
 Schedules API filtering uses `sessionId`.
 
-Connection-account refusals retain immutable [diagnostic-only run receipts](scheduled-admission-diagnostics.md), never execution authority.
+Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; runs waiting on a person and their optional timeout are in [scheduled-task-access.md](scheduled-task-access.md#runs-waiting-on-a-person).
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;
 `tools: []` remains an empty override. Standalone scheduler-owned turns use a
@@ -1388,7 +1392,7 @@ selection; connection-only setup never mutates sessions.
 Canonical mechanics: [shared connection presentation](connection-presentation.md).
 
 `SessionConversation` includes feed, queue/actions, durable composer, model policy,
-human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
+tool approvals, attachments, human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
 

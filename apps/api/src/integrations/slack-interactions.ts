@@ -165,6 +165,7 @@ import {
   slackAppHomeOpenedEvent,
 } from "./slack-app-home";
 import { importSlackReactionImage, type ImportedSlackReactionImage } from "../slack-reaction-files";
+import { parseRequestJson } from "../http/request-body";
 
 export const SLACK_INTERACTION_MAX_BODY_BYTES = 256 * 1024;
 export const SLACK_SIGNATURE_REPLAY_WINDOW_SECONDS = 300;
@@ -636,7 +637,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
   app.post("/v1/workspaces/:workspaceId/integrations/slack/user-link-intents", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const context = await requireManagedSlackLinkHuman(c, deps);
-    const payload = PrepareSlackUserLinkAccessRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, PrepareSlackUserLinkAccessRequest);
     const signingSecret = deps.settings.slackSigningSecret;
     const link = signingSecret ? verifySlackUserLinkToken(signingSecret, payload.linkToken) : null;
     if (!link || link.workspaceId !== workspaceId) {
@@ -708,7 +709,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const context = await requireManagedSlackLinkHuman(c, deps);
-      const payload = SlackUserLinkAccessMutationRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, SlackUserLinkAccessMutationRequest);
       try {
         const request = await requestSlackUserLinkWorkspaceAccess(deps.db, {
           workspaceId,
@@ -734,7 +735,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const context = await requireManagedSlackLinkHuman(c, deps);
-      const payload = SlackUserLinkAccessMutationRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, SlackUserLinkAccessMutationRequest);
       try {
         const request = await cancelSlackUserLinkAccessRequest(deps.db, {
           workspaceId,
@@ -775,7 +776,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
-      const payload = ApproveSlackUserLinkAccessRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, ApproveSlackUserLinkAccessRequest);
       // The identity link belongs to the installation, which for a routed
       // request is a different workspace from the one being granted. The
       // request row names its Slack team, so the binding resolves from it.
@@ -823,7 +824,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
-      const payload = SlackUserLinkAccessMutationRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, SlackUserLinkAccessMutationRequest);
       try {
         const request = await denySlackUserLinkAccessRequest(deps.db, {
           workspaceId,
@@ -958,7 +959,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     // Same gate as the reaction-channel allowlist this sits beside: pointing a
     // channel somewhere is an installation-administration act.
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = UpdateSlackChannelRoutesRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateSlackChannelRoutesRequest);
     const home = { accountId: grant.accountId, workspaceId };
     const installation = await listSlackInstallationBindings(deps.db, home);
     const binding = installation.find(

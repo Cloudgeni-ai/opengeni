@@ -1,6 +1,10 @@
 import { MessageTimeline, type TimelineItem } from "@opengeni/react";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 // Load only one consumer stylesheet: compiled mode must not be rescued by the
 // demo's Tailwind source scanning. Both run from the production Vite graph.

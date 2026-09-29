@@ -47,6 +47,8 @@ import {
   type ApiIntegrationConnectionDescriptor,
   type ResolvedApiIntegrationPreview,
 } from "../integrations/api-integrations";
+import { ApiHttpError } from "../http/api-error";
+import { parseRequestJson } from "../http/request-body";
 
 export type ApiIntegrationRouteOverrides = Readonly<{ fetchImpl?: FetchLike }>;
 
@@ -115,10 +117,60 @@ export function validatedIntegrationInstallInput(
       : {}),
     requiredScopes: resolved.requiredScopes,
     ownership: resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
-    ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
+    ...(payload.allowedTools
+      ? { allowedTools: validatedAllowedToolIds(payload.allowedTools, resolved.revision.tools) }
+      : {}),
     facetDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
     revision: resolved.revision,
   };
+}
+
+const MAX_REPORTED_TOOL_IDS = 50;
+
+/**
+ * `allowedTools` names tools by their preview `id`, the stable identity the
+ * install persists. Reject anything else as a client error that lists the
+ * valid ids; a caller that sent a preview `operationKey` is told which id it
+ * maps to rather than having it silently reinterpreted.
+ */
+export function validatedAllowedToolIds(
+  allowedTools: readonly string[],
+  tools: readonly { id: string; operationKey: string }[],
+): string[] {
+  const ids = new Set(tools.map((tool) => tool.id));
+  const unknown = [
+    ...new Set(allowedTools.map((tool) => tool.trim()).filter((tool) => !ids.has(tool))),
+  ];
+  if (unknown.length === 0) return [...allowedTools];
+  const operationKeyMatches = unknown.flatMap((value) => {
+    const tool = tools.find((candidate) => candidate.operationKey === value);
+    return tool ? [{ operationKey: value, id: tool.id }] : [];
+  });
+  const validToolIds = tools.map((tool) => tool.id);
+  const shownUnknown = unknown.slice(0, 10);
+  const hint =
+    operationKeyMatches.length > 0
+      ? ` allowedTools takes tool ids, not operationKeys: ${operationKeyMatches
+          .slice(0, 5)
+          .map((match) => `${match.operationKey} -> ${match.id}`)
+          .join(", ")}.`
+      : "";
+  throw new ApiHttpError(422, {
+    code: "validation_failed",
+    message: `allowedTools contains unknown tool ids: ${shownUnknown.join(", ")}${
+      unknown.length > shownUnknown.length
+        ? `, and ${unknown.length - shownUnknown.length} more`
+        : ""
+    }. Use the \`id\` of each tool in the Integration preview.${hint}`,
+    retryable: false,
+    details: {
+      code: "unknown_integration_tools",
+      unknownTools: shownUnknown,
+      operationKeyMatches: operationKeyMatches.slice(0, MAX_REPORTED_TOOL_IDS),
+      validToolIds: validToolIds.slice(0, MAX_REPORTED_TOOL_IDS),
+      validToolIdCount: validToolIds.length,
+    },
+  });
 }
 
 export function registerApiIntegrationRoutes(
@@ -212,7 +264,7 @@ export function registerApiIntegrationRoutes(
   app.post("/v1/workspaces/:workspaceId/integrations/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const payload = PreviewApiIntegrationRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, PreviewApiIntegrationRequest);
     const resolved = await resolveForRoute({
       deps,
       transport,
@@ -227,7 +279,7 @@ export function registerApiIntegrationRoutes(
   app.post("/v1/workspaces/:workspaceId/integrations/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
-    const payload = InstallApiIntegrationRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, InstallApiIntegrationRequest);
     const resolved = await resolveForRoute({
       deps,
       transport,
@@ -283,7 +335,7 @@ export function registerApiIntegrationRoutes(
       const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
       const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
       const instanceKey = decodeURIComponent(c.req.param("instanceKey"));
-      const payload = UninstallApiIntegrationRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, UninstallApiIntegrationRequest);
       try {
         return c.json(
           UninstallApiIntegrationResult.parse(
