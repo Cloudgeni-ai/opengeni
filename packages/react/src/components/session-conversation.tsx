@@ -169,6 +169,7 @@ function Conversation({
       <div className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto" data-og-conversation-inputs="">
         {approvals.length > 0 && !terminal ? (
           <ApprovalSurface
+            className="mx-auto max-w-3xl"
             approvals={approvals}
             onApprove={async (approval) => {
               await control.approve(approval.id);

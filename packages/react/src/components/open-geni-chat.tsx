@@ -163,7 +163,7 @@ export function OpenGeniChat({
           </button>
           <span className="text-og-sm font-semibold text-og-fg-muted">{labels.heading}</span>
         </div>
-        <div className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
           {selected ? (
             <SessionConversation
               {...conversationProps}
