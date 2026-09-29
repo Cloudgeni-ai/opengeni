@@ -3968,7 +3968,7 @@ function SessionRow(props: {
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
-            {lead}
+          {lead}
           <SiteOriginLink session={props.session} compact />
           <HoverCard openDelay={100} closeDelay={80}>
             <HoverCardTrigger asChild>

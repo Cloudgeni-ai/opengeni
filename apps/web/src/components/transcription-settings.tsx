@@ -221,7 +221,9 @@ export function PreferenceToggleRow(props: {
         <span
           className={cn(
             "inline-block size-3.5 rounded-full shadow-sm transition-transform",
-            props.checked ? "translate-x-4 bg-primary-foreground" : "translate-x-0.5 bg-switch-thumb",
+            props.checked
+              ? "translate-x-4 bg-primary-foreground"
+              : "translate-x-0.5 bg-switch-thumb",
           )}
         />
       </button>

@@ -198,9 +198,7 @@ describe("signed-out homepage on the real app route", () => {
       expect(await popup.getByRole("button", { name: "Continue with GitHub" }).isVisible()).toBe(
         true,
       );
-      expect(await popup.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(
-        0,
-      );
+      expect(await popup.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(0);
       expect(await page.getByRole("heading", { name: SIGNED_OUT_HEADING }).count()).toBe(1);
     } finally {
       await context.close();
