@@ -1003,6 +1003,11 @@ implicitly falls back to another key.
 Provider-refusal cooldowns retain provenance and revisions: fresh usage repairs
 older quota refusals, never generic backpressure or newer refusals. All-capped
 admission and capacity waits reconcile through bounded refreshes.
+Codex quota windows get 5-hour/weekly labels only from explicit provider window
+durations in `/wham/usage`; primary/secondary slots are not durations. Response
+headers without both identified windows cannot update the labeled quota cache.
+The account picker refreshes live usage on open, showing the provider result
+instead of a previously mislabeled cache value.
 
 Codex turns require durable credential leases. `rotation_enabled` controls
 account switching: off waits on capped accounts; on allows same-turn recovery

@@ -15,11 +15,11 @@ export type CodexTokenSnapshot = {
 
 /**
  * Multi-account P4 (Part A): a full usage snapshot scraped FOR FREE from the
- * `x-codex-primary-*` / `x-codex-secondary-*` response headers the codex backend
- * stamps on every `/codex/responses` turn (success AND 429 hard-cap). Integer-
- * identical to GET /wham/usage but with zero extra round-trip. parseCodexUsageHeaders
- * returns this only when BOTH windows parse, so a write is always a full 5-column
- * snapshot (no partial-window clobber). Shape mirrors db's CodexAccountUsageSnapshot
+ * `x-codex-primary-*` / `x-codex-secondary-*` response headers when BOTH slots
+ * identify their durations. Untyped headers are ignored rather than mislabeled;
+ * /wham/usage remains authoritative. parseCodexUsageHeaders returns this only
+ * when both windows parse, so a write is always a full 5-column snapshot.
+ * Shape mirrors db's CodexAccountUsageSnapshot
  * (non-null here: a partial read is filtered to null upstream, never half-written).
  */
 export type CodexUsageHeaderSnapshot = {
@@ -105,7 +105,7 @@ export type CodexRequestContext = {
   /**
    * Multi-account P4 (Part A): fire-and-forget usage-header sink. Called by
    * codexSubscriptionFetch on EVERY response (sync, non-throwing, never awaited)
-   * with the parsed full-window snapshot. The worker records the latest into the
+   * with a duration-identified full-window snapshot. The worker records the latest into the
    * P2 usage cache once per turn in its `finally` — packages/codex stays db-free.
    */
   onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;

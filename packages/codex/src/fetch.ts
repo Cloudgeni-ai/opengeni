@@ -15,6 +15,7 @@ import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
 import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
+import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./usage-normalize";
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
@@ -181,39 +182,53 @@ function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs
 }
 
 /**
- * Multi-account P4 (Part A): scrape the full usage snapshot the codex backend
- * stamps on every `/codex/responses` response in `x-codex-primary-*` /
- * `x-codex-secondary-*` headers (integer-identical to GET /wham/usage, for free).
- *
- * CRITICAL clobber-fix: return null unless BOTH windows expose a valid used-percent
- * integer. recordCodexAccountUsage writes all five columns unconditionally, so a
- * primary-only snapshot would null the weekly column. Both windows are always
- * emitted together on `/codex/responses`; gating on both makes every write a full
- * 5-column snapshot byte-identical to the poll path, and a malformed/absent header
- * set simply no-ops (the /wham/usage poll fallback still covers it).
+ * Only cache response-header usage when BOTH windows have an explicit, known
+ * duration. The provider's primary/secondary slots are not stable 5h/weekly
+ * labels: a weekly-only account can place its weekly quota in primary. Most
+ * responses omit duration headers, in which case the authoritative /wham/usage
+ * poll supplies the labeled windows instead. Never clobber a good cache with
+ * percentages whose time windows cannot be identified.
  */
 export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapshot | null {
-  const primaryUsedPercent = parseIntHeader(headers.get("x-codex-primary-used-percent"));
-  const secondaryUsedPercent = parseIntHeader(headers.get("x-codex-secondary-used-percent"));
-  if (primaryUsedPercent === null || secondaryUsedPercent === null) {
-    return null; // not a full both-windows snapshot — no-op (never a partial clobber)
+  const duration = (slot: "primary" | "secondary"): number | null => {
+    const raw = headers.get(`x-codex-${slot}-limit-window-seconds`);
+    if (raw === null || !/^\d+$/.test(raw.trim())) return null;
+    return Number(raw.trim());
+  };
+  const primarySeconds = duration("primary");
+  const secondarySeconds = duration("secondary");
+  if (
+    !(
+      (primarySeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS &&
+        secondarySeconds === CODEX_WEEKLY_WINDOW_SECONDS) ||
+      (primarySeconds === CODEX_WEEKLY_WINDOW_SECONDS &&
+        secondarySeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS)
+    )
+  ) {
+    return null;
   }
+  const first = parseIntHeader(headers.get("x-codex-primary-used-percent"));
+  const second = parseIntHeader(headers.get("x-codex-secondary-used-percent"));
+  if (first === null || second === null) return null; // never write a partial snapshot
   const nowMs = Date.now();
+  const primaryResetAt = resolveResetAt(
+    headers,
+    "x-codex-primary-reset-at",
+    "x-codex-primary-reset-after-seconds",
+    nowMs,
+  );
+  const secondaryResetAt = resolveResetAt(
+    headers,
+    "x-codex-secondary-reset-at",
+    "x-codex-secondary-reset-after-seconds",
+    nowMs,
+  );
+  const firstIsFiveHour = primarySeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS;
   return {
-    primaryUsedPercent,
-    primaryResetAt: resolveResetAt(
-      headers,
-      "x-codex-primary-reset-at",
-      "x-codex-primary-reset-after-seconds",
-      nowMs,
-    ),
-    secondaryUsedPercent,
-    secondaryResetAt: resolveResetAt(
-      headers,
-      "x-codex-secondary-reset-at",
-      "x-codex-secondary-reset-after-seconds",
-      nowMs,
-    ),
+    primaryUsedPercent: firstIsFiveHour ? first : second,
+    primaryResetAt: firstIsFiveHour ? primaryResetAt : secondaryResetAt,
+    secondaryUsedPercent: firstIsFiveHour ? second : first,
+    secondaryResetAt: firstIsFiveHour ? secondaryResetAt : primaryResetAt,
     checkedAt: new Date(nowMs),
   };
 }
