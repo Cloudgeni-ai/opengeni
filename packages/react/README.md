@@ -100,6 +100,23 @@ Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
 the product needs a materially different interaction model. These components do
 not consume the text-only `@opengeni/sdk/chat` fallback protocol.
 
+`SessionConversation` hides its model picker when the client config reports
+`modelSelection: false` (a proxy that fixes the model policy); pass
+`modelPicker={false}` or `modelPicker` to override. Attachments appear when the
+deployment enables uploads (`attachments={false}` opts out), pending tool
+approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
+
+Highlighted diffs use the optional `@pierre/diffs` peer only after an explicit
+opt-in, so a host without it still builds with any bundler (Turbopack resolves
+every reachable `import()`). Hosts that install it call, once at startup:
+
+```ts
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+enablePierreDiffs();
+```
+
+Without it, diffs and file views render as plain text.
+
 `OpenGeniProvider` never blocks or reloads the host page when OpenGeni deploys
 a new API contract revision. The stock OpenGeni console opts into that
 stale-tab protection with `reloadOnApiContractChange`; embedded products

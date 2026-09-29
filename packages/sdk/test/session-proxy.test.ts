@@ -384,4 +384,76 @@ describe("createSessionProxyHandler", () => {
     expect(events.headers.get("x-opengeni-api-contract")).toBeNull();
     expect(events.headers.get("X-OpenGeni-Has-More")).toBe("true");
   });
+
+  test("beforeForwardMessage adds server context and MCP credential rotation to every message", async () => {
+    const inputs: unknown[] = [];
+    const { upstream, browser } = setup({
+      createSession: ({ initialMessage }) => ({ initialMessage, modelContext: "Workspace plan" }),
+      beforeForwardMessage: (input, context) => {
+        inputs.push({ ...input, user: context.user });
+        return {
+          modelContext: "Page: /reports · TZ: Europe/Oslo · 2026-09-29",
+          mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "Bearer short-lived" } }],
+        };
+      },
+    });
+    await browser.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "hi", modelContext: "Row 7" });
+    expect(upstream.requests[0]!.body).toEqual({
+      type: "user.message",
+      payload: {
+        text: "hi",
+        modelContext: "Page: /reports · TZ: Europe/Oslo · 2026-09-29\n\nRow 7",
+        mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "Bearer short-lived" } }],
+      },
+    });
+    await browser.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
+    expect(upstream.requests[1]!.body).toMatchObject({
+      text: "now",
+      mcpCredentialUpdates: [{ id: "crm" }],
+    });
+    await browser.submitComposerDraft(WORKSPACE_ID, SESSION_ID, {
+      text: "draft",
+      expectedDraftRevision: 1,
+      clientEventId: "c1",
+      delivery: "send",
+    } as never);
+    expect(upstream.requests[2]!.body).toMatchObject({
+      text: "draft",
+      modelContext: expect.any(String),
+    });
+    await browser.createSession(WORKSPACE_ID, { initialMessage: "start" } as never);
+    expect(upstream.requests[3]!.body).toEqual({
+      initialMessage: "start",
+      modelContext: "Page: /reports · TZ: Europe/Oslo · 2026-09-29\n\nWorkspace plan",
+    });
+    expect(inputs).toEqual([
+      { sessionId: SESSION_ID, delivery: "send", user: "u_42" },
+      { sessionId: SESSION_ID, delivery: "steer", user: "u_42" },
+      { sessionId: SESSION_ID, delivery: "submit", user: "u_42" },
+      { delivery: "create", user: "u_42" },
+    ]);
+    // The browser still cannot rotate credentials itself.
+    const smuggled = await rejection(
+      browser.sendMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "hi",
+        mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "x" } }],
+      } as never),
+    );
+    expect(smuggled.status).toBe(403);
+  });
+
+  test("beforeForwardMessage can refuse a message", async () => {
+    const { upstream, browser } = setup({
+      beforeForwardMessage: () => new Response("Token expired", { status: 401 }),
+    });
+    expect((await rejection(browser.sendMessage(WORKSPACE_ID, SESSION_ID, "hi"))).status).toBe(401);
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("modelSelection: false is reported in client config so UIs hide the picker", async () => {
+    const locked = setup({ modelSelection: false });
+    expect((await locked.browser.getClientConfig()).modelSelection).toBe(false);
+    const open = setup();
+    expect((await open.browser.getClientConfig()).modelSelection).toBeUndefined();
+  });
 });

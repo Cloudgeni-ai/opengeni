@@ -4024,6 +4024,12 @@ export type ClientConfig = {
       }
     | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /**
+   * `false` when a host's session proxy fixes the model policy
+   * (`createSessionProxyHandler({ modelSelection: false })`), so UIs hide the
+   * model picker. OpenGeni itself omits it.
+   */
+  modelSelection?: boolean | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**

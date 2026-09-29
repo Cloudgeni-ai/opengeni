@@ -2,7 +2,7 @@ import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError } from "./errors";
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
-import type { CreateSessionRequest } from "./types";
+import type { CreateSessionRequest, SessionMcpCredentialUpdateInput } from "./types";
 
 /**
  * Packaged same-origin backend for the React conversation surfaces.
@@ -58,6 +58,29 @@ export type SessionProxyCreateInput = {
   idempotencyKey?: string | undefined;
 };
 
+/** Which browser action is about to forward a user message. */
+export type SessionProxyMessageInput = {
+  /** Absent for `create`. */
+  sessionId?: string | undefined;
+  delivery: "create" | "send" | "steer" | "submit";
+};
+
+/** Server-side additions the host attaches to one forwarded user message. */
+export type SessionProxyMessageExtras = {
+  /**
+   * Model-visible context for this message (current page, time zone, today's
+   * date). Placed before any context the browser sent. Not secret.
+   */
+  modelContext?: string | undefined;
+  /**
+   * Header-only credential rotation for MCP servers already attached to the
+   * session (for example a fresh short-lived per-user bearer), applied
+   * atomically as the message is accepted. Ignored for `create`, where the
+   * `createSession` hook sets the initial headers.
+   */
+  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+};
+
 export type SessionProxyHandlerOptions = {
   /** Mandatory host auth hook, called on every request. */
   resolve: SessionProxyResolve;
@@ -86,6 +109,21 @@ export type SessionProxyHandlerOptions = {
         input: SessionProxyCreateInput,
         context: SessionProxyContext,
       ) => CreateSessionRequest | Response | Promise<CreateSessionRequest | Response>)
+    | undefined;
+  /**
+   * Called before every forwarded user message (send, steer, composer submit,
+   * and browser-started create). Return server-owned `modelContext` and MCP
+   * credential rotations, or a `Response` to reject the message.
+   */
+  beforeForwardMessage?:
+    | ((
+        input: SessionProxyMessageInput,
+        context: SessionProxyContext,
+      ) =>
+        | SessionProxyMessageExtras
+        | Response
+        | undefined
+        | Promise<SessionProxyMessageExtras | Response | undefined>)
     | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
   basePath?: string | undefined;
@@ -202,6 +240,30 @@ export function createSessionProxyHandler(
       }
 
       const call = { signal: request.signal };
+      const messageExtras = async (input: SessionProxyMessageInput) =>
+        options.beforeForwardMessage
+          ? await options.beforeForwardMessage(input, context)
+          : undefined;
+      /** Browser input sanitized, then server-owned extras merged in. */
+      const forwardMessage = async (
+        value: unknown,
+        input: SessionProxyMessageInput,
+      ): Promise<Record<string, unknown> | Response> => {
+        const message = sanitizeMessage(value, modelSelection);
+        const extras = await messageExtras(input);
+        if (extras instanceof Response) return extras;
+        const modelContext = joinContext(
+          extras?.modelContext,
+          typeof message.modelContext === "string" ? message.modelContext : undefined,
+        );
+        return {
+          ...message,
+          ...(modelContext ? { modelContext } : {}),
+          ...(extras?.mcpCredentialUpdates?.length
+            ? { mcpCredentialUpdates: extras.mcpCredentialUpdates }
+            : {}),
+        };
+      };
       // Unknown additive query parameters on allowlisted reads pass through, so a
       // newer browser SDK keeps working; the route and method allowlist is exact.
       const query = Object.fromEntries(url.searchParams);
@@ -220,7 +282,11 @@ export function createSessionProxyHandler(
             query,
             call,
           );
-          return json({ ...config, apiContractRevision: OPENGENI_API_CONTRACT_REVISION });
+          return json({
+            ...config,
+            apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+            ...(modelSelection ? {} : { modelSelection: false }),
+          });
         }
         return errorJson(404, "route_not_allowed", "Not found.");
       }
@@ -287,7 +353,15 @@ export function createSessionProxyHandler(
         const input = createInput(await readJsonBody(request, maxBodyBytes));
         const created = await options.createSession(input, context);
         if (created instanceof Response) return created;
-        return json(await client.createSession(workspaceId, created));
+        const extras = await messageExtras({ delivery: "create" });
+        if (extras instanceof Response) return extras;
+        const modelContext = joinContext(extras?.modelContext, created.modelContext);
+        return json(
+          await client.createSession(workspaceId, {
+            ...created,
+            ...(modelContext ? { modelContext } : {}),
+          }),
+        );
       }
 
       const [sessionId, ...op] = tail as [string, ...string[]];
@@ -298,6 +372,10 @@ export function createSessionProxyHandler(
       const route = `${method} ${op.join("/")}`;
       const body = method === "GET" ? undefined : await readJsonBody(request, maxBodyBytes, true);
       const sanitize = (value: unknown) => sanitizeMessage(value, modelSelection);
+      const forward = async (path: string, payload: Record<string, unknown> | Response) =>
+        payload instanceof Response
+          ? payload
+          : json(await client.requestJson("POST", path, payload));
 
       switch (route) {
         case "GET ":
@@ -319,12 +397,22 @@ export function createSessionProxyHandler(
             signal: request.signal,
             heartbeatMs,
           });
-        case "POST events":
-          return json(
-            await client.requestJson("POST", `${session}/events`, clientEvent(body, sanitize)),
+        case "POST events": {
+          const event = clientEvent(body);
+          if (event.type !== "user.message") {
+            return json(await client.requestJson("POST", `${session}/events`, event));
+          }
+          const payload = await forwardMessage(event.payload, { sessionId, delivery: "send" });
+          return await forward(
+            `${session}/events`,
+            payload instanceof Response ? payload : { ...event, payload },
           );
+        }
         case "POST steer":
-          return json(await client.requestJson("POST", `${session}/steer`, sanitize(body)));
+          return await forward(
+            `${session}/steer`,
+            await forwardMessage(body, { sessionId, delivery: "steer" }),
+          );
         case "GET queue":
           return await read(`${session}/queue`);
         case "GET composer-draft":
@@ -332,8 +420,9 @@ export function createSessionProxyHandler(
         case "PUT composer-draft":
           return json(await client.requestJson("PUT", `${session}/composer-draft`, sanitize(body)));
         case "POST composer-draft/submit":
-          return json(
-            await client.requestJson("POST", `${session}/composer-draft/submit`, sanitize(body)),
+          return await forward(
+            `${session}/composer-draft/submit`,
+            await forwardMessage(body, { sessionId, delivery: "submit" }),
           );
         case "POST control": {
           if (body?.action !== "pause" && body?.action !== "resume") {
@@ -501,22 +590,27 @@ function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string
   return input;
 }
 
-function clientEvent(
-  body: Record<string, unknown> | undefined,
-  sanitize: (value: unknown) => Record<string, unknown>,
-): Record<string, unknown> {
+function clientEvent(body: Record<string, unknown> | undefined): Record<string, unknown> & {
+  type: string;
+} {
   switch (body?.type) {
     case "user.message":
-      return { ...body, payload: sanitize(body.payload) };
     case "user.approvalDecision":
     case "user.humanInputResponse":
-      return body;
+      return body as Record<string, unknown> & { type: string };
     default:
       return reject(403, "event_not_allowed", "This session event type is not available.");
   }
 }
 
-/** Event pages keep OpenGeni's paging headers; forensic reads are not proxied. */
+function joinContext(...parts: Array<string | undefined>): string | undefined {
+  const joined = parts
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  return joined || undefined;
+}
+
 async function listEvents(
   client: ProxyClient,
   path: string,

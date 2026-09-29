@@ -89,6 +89,33 @@ check on top of OpenGeni's own membership and visibility checks. Without
 `authorizeMutation`, only cross-site (`Sec-Fetch-Site`) mutations are refused,
 so cookie-authenticated hosts should pass their CSRF check.
 
+`beforeForwardMessage(message, context)` runs before every forwarded user
+message (send, steer, composer submit, and a browser-started create) and may
+return server-owned additions, or a `Response` to refuse the message:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve,
+  beforeForwardMessage: async ({ sessionId, delivery }, { user }) => ({
+    // Model-visible, placed before any context the browser sent.
+    modelContext: `Page ${currentPage(user)} · ${timeZone(user)} · ${today()}`,
+    // Header-only rotation of MCP servers already attached to the session,
+    // applied atomically as the message is accepted (ignored on create).
+    mcpCredentialUpdates: [
+      { id: "acme", headers: { Authorization: `Bearer ${await mintUserToken(user)}` } },
+    ],
+  }),
+});
+```
+
+This is the per-user tool token pattern: create the session with
+`mcpServers: [{ id: "acme", url, headers }]` (and `tools: [{ kind: "mcp", id:
+"acme" }]`, which the acting user needs `mcp_servers:attach` to attach), then
+hand the MCP server a fresh short-lived bearer on every message. The browser
+still cannot send `mcpCredentialUpdates` itself. With `modelSelection: false`
+the proxy reports `modelSelection: false` in the client config, and
+`SessionConversation` hides its model picker.
+
 Onboard each user explicitly before their first request (see
 [External users](#external-users-asuser)); the proxy never grants membership.
 The conversation needs `workspace:read`, `sessions:read`, `sessions:control`,

@@ -153,6 +153,8 @@ export type {
   SessionProxyContext,
   SessionProxyCreateInput,
   SessionProxyHandlerOptions,
+  SessionProxyMessageExtras,
+  SessionProxyMessageInput,
   SessionProxyResolution,
   SessionProxyResolve,
 } from "./session-proxy";

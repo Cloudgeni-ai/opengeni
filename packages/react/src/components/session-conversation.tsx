@@ -31,6 +31,11 @@ export type SessionConversationProps = ClientOverride & {
    * appears only when the deployment's client config enables file uploads.
    */
   attachments?: boolean | undefined;
+  /**
+   * Show the model/reasoning picker. Defaults to shown unless the client config
+   * reports `modelSelection: false` (a host proxy that fixes the model policy).
+   */
+  modelPicker?: boolean | undefined;
   /** Localized actions for already-sent user-message disclosure. */
   userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
@@ -55,6 +60,7 @@ function Conversation({
   renderMessageText,
   toolRegistry,
   attachments: attachmentsRequested = true,
+  modelPicker,
   userMessageDisclosureLabels,
   loadSkillReview,
   client,
@@ -65,9 +71,12 @@ function Conversation({
 }: SessionConversationProps) {
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
+  const config = useClientConfigFlags(context.client);
+  const showModelPicker = modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({
     client: context.client,
     workspaceId: context.workspaceId,
+    enabled: showModelPicker,
   });
   const feed = useSessionEvents(sessionId, scope);
   const options = { ...scope, events: feed.events };
@@ -77,7 +86,7 @@ function Conversation({
   const control = useSessionControl(sessionId, scope);
   const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
   const files = useFileAttachments(scope);
-  const uploadsEnabled = useFileUploadsEnabled(context.client, attachmentsRequested);
+  const uploadsEnabled = attachmentsRequested && config.uploads;
   const status = feed.sessionStatus ?? detail.session?.status;
   const terminal = status === "cancelled";
   const releaseSentFiles = (input: SendMessageInput) =>
@@ -177,7 +186,7 @@ function Conversation({
           disabled={terminal || composerProps?.disabled}
           controlsStart={
             composerProps?.controlsStart ??
-            (composer.policy && (
+            (showModelPicker && composer.policy && (
               <ModelPolicyPicker
                 rows={catalog.rows}
                 model={composer.policy.model}
@@ -204,29 +213,30 @@ function Conversation({
   );
 }
 
-/** Show attachments only when the deployment accepts browser file uploads. */
-function useFileUploadsEnabled(
-  client: { getClientConfig: () => Promise<{ fileUploads?: { enabled?: boolean } }> },
-  requested: boolean,
-): boolean {
-  const [enabled, setEnabled] = useState(false);
+/** Deployment/proxy flags from the client config: uploads, and whether model choice is open. */
+function useClientConfigFlags(client: {
+  getClientConfig: () => Promise<{
+    fileUploads?: { enabled?: boolean };
+    modelSelection?: boolean | undefined;
+  }>;
+}): { uploads: boolean; modelSelection: boolean } {
+  const [flags, setFlags] = useState({ uploads: false, modelSelection: true });
   useEffect(() => {
-    if (!requested) {
-      setEnabled(false);
-      return;
-    }
     let live = true;
     client.getClientConfig().then(
       (config) => {
-        if (live) setEnabled(config.fileUploads?.enabled === true);
+        if (live) {
+          setFlags({
+            uploads: config.fileUploads?.enabled === true,
+            modelSelection: config.modelSelection !== false,
+          });
+        }
       },
-      () => {
-        if (live) setEnabled(false);
-      },
+      () => undefined,
     );
     return () => {
       live = false;
     };
-  }, [client, requested]);
-  return enabled;
+  }, [client]);
+  return flags;
 }

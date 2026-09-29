@@ -229,3 +229,51 @@ test("complete conversation surfaces tool approvals and wires attachments when u
     await view.unmount();
   }
 });
+
+test("the model picker follows the proxy's modelSelection flag and the modelPicker prop", async () => {
+  const base = fakeClient({});
+  const clientWith = (modelSelection: boolean | undefined) =>
+    fakeClient({
+      getClientConfig: async () =>
+        ({
+          ...(await base.getClientConfig()),
+          ...(modelSelection === undefined ? {} : { modelSelection }),
+        }) as never,
+      getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
+      getQueue: async () =>
+        ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+      getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+      listHumanInputRequests: async () => [],
+      streamEvents: async function* (_workspace, _session, options) {
+        await new Promise<void>((resolve) =>
+          options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        yield* [];
+      },
+    });
+  const picker = (container: HTMLElement) =>
+    container.querySelector(
+      "[aria-label='Model and effort'], [aria-label='Loading model catalog…']",
+    );
+  for (const [modelSelection, prop, expected] of [
+    [undefined, undefined, true],
+    [false, undefined, false],
+    [false, true, true],
+    [undefined, false, false],
+  ] as const) {
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={clientWith(modelSelection)}
+        workspaceId={WORKSPACE_ID}
+        {...(prop === undefined ? {} : { modelPicker: prop })}
+      />,
+    );
+    try {
+      await flush(150);
+      expect(picker(view.container) !== null).toBe(expected);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
