@@ -151,6 +151,70 @@ const workRows = (groups: TimelineGroup[]) =>
   groups.filter((group) => group.kind === "activity" && group.work);
 
 describe("readable per-turn grouping", () => {
+  test("legacy work follows attention and terminal status without turn IDs", () => {
+    sequence = 0;
+    const legacy = (type: string, payload: unknown) => event(type, payload, { turnId: null });
+    const work = [
+      legacy("user.message", { text: "Check the result" }),
+      legacy("agent.toolCall.created", { id: "read", name: "exec_command", arguments: {} }),
+      legacy("agent.toolCall.output", { id: "read", output: "ok" }),
+    ];
+    const waiting = legacy("session.status.changed", { status: "requires_action" });
+    const waitingRow = workRows(fold([...work, waiting]))[0];
+    expect(waitingRow?.kind === "activity" && waitingRow.work?.waiting).toEqual({
+      label: "Waiting for you",
+      since: waiting.occurredAt,
+    });
+    for (const status of ["cancelled", "failed"]) {
+      const terminal = legacy("session.status.changed", { status });
+      const row = workRows(fold([...work, waiting, terminal]))[0];
+      expect(row?.kind === "activity" && row.work?.endedAt).toBe(terminal.occurredAt);
+      expect(row?.kind === "activity" && row.work?.waiting).toBeUndefined();
+    }
+  });
+
+  test("a new legacy work row stops the previous clock without folding turns together", () => {
+    sequence = 0;
+    const legacy = (type: string, payload: unknown) => event(type, payload, { turnId: null });
+    const firstPrompt = legacy("user.message", { text: "First question" });
+    const firstWork = legacy("agent.toolCall.created", {
+      id: "first",
+      name: "exec_command",
+      arguments: {},
+    });
+    const secondPrompt = legacy("user.message", { text: "Second question" });
+    const secondWork = legacy("agent.toolCall.created", {
+      id: "second",
+      name: "exec_command",
+      arguments: {},
+    });
+    const rows = workRows(fold([firstPrompt, firstWork, secondPrompt, secondWork]));
+    expect(rows.map((row) => row.kind === "activity" && row.id)).toEqual([
+      `work-${firstPrompt.id}`,
+      `work-${secondPrompt.id}`,
+    ]);
+    expect(rows[0]?.kind === "activity" && rows[0].work?.endedAt).toBe(secondWork.occurredAt);
+    expect(rows[1]?.kind === "activity" && rows[1].work?.endedAt).toBeUndefined();
+  });
+
+  test("a legacy human message alone does not end or redirect the active work", () => {
+    sequence = 0;
+    const legacy = (type: string, payload: unknown) => event(type, payload, { turnId: null });
+    const prompt = legacy("user.message", { text: "Check the totals" });
+    const events = [
+      prompt,
+      legacy("agent.toolCall.created", { id: "read", name: "exec_command", arguments: {} }),
+      legacy("user.message", { text: "Include yesterday", delivery: "steer" }),
+      legacy("session.requiresAction", {}),
+    ];
+    const rows = workRows(fold(events));
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row?.kind === "activity" && row.id).toBe(`work-${prompt.id}`);
+    expect(row?.kind === "activity" && row.work?.endedAt).toBeUndefined();
+    expect(row?.kind === "activity" && row.work?.waiting?.label).toBe("Waiting for you");
+  });
+
   test("late commentary cannot change a settled phase-less response duration", () => {
     sequence = 0;
     const work = tool("read", "exec_command", "turn-1");
