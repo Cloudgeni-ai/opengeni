@@ -294,6 +294,7 @@ export function useSettingsRail(input: {
       </>
     ) : null;
 
+  const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   const sections: SettingsRailSection[] = [];
 
   if (managedWorkspace) {
@@ -335,7 +336,11 @@ export function useSettingsRail(input: {
       groups: [
         {
           items: [
-            ...SECTION_ORDER.map((section) => ({
+            // Nobody administers a Personal workspace, so its API keys and
+            // Developer pages could only say they aren't available.
+            ...SECTION_ORDER.filter(
+              (section) => !personal || (section !== "api-keys" && section !== "developer"),
+            ).map((section) => ({
               id: `workspace:${section}`,
               label: WORKSPACE_SETTINGS_COPY[section].title,
               icon: SECTION_ICONS[section],
@@ -437,7 +442,6 @@ export function useSettingsRail(input: {
       }
     : { label: "Back to Opengeni", link: <Link to="/" /> };
 
-  const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   return {
     picker,
     sections,
