@@ -182,7 +182,9 @@ opacity-muted text.
   the choice, with no fill or inset of its own.
   `ChoiceCards` and `ListRow` do this themselves when they sit in a card. A section whose content
   is a single boxed control (a large textarea, a code editor) stays open (`variant="open"`): the
-  control is the card. A dialog or sheet opened from a card starts fresh (`SectionFrameReset`).
+  control is the card. A form dialog or sheet opened from a card starts fresh (`FormDialog` and
+  `Sheet` wrap their content in `SectionFrameReset`; a plain `Dialog` that shows lists or choices
+  does the same itself, so the startup bundle doesn't carry the section context).
 - Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 64px (32px
   tile, one column, hairline dividers, for things you own). **Every row in a list has the same
   height.** A resource row is its title plus ONE secondary line: the description and the meta

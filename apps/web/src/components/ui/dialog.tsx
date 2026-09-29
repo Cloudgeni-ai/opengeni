@@ -6,7 +6,6 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { SectionFrameReset } from "@/components/ui/section-variant";
 
 function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />;
@@ -69,7 +68,7 @@ function DialogContent({
         )}
         {...props}
       >
-        <SectionFrameReset>{children}</SectionFrameReset>
+        {children}
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
