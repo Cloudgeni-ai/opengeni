@@ -42,3 +42,15 @@ export function useSectionListFrame(): "card" | "inside" | "open" {
   if (inCard) return "inside";
   return variant === "group" ? "card" : "open";
 }
+
+/**
+ * A dialog, sheet or other overlay opened from inside a settings card starts
+ * fresh: its sections are open again and its lists and choices draw normally.
+ */
+export function SectionFrameReset({ children }: { children?: ReactNode }) {
+  return (
+    <SectionVariantContext.Provider value={null}>
+      <SectionCardContext.Provider value={false}>{children}</SectionCardContext.Provider>
+    </SectionVariantContext.Provider>
+  );
+}

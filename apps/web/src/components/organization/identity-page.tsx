@@ -261,7 +261,10 @@ export function OrganizationIdentityPage({
     <SectionStack>
       <CurrentIdentitySection workspaceId={workspaceId} canManage={canManage} />
       {canManage ? (
+        // The request field is the card here: an open section keeps the
+        // textarea from becoming a box inside a box.
         <Section
+          variant="open"
           title="Write it with Opengeni"
           description="Opengeni keeps it to identity and mission, asks only what it needs, and shows you the result before saving."
         >

@@ -176,6 +176,12 @@ opacity-muted text.
   `SettingRow` children render this way.
 - A block that is not a SettingRow list (e.g. "Linked product access") takes the same heading
   plus card treatment; its empty or loading line is a row inside the card.
+- **Never a card inside a card.** Nothing inside a settings card draws its own box: a list is
+  rows split by the card's hairlines, a Notice drops its border, and choice cards become flat
+  radio rows (radio, title, consequence line; the selected row keeps a faint `selection` fill).
+  `ChoiceCards` and `ListRow` do this themselves when they sit in a card. A section whose content
+  is a single boxed control (a large textarea, a code editor) stays open (`variant="open"`): the
+  control is the card. A dialog or sheet opened from a card starts fresh (`SectionFrameReset`).
 - Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 64px (32px
   tile, one column, hairline dividers, for things you own). **Every row in a list has the same
   height.** A resource row is its title plus ONE secondary line: the description and the meta
@@ -427,7 +433,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | Setting row | Label and description left, the one control in a fixed right column. A setting with its own page is a `SettingNavRow`; a destructive group action is a `SettingDangerRow` at the end. |
 | Switch | The primary fill and edge when on, with a primary-ink thumb; the `switch-track` with a `switch-thumb` when off, visible in both themes. |
 | Segmented control | Filled track with the active option raised on the surface. |
-| Choice cards | Brand ring: brand border, faint brand fill, a check in the corner. The same highlight for every selected state. |
+| Choice cards | Brand ring: brand border, faint brand fill, a check in the corner. The same highlight for every selected state. Inside a settings card they become flat radio rows split by the card's hairlines. |
 | Select | Menu select like the composer: title, description, payment source, a check on the selected option. The settings trigger is the 32px "field" style, as wide as its content (at least 180px). |
 | Disclosure | Advanced row: full-width row, rotating chevron, title and a summary of current values. |
 | Status badge | Plain dot + label in rows; the bordered 22px pill with a 6px dot in page headers. |

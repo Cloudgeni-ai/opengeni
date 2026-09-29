@@ -16,6 +16,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
+import { SectionFrameReset } from "@/components/ui/section-variant";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { AnalyticsAction } from "@/lib/analytics-actions";
 import { cn } from "@/lib/utils";
@@ -663,12 +664,14 @@ export function FormDialog({
           )}
         >
           <FormChromeContext.Provider value={DIALOG_CHROME}>
-            <FormFrame
-              variant="dialog"
-              {...frame}
-              {...overlay.frameProps}
-              className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
-            />
+            <SectionFrameReset>
+              <FormFrame
+                variant="dialog"
+                {...frame}
+                {...overlay.frameProps}
+                className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
+              />
+            </SectionFrameReset>
           </FormChromeContext.Provider>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
