@@ -15606,6 +15606,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // The same child omission rule applies to selected MCP tool refs. Top-level
       // omission still applies workspace-default capability MCP tools; explicit []
       // suppresses those defaults (the first-party OpenGeni server remains added).
+      // Servers attached in this request's `mcpServers` are selected either way.
       tools: z.array(ToolRef).default([]),
       excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
       metadata: z.record(z.string(), z.unknown()).default({}),
@@ -15675,7 +15676,10 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // policies, connection refs, and encrypted credentials. Explicit arrays,
       // including [], are authoritative; non-empty explicit arrays require attach
       // permission. Credential headers are write-only: create responses and events
-      // expose only SessionMcpServerMetadata.
+      // expose only SessionMcpServerMetadata. On a top-level create, every server
+      // attached here is also selected as a strict tool ref whether `tools` is
+      // omitted or explicit; list `{ kind: "mcp", id, eager: true }` in `tools`
+      // only to change its startup/degradation markers.
       mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
       // Override approval policy without copying inherited capability definitions.
       // Unknown/disabled servers are rejected; curated approval floors still apply.
