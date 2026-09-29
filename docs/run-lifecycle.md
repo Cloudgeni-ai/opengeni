@@ -2039,6 +2039,16 @@ Repeated Modal binding-missing or binding-mismatch observations enter a durable
 only backoff: the process remains active, retains every blocker, carries no
 exit/loss proof, and is periodically eligible for a later positive binding
 lookup and ordinary reconciliation.
+A Modal command's exit is reported only once both output streams reach EOF.
+Output is therefore read in 1 MiB pages per stream, and within one claim the
+reaper keeps reading while each read advances the durable cursor, bounded by
+eight reads and ten seconds. A running command whose output advanced is
+re-probed at reaper cadence rather than on the exponential backoff reserved
+for quiet commands and failures. Without this, a command that finished in
+seconds but printed megabytes stayed running for hours, holding its process
+blocker and preventing idle drain and capture until the provider deadline.
+Each stream records at most 16 MiB of output; later bytes are still read and
+the page that crosses the limit carries one explicit marker.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 

@@ -36,6 +36,24 @@ type RouterEntry = {
   idle?: ReturnType<typeof setTimeout>;
 };
 
+/** Output past this many bytes of one stream is still read, so the command's
+ * exit stays observable, but it is not recorded. Without a bound, a command
+ * that prints forever would grow the session event log without limit once its
+ * output drains at provider speed. */
+export const MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
+
+export function recordedOutputText(
+  stream: "stdout" | "stderr",
+  startOffset: number,
+  endOffset: number,
+  text: string,
+): string {
+  if (startOffset >= MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES) return "";
+  if (endOffset <= MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES) return text;
+  const limitMiB = MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES / (1024 * 1024);
+  return `${text}\n[OpenGeni stopped recording ${stream} after ${limitMiB} MiB. The command keeps running and its exit is still reported.]\n`;
+}
+
 /** New commands use replayable task-router byte offsets. Legacy identifiers
  * never cross that protocol boundary and are never used for new starts. */
 export class ModalCommandControl {
@@ -412,11 +430,12 @@ export class ModalCommandControl {
             eof: page.eof,
             exitCode: page.eof ? exit : null,
           };
-          if (decoded.text)
+          const text = recordedOutputText(stream, old.byteOffset, byteOffset, decoded.text);
+          if (text)
             chunks.push({
               stream,
               chunkId: `modal-router:${command.execId}:${stream}:${old.byteOffset}:${byteOffset}:${page.eof ? 1 : 0}`,
-              text: decoded.text,
+              text,
             });
         }
         return {

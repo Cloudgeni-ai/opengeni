@@ -321,6 +321,8 @@ export type RetainedProcessProbeResult =
         | "provider_binding_missing"
         | "provider_binding_mismatch"
         | "process_observation_unavailable";
+      /** A running command whose output cursor moved during this probe. */
+      outputAdvanced?: boolean;
     };
 
 export type RetainedProcessProbeFn = (
@@ -347,6 +349,10 @@ export type DrainableProviderProbeFn = (
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
+/** Per-claim bounds on reading a running command's output backlog. Each read
+ * returns up to one provider page per stream. */
+export const RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS = 8;
+export const RETAINED_PROCESS_OUTPUT_DRAIN_BUDGET_MS = 10_000;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
@@ -1740,6 +1746,7 @@ async function reconcileTerminalRetainedProcesses(
           expected,
           claim.claimId,
           observation.reason,
+          observation.outputAdvanced === true,
         );
         continue;
       }
@@ -1820,8 +1827,14 @@ async function deferRetainedProcessClaim(
   expected: ReturnType<typeof retainedProcessSettlementIdentity>,
   claimId: string,
   outcome: RetainedProcessDeferralOutcome,
+  outputAdvanced = false,
 ): Promise<void> {
-  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome);
+  const deferral = retainedProcessReconciliationDeferral(
+    settings,
+    process,
+    outcome,
+    outputAdvanced,
+  );
   try {
     // A healthy long-lived command can already be on a five-minute backoff
     // when rotation becomes due. Wake it at the lead boundary, then at the
@@ -1858,6 +1871,7 @@ export function retainedProcessReconciliationDeferral(
   settings: Pick<ActivityServices["settings"], "sandboxLeaseReaperPeriodMs">,
   process: Pick<SandboxRetainedProcess, "reconcileAttempts">,
   outcome: RetainedProcessDeferralOutcome,
+  outputAdvanced = false,
 ): {
   durableOutcome: string;
   metricOutcome: RetainedProcessReconciliationOutcome;
@@ -1882,11 +1896,14 @@ export function retainedProcessReconciliationDeferral(
       quarantined: true,
     };
   }
-  const exponent = Math.min(4, Math.max(0, process.reconcileAttempts - 1));
-  const retryAfterMs = Math.min(
-    5 * 60_000,
-    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
-  );
+  const baseRetryMs = Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000);
+  // Output still flowing means the backlog is being drained, not that the
+  // provider is unhealthy: come back at the reaper cadence, without backoff.
+  const exponent =
+    outcome === "provider_running" && outputAdvanced
+      ? 0
+      : Math.min(4, Math.max(0, process.reconcileAttempts - 1));
+  const retryAfterMs = Math.min(5 * 60_000, baseRetryMs * 2 ** exponent);
   return {
     durableOutcome: outcome,
     metricOutcome: outcome,
@@ -1912,6 +1929,63 @@ type RetainedProcessProbeSession = ProviderCommandSession & {
 };
 
 const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
+
+/** A command's exit is reported only after both output streams reach EOF, so a
+ * finished command with a large backlog looks running until it is read. Keep
+ * reading while each read makes progress, within a bounded budget, so it
+ * settles in this claim instead of one page per backoff step. The first page
+ * has already been captured by the caller. */
+export async function drainRetainedCommandBacklog(
+  session: RetainedProcessProbeSession,
+  providerSessionId: number,
+  first: unknown,
+  capturePage: (value: unknown) => Promise<void>,
+): Promise<RetainedProcessProbeResult> {
+  let observation = classifyRetainedProcessPollResult(first, providerSessionId, session);
+  const outputAdvanced = retainedOutputAdvanced(session, first);
+  if (!outputAdvanced || typeof session.writeStdin !== "function") return observation;
+  const drainUntil = Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_BUDGET_MS;
+  for (
+    let reads = 0;
+    observation.status === "deferred" &&
+    observation.reason === "provider_running" &&
+    reads < RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS &&
+    Date.now() < drainUntil;
+    reads++
+  ) {
+    let next: unknown;
+    try {
+      next = await withRetainedProcessProbeTimeout(
+        session.writeStdin({
+          sessionId: providerSessionId,
+          chars: "",
+          yieldTimeMs: 250,
+          maxOutputTokens: 2_000,
+        }),
+      );
+    } catch {
+      // The observation already made stays authoritative; the next sweep
+      // classifies any provider failure through the ordinary path.
+      break;
+    }
+    await capturePage(next);
+    observation = classifyRetainedProcessPollResult(next, providerSessionId, session);
+    if (!retainedOutputAdvanced(session, next)) break;
+  }
+  return observation.status === "deferred" && observation.reason === "provider_running"
+    ? { ...observation, outputAdvanced: true }
+    : observation;
+}
+
+/** True only for a byte-offset page whose read moved a stream cursor. */
+function retainedOutputAdvanced(session: RetainedProcessProbeSession, result: unknown): boolean {
+  const page = session.getProviderCommandOutput?.(result);
+  if (!page?.expected || page.command.kind !== "modal-router-v1") return false;
+  const { command, expected } = page;
+  return (["stdout", "stderr"] as const).some(
+    (stream) => command.streams[stream].byteOffset > expected.streams[stream].byteOffset,
+  );
+}
 
 async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2184,7 +2258,10 @@ export async function probeRetainedProcessAtProvider(
     return { status: "deferred", reason: "provider_error" };
   }
   await capturePage(result);
-  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId, session);
+  const observation =
+    mode === "observe"
+      ? await drainRetainedCommandBacklog(session, process.providerSessionId, result, capturePage)
+      : classifyRetainedProcessPollResult(result, process.providerSessionId, session);
   if (
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
