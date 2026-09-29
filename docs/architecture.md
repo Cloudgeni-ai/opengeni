@@ -1572,9 +1572,9 @@ Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 
 ---
 
-Skill approval atomically settles a verified managed/local human response and
-activates the exact folder under scope/head checks. Agents and delegated
-subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifecycle.md).
+Verified human Skill approvals activate folders under scope/head checks;
+agents/delegates cannot authorize them. Editor removal uses the human-authorized
+content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lifecycle.md).
 
 ## 10. Security and access model
 

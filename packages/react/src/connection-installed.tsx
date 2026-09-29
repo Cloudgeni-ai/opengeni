@@ -4,6 +4,7 @@ export type ConnectionInstalledItem = {
   id: string;
   name: string;
   status: string;
+  showStatus?: boolean;
   icon?: ReactNode;
   needsAttention?: boolean;
   disabled?: boolean;
@@ -38,6 +39,9 @@ export function ConnectionInstalled({
           >
             {item.icon}
             <span>{item.name}</span>
+            {item.showStatus ? (
+              <span className="og-connection-installed-status">{item.status}</span>
+            ) : null}
             {item.needsAttention ? <span aria-label="Needs attention">!</span> : null}
           </button>
         ))}

@@ -8,6 +8,17 @@
 
 ## Permanent removal
 
+The human Skills editor exposes **Remove skill** for saved personal/workspace
+Skills, including inactive Skills. Confirmation names the Skill and explains
+permanent deletion of all revisions. The SDK `removeWorkspaceSkill` calls
+`POST /v1/workspaces/:workspaceId/skills/content/:skillId/remove`, using the same
+human scope authorization as Save and the core removal lifecycle below. Retries
+retain the operation ID and exact version arguments; after deletion, the
+content-free receipt supplies scope for authorization before lifecycle replay.
+Organization Skills and shared distribution owners retain their existing removal
+restrictions. Opening details preserves the source Capabilities tab, and inactive
+and pending status remain visible in the installed list.
+
 The lazy agent tool `skill_remove` and core `removeSkill` permanently delete the
 saved Skill identity and **all registry revisions and files**, including pending
 revisions. This is distinct from source uninstall/deactivation and is not
