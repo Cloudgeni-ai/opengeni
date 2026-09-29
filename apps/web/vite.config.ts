@@ -146,7 +146,7 @@ export default defineConfig({
               // Its shared helpers remain available for normal consumer-aware
               // splitting without pulling the full rail implementation in.
               name: "session-rail",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:session-list|workspace-switcher|workspace-name-dialog)\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:session-list|switcher-block|workspace-switcher|workspace-name-dialog)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 3,
             },
