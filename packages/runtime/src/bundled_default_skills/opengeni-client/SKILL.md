@@ -97,16 +97,19 @@ const { workspace } = await og.ensureWorkspace({
 await og.addExternalWorkspaceMember(workspace.id, {
   identity: { externalId: user.id, source },
   permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control",
-    "files:upload", "files:read"],
+    "files:upload", "files:read", "mcp_servers:attach"], // attach: per-session mcpServers
   operationId,
 });
 
-// 2. The server creates sessions: explicit tools, stable idempotency key.
+// 2. The server creates sessions: the product's MCP server with a short-lived
+//    per-user token, explicit tools, and a stable idempotency key.
+const acme = (token: string) => ({ id: "acme", headers: { Authorization: `Bearer ${token}` } });
 const session = await og.asUser(user.id, { source }).createSession(workspace.id, {
   initialMessage: `Help me with ticket ${ticket.id}`,
   idempotencyKey: `ticket:${ticket.id}:${user.id}`,
   skills: productSkills, // product-owned, inline
-  tools: [{ kind: "mcp", id: "acme" }], // explicit minimal selection
+  mcpServers: [{ ...acme(await mintUserToken(user)), url: ACME_MCP_URL, allowedTools }],
+  tools: [{ kind: "mcp", id: "acme" }], // a per-session server must also be selected here
   firstPartyMcpTools: [],
   sandboxBackend: "none", // pure chat/tool agent: no sandbox to start or shell around tools
 });
@@ -120,6 +123,11 @@ export const handler = createSessionProxyHandler(og, {
       : new Response("Unauthorized", { status: 401 });
   },
   authorizeMutation: verifyCsrf, // the product's existing CSRF policy
+  // Every forwarded message: fresh per-user token and server-owned page context.
+  beforeForwardMessage: async (_message, { user }) => ({
+    mcpCredentialUpdates: [acme(await mintUserToken(user))],
+    modelContext: `Today ${new Date().toISOString().slice(0, 10)}, time zone ${tz}`,
+  }),
 });
 ```
 
@@ -180,8 +188,19 @@ Read selectively: [Product integration shapes](references/product-integration-sh
   `mcp_servers:attach` for the acting user. MCP and OpenAPI spec URLs must be
   public HTTPS the deployment can reach; tunnel local servers (for example
   `cloudflared`).
+- Install `@opengeni/sdk` and `@opengeni/react` from the same release. If the
+  repository enforces a release-age policy (for example pnpm
+  `minimumReleaseAge`), a just-published version may be refused: pin an older
+  matching pair or ask before adding an exclusion; never bypass it silently.
+- External member permissions cannot yet be edited in place (a re-grant with a
+  new `operationId` conflicts, and the organization key cannot update the
+  member). Grant the final set at onboarding; to change it, revoke
+  (`cancelExternalWorkspaceMemberGrant`, which cancels that user's running
+  turns) and re-add with a new `operationId`.
 - `sandboxBackend: "none"` suits pure chat/tool agents: turns start in seconds
   instead of minutes, and there is no shell to route around the product's tools.
+- For the smallest agent and prompt, see
+  [Agent recipes](references/agent-recipes.md#minimal-agent).
 - Stop in a chat UI is `pauseSession`: resumable, and messages sent while
   paused queue until `resumeSession`. `cancelSession` is terminal for the
   session and its children; never wire it to Stop.
