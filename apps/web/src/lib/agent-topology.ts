@@ -1,6 +1,17 @@
 import type { AgentTopologySession } from "@opengeni/sdk";
 
-export type AgentTopologyFilter = "all" | "active" | "attention" | "paused" | "failed";
+/**
+ * The Agents page's views. "All" is the default; the other three are the only
+ * numbers the page shows, because they are the only states someone acts on:
+ * - attention: an agent waits on a person (approval or answer).
+ * - running: an agent is working on its own right now, including one that is
+ *   queued to start, recovering after a worker restart or waiting for model
+ *   capacity. None of those need anyone.
+ * - failed: a top-level workstream failed in the last day. A spawned agent's
+ *   failure is reported to the agent that spawned it, which carries on, so it
+ *   is not counted; an older failure stays visible under All without nagging.
+ */
+export type AgentTopologyFilter = "all" | "attention" | "running" | "failed";
 
 export type AgentTopologyNode = {
   session: AgentTopologySession;
@@ -10,14 +21,27 @@ export type AgentTopologyNode = {
 };
 
 export type AgentTopologySummary = {
-  total: number;
-  active: number;
-  running: number;
-  queued: number;
+  /** Agents at any depth waiting on a person. */
   attention: number;
-  paused: number;
+  /** Agents at any depth working on their own. */
+  running: number;
+  /** Top-level workstreams that failed in the last day. */
   failed: number;
+  /** A tree was larger than the server counts, so the numbers are a floor. */
+  capped: boolean;
 };
+
+/** Statuses of an agent that is working without anyone: running, starting or about to continue. */
+export const LIVE_AGENT_STATUSES = [
+  "running",
+  "recovering",
+  "queued",
+  "waiting_capacity",
+] as const satisfies readonly AgentTopologySession["status"][];
+
+/** How far back a failed workstream still counts as recent. */
+export const RECENT_FAILURE_HOURS = 24;
+const RECENT_FAILURE_MS = RECENT_FAILURE_HOURS * 60 * 60 * 1000;
 
 export type AgentTopologyDiagramNode = {
   node: AgentTopologyNode;
@@ -31,6 +55,8 @@ export type AgentTopologyDiagramLayout = {
   nodes: AgentTopologyDiagramNode[];
   width: number;
   height: number;
+  /** Card width: columns stretch to fill the available width. */
+  nodeWidth: number;
 };
 
 export type AgentTopologyLimits = {
@@ -46,11 +72,15 @@ export type LimitedAgentTopology = {
   hiddenByParent: ReadonlyMap<string, number>;
 };
 
-export const AGENT_DIAGRAM_NODE_WIDTH = 224;
-export const AGENT_DIAGRAM_NODE_HEIGHT = 96;
-const AGENT_DIAGRAM_COLUMN_GAP = 48;
-const AGENT_DIAGRAM_ROW_GAP = 64;
-const AGENT_DIAGRAM_PADDING = 24;
+export const AGENT_DIAGRAM_NODE_WIDTH = 240;
+const AGENT_DIAGRAM_NODE_MIN_WIDTH = 200;
+const AGENT_DIAGRAM_NODE_MAX_WIDTH = 280;
+export const AGENT_DIAGRAM_NODE_HEIGHT = 88;
+const AGENT_DIAGRAM_COLUMN_GAP = 24;
+const AGENT_DIAGRAM_ROW_GAP = 40;
+const AGENT_DIAGRAM_PADDING = 0;
+/** Space between bands of workstreams, less than a level so bands never read as one tree. */
+const AGENT_DIAGRAM_BAND_GAP = 24;
 
 type RollingAgentTopologySession = Omit<AgentTopologySession, "goal" | "relatedWork"> &
   Partial<Pick<AgentTopologySession, "goal" | "relatedWork">>;
@@ -82,35 +112,60 @@ export function isPausedAgent(session: AgentTopologySession): boolean {
   return session.pause.state === "paused";
 }
 
-export function isActiveAgent(session: AgentTopologySession): boolean {
+/** Working on its own right now (running, queued, recovering, waiting for capacity). */
+export function isRunningAgent(session: AgentTopologySession): boolean {
   return (
     !isPausedAgent(session) &&
-    (session.status === "running" ||
-      session.status === "queued" ||
-      session.status === "requires_action")
+    (LIVE_AGENT_STATUSES as readonly AgentTopologySession["status"][]).includes(session.status)
   );
 }
 
-export function summarizeAgentTopology(sessions: AgentTopologySession[]): AgentTopologySummary {
+/** Waiting on a person: an approval or an answer. */
+export function agentNeedsYou(session: AgentTopologySession): boolean {
+  return !isPausedAgent(session) && session.status === "requires_action";
+}
+
+export function isActiveAgent(session: AgentTopologySession): boolean {
+  return isRunningAgent(session) || agentNeedsYou(session);
+}
+
+/** A top-level workstream that failed within the last day. */
+export function isRecentlyFailedWorkstream(
+  session: AgentTopologySession,
+  now: number = Date.now(),
+): boolean {
+  if (session.parentSessionId !== null || isPausedAgent(session)) return false;
+  if (session.status !== "failed") return false;
+  const updatedAt = Date.parse(session.updatedAt);
+  return Number.isFinite(updatedAt) && now - updatedAt <= RECENT_FAILURE_MS;
+}
+
+/**
+ * The page's three numbers, from top-level workstreams only: each one's own
+ * state plus the server's counts for everything below it, so a branch that is
+ * collapsed or not loaded yet still counts. Children and search results are
+ * already inside their workstream's counts and are skipped.
+ */
+export function summarizeAgentTopology(
+  sessions: AgentTopologySession[],
+  now: number = Date.now(),
+): AgentTopologySummary {
   const summary: AgentTopologySummary = {
-    total: sessions.length,
-    active: 0,
-    running: 0,
-    queued: 0,
     attention: 0,
-    paused: 0,
+    running: 0,
     failed: 0,
+    capped: false,
   };
+  const seen = new Set<string>();
   for (const session of sessions) {
-    if (isPausedAgent(session)) {
-      summary.paused += 1;
-      continue;
-    }
-    if (isActiveAgent(session)) summary.active += 1;
-    if (session.status === "running") summary.running += 1;
-    if (session.status === "queued") summary.queued += 1;
-    if (session.status === "requires_action") summary.attention += 1;
-    if (session.status === "failed") summary.failed += 1;
+    if (session.parentSessionId !== null || seen.has(session.id)) continue;
+    seen.add(session.id);
+    if (agentNeedsYou(session)) summary.attention += 1;
+    if (isRunningAgent(session)) summary.running += 1;
+    if (isRecentlyFailedWorkstream(session, now)) summary.failed += 1;
+    summary.attention += session.children.attentionDescendants;
+    summary.running += session.children.runningDescendants + session.children.queuedDescendants;
+    if (session.children.truncated) summary.capped = true;
   }
   return summary;
 }
@@ -127,6 +182,34 @@ export function mergeAgentTopologySessions(
     sessions.set(session.id, session);
   }
   return [...sessions.values()];
+}
+
+/**
+ * Roots that were loaded only because they were live or had just failed, and
+ * are now neither live nor on the first page nor paged in by hand. Their last
+ * known state would be stale, so they leave the collection.
+ */
+export function staleLiveRootIds(
+  previousLiveOnly: ReadonlySet<string>,
+  current: ReadonlySet<string>,
+  paged: ReadonlySet<string>,
+): Set<string> {
+  const stale = new Set<string>();
+  for (const id of previousLiveOnly) {
+    if (!current.has(id) && !paged.has(id)) stale.add(id);
+  }
+  return stale;
+}
+
+/** Drop whole workstreams: the roots and every loaded agent below them. */
+export function withoutAgentTopologyRoots(
+  sessions: AgentTopologySession[],
+  rootIds: ReadonlySet<string>,
+): AgentTopologySession[] {
+  if (rootIds.size === 0) return sessions;
+  return sessions.filter(
+    (session) => !rootIds.has(session.id) && !rootIds.has(session.rootSessionId),
+  );
 }
 
 export function canStartAgentTopologyRootRead(requestInFlight: boolean): boolean {
@@ -217,49 +300,35 @@ export function buildAgentTopology(sessions: AgentTopologySession[]): AgentTopol
 export function agentMatchesFilter(
   session: AgentTopologySession,
   filter: AgentTopologyFilter,
+  now: number = Date.now(),
 ): boolean {
   if (filter === "all") return true;
-  if (filter === "active") {
-    return (
-      isActiveAgent(session) ||
-      session.children.runningDescendants +
-        session.children.queuedDescendants +
-        session.children.attentionDescendants >
-        0
-    );
-  }
   if (filter === "attention") {
+    return agentNeedsYou(session) || session.children.attentionDescendants > 0;
+  }
+  if (filter === "running") {
     return (
-      (!isPausedAgent(session) && session.status === "requires_action") ||
-      session.children.attentionDescendants > 0
+      isRunningAgent(session) ||
+      session.children.runningDescendants + session.children.queuedDescendants > 0
     );
   }
-  if (filter === "paused") {
-    return isPausedAgent(session) || session.children.pausedDescendants > 0;
-  }
-  return (
-    (!isPausedAgent(session) && session.status === "failed") ||
-    session.children.failedDescendants > 0
-  );
+  return isRecentlyFailedWorkstream(session, now);
 }
 
-/** Whether expanding this node can reveal a descendant selected by the current filter. */
+/**
+ * Whether expanding this node can reveal a descendant the current view is
+ * about. Under All, only branches with live work open by themselves; quiet
+ * trees stay folded until someone opens them.
+ */
 export function agentHasMatchingDescendants(
   session: AgentTopologySession,
   filter: AgentTopologyFilter,
 ): boolean {
-  if (filter === "all") return session.children.directChildren > 0;
-  if (filter === "active") {
-    return (
-      session.children.runningDescendants +
-        session.children.queuedDescendants +
-        session.children.attentionDescendants >
-      0
-    );
-  }
-  if (filter === "attention") return session.children.attentionDescendants > 0;
-  if (filter === "paused") return session.children.pausedDescendants > 0;
-  return session.children.failedDescendants > 0;
+  const { runningDescendants, queuedDescendants, attentionDescendants } = session.children;
+  if (filter === "all") return runningDescendants + queuedDescendants + attentionDescendants > 0;
+  if (filter === "attention") return attentionDescendants > 0;
+  if (filter === "running") return runningDescendants + queuedDescendants > 0;
+  return false;
 }
 
 /** Keep ancestors of matching nodes so filtered results retain their branch context. */
@@ -267,6 +336,7 @@ export function filterAgentTopology(
   roots: AgentTopologyNode[],
   filter: AgentTopologyFilter,
   query: string,
+  now: number = Date.now(),
 ): AgentTopologyNode[] {
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visit = (node: AgentTopologyNode): AgentTopologyNode | null => {
@@ -278,7 +348,7 @@ export function filterAgentTopology(
       normalizedQuery.length === 0 ||
       title.toLocaleLowerCase().includes(normalizedQuery) ||
       node.session.id.toLocaleLowerCase().includes(normalizedQuery);
-    const matches = agentMatchesFilter(node.session, filter) && matchesQuery;
+    const matches = agentMatchesFilter(node.session, filter, now) && matchesQuery;
     return matches || children.length > 0 ? { ...node, children } : null;
   };
   return roots.map(visit).filter((node): node is AgentTopologyNode => !!node);
@@ -337,10 +407,15 @@ export function limitAgentTopology(
   };
 }
 
-/** Position a visible forest as a compact top-down decision tree. */
+/**
+ * Position a visible forest as compact top-down trees. Each workstream keeps
+ * its own subtree; workstreams sit side by side and wrap into a new band when
+ * the next one would not fit in `maxWidth` (one band when it is omitted).
+ */
 export function layoutAgentTopologyDiagram(
   roots: AgentTopologyNode[],
   collapsed: ReadonlySet<string>,
+  maxWidth: number = Number.POSITIVE_INFINITY,
 ): AgentTopologyDiagramLayout {
   const centerPriority = (children: AgentTopologyNode[]): AgentTopologyNode[] => {
     if (children.length < 3) return children;
@@ -358,59 +433,96 @@ export function layoutAgentTopologyDiagram(
     return slots;
   };
   const units = new Map<string, number>();
+  const depths = new Map<string, number>();
   const measure = (node: AgentTopologyNode): number => {
     const visibleChildren = collapsed.has(node.session.id) ? [] : node.children;
+    let deepest = 0;
     const width = Math.max(
       1,
-      visibleChildren.reduce((sum, child) => sum + measure(child), 0),
+      visibleChildren.reduce((sum, child) => {
+        const childUnits = measure(child);
+        deepest = Math.max(deepest, 1 + (depths.get(child.session.id) ?? 0));
+        return sum + childUnits;
+      }, 0),
     );
     units.set(node.session.id, width);
+    depths.set(node.session.id, deepest);
     return width;
   };
   roots.forEach(measure);
 
-  const pitch = AGENT_DIAGRAM_NODE_WIDTH + AGENT_DIAGRAM_COLUMN_GAP;
+  // A band holds whole workstreams; the last card in a band needs no gap after it.
+  const available = maxWidth - AGENT_DIAGRAM_PADDING * 2 + AGENT_DIAGRAM_COLUMN_GAP;
+  const columns = Number.isFinite(available)
+    ? Math.max(1, Math.floor(available / (AGENT_DIAGRAM_NODE_MIN_WIDTH + AGENT_DIAGRAM_COLUMN_GAP)))
+    : 0;
+  // One column (a phone) takes the whole width; wider layouts cap the card.
+  const nodeWidth =
+    columns === 0
+      ? AGENT_DIAGRAM_NODE_WIDTH
+      : columns === 1
+        ? Math.max(AGENT_DIAGRAM_NODE_MIN_WIDTH, Math.floor(available - AGENT_DIAGRAM_COLUMN_GAP))
+        : Math.min(
+            AGENT_DIAGRAM_NODE_MAX_WIDTH,
+            Math.floor(available / columns - AGENT_DIAGRAM_COLUMN_GAP),
+          );
+  const pitch = nodeWidth + AGENT_DIAGRAM_COLUMN_GAP;
+  // On one column (a phone) a parent sits over its first child, so the part of
+  // a wide tree that is on screen always starts with the parent and its most
+  // important child; wider layouts center parents over their children.
+  const alignStart = columns === 1;
+  const levelHeight = AGENT_DIAGRAM_NODE_HEIGHT + AGENT_DIAGRAM_ROW_GAP;
   const nodes: AgentTopologyDiagramNode[] = [];
-  let maxDepth = 0;
   const place = (
     node: AgentTopologyNode,
     parentId: string | null,
+    originX: number,
     offsetUnits: number,
+    originY: number,
     depth: number,
   ): void => {
     const widthUnits = units.get(node.session.id) ?? 1;
-    maxDepth = Math.max(maxDepth, depth);
     nodes.push({
       node,
       parentId,
       depth,
-      x:
-        AGENT_DIAGRAM_PADDING +
-        (offsetUnits + widthUnits / 2) * pitch -
-        AGENT_DIAGRAM_NODE_WIDTH / 2,
-      y: AGENT_DIAGRAM_PADDING + depth * (AGENT_DIAGRAM_NODE_HEIGHT + AGENT_DIAGRAM_ROW_GAP),
+      x: originX + (alignStart ? offsetUnits : offsetUnits + widthUnits / 2 - 0.5) * pitch,
+      y: originY + depth * levelHeight,
     });
     if (collapsed.has(node.session.id)) return;
     let childOffset = offsetUnits;
-    for (const child of centerPriority(node.children)) {
-      place(child, node.session.id, childOffset, depth + 1);
+    for (const child of alignStart ? node.children : centerPriority(node.children)) {
+      place(child, node.session.id, originX, childOffset, originY, depth + 1);
       childOffset += units.get(child.session.id) ?? 1;
     }
   };
 
-  let rootOffset = 0;
+  let bandX = 0;
+  let bandY = 0;
+  let bandHeight = 0;
+  let widest = 0;
   for (const root of roots) {
-    place(root, null, rootOffset, 0);
-    rootOffset += units.get(root.session.id) ?? 1;
+    const width = (units.get(root.session.id) ?? 1) * pitch;
+    const depth = depths.get(root.session.id) ?? 0;
+    const height = (depth + 1) * AGENT_DIAGRAM_NODE_HEIGHT + depth * AGENT_DIAGRAM_ROW_GAP;
+    if (bandX > 0 && bandX + width > available) {
+      bandY += bandHeight + AGENT_DIAGRAM_BAND_GAP;
+      bandX = 0;
+      bandHeight = 0;
+    }
+    place(root, null, AGENT_DIAGRAM_PADDING + bandX, 0, AGENT_DIAGRAM_PADDING + bandY, 0);
+    bandX += width;
+    widest = Math.max(widest, bandX);
+    bandHeight = Math.max(bandHeight, height);
   }
-  const totalUnits = Math.max(1, rootOffset);
   return {
     nodes,
-    width: Math.ceil(AGENT_DIAGRAM_PADDING * 2 + totalUnits * pitch),
-    height: Math.ceil(
-      AGENT_DIAGRAM_PADDING * 2 +
-        (maxDepth + 1) * AGENT_DIAGRAM_NODE_HEIGHT +
-        maxDepth * AGENT_DIAGRAM_ROW_GAP,
+    width: Math.ceil(
+      AGENT_DIAGRAM_PADDING * 2 + Math.max(widest, pitch) - AGENT_DIAGRAM_COLUMN_GAP,
     ),
+    height: Math.ceil(
+      AGENT_DIAGRAM_PADDING * 2 + bandY + Math.max(bandHeight, AGENT_DIAGRAM_NODE_HEIGHT),
+    ),
+    nodeWidth,
   };
 }
