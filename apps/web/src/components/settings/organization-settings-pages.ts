@@ -61,7 +61,8 @@ export function organizationSettingsDescription(
     case "models":
       return "Subscriptions and API keys the organization pays for, and which workspaces can use them.";
     case "integrations":
-      return "Which integrations workspaces can connect.";
+      // "Allowed integrations" and its one row say it all.
+      return undefined;
     case "identity":
       return "Who the organization is and what it does, for every agent.";
     case "billing":
