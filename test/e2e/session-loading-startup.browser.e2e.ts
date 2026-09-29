@@ -22,6 +22,7 @@ let web: StartedProcess | undefined;
 let browser: Browser;
 let questionAsset: string;
 let composerMenuAsset: string;
+let workspaceFilesAsset: string;
 
 async function cleanup() {
   await Promise.allSettled([browser?.close(), web?.stop()]);
@@ -51,6 +52,8 @@ beforeAll(async () => {
     questionAsset = questionEntry[1].file;
     composerMenuAsset = manifest["src/components/composer-mobile-plus-panel.tsx"]!.file;
     assert.ok(composerMenuAsset, "Composer menu must retain its optional production chunk");
+    workspaceFilesAsset = manifest["../../packages/react/src/components/sandbox-files.tsx"]!.file;
+    assert.ok(workspaceFilesAsset, "Files must retain its optional production chunk");
     const port = await freePort();
     base = `http://127.0.0.1:${port}`;
     web = await startProcess(
@@ -1347,4 +1350,100 @@ for (const width of [1280, 390]) {
       await context.close();
     }
   }, 30_000);
+
+  test(`production Files failure after deployment recovery preserves chat at ${width}px`, async () => {
+    const context = await browser.newContext({
+      viewport: { width, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    const state = fixtures();
+    for (const name of ["config", "access", "detail", "history"] as const)
+      state.gates[name].release();
+    await installApi(page, state);
+    const first = gate();
+    const second = gate();
+    let requests = 0;
+    await page.route(`**/${workspaceFilesAsset}`, async (route) => {
+      await (++requests === 1 ? first : second).wait();
+      await route.abort("failed");
+    });
+    const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+    const openFiles = async () => {
+      const open = page.getByRole("button", { name: "Open workspace", exact: true });
+      if (await open.isVisible()) await open.click();
+      await page.getByRole("tab", { name: "Files", exact: true }).click();
+    };
+    const showChat = async () => {
+      // A phone restores the dock as an overlay; close it before editing chat.
+      // Its inert/aria-hidden primary pane is deliberately absent from role queries.
+      if (width < 1024)
+        await page
+          .locator("[data-dock-chrome]")
+          .getByRole("button", { name: "Hide workspace", exact: true })
+          .click();
+      await input.waitFor();
+    };
+    try {
+      await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      await input.waitFor();
+      await openFiles();
+      await first.entered;
+      // A stale deployment still gets the app's existing one guarded reload.
+      const reloaded = page.waitForEvent("load");
+      first.release();
+      await reloaded;
+      await showChat();
+      await input.fill("Draft survives optional Files failure");
+      const originalInput = await input.elementHandle();
+      await openFiles();
+      await second.entered;
+      await page.getByText("Opening Files", { exact: true }).waitFor();
+      second.release();
+      await page.getByRole("alert").filter({ hasText: "Files could not be loaded." }).waitFor();
+      assert.equal(await originalInput!.evaluate((node) => node.isConnected), true);
+      assert.equal(await page.getByRole("button", { name: "Reload", exact: true }).count(), 1);
+      for (const theme of ["dark", "light"] as const) {
+        await page.evaluate(
+          (value) => document.documentElement.setAttribute("data-og-theme", value),
+          theme,
+        );
+        await page.screenshot({ path: `${output}/${width}-files-load-error-${theme}.png` });
+      }
+      await page
+        .locator("[data-dock-chrome]")
+        .getByRole("button", { name: "Hide workspace", exact: true })
+        .click();
+      assert.equal(await input.inputValue(), "Draft survives optional Files failure");
+      await input.fill("Still editable after Files failed");
+      assert.equal(await input.inputValue(), "Still editable after Files failed");
+      await openFiles();
+      await page.getByRole("alert").filter({ hasText: "Files could not be loaded." }).waitFor();
+      assert.equal(requests, 2, "reopening keeps the failure local without a request loop");
+      await page.unroute(`**/${workspaceFilesAsset}`);
+      await Promise.all([
+        page.waitForEvent("load"),
+        page.getByRole("button", { name: "Reload", exact: true }).click(),
+      ]);
+      await showChat();
+      await openFiles();
+      await page
+        .getByRole("tabpanel", { name: "Files", exact: true })
+        .getByText("Files unavailable", { exact: true })
+        .waitFor();
+      assert.equal(
+        await page.getByRole("alert").filter({ hasText: "Files could not be loaded." }).count(),
+        0,
+      );
+    } catch (error) {
+      await page.screenshot({ path: `${output}/${width}-files-load-error-failure.png` });
+      throw new Error(`${width}px Files failure: ${await page.locator("body").innerText()}`, {
+        cause: error,
+      });
+    } finally {
+      first.release();
+      second.release();
+      await context.close();
+    }
+  }, 45_000);
 }
