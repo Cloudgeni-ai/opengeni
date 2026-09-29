@@ -83,10 +83,20 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
-Use `SessionConversation` for an existing session, or compose `MessageTimeline`
-and `ChatComposer` with the session hooks. These use the normal SDK through
-your authenticated host routes. For custom or compatible frontends, the backend
-`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
+`SessionConversation` is the default product integration for an existing
+session. Back it with `createSessionProxyHandler` from `@opengeni/sdk`, mounted
+on your server, and point an unmodified browser
+`new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it:
+
+```tsx
+import "@opengeni/react/compiled.css";
+
+<SessionConversation client={client} workspaceId={workspaceId} sessionId={sessionId} />;
+```
+
+Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
+the product needs a materially different interaction model. These components do
+not consume the text-only `@opengeni/sdk/chat` fallback protocol.
 
 ### Exact conversation search navigation
 
