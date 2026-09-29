@@ -9,7 +9,13 @@ import { latestQuestionClient } from "./fixtures/latest-question-client";
 
 registerDom();
 
-for (const mode of ["pending", "started", "withdrawn"] as const) {
+for (const mode of [
+  "pending",
+  "started",
+  "withdrawn",
+  "legacy-running",
+  "legacy-settled",
+] as const) {
   test(`Latest question reaches the real ${mode} destination through SessionConversation`, async () => {
     const { client, turn, reads } = latestQuestionClient(mode);
     const view = await renderComponent(
@@ -44,7 +50,7 @@ for (const mode of ["pending", "started", "withdrawn"] as const) {
         expect(
           prompts.some((text) =>
             text?.includes(
-              mode === "started" ? "Newest queued question" : "Previous valid question",
+              mode === "withdrawn" ? "Previous valid question" : "Newest queued question",
             ),
           ),
         ).toBe(true);
@@ -56,6 +62,60 @@ for (const mode of ["pending", "started", "withdrawn"] as const) {
     }
   });
 }
+
+test("deferred queued refresh cannot reopen or focus the queue after Jump to start", async () => {
+  const fixture = latestQuestionClient("pending");
+  let release!: (snapshot: SessionQueueSnapshot) => void;
+  const deferred = new Promise<SessionQueueSnapshot>((resolve) => {
+    release = resolve;
+  });
+  let deferRefresh = false;
+  let reads = 0;
+  fixture.client.getQueue = async () => {
+    if (deferRefresh && ++reads === 2) return deferred;
+    return fixture.snapshot;
+  };
+  const view = await renderComponent(
+    <SessionConversation
+      client={fixture.client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+    />,
+  );
+  try {
+    await flush(100);
+    const queueButton = view.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    )!;
+    if (queueButton.getAttribute("aria-expanded") === "true")
+      await actRun(() => queueButton.click());
+    const scroller = view.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+    await actRun(() =>
+      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })),
+    );
+    await flush(20);
+    const start = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-start]");
+    expect(start).not.toBeNull();
+    deferRefresh = true;
+    await actRun(() =>
+      view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]")!.click(),
+    );
+    await flush(30);
+    expect(reads).toBe(2);
+    await actRun(() => start!.click());
+    await flush(40);
+    release(fixture.snapshot);
+    await flush(80);
+    expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).not.toBe(fixture.turn.id);
+    expect(view.container.querySelector('[data-og-session-chrome-open="true"]')).toBeNull();
+    expect(view.container.querySelector("[data-og-prompt]")?.textContent).toContain(
+      "Previous valid question",
+    );
+  } finally {
+    release(fixture.snapshot);
+    await view.unmount();
+  }
+});
 
 test("queued delivery failures remain visible and retryable; acknowledged queue items are not duplicated", () => {
   const turn = fakeTurn();
