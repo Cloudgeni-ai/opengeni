@@ -1677,7 +1677,7 @@ function BrowserProfileMenu(props: {
                 <button
                   type="submit"
                   disabled={!name.trim() || props.saving}
-                  className="inline-flex h-8 items-center gap-1 rounded-og-sm bg-og-accent px-2.5 text-og-control font-medium text-white transition hover:opacity-90 disabled:opacity-40"
+                  className="inline-flex h-8 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-40"
                 >
                   {props.saving ? (
                     <LoaderCircleIcon className="size-3.5 animate-spin" />

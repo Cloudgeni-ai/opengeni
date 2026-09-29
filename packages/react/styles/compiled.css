@@ -201,102 +201,167 @@
 @property --og-color-bg {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.155 0.012 260);
+  initial-value: #303030;
+}
+@property --og-color-canvas {
+  syntax: "*";
+  inherits: true;
+  initial-value: #202020;
 }
 @property --og-color-surface-1 {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.19 0.014 260);
+  initial-value: #333333;
 }
 @property --og-color-surface-2 {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.225 0.015 260);
+  initial-value: #383838;
 }
 @property --og-color-surface-3 {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.265 0.016 260);
+  initial-value: #404040;
+}
+@property --og-color-selection {
+  syntax: "*";
+  inherits: true;
+  initial-value: #424242;
 }
 @property --og-color-border {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.3 0.014 260);
+  initial-value: #454545;
 }
 @property --og-color-border-strong {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.42 0.016 260);
+  initial-value: #555555;
 }
 @property --og-color-fg {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.955 0.005 260);
+  initial-value: #e6e6e6;
 }
 @property --og-color-fg-muted {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.73 0.012 260);
+  initial-value: #b0b0b0;
 }
 @property --og-color-fg-subtle {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.62 0.013 260);
+  initial-value: #a3a3a3;
 }
 @property --og-color-accent {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.72 0.15 255);
+  initial-value: #c4c4c4;
 }
 @property --og-color-accent-strong {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.78 0.14 255);
+  initial-value: #dcdcdc;
 }
 @property --og-color-accent-deep {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.54 0.18 255);
+  initial-value: #d5d5d5;
 }
 @property --og-color-accent-fg {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.985 0.005 260);
+  initial-value: #242424;
+}
+@property --og-color-primary {
+  syntax: "*";
+  inherits: true;
+  initial-value: #2b3432;
+}
+@property --og-color-primary-fg {
+  syntax: "*";
+  inherits: true;
+  initial-value: #eeeeee;
+}
+@property --og-color-primary-border {
+  syntax: "*";
+  inherits: true;
+  initial-value: #4e5e59;
+}
+@property --og-color-switch-track {
+  syntax: "*";
+  inherits: true;
+  initial-value: #454545;
+}
+@property --og-color-switch-thumb {
+  syntax: "*";
+  inherits: true;
+  initial-value: #a3a3a3;
+}
+@property --og-glow-teal {
+  syntax: "*";
+  inherits: true;
+  initial-value: #79d9c125;
+}
+@property --og-glow-peach {
+  syntax: "*";
+  inherits: true;
+  initial-value: #ffb78724;
+}
+@property --og-glow-teal-quiet {
+  syntax: "*";
+  inherits: true;
+  initial-value: #79d9c115;
+}
+@property --og-glow-peach-quiet {
+  syntax: "*";
+  inherits: true;
+  initial-value: #ffb78714;
 }
 @property --og-color-status-queued {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.62 0.03 260);
+  initial-value: #a3a3a3;
 }
 @property --og-color-status-running {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.78 0.11 80);
+  initial-value: #d5bd72;
 }
 @property --og-color-status-idle {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.78 0.12 155);
+  initial-value: #83cbb0;
 }
 @property --og-color-status-waiting {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.74 0.12 305);
+  initial-value: #e9ab77;
 }
 @property --og-color-status-failed {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.7 0.16 22);
+  initial-value: oklch(0.77 0.12 22);
 }
 @property --og-color-status-cancelled {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.6 0.035 260);
+  initial-value: #a3a3a3;
 }
 @property --og-color-danger {
   syntax: "*";
   inherits: true;
-  initial-value: oklch(0.66 0.18 22);
+  initial-value: oklch(0.76 0.13 22);
+}
+@property --og-color-danger-fill {
+  syntax: "*";
+  inherits: true;
+  initial-value: oklch(0.52 0.16 22);
+}
+@property --og-color-danger-fg {
+  syntax: "*";
+  inherits: true;
+  initial-value: #ffffff;
 }
 @property --og-shadow-sm {
   syntax: "*";
@@ -502,9 +567,10 @@
 @supports (color: color-mix(in lab, red, red)) {
   :where(.og-root) {
     --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
+    --_og-color-primary-hover: var(--og-color-primary-hover, color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg)));
     --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
     --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
-    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent));
+    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 10%, transparent));
     --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
     --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
     --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
@@ -539,32 +605,46 @@
   --og-realtime-menu-width: 15rem;
 }
 :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
-  --og-color-bg: oklch(0.978 0.003 260);
-  --og-color-surface-1: oklch(1 0 0);
-  --og-color-surface-2: oklch(0.962 0.004 260);
-  --og-color-surface-3: oklch(0.935 0.006 260);
-  --og-color-border: oklch(0.9 0.006 260);
-  --og-color-border-strong: oklch(0.8 0.01 260);
-  --og-color-fg: oklch(0.21 0.015 260);
-  --og-color-fg-muted: oklch(0.46 0.014 260);
-  --og-color-fg-subtle: oklch(0.5 0.012 260);
-  --og-color-accent: oklch(0.55 0.18 255);
-  --og-color-accent-strong: oklch(0.48 0.19 255);
-  --og-color-accent-deep: oklch(0.44 0.19 255);
-  --og-color-accent-fg: oklch(0.985 0.005 260);
+  --og-color-bg: #f6f6f6;
+  --og-color-canvas: #ffffff;
+  --og-color-surface-1: #ffffff;
+  --og-color-surface-2: #eeeeee;
+  --og-color-surface-3: #e5e5e5;
+  --og-color-selection: #e9e9e9;
+  --og-color-border: #dedede;
+  --og-color-border-strong: #bdbdbd;
+  --og-color-fg: #242424;
+  --og-color-fg-muted: #5f5f5f;
+  --og-color-fg-subtle: #696969;
+  --og-color-accent: #545454;
+  --og-color-accent-strong: #383838;
+  --og-color-accent-deep: #383838;
+  --og-color-accent-fg: #ffffff;
   --og-color-accent-soft: var(--og-color-accent);
-  --og-color-status-queued: oklch(0.55 0.03 260);
-  --og-color-status-running: oklch(0.48 0.13 80);
-  --og-color-status-idle: oklch(0.49 0.13 155);
-  --og-color-status-waiting: oklch(0.54 0.15 305);
+  --og-color-primary: #ebf2f0;
+  --og-color-primary-fg: #292929;
+  --og-color-primary-border: #c4d5d0;
+  --og-color-primary-hover: var(--og-color-primary);
+  --og-color-switch-track: #bdbdbd;
+  --og-color-switch-thumb: #ffffff;
+  --og-glow-teal: #9fe3d359;
+  --og-glow-peach: #ffb78752;
+  --og-glow-teal-quiet: #9fe3d32b;
+  --og-glow-peach-quiet: #ffb78729;
+  --og-color-status-queued: #696969;
+  --og-color-status-running: #766623;
+  --og-color-status-idle: #237058;
+  --og-color-status-waiting: #915826;
   --og-color-status-failed: oklch(0.5 0.19 22);
-  --og-color-status-cancelled: oklch(0.55 0.025 260);
-  --og-color-danger: oklch(0.54 0.2 22);
+  --og-color-status-cancelled: #696969;
+  --og-color-danger: oklch(0.52 0.2 22);
+  --og-color-danger-fill: oklch(0.5 0.19 22);
+  --og-color-danger-fg: #ffffff;
   --og-color-diff-add-bg: var(--og-color-status-idle);
   --og-color-diff-del-bg: var(--og-color-status-failed);
-  --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
-  --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
-  --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
+  --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.07);
+  --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.09), 0 1px 2px oklch(0 0 0 / 0.06);
+  --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.13), 0 2px 8px oklch(0 0 0 / 0.07);
   --og-shadow-glow: 0 0 20px var(--og-color-accent);
   --og-session-chrome-surface: var(--og-color-surface-2);
   --og-session-chrome-surface-open: var(--og-color-surface-2);
@@ -572,8 +652,8 @@
   --og-session-chrome-border-open: var(--og-color-border);
   --og-session-chrome-highlight: var(--og-color-surface-3);
   --og-session-chrome-highlight-ring: var(--og-color-fg);
-  --og-session-chrome-shadow: 0 4px 16px -10px oklch(0.2 0.02 260 / 0.14);
-  --og-session-chrome-shadow-open: 0 8px 22px -12px oklch(0.2 0.02 260 / 0.18);
+  --og-session-chrome-shadow: 0 4px 16px -10px oklch(0 0 0 / 0.14);
+  --og-session-chrome-shadow-open: 0 8px 22px -12px oklch(0 0 0 / 0.18);
   --og-session-chrome-row-hover: var(--og-color-surface-3);
   color-scheme: light;
   --_og-color-scheme: light;
@@ -581,9 +661,10 @@
 @supports (color: color-mix(in lab, red, red)) {
   :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
     --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+    --og-color-primary-hover: color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg));
     --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
     --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
-    --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
+    --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 12%, transparent);
     --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
     --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
     --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 12%, transparent);
@@ -599,6 +680,7 @@
   --_og-duration-stream: var(--og-duration-stream, calc(420ms * var(--og-motion-inspect-scale)));
   --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize, calc(480ms * var(--og-motion-inspect-scale)));
   --_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));
+  --_og-color-primary-hover: var(--og-color-primary-hover, var(--og-color-primary));
   --_og-color-diff-add-bg: var(--og-color-diff-add-bg, var(--og-color-status-idle));
   --_og-color-diff-del-bg: var(--og-color-diff-del-bg, var(--og-color-status-failed));
   --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px var(--og-color-accent));
@@ -700,11 +782,11 @@
 :where(.og-root).og-session-capability-actions button,:where(.og-root) .og-session-capability-actions button {
   margin-left: auto;
   min-height: 35px;
-  border: 0;
   padding: 8px 13px;
   border-radius: 7px;
-  color: var(--og-color-accent-fg,#fff);
-  background: var(--og-color-accent-deep,#006cdb);
+  border: 1px solid var(--og-color-primary-border);
+  color: var(--og-color-primary-fg);
+  background: var(--og-color-primary);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -809,19 +891,19 @@
   cursor: not-allowed;
 }
 :where(.og-root).og-session-capability-setup [role=alert],:where(.og-root) .og-session-capability-setup [role=alert] {
-  color: var(--og-color-danger,#b42318);
+  color: var(--og-color-danger);
 }
 :where(.og-root).og-session-capability-setup .og-session-capability-notice,:where(.og-root) .og-session-capability-setup .og-session-capability-notice {
   color: var(--og-color-fg-muted);
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"],:where(.og-root) .og-session-capability-shell[data-state="complete"] {
-  border-color: var(--og-color-status-success,#16804a);
+  border-color: var(--og-color-status-idle);
   @supports (color: color-mix(in lab, red, red)) {
-    border-color: color-mix(in srgb,var(--og-color-status-success,#16804a) 35%,var(--og-color-border));
+    border-color: color-mix(in srgb,var(--og-color-status-idle) 35%,var(--og-color-border));
   }
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-header > svg,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root)  .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
-  color: var(--og-color-status-success,#16804a);
+  color: var(--og-color-status-idle);
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
   font-weight: 500;
@@ -840,7 +922,7 @@
 }
 :where(.og-root).og-session-capability-setup input,:where(.og-root) .og-session-capability-setup input {
   margin-top: 4px;
-  accent-color: var(--og-color-accent-deep,#006cdb);
+  accent-color: var(--og-color-accent-deep);
 }
 :where(.og-root).og-session-capability-setup .og-session-capability-scope,:where(.og-root) .og-session-capability-setup .og-session-capability-scope {
   color: var(--og-color-fg-muted);
@@ -850,9 +932,9 @@
   justify-self: end;
   min-height: 40px;
   padding: 10px 16px;
-  border: 0;
-  background: var(--og-color-accent-deep,#006cdb);
-  color: var(--og-color-accent-fg,#fff);
+  border: 1px solid var(--og-color-primary-border);
+  background: var(--og-color-primary);
+  color: var(--og-color-primary-fg);
   font-weight: 500;
 }
 :where(.og-root).og-session-capability-setup .og-session-capability-primary:hover:not(:disabled),:where(.og-root) .og-session-capability-setup .og-session-capability-primary:hover:not(:disabled) {
@@ -871,19 +953,19 @@
   }
 }
 :where(.og-root).og-preview-loading,:where(.og-root) .og-preview-loading {
-  --_og-preview-ink: #bca3ef;
-  --_og-preview-glow: #8f6ccc;
+  --_og-preview-ink: #9fdccd;
+  --_og-preview-glow: #5fb8a3;
   position: relative;
   width: 100%;
   overflow: hidden;
   border-radius: 10px;
-  background: #17161d;
+  background: #1b1b1b;
   container: og-preview / inline-size;
 }
 :where(.og-root):is([data-og-theme="light"], .og-light) .og-preview-loading, :is([data-og-theme="light"], .og-light) :where(.og-root) .og-preview-loading,:where(.og-root) :is([data-og-theme="light"], .og-light) .og-preview-loading {
-  --_og-preview-ink: #76629c;
-  --_og-preview-glow: #ba8ee0;
-  background: #faf9fd;
+  --_og-preview-ink: #5f8f84;
+  --_og-preview-glow: #9fe3d3;
+  background: #f9f9f9;
 }
 :where(.og-root).og-preview-loading canvas,:where(.og-root) .og-preview-loading canvas {
   display: block;
@@ -1163,6 +1245,47 @@
   pointer-events: none !important;
   z-index: -1 !important;
 }
+:where(.og-root).og-cm-editor .cm-editor,:where(.og-root) .og-cm-editor .cm-editor {
+  background-color: var(--og-cm-bg, var(--og-color-bg));
+  color: var(--og-color-fg);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-gutters,:where(.og-root) .og-cm-editor .cm-editor .cm-gutters {
+  background-color: var(--og-cm-bg, var(--og-color-bg));
+  border-right-color: var(--og-color-border);
+  color: var(--og-color-fg-subtle);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-activeLine,:where(.og-root) .og-cm-editor .cm-editor .cm-activeLine {
+  background-color: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-fg) 4%, transparent);
+  }
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-activeLineGutter,:where(.og-root) .og-cm-editor .cm-editor .cm-activeLineGutter {
+  background-color: var(--og-color-fg);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-fg) 6%, transparent);
+  }
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-cursor,:where(.og-root) .og-cm-editor .cm-editor .cm-cursor,:where(.og-root) .og-cm-editor .cm-editor .cm-dropCursor,:where(.og-root)  .og-cm-editor .cm-editor .cm-dropCursor {
+  border-left-color: var(--og-color-fg);
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,:where(.og-root) .og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,:where(.og-root) .og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground,:where(.og-root)  .og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background-color: var(--og-color-accent);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-accent) 30%, transparent);
+  }
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-selectionMatch,:where(.og-root) .og-cm-editor .cm-editor .cm-selectionMatch {
+  background-color: var(--og-color-accent);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in srgb, var(--og-color-accent) 18%, transparent);
+  }
+}
+:where(.og-root).og-cm-editor .cm-editor .cm-panels,:where(.og-root) .og-cm-editor .cm-editor .cm-panels {
+  background-color: var(--og-color-surface-2);
+  color: var(--og-color-fg);
+}
 :where(.og-root).og-genie-loading,:where(.og-root) .og-genie-loading {
   display: flex;
   align-items: center;
@@ -1204,7 +1327,10 @@
   color: var(--og-color-fg);
 }
 :where(.og-root).og-genie-details:focus-visible,:where(.og-root) .og-genie-details:focus-visible {
-  outline: 2px solid #a995e9;
+  outline: 2px solid var(--og-color-accent);
+  @supports (color: color-mix(in lab, red, red)) {
+    outline: 2px solid color-mix(in srgb, var(--og-color-accent) 55%, transparent);
+  }
   outline-offset: 4px;
 }
 @keyframes og-genie-phrase-in {
@@ -1308,7 +1434,7 @@
   white-space: nowrap;
 }
 :where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
-  background-image: linear-gradient(90deg, light-dark(#898c94,#686b76) 42%, light-dark(#f0f1f4,#fff) 50%, light-dark(#898c94,#686b76) 58%);
+  background-image: linear-gradient(90deg, light-dark(#8a8a8a,#6b6b6b) 42%, light-dark(#f2f2f2,#fff) 50%, light-dark(#8a8a8a,#6b6b6b) 58%);
   background-size: 300% 100%;
   background-position: 100% 0;
   background-clip: text;
@@ -2721,6 +2847,9 @@
       border-color: color-mix(in oklab, var(--og-color-border) 90%, transparent);
     }
   }
+:where(.og-root).border-og-primary-border,:where(.og-root) .border-og-primary-border {
+    border-color: var(--og-color-primary-border);
+  }
 :where(.og-root).border-og-status-failed\/25,:where(.og-root) .border-og-status-failed\/25 {
     border-color: var(--og-color-status-failed);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2886,17 +3015,11 @@
 :where(.og-root).bg-border,:where(.og-root) .bg-border {
     background-color: var(--og-color-border);
   }
-:where(.og-root).bg-brand,:where(.og-root) .bg-brand {
-    background-color: var(--og-color-accent);
-  }
 :where(.og-root).bg-current,:where(.og-root) .bg-current {
     background-color: currentcolor;
   }
 :where(.og-root).bg-og-accent,:where(.og-root) .bg-og-accent {
     background-color: var(--og-color-accent);
-  }
-:where(.og-root).bg-og-accent-deep,:where(.og-root) .bg-og-accent-deep {
-    background-color: var(--og-color-accent-deep);
   }
 :where(.og-root).bg-og-accent-soft,:where(.og-root) .bg-og-accent-soft {
     background-color: var(--_og-color-accent-soft);
@@ -2961,6 +3084,9 @@
 :where(.og-root).bg-og-border,:where(.og-root) .bg-og-border {
     background-color: var(--og-color-border);
   }
+:where(.og-root).bg-og-danger-fill,:where(.og-root) .bg-og-danger-fill {
+    background-color: var(--og-color-danger-fill);
+  }
 :where(.og-root).bg-og-danger\/8,:where(.og-root) .bg-og-danger\/8 {
     background-color: var(--og-color-danger);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2987,6 +3113,9 @@
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--og-color-fg) 5%, transparent);
     }
+  }
+:where(.og-root).bg-og-primary,:where(.og-root) .bg-og-primary {
+    background-color: var(--og-color-primary);
   }
 :where(.og-root).bg-og-status-cancelled,:where(.og-root) .bg-og-status-cancelled {
     background-color: var(--og-color-status-cancelled);
@@ -3719,6 +3848,9 @@
 :where(.og-root).text-og-danger,:where(.og-root) .text-og-danger {
     color: var(--og-color-danger);
   }
+:where(.og-root).text-og-danger-fg,:where(.og-root) .text-og-danger-fg {
+    color: var(--og-color-danger-fg);
+  }
 :where(.og-root).text-og-fg,:where(.og-root) .text-og-fg {
     color: var(--og-color-fg);
   }
@@ -3739,6 +3871,9 @@
     @supports (color: color-mix(in lab, red, red)) {
       color: color-mix(in oklab, var(--og-color-fg-subtle) 80%, transparent);
     }
+  }
+:where(.og-root).text-og-primary-fg,:where(.og-root) .text-og-primary-fg {
+    color: var(--og-color-primary-fg);
   }
 :where(.og-root).text-og-status-failed,:where(.og-root) .text-og-status-failed {
     color: var(--og-color-status-failed);
@@ -4653,16 +4788,6 @@
       }
     }
   }
-:where(.og-root).hover\:bg-brand\/90,:where(.og-root) .hover\:bg-brand\/90 {
-    &:hover {
-      @media (hover: hover) {
-        background-color: var(--og-color-accent);
-        @supports (color: color-mix(in lab, red, red)) {
-          background-color: color-mix(in oklab, var(--og-color-accent) 90%, transparent);
-        }
-      }
-    }
-  }
 :where(.og-root).hover\:bg-current\/10,:where(.og-root) .hover\:bg-current\/10 {
     &:hover {
       @media (hover: hover) {
@@ -4687,13 +4812,6 @@
       }
     }
   }
-:where(.og-root).hover\:bg-og-accent-strong,:where(.og-root) .hover\:bg-og-accent-strong {
-    &:hover {
-      @media (hover: hover) {
-        background-color: var(--og-color-accent-strong);
-      }
-    }
-  }
 :where(.og-root).hover\:bg-og-accent\/10,:where(.og-root) .hover\:bg-og-accent\/10 {
     &:hover {
       @media (hover: hover) {
@@ -4708,6 +4826,13 @@
     &:hover {
       @media (hover: hover) {
         background-color: var(--og-color-fg-muted);
+      }
+    }
+  }
+:where(.og-root).hover\:bg-og-primary-hover,:where(.og-root) .hover\:bg-og-primary-hover {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--_og-color-primary-hover);
       }
     }
   }
@@ -4952,14 +5077,6 @@
       }
     }
   }
-:where(.og-root).hover\:brightness-105,:where(.og-root) .hover\:brightness-105 {
-    &:hover {
-      @media (hover: hover) {
-        --tw-brightness: brightness(105%);
-        filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
-      }
-    }
-  }
 :where(.og-root).hover\:brightness-110,:where(.og-root) .hover\:brightness-110 {
     &:hover {
       @media (hover: hover) {
@@ -5191,16 +5308,6 @@
       cursor: wait;
     }
   }
-:where(.og-root).disabled\:bg-og-surface-3,:where(.og-root) .disabled\:bg-og-surface-3 {
-    &:disabled {
-      background-color: var(--og-color-surface-3);
-    }
-  }
-:where(.og-root).disabled\:text-og-fg-subtle,:where(.og-root) .disabled\:text-og-fg-subtle {
-    &:disabled {
-      color: var(--og-color-fg-subtle);
-    }
-  }
 :where(.og-root).disabled\:opacity-30,:where(.og-root) .disabled\:opacity-30 {
     &:disabled {
       opacity: 30%;
@@ -5234,12 +5341,6 @@
 :where(.og-root).disabled\:opacity-70,:where(.og-root) .disabled\:opacity-70 {
     &:disabled {
       opacity: 70%;
-    }
-  }
-:where(.og-root).disabled\:shadow-none,:where(.og-root) .disabled\:shadow-none {
-    &:disabled {
-      --tw-shadow: 0 0 #0000;
-      box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     }
   }
 :where(.og-root).disabled\:hover\:bg-transparent,:where(.og-root) .disabled\:hover\:bg-transparent {

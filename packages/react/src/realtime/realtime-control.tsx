@@ -1526,7 +1526,7 @@ function RealtimeStatusDot(props: { phase: RealtimeVisualPhase; reduceMotion: bo
 
 function voiceButtonTone(phase: RealtimeVisualPhase): string {
   if (phase === "listening" || phase === "speaking") {
-    return "border border-og-accent/45 bg-og-accent text-og-accent-fg shadow-og-sm hover:bg-og-accent-strong";
+    return "border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover";
   }
   if (phase === "blocked" || phase === "error") {
     return "border border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting hover:bg-og-status-waiting/15";
@@ -1540,7 +1540,7 @@ function voiceButtonTone(phase: RealtimeVisualPhase): string {
 
 function voiceChevronTone(phase: RealtimeVisualPhase): string {
   if (phase === "listening" || phase === "speaking") {
-    return "border border-l-0 border-og-accent/45 bg-og-accent text-og-accent-fg hover:bg-og-accent-strong";
+    return "border border-l-0 border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover";
   }
   if (phase === "blocked" || phase === "error") {
     return "border border-l-0 border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting hover:bg-og-status-waiting/15";

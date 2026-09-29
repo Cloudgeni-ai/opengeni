@@ -1204,7 +1204,7 @@ function SortableQueueRow({
             </button>
             <button
               type="button"
-              className="rounded-md bg-brand px-2 py-1 font-medium text-white hover:bg-brand/90 focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="rounded-md border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-ring/40"
               onClick={onConfirmReplace}
             >
               Replace and edit

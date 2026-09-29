@@ -18,24 +18,26 @@
 @import "./effective-tokens.css";
 @import "./session-capability.css";
 
-/* Full-surface preview preparation. Private palette preserves the accepted
-   ripple study; the steady label uses the host's typography and text tokens. */
+/* Full-surface preview preparation. The ripple keeps its private ink and glow
+   (read by the canvas effect as literal colors), tuned to the app's teal glow
+   on a neutral ground; the steady label uses the host's typography and text
+   tokens. */
 .og-preview-loading {
-  --_og-preview-ink: #bca3ef;
-  --_og-preview-glow: #8f6ccc;
+  --_og-preview-ink: #9fdccd;
+  --_og-preview-glow: #5fb8a3;
   position: relative;
   width: 100%;
   overflow: hidden;
   border-radius: 10px;
-  background: #17161d;
+  background: #1b1b1b;
   container: og-preview / inline-size;
 }
 .og-root:is([data-og-theme="light"], .og-light) .og-preview-loading,
 :is([data-og-theme="light"], .og-light) .og-root .og-preview-loading,
 .og-root :is([data-og-theme="light"], .og-light) .og-preview-loading {
-  --_og-preview-ink: #76629c;
-  --_og-preview-glow: #ba8ee0;
-  background: #faf9fd;
+  --_og-preview-ink: #5f8f84;
+  --_og-preview-glow: #9fe3d3;
+  background: #f9f9f9;
 }
 .og-preview-loading canvas {
   display: block;
@@ -119,6 +121,8 @@
   --text-2xs--line-height: 1rem;
 
   --color-og-bg: var(--og-color-bg);
+  --color-og-canvas: var(--og-color-canvas);
+  --color-og-selection: var(--og-color-selection);
   --color-og-surface-1: var(--og-color-surface-1);
   --color-og-surface-2: var(--og-color-surface-2);
   --color-og-surface-3: var(--og-color-surface-3);
@@ -134,6 +138,13 @@
   --color-og-accent-fg: var(--og-color-accent-fg);
   --color-og-accent-soft: var(--og-color-accent-soft);
 
+  --color-og-primary: var(--og-color-primary);
+  --color-og-primary-fg: var(--og-color-primary-fg);
+  --color-og-primary-border: var(--og-color-primary-border);
+  --color-og-primary-hover: var(--og-color-primary-hover);
+  --color-og-switch-track: var(--og-color-switch-track);
+  --color-og-switch-thumb: var(--og-color-switch-thumb);
+
   --color-og-status-queued: var(--og-color-status-queued);
   --color-og-status-running: var(--og-color-status-running);
   --color-og-status-idle: var(--og-color-status-idle);
@@ -141,8 +152,12 @@
   --color-og-status-failed: var(--og-color-status-failed);
   --color-og-status-cancelled: var(--og-color-status-cancelled);
   --color-og-danger: var(--og-color-danger);
+  --color-og-danger-fill: var(--og-color-danger-fill);
+  --color-og-danger-fg: var(--og-color-danger-fg);
 
   --color-bg: var(--og-color-bg);
+  --color-canvas: var(--og-color-canvas);
+  --color-selection: var(--og-color-selection);
   --color-surface: var(--og-color-surface-1);
   --color-surface-2: var(--og-color-surface-2);
   --color-surface-3: var(--og-color-surface-3);
@@ -169,23 +184,25 @@
   --color-card-foreground: var(--color-fg);
   --color-popover: var(--color-surface-3);
   --color-popover-foreground: var(--color-fg);
-  --color-primary: var(--color-brand-strong);
-  --color-primary-foreground: var(--color-brand-fg);
-  --color-secondary: var(--color-surface-2);
-  --color-secondary-foreground: var(--color-fg);
+  --color-primary: var(--og-color-primary);
+  --color-primary-foreground: var(--og-color-primary-fg);
+  --color-primary-border: var(--og-color-primary-border);
+  --color-primary-hover: var(--og-color-primary-hover);
+  --color-secondary: var(--og-color-selection);
+  --color-secondary-foreground: var(--og-color-fg-muted);
   --color-muted: var(--color-surface-2);
   --color-muted-foreground: var(--color-fg-muted);
   --color-accent: var(--color-surface-2);
   --color-accent-foreground: var(--color-fg);
   --color-destructive: var(--og-color-danger);
-  --color-destructive-filled: color-mix(in oklch, var(--og-color-danger) 70%, black);
-  --color-destructive-foreground: var(--og-color-accent-fg);
+  --color-destructive-filled: var(--og-color-danger-fill);
+  --color-destructive-foreground: var(--og-color-danger-fg);
   --color-input: var(--color-surface-2);
   --color-ring: var(--color-brand);
   --color-sidebar: var(--color-surface);
   --color-sidebar-foreground: var(--color-fg);
-  --color-sidebar-primary: var(--color-brand-strong);
-  --color-sidebar-primary-foreground: var(--color-brand-fg);
+  --color-sidebar-primary: var(--og-color-primary);
+  --color-sidebar-primary-foreground: var(--og-color-primary-fg);
   --color-sidebar-accent: var(--color-surface-2);
   --color-sidebar-accent-foreground: var(--color-fg);
   --color-sidebar-border: var(--color-border);
@@ -627,6 +644,21 @@
 }
 
 /* The upstream ThinkingOrb owns motion, visibility pausing, and reduced motion. */
+/* CodeMirror (SDK code editor). The stock light and one-dark themes bring
+   their own chrome (one-dark is blue-grey with a blue cursor); pin the ground,
+   gutters, cursor, active line and selection to the og palette. Syntax colors
+   stay with the theme. */
+.og-cm-editor .cm-editor { background-color: var(--og-cm-bg, var(--og-color-bg)); color: var(--og-color-fg); }
+.og-cm-editor .cm-editor .cm-gutters { background-color: var(--og-cm-bg, var(--og-color-bg)); border-right-color: var(--og-color-border); color: var(--og-color-fg-subtle); }
+.og-cm-editor .cm-editor .cm-activeLine { background-color: color-mix(in srgb, var(--og-color-fg) 4%, transparent); }
+.og-cm-editor .cm-editor .cm-activeLineGutter { background-color: color-mix(in srgb, var(--og-color-fg) 6%, transparent); color: var(--og-color-fg-muted); }
+.og-cm-editor .cm-editor .cm-cursor,
+.og-cm-editor .cm-editor .cm-dropCursor { border-left-color: var(--og-color-fg); }
+.og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,
+.og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background-color: color-mix(in srgb, var(--og-color-accent) 30%, transparent); }
+.og-cm-editor .cm-editor .cm-selectionMatch { background-color: color-mix(in srgb, var(--og-color-accent) 18%, transparent); }
+.og-cm-editor .cm-editor .cm-panels { background-color: var(--og-color-surface-2); color: var(--og-color-fg); }
+
 .og-genie-loading { display: flex; align-items: center; gap: 14px; min-height: 88px; padding: 12px 0; }
 .og-genie-orb { width: 64px; height: 64px; flex: 0 0 64px; }
 .og-genie-orb canvas { display: block; }
@@ -634,7 +666,7 @@
 .og-genie-phrase { color: var(--og-color-fg-muted); font-size: var(--og-font-size-sm); line-height: 1.5; animation: og-genie-phrase-in .65s ease-out both; }
 .og-genie-details { color: var(--og-color-fg-subtle); font-size: var(--og-font-size-xs); min-height: 28px; cursor: pointer; border-radius: 4px; text-align: left; transition: color .2s; }
 .og-genie-details:hover { color: var(--og-color-fg); }
-.og-genie-details:focus-visible { outline: 2px solid #a995e9; outline-offset: 4px; }
+.og-genie-details:focus-visible { outline: 2px solid color-mix(in srgb, var(--og-color-accent) 55%, transparent); outline-offset: 4px; }
 @keyframes og-genie-phrase-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 @media (pointer: coarse) { .og-genie-details { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) {
@@ -671,7 +703,7 @@
 /* Focused beam: one shared light source clipped to the entire text row. */
 .og-command-reel-running,
 .og-rolling-status[data-running="true"] .og-command-reel {
-  background-image:linear-gradient(90deg, light-dark(#898c94,#686b76) 42%, light-dark(#f0f1f4,#fff) 50%, light-dark(#898c94,#686b76) 58%);
+  background-image:linear-gradient(90deg, light-dark(#8a8a8a,#6b6b6b) 42%, light-dark(#f2f2f2,#fff) 50%, light-dark(#8a8a8a,#6b6b6b) 58%);
   background-size:300% 100%;
   background-position:100% 0;
   background-clip:text;

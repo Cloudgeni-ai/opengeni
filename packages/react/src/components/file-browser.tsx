@@ -1249,7 +1249,7 @@ function DeleteDialog({
                   closeIntentRef.current = "confirm";
                 }}
                 disabled={busy}
-                className="min-h-9 rounded-og-md bg-og-status-failed px-3 text-og-sm font-semibold text-white shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
+                className="min-h-9 rounded-og-md bg-og-danger-fill px-3 text-og-sm font-semibold text-og-danger-fg shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
               >
                 Delete permanently
               </button>

@@ -1342,10 +1342,10 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           }
           className={cn(
             "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
-            "bg-og-accent text-og-accent-fg shadow-og-sm",
+            "border border-og-primary-border bg-og-primary text-og-primary-fg",
             "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
-            "hover:bg-og-accent-strong active:scale-95",
-            "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
+            "hover:bg-og-primary-hover active:scale-95",
+            "disabled:cursor-not-allowed disabled:opacity-40",
             className,
           )}
         >

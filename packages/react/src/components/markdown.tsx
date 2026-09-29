@@ -189,7 +189,7 @@ const baseComponents: Components = {
   // the `pre` renderer), so a `code` reaching here is treated as inline.
   code: ({ children, className: _className, ...props }) => (
     <code
-      className="rounded-og-xs bg-og-surface-1 px-1 py-0.5 font-og-mono text-og-sm text-og-fg"
+      className="rounded-og-xs bg-og-surface-2 px-1 py-0.5 font-og-mono text-og-sm text-og-fg"
       {...props}
     >
       {children}

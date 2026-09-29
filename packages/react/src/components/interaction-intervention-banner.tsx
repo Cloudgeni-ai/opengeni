@@ -59,7 +59,7 @@ export function InteractionInterventionBanner({
           type="button"
           onClick={() => onResolve(intervention, "completed")}
           disabled={mutating}
-          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-og-sm bg-og-accent px-2.5 text-og-control font-medium text-og-accent-fg transition hover:brightness-105 disabled:opacity-50"
+          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-40"
         >
           {mutating ? (
             <LoaderCircleIcon className="size-3 animate-spin" />
