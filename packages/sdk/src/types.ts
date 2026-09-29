@@ -2911,6 +2911,8 @@ export type ScheduledTaskAgentConfig = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /** Seconds a run may wait on a person before the scheduler answers for it. */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type ScopedKnowledgeScope =
@@ -5532,6 +5534,12 @@ export type ScheduledTaskAgentConfigInput = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /**
+   * Seconds a run's own turn may wait on a person (tool approval or structured
+   * question, 60 s - 30 days) before the scheduler rejects the approval / skips
+   * the question as a labelled system decision. Omitted: waits indefinitely.
+   */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -5695,10 +5703,21 @@ export type ScheduledTaskRun = {
    * every occurrence is refused until the task or a resource it names changes.
    */
   admissionRefusal?: ScheduledTaskAdmissionRefusal | null | undefined;
+  /**
+   * This dispatched run's own turn is waiting on a person (tool approval or
+   * structured question) since `since`; `expiresAt` is when the task's
+   * `approvalTimeoutSeconds` answers for it (null: waits indefinitely).
+   */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
   createdAt: string;
   updatedAt: string;
   /** Connectors this run could not use; projected only for a viewer who can act on the task. */
   accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+};
+
+export type ScheduledTaskRunAwaitingHuman = {
+  since: string;
+  expiresAt: string | null;
 };
 
 export type ScheduledTaskAdmissionRefusal = {
@@ -5750,6 +5769,8 @@ export type ScheduledTaskAccessAttention = {
   firedAt: string | null;
   failures: ScheduledTaskRunAccessFailure[];
   unavailableAccounts: ScheduledTaskAccessConnector[];
+  /** The latest run is waiting on a person (tool approval or question) right now. */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
 };
 
 export type ListScheduledTaskAccessAttentionResponse = {

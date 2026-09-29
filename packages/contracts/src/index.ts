@@ -9652,6 +9652,9 @@ export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
   "slack_bot_send_prepared_message",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
+export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS = 60;
+export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS = 30 * 24 * 60 * 60;
+
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
     .object({
@@ -9706,6 +9709,16 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // Durable task override. Scheduled dispatch is trusted to preserve this
     // snapshot even if the workspace/deployment policy narrows later.
     maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+    // How long a run's own turn may wait on a person (a tool approval or a
+    // structured question) before the scheduler answers for it: approvals are
+    // rejected and questions skipped, as a labelled system decision. Frozen in
+    // each run's accepted execution. Omitted: wait indefinitely.
+    approvalTimeoutSeconds: z
+      .number()
+      .int()
+      .min(SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS)
+      .max(SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS)
+      .optional(),
   };
 }
 
@@ -10130,6 +10143,14 @@ export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ z
   .strict();
 export type ScheduledTaskAdmissionRefusal = z.infer<typeof ScheduledTaskAdmissionRefusal>;
 
+export const ScheduledTaskRunAwaitingHuman = /* @__PURE__ */ z
+  .object({
+    since: z.string(),
+    expiresAt: z.string().nullable(),
+  })
+  .strict();
+export type ScheduledTaskRunAwaitingHuman = z.infer<typeof ScheduledTaskRunAwaitingHuman>;
+
 /** Non-secret evidence of a refused connection selection, never execution authority. */
 export const ConnectionAccountSelectionDiagnostic = /* @__PURE__ */ z
   .object({
@@ -10209,6 +10230,13 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
   /** Why the scheduler refused this occurrence before running it (see the schema). */
   admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
+  /**
+   * Read-time: this dispatched run's own turn is waiting on a person (a tool
+   * approval or structured question) since `since`; `expiresAt` is when the
+   * task's approval timeout answers for it (null: waits indefinitely).
+   * Absent/null when the run is not waiting.
+   */
+  awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   /**
@@ -10247,11 +10275,20 @@ export const ScheduledTaskAccessAttention = /* @__PURE__ */ z
     unavailableAccounts: z
       .array(ScheduledTaskAccessConnector)
       .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** The latest run is waiting on a person (approval or question) right now. */
+    awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().default(null),
   })
   .strict()
-  .refine((item) => item.failures.length > 0 || item.unavailableAccounts.length > 0, {
-    message: "an attention item names a failed connector or an unavailable account",
-  })
+  .refine(
+    (item) =>
+      item.failures.length > 0 ||
+      item.unavailableAccounts.length > 0 ||
+      item.awaitingHuman !== null,
+    {
+      message:
+        "an attention item names a failed connector, an unavailable account, or a run waiting on a person",
+    },
+  )
   .refine((item) => (item.runId === null) === (item.firedAt === null), {
     message: "runId and firedAt are both set or both null",
   })

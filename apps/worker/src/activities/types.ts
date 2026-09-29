@@ -395,6 +395,18 @@ export type ExpireSessionInteractionInterventionResult = {
   action: "expired" | "stale" | "not_found";
 };
 
+export type ExpireScheduledRunHumanWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  runId: string;
+};
+
+export type ExpireScheduledRunHumanWaitResult = {
+  action: "expired" | "stale" | "not_found";
+};
+
 export type MarkSessionIdleInput = {
   workspaceId: string;
   sessionId: string;
