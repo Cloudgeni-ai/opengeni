@@ -47,21 +47,53 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 
 | Token | Use |
 | --- | --- |
-| `bg` | Page canvas, rail |
-| `surface` | Inputs, dialogs, menus |
+| `bg` | Rail and page chrome (behind the rail glow). Inside the content pane `bg` resolves to `canvas` |
+| `canvas` | The main content pane beside the rail or settings rail (`data-canvas`) |
+| `surface` | Inputs, dialogs, menus, outline buttons |
 | `surface-2` | Row hover, active nav, chips, segmented track, the detail page aside card |
 | `surface-3` | Pressed, open |
+| `selection` | The selected row (open session in the rail), secondary button fill |
 | `border` | Every hairline |
-| `border-strong` | Outline hover, switch off-track |
+| `border-strong` | Outline hover |
 | `fg` | Titles, labels |
-| `fg-muted` | Descriptions, meta lines |
+| `fg-muted` | Descriptions, meta lines, secondary button text |
 | `fg-subtle` | Quiet meta, placeholders, separators |
-| `brand` | Icon, link, focus, active tab bar, selected ring |
-| `primary` | The filled primary button only |
+| `brand` | Neutral grey: icon, link, focus, active tab bar, selected ring. Never blue |
+| `primary` | The filled primary button only ("teal wash": `primary` fill, `primary-foreground` ink, `primary-border` edge, `primary-hover`) |
+| `switch-track` / `switch-thumb` | A switch that is off |
 | `status-idle` | Green: Connected, Active, Succeeded, Installed |
-| `status-waiting` | Purple: Needs you, Needs reconnect, Pending review |
+| `status-waiting` | Peach: Needs you, Needs reconnect, Pending review |
 | `status-running` | Amber: Running, Syncing |
 | `danger` | Red: Failed, Expired, destructive actions |
+
+The palette is neutral grey everywhere (no blue or slate tint). Color appears only in the
+primary button's teal wash, the soft teal/peach glow and the status hues.
+
+| | Light | Dark ("graphite") |
+| --- | --- | --- |
+| `bg` (rail, chrome) | `#f6f6f6` | `#303030` |
+| `canvas` (content pane) | `#ffffff` | `#202020` (darker than the rail) |
+| `surface` / `surface-2` / `surface-3` | `#ffffff` / `#eeeeee` / `#e5e5e5` | `#333333` / `#383838` / `#404040` |
+| `selection` | `#e9e9e9` | `#424242` |
+| `border` / `border-strong` | `#dedede` / `#bdbdbd` | `#454545` / `#555555` |
+| `fg` / `fg-muted` / `fg-subtle` | `#242424` / `#5f5f5f` / `#696969` | `#e6e6e6` / `#b0b0b0` / `#a3a3a3` |
+| `brand` (accent) / accent-deep / accent-fg | `#545454` / `#383838` / `#ffffff` | `#c4c4c4` / `#d5d5d5` / `#242424` |
+| `primary` fill / ink / edge | `#ebf2f0` / `#292929` / `#c4d5d0` | `#2b3432` / `#eeeeee` / `#4e5e59` |
+| `status-waiting` / `running` / `idle` | `#915826` / `#766623` / `#237058` | `#e9ab77` / `#d5bd72` / `#83cbb0` |
+| Glow teal / peach | `#9fe3d359` / `#ffb78752` | `#79d9c125` / `#ffb78724` |
+
+Light `fg-muted`, `fg-subtle` and the light status hues are a step darker than the studio values
+(`#686868`, `#767676`, `#a3652f`, `#8b782c`, `#287d64`), and dark `fg-subtle` a step lighter than
+`#949494`, so every text token keeps 4.5:1 as 11-12px text on the rail, `surface-2` and the
+selected row.
+
+**Buttons.** Primary: the teal wash, no shadow, hover mixes 15% ink into the fill. Secondary:
+`selection` fill, `fg-muted` text. Outline: `surface` fill, `border`, `fg` text. Disabled: 40%
+opacity for every variant.
+
+**Rail glow.** The main rail and the settings rail use `.og-rail-glow`: a teal wash from the
+top-left and a peach wash from the bottom-right over `bg`. The signed-out pages use
+`.og-page-glow`, the same two washes down the left edge of the canvas.
 
 Grey (`fg-subtle`) is Paused, Not connected, Revoked, Off. Always a dot plus a sentence-case
 label; never color alone.
@@ -113,9 +145,12 @@ opacity-muted text.
   keep their own 20px size.
 - Elevation: pages and rows are flat, hover is a `surface-2` fill. Dialogs: 1px border +
   `shadow-lg`. Menus: `shadow-md`.
-- Focus: 2px ring in brand at 55%, 2px offset. Motion: 120ms, color and opacity only.
-- Rail: 240px in every mode. Nav item 32px, radius 10, 16px icon, 14/500 muted; active =
-  `surface-2` + `fg` + a 2x16px brand bar.
+- Focus: 2px ring in brand (neutral grey) at 55%, 2px offset. Motion: 120ms, color and opacity
+  only.
+- Rail: 240px in every mode, on the rail glow. Nav item 32px, radius 10, 16px icon, 14/500
+  muted; active = `surface-2` + `fg` + a 2x16px brand bar. The open session row is a selected
+  row: `selection` fill, `fg` text and a 1px `brand/20` edge, radius 10; row hover is
+  `surface-2`.
 - Every page works at 390px wide with no horizontal scroll and 44px touch targets on coarse
   pointers.
 
@@ -162,6 +197,9 @@ Cancel and the action as the primary.
   see". Drop it rather than paraphrase. The same goes for a section header that only repeats the
   page title: Settings > General starts with its rows (Name, ID) and no "Organization" or
   "Workspace" header.
+- The product is "Opengeni" (lowercase g) in every user-visible string: titles, labels, toasts,
+  meta. Code identifiers, package names (`@opengeni/...`), env vars and URLs keep their own
+  spelling.
 - Sentence case everywhere. Plain dashes (-), never em-dashes. Dates as "Mon 28 Sep, 08:00" or
   "3 days ago" with the exact time on hover; never seconds, never ISO.
 - No ellipsis in button labels: "Delete", "Pause", "Rename", not "Delete...". A button that opens
@@ -319,7 +357,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | Detail | **Detail page** (section 8). No side sheets. Expand in place only for one level of secondary options. |
 | Empty state | Centered: 40px icon tile, title, one sentence, one action; the header action hides while empty. Add 2-3 template cards where starting is hard (Schedules). |
 | Setting row | Label and description left, the one control in a fixed right column. A setting with its own page is a `SettingNavRow`; a destructive group action is a `SettingDangerRow` at the end. |
-| Switch | Brand track when on, a visible track when off in both themes. |
+| Switch | The primary fill and edge when on, with a primary-ink thumb; the `switch-track` with a `switch-thumb` when off, visible in both themes. |
 | Segmented control | Filled track with the active option raised on the surface. |
 | Choice cards | Brand ring: brand border, faint brand fill, a check in the corner. The same highlight for every selected state. |
 | Select | Menu select like the composer: title, description, payment source, a check on the selected option. The settings trigger is the 32px "field" style, as wide as its content (at least 180px). |
@@ -338,12 +376,15 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 Colors, fonts and most sizes are tokens, so a restyle happens in two files, not in components:
 
 - `packages/react/styles/tokens.css` (`@opengeni/react` tokens) defines the palette and fonts as
-  `--og-*` variables for light and dark (`--og-color-bg`, `--og-color-surface-1`,
-  `--og-color-accent`, `--og-color-status-*`, `--og-font-sans`, ...). Change a color or font there
-  and every surface follows, in both themes.
+  `--og-*` variables for light and dark (`--og-color-bg`, `--og-color-canvas`,
+  `--og-color-surface-1`, `--og-color-selection`, `--og-color-accent`, `--og-color-primary*`,
+  `--og-glow-*`, `--og-color-status-*`, `--og-font-sans`, ...). Change a color or font there
+  and every surface follows, in both themes. Run `bun run build:css` in `packages/react` after
+  editing it; `compiled.css` is checked in.
 - `apps/web/src/styles.css` maps those onto Tailwind names in `@theme` (`--color-bg`,
-  `--color-brand`, `--font-sans`, `--radius-md` 10px, `--radius-lg` 14px, `--text-2xs`). Rename or
-  retune the scale there.
+  `--color-canvas`, `--color-brand`, `--color-primary`, `--font-sans`, `--radius-md` 10px,
+  `--radius-lg` 14px, `--text-2xs`), rebinds `bg` to `canvas` inside `[data-canvas]`, and holds
+  the glow classes. Rename or retune the scale there.
 
 Components use only the semantic utilities (`bg-surface`, `text-fg-muted`, `border-border`,
 `text-brand`, `rounded-md`), so they pick up the change without edits. Some primitives still
