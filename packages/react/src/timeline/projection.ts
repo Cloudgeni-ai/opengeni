@@ -1,7 +1,6 @@
 import {
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
-  SESSION_EVENT_TYPES,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -1958,18 +1957,6 @@ type TurnAnchorPrescan = {
   startedTurnIds: Set<string>;
 };
 
-/** The filtered navigation index includes every canonical execution fallback,
- * not just turn.started. Keep classification shared with prescanTurnAnchors. */
-export const TIMELINE_TURN_ANCHOR_EVENT_TYPES = SESSION_EVENT_TYPES.filter(
-  (type) =>
-    isTurnExecutionEvidence(type) ||
-    type === "turn.queued" ||
-    type === "turn.started" ||
-    type === "turn.cancelled" ||
-    type === "session.queue.changed" ||
-    type === "session.control.steer_requested",
-);
-
 /** Navigation uses the same queue/start/withdrawal rules as transcript ordering. */
 export function timelineQuestionPlacement(question: SessionEvent, evidence: SessionEvent[]) {
   const anchors = prescanTurnAnchors([question, ...evidence]);
@@ -2184,7 +2171,7 @@ function isAgentActivityEvent(type: string): boolean {
  * steering, or deleting a waiting row must never make its prompt appear in the
  * transcript as though inference had begun.
  */
-function isTurnExecutionEvidence(type: string): boolean {
+export function isTurnExecutionEvidence(type: string): boolean {
   return (
     isAgentActivityEvent(type) ||
     type === "turn.completed" ||
