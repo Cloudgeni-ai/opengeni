@@ -3792,3 +3792,17 @@ binary afterward. Do not use an older binary as the rollback image after this
 routine contract changes. Whole-session forks retain their existing signature.
 See [Forking at a message](organization-tenancy.md#forking-at-a-message) for
 boundary validation and compacted-history limitations.
+
+### Restricting native human accounts
+
+Set `OPENGENI_ALLOWED_USER_EMAILS` to a comma-separated list of exact email
+addresses to restrict native human signup, sign-in and existing browser sessions.
+Addresses are case-insensitive; email verification remains required. Unset keeps
+open registration; an explicitly empty or invalid list fails startup. Apply the
+same value to all API replicas and restart them when changing the list.
+
+This is deployment admission, not an organization membership grant. It does not
+change organization API keys, external-user authentication, sandbox credentials,
+webhook signatures or signed storage URLs. Review existing issued credentials
+separately when restricting an already-running deployment: removing an email does
+not revoke its previously issued API keys or cancel already accepted work.
