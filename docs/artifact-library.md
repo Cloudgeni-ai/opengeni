@@ -24,6 +24,13 @@ the viewer and query and expires after one hour. A bounded scan through denied
 candidates can return an empty page with `nextCursor`; that is not the end of the
 listing.
 
+The web console keeps loaded catalog views in memory per client, credential
+generation, workspace, and filters, so switching tabs or returning to the page
+renders at once. A view older than 30 seconds, or one a session's tool output has
+marked stale, refetches on revisit or window focus, restarting the listing and
+reloading as many pages as were shown. Site archive, restore, and rollback drop
+the workspace's cached views; an access denial drops them without keeping rows.
+
 The catalog reuses Site records and versions, editable-artifact records and
 authority, generated-image correlation, and explicit sandbox-file publication
 metadata. File bytes remain in the existing workspace file domain. It does not

@@ -36,6 +36,7 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "slack_bot_list_files",
   "slack_bot_file_info",
   "slack_bot_file_content",
+  "slack_bot_upload_file",
   "slack_bot_post_message",
   "slack_bot_delete_message",
   "slack_bot_prepare_message",

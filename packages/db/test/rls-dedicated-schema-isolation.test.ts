@@ -604,7 +604,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           owner: "postgres",
           execute: false,
           publicExecute: false,
-          securityDefiner: true,
+          securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+            name,
+          ),
         })),
       ].sort((left, right) => left.name.localeCompare(right.name)),
     );

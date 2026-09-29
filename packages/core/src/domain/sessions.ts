@@ -24,6 +24,7 @@ import {
   withCodexCatalogProvider,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
+  allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
@@ -4232,18 +4233,13 @@ export async function updateSessionToolPolicy(
         return withFirstPartyTools(validatedTools, runtimeSettings);
       })()
     : null;
-  const explicitRequestedFirstPartyTools = explicitRequest
-    ? [...explicitRequest.firstPartyMcpTools]
-    : null;
   const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(deps.settings);
-  const disallowedFirstPartyMcpTool = explicitRequestedFirstPartyTools?.find(
-    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
-  );
-  if (disallowedFirstPartyMcpTool) {
-    throw new HTTPException(422, {
-      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
-    });
-  }
+  // Echoing the session's stored catalog (or create defaults) can include a
+  // tool the deployment later removed. Runtime already strips those; failing
+  // the whole connector save would block unrelated MCP toggles.
+  const explicitRequestedFirstPartyTools = explicitRequest
+    ? allowedFirstPartyMcpToolsForSession(deps.settings, explicitRequest.firstPartyMcpTools)
+    : null;
   const workspaceDefaultTools = withFirstPartyTools(
     withWorkspaceDefaultMcpTools(
       [],

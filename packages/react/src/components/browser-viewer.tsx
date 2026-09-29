@@ -20,6 +20,7 @@ import type {
   SiteAuthConnection,
 } from "@opengeni/sdk/interaction";
 import { interactionControlFailureFromError } from "@opengeni/sdk/interaction";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   BugIcon,
   ArchiveIcon,
@@ -428,7 +429,8 @@ export function BrowserViewer({
   }, [frameIsLive]);
   const supportsLiveFrames =
     (browser.session ?? selectedRegistrySession)?.capabilities.liveFrames === true;
-  const connectionError = frames.error ?? browser.error;
+  const controlUnavailable = isBrowserControlUnavailable(browser.error);
+  const connectionError = controlUnavailable ? browser.error : (frames.error ?? browser.error);
   // A managed controller can reject a stale attachment while the same browser
   // remains healthy. Only extension-attached Chrome requires a new browser on
   // connection-generation loss; an unrelated lost Chrome must not poison the
@@ -442,7 +444,7 @@ export function BrowserViewer({
       ? attached.devices.find((candidate) => candidate.id === selectedPlacement.deviceId)
       : null;
   const displayConnectionState =
-    connectionError && !frameIsLive
+    connectionError && (!frameIsLive || controlUnavailable)
       ? "error"
       : !browser.session
         ? "connecting"
@@ -924,6 +926,7 @@ export function BrowserViewer({
               connectionState={displayConnectionState}
               supportsLiveFrames={supportsLiveFrames}
               connectionError={connectionError}
+              controlUnavailable={controlUnavailable}
               observation={browser.observation}
               mutating={browser.mutating || savingProfile}
               activityLabel={savingProfile ? "Saving browser version…" : undefined}
@@ -1898,6 +1901,7 @@ function BrowserViewport(props: {
   connectionState: string;
   supportsLiveFrames: boolean;
   connectionError: Error | null;
+  controlUnavailable: boolean;
   observation: ReturnType<typeof useBrowserSession>["observation"];
   mutating: boolean;
   clipboardEnabled: boolean;
@@ -2409,7 +2413,10 @@ function BrowserViewport(props: {
   };
 
   const showCanvas =
-    props.frame !== null && paintedFrame !== null && sameBrowserDocument(props.frame, paintedFrame);
+    !props.controlUnavailable &&
+    props.frame !== null &&
+    paintedFrame !== null &&
+    sameBrowserDocument(props.frame, paintedFrame);
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
       <canvas
@@ -2429,6 +2436,7 @@ function BrowserViewport(props: {
       />
       <textarea
         ref={inputRef}
+        disabled={props.controlUnavailable}
         defaultValue=""
         onInput={(event) =>
           input(event.currentTarget.value, (event.nativeEvent as InputEvent).isComposing)
@@ -2450,6 +2458,7 @@ function BrowserViewport(props: {
           connectionState={props.connectionState}
           supportsLiveFrames={props.supportsLiveFrames}
           error={props.connectionError}
+          controlUnavailable={props.controlUnavailable}
           onAction={(action) => enqueue(action, null)}
           onReconnect={props.onReconnect}
           reconnectLabel={props.reconnectLabel}
@@ -2484,12 +2493,14 @@ function SemanticBrowserFallback(props: {
   connectionState: string;
   supportsLiveFrames: boolean;
   error: Error | null;
+  controlUnavailable: boolean;
   onAction: (action: BrowserAction) => void;
   onReconnect: () => void;
   reconnectLabel?: string | undefined;
   reconnectMessage?: string | undefined;
 }) {
   const controlFailure = interactionControlFailureFromError(props.error);
+  const { controlUnavailable } = props;
   const generationLoss = Boolean(props.reconnectMessage);
   const nodes = semanticNodes(
     props.observation?.semantic?.kind === "snapshot" ? props.observation.semantic.roots : [],
@@ -2509,13 +2520,15 @@ function SemanticBrowserFallback(props: {
           <p className="text-og-menu font-medium text-og-fg">
             {generationLoss
               ? "Chrome reconnected—open a fresh browser/desktop."
-              : props.error
-                ? props.supportsLiveFrames
-                  ? "Live view disconnected"
-                  : "Browser unavailable"
-                : props.connectionState === "semantic"
-                  ? "Semantic browser"
-                  : browserConnectionLabel(props.connectionState)}
+              : controlUnavailable
+                ? "Browser controls unavailable"
+                : props.error
+                  ? props.supportsLiveFrames
+                    ? "Live view disconnected"
+                    : "Browser unavailable"
+                  : props.connectionState === "semantic"
+                    ? "Semantic browser"
+                    : browserConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error || props.reconnectMessage ? (
@@ -2523,7 +2536,7 @@ function SemanticBrowserFallback(props: {
             {props.reconnectMessage ?? controlFailure?.message ?? props.error?.message}
           </p>
         ) : null}
-        {interactive.length > 0 ? (
+        {interactive.length > 0 && !controlUnavailable ? (
           <div className="mt-3 border-t border-og-border pt-3">
             <p className="mb-2 text-og-xs text-og-fg-subtle">
               {props.supportsLiveFrames
@@ -3206,6 +3219,12 @@ function attachedChromeGenerationLoss(
       session.placement.kind === "attached_device",
   );
   return lost?.placement.kind === "attached_device" ? { deviceId: lost.placement.deviceId } : null;
+}
+
+function isBrowserControlUnavailable(error: Error | null): boolean {
+  // Receiving pixels proves only the media channel. A failed control request
+  // must not leave a frozen screenshot presented as an interactive live page.
+  return error instanceof OpenGeniApiError && (error.status >= 500 || error.status === 0);
 }
 
 function isAttachedChromeGenerationLossError(error: Error | null): boolean {

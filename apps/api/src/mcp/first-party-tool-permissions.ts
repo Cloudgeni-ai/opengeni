@@ -207,6 +207,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_list_files: { allOf: ["connections:read"] },
   slack_bot_file_info: { allOf: ["connections:read"] },
   slack_bot_file_content: { allOf: ["connections:read"] },
+  slack_bot_upload_file: { sessionRequired: true, allOf: ["connections:read", "files:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
   // Scheduled runs only; the destination is the task's human-chosen channel.
   slack_bot_prepare_message: { sessionRequired: true, allOf: ["connections:read"] },

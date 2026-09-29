@@ -8,6 +8,18 @@ describe("session search route", () => {
     ).toEqual({ find: " PR_100% ", matchSequence: 42, matchOffset: 0 });
   });
 
+  test("only a session-search navigation carries the return path", () => {
+    expect(parseSessionSearchRoute({ find: "test" })).toEqual({ find: "test" });
+    expect(parseSessionSearchRoute({ find: "test", searchOrigin: "session-search" })).toEqual({
+      find: "test",
+      searchOrigin: "session-search",
+    });
+    expect(parseSessionSearchRoute({ find: "test", searchOrigin: "other" })).toEqual({
+      find: "test",
+    });
+    expect(parseSessionSearchRoute({ searchOrigin: "session-search" })).toEqual({});
+  });
+
   test("rejects absent, empty, and oversized queries", () => {
     for (const find of [undefined, null, true, "", "  ", "x".repeat(201)]) {
       expect(parseSessionSearchRoute({ find, matchSequence: 42 })).toEqual({});

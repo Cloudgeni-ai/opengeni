@@ -211,6 +211,7 @@ function fakeSlack(
     fileListResponse?: (input: { count: number; page: number }) => Record<string, unknown>;
     /** Extra channels, with realistic IDs, that the bot is a member of. */
     extraMemberChannels?: string[];
+    dmUserId?: string;
   } = {},
 ) {
   const isMemberChannel = (channel: string) =>
@@ -459,6 +460,9 @@ function fakeSlack(
           name: isMemberChannel(channel) ? "general" : "private",
           is_private: channel.startsWith("G"),
           is_member: isMemberChannel(channel),
+          is_im: channel.startsWith("D"),
+          is_mpim: channel === "G_GROUP",
+          ...(channel.startsWith("D") ? { user: options.dmUserId ?? "U_OWNER" } : {}),
           is_archived: isMemberChannel(channel) && memberChannelState.isArchived,
           is_shared: isMemberChannel(channel) && memberChannelState.isShared,
           is_ext_shared: isMemberChannel(channel) && memberChannelState.isExternallyShared,
@@ -988,7 +992,6 @@ describe("OpenGeni Slack bot credential verification", () => {
       ),
     ).rejects.toThrow("do not satisfy");
     for (const unsafe of [
-      "files:write",
       "reactions:write",
       "chat:write.customize",
       "users:read.email",
@@ -2389,6 +2392,127 @@ describe("OpenGeni Slack bot connection", () => {
         requestedConnectionId: connected.body.connection.id,
       }),
     ).rejects.toThrow("OpenGeni Slack bot connection");
+  });
+
+  test("uploads bytes without bot headers and completes in the exact task thread", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const uploadUrl = "https://files.slack.com/upload/v1/fixture-upload";
+    const providerCalls: { method: string; params?: URLSearchParams }[] = [];
+    const fetchUpload = (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(request instanceof Request ? request.url : request.toString());
+      if (url.toString() === uploadUrl) {
+        providerCalls.push({ method: "bytes" });
+        expect(init?.method).toBe("POST");
+        expect(new Headers(init?.headers).has("authorization")).toBe(false);
+        expect(init?.redirect).toBe("error");
+        expect([...new Uint8Array(init?.body as Buffer)]).toEqual([...fixturePng()]);
+        return new Response("OK", { status: 200 });
+      }
+      if (url.pathname === "/api/files.getUploadURLExternal") {
+        const params = new URLSearchParams(init?.body as string);
+        providerCalls.push({ method: "allocate", params });
+        return Response.json({ ok: true, file_id: "FUPLOAD1", upload_url: uploadUrl });
+      }
+      if (url.pathname === "/api/files.completeUploadExternal") {
+        const params = new URLSearchParams(init?.body as string);
+        providerCalls.push({ method: "complete", params });
+        return Response.json({ ok: true, files: [{ id: "FUPLOAD1" }] });
+      }
+      return slack.fetch(request, init);
+    }) as typeof globalThis.fetch;
+    let authorizations = 0;
+    const { bot } = await connectedTestBot(workspace, fetchUpload, async () => {
+      authorizations += 1;
+      return true;
+    });
+    const before = slack.calls.length;
+    const allocated = await bot.allocateFileUpload({
+      channelId: "C_MEMBER",
+      filename: "preview.png",
+      sizeBytes: fixturePng().byteLength,
+    });
+    await bot.transferFileUpload({
+      channelId: "C_MEMBER",
+      uploadUrl: allocated.uploadUrl,
+      bytes: fixturePng(),
+    });
+    await bot.completeFileUpload({
+      channelId: "C_MEMBER",
+      threadTimestamp: "1700000000.123456",
+      fileId: allocated.fileId,
+      title: "preview.png",
+    });
+    expect(providerCalls.map((call) => call.method)).toEqual(["allocate", "bytes", "complete"]);
+    expect(providerCalls[0]!.params?.get("filename")).toBe("preview.png");
+    expect(providerCalls[0]!.params?.get("length")).toBe(String(fixturePng().byteLength));
+    expect(providerCalls[2]!.params?.get("channel_id")).toBe("C_MEMBER");
+    expect(providerCalls[2]!.params?.get("thread_ts")).toBe("1700000000.123456");
+    expect(JSON.parse(providerCalls[2]!.params!.get("files")!)).toEqual([
+      { id: "FUPLOAD1", title: "preview.png" },
+    ]);
+    expect(authorizations).toBe(slack.calls.length - before + providerCalls.length);
+  });
+
+  test("refuses uploads from legacy bot grants before provider I/O", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const before = slack.calls.length;
+    await expect(
+      bot.allocateFileUpload({ channelId: "C_MEMBER", filename: "preview.png", sizeBytes: 1 }),
+    ).rejects.toThrow("slack_bot_file_upload_scope_missing");
+    expect(slack.calls).toHaveLength(before);
+  });
+
+  test("private file upload validates the exact live requester IM before allocation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ dmUserId: "U_OWNER", extraMemberChannels: ["G_GROUP"] });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const input = { filename: "private.png", sizeBytes: 1, privateRecipientSlackUserId: "U_OWNER" };
+    await expect(bot.allocateFileUpload({ ...input, channelId: "G_GROUP" })).rejects.toThrow(
+      "private_task_recipient_changed",
+    );
+    await expect(
+      bot.allocateFileUpload({
+        ...input,
+        channelId: "D_OWNER",
+        privateRecipientSlackUserId: "U_OTHER",
+      }),
+    ).rejects.toThrow("private_task_recipient_changed");
+    expect(slack.calls.some((call) => call.method === "files.getUploadURLExternal")).toBe(false);
+  });
+
+  test("denies a revoked byte-transfer continuation before sending any bytes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    let byteTransfers = 0;
+    const fetchUpload = (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(request instanceof Request ? request.url : request.toString());
+      if (url.hostname === "files.slack.com") {
+        byteTransfers += 1;
+        return new Response("OK", { status: 200 });
+      }
+      return slack.fetch(request, init);
+    }) as typeof globalThis.fetch;
+    let authorizations = 0;
+    const { bot } = await connectedTestBot(workspace, fetchUpload, async () => {
+      authorizations += 1;
+      return authorizations < 2;
+    });
+    await expect(
+      bot.transferFileUpload({
+        channelId: "C_MEMBER",
+        uploadUrl: new URL("https://files.slack.com/upload/v1/fixture-upload"),
+        bytes: fixturePng(),
+      }),
+    ).rejects.toThrow("provider request is no longer authorized");
+    expect(authorizations).toBe(2);
+    expect(byteTransfers).toBe(0);
   });
 
   test("adapts files.list to bounded count/page pagination with opaque continuation", async () => {

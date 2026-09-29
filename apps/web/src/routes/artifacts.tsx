@@ -27,7 +27,7 @@ import {
   useArtifactsBackLink,
 } from "@/components/artifacts/artifact-page-chrome";
 import { artifactKinds, defaultArtifactFilters, type ArtifactKind } from "@/lib/artifact-catalog";
-import { useArtifactCatalog } from "@/lib/use-artifact-catalog";
+import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { ArtifactSandbox } from "@/components/artifacts/artifact-sandbox";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -285,6 +285,7 @@ export function ArtifactDetailRoute({
         reason: `Restored from the artifact history by ${context.authSession?.user?.name ?? "a workspace member"}`,
         idempotencyKey: crypto.randomUUID(),
       });
+      invalidateArtifactCatalog(context.client, workspaceId);
       toast.success("Artifact version restored");
       await load();
     } catch (nextError) {
@@ -308,6 +309,7 @@ export function ArtifactDetailRoute({
         reason: `${status === "archived" ? "Archived" : "Restored"} from Sites by ${context.authSession?.user?.name ?? "a workspace member"}`,
         idempotencyKey: crypto.randomUUID(),
       });
+      invalidateArtifactCatalog(context.client, workspaceId);
       toast.success(status === "archived" ? "Site archived" : "Site restored");
       await load();
       return true;

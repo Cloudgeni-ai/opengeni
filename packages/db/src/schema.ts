@@ -5766,6 +5766,83 @@ export const sandboxFilePublications = opengeniPrivateSchema.table(
   }),
 );
 
+/** Source-session upload fence; never stores file bytes or expiring upload URLs. */
+export const slackFileUploadOperations = opengeniPrivateSchema.table(
+  "slack_file_upload_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    interactionId: uuid("interaction_id").notNull(),
+    // Routed interactions may use an installation whose HOME is another workspace.
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    fileId: uuid("file_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    phase: text("phase")
+      .$type<
+        "pending" | "uploading" | "uploaded" | "completing" | "outcome_unknown" | "completed"
+      >()
+      .notNull()
+      .default("pending"),
+    slackFileId: text("slack_file_id"),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operation: uniqueIndex("slack_file_upload_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    session: foreignKey({
+      name: "slack_file_upload_operations_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    interaction: foreignKey({
+      name: "slack_file_upload_operations_interaction_fk",
+      columns: [table.accountId, table.workspaceId, table.interactionId],
+      foreignColumns: [
+        slackInteractions.accountId,
+        slackInteractions.workspaceId,
+        slackInteractions.id,
+      ],
+    }).onDelete("cascade"),
+    file: foreignKey({
+      name: "slack_file_upload_operations_file_fk",
+      columns: [table.accountId, table.workspaceId, table.fileId],
+      foreignColumns: [files.accountId, files.workspaceId, files.id],
+    }).onDelete("cascade"),
+    sessionLookup: index("slack_file_upload_operations_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
+    bounds: check(
+      "slack_file_upload_operations_bounds_check",
+      sql`octet_length(${table.subjectId}) between 1 and 1024
+        and length(btrim(${table.subjectId})) > 0
+        and ${table.requestDigest} ~ '^[a-f0-9]{64}$'
+        and (${table.slackFileId} is null or (
+          octet_length(${table.slackFileId}) between 1 and 128
+          and length(btrim(${table.slackFileId})) > 0
+        ))`,
+    ),
+    state: check(
+      "slack_file_upload_operations_state_check",
+      sql`${table.phase} in ('pending', 'uploading', 'uploaded', 'completing', 'outcome_unknown', 'completed')
+        and ((${table.phase} = 'pending') = (${table.slackFileId} is null))
+        and ((${table.claimHolderId} is null) = (${table.claimExpiresAt} is null))
+        and (${table.phase} <> 'completed' or ${table.claimHolderId} is null)`,
+    ),
+  }),
+);
+
 export const fileUploads = pgTable(
   "file_uploads",
   {

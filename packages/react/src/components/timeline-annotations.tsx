@@ -118,6 +118,7 @@ export function TimelineAnnotationsChip({
   onRemove,
   onRevealSource,
   className,
+  compact = false,
   onCommit,
 }: {
   annotations: readonly TimelineAnnotationLike[];
@@ -130,6 +131,8 @@ export function TimelineAnnotationsChip({
   onCommit?: (() => void) | undefined;
   onRevealSource?: ((source: TimelineAnnotationSource) => boolean) | undefined;
   className?: string | undefined;
+  /** Dense trigger for single-line rows such as the compact queue dock. */
+  compact?: boolean | undefined;
 }) {
   const focusRequested = Boolean(
     focusAnnotationId && annotations.some((item) => item.id === focusAnnotationId),
@@ -171,7 +174,8 @@ export function TimelineAnnotationsChip({
           ref={triggerRef}
           type="button"
           className={cn(
-            "inline-flex min-h-8 min-w-0 max-w-full items-center gap-1.5 rounded-full border-0 bg-transparent py-1 text-og-sm font-medium outline-hidden transition hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]",
+            "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full border-0 bg-transparent font-medium outline-hidden transition hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]",
+            compact ? "min-h-6 py-0.5 text-og-xs" : "min-h-8 py-1 text-og-sm",
             canClear ? "pr-1 pl-2.5" : "px-2.5",
           )}
           aria-label={`Review ${countLabel}`}

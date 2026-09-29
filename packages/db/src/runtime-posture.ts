@@ -58,6 +58,7 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE = "slack_file_upload_operations";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
@@ -696,6 +697,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "guard_slack_file_upload_operation()",
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
@@ -707,6 +709,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "guard_slack_file_upload_operation()",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
@@ -2019,6 +2022,7 @@ export async function inspectRuntimeDatabasePosture(
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
               'session_file_attachments',
               'session_file_read_capabilities',
@@ -2355,9 +2359,10 @@ export function evaluateRuntimeDatabasePosture(
       continue;
     }
     const routine = matches[0]!;
-    if (!routine.securityDefiner) {
+    const invoker = RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET.has(routine.name);
+    if (routine.securityDefiner === invoker) {
       violations.push(
-        `owner-internal target-schema helper ${routine.name} is not SECURITY DEFINER`,
+        `owner-internal target-schema helper ${routine.name} is not SECURITY ${invoker ? "INVOKER" : "DEFINER"}`,
       );
     }
     const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
@@ -3671,6 +3676,31 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
       }
     }
+  }
+
+  const slackFileUploadTables = posture.privateTables.filter(
+    (table) => table.name === SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+  );
+  if (slackFileUploadTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("Slack file upload private relation is missing or ambiguous");
+  } else {
+    const table = slackFileUploadTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("Slack file upload relation lacks active FORCE-RLS session isolation");
+    }
+    if (
+      !table.select ||
+      !table.insert ||
+      !table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has unsafe Slack file upload ledger privileges");
+    }
+    const sessionOwner = tableByName.get("sessions")?.owner;
+    if (sessionOwner && table.owner !== sessionOwner)
+      violations.push("Slack file upload owner does not match session authority");
   }
 
   const scheduledSlackMessageTables = posture.privateTables.filter(

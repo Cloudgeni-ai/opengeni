@@ -12,7 +12,7 @@ Canonical sources: `packages/contracts/src/workspace-integrations.ts`
 list, headers, and signature scheme, exported as
 `@opengeni/contracts/workspace-integration-wire` so the SDK root stays
 zod-free), `packages/db/src/workspace-integrations.ts`
-and migration `0535_workspace_integration_primitives.sql` (storage and the
+and migration `0536_workspace_integration_primitives.sql` (storage and the
 delivery outbox), `apps/api/src/routes/workspace-integrations.ts` (routes),
 `apps/api/src/workspace-webhook-dispatch.ts` (delivery pump),
 `apps/worker/src/activities/workspace-credential-provider.ts` (credential

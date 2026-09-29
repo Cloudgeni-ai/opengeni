@@ -3,6 +3,7 @@ export type SessionSearchRoute = {
   find?: string;
   matchSequence?: number;
   matchOffset?: number;
+  searchOrigin?: "session-search";
 };
 
 export function parseSessionSearchRoute(search: Record<string, unknown>): SessionSearchRoute {
@@ -10,6 +11,7 @@ export function parseSessionSearchRoute(search: Record<string, unknown>): Sessio
     return {};
   }
   const result: SessionSearchRoute = { find: search.find };
+  if (search.searchOrigin === "session-search") result.searchOrigin = "session-search";
   const sequence = searchInteger(search.matchSequence);
   const offset = searchInteger(search.matchOffset);
   if (sequence !== null && sequence > 0) {

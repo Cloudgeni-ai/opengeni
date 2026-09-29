@@ -1233,6 +1233,43 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(sessionless)).not.toContain("slack_bot_prepare_message");
   });
 
+  test("Slack file upload is explicit, session-bound, and requires source-file permission", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_upload_file");
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["connections:read", "files:read"], ["slack_bot_upload_file"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "slack-file-upload-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "slack_bot_upload_file",
+      );
+      expect(Object.keys(tool?.inputSchema.properties ?? {}).sort()).toEqual([
+        "fileId",
+        "operationId",
+      ]);
+      expect(tool?.description).toContain("personal Slack account");
+      expect(tool?.description).toContain("same operationId");
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+    for (const permissions of [["connections:read"], ["files:read"]] as const) {
+      expect(
+        registeredToolNames(
+          buildOpenGeniMcpServer(deps(), grant([...permissions], ["slack_bot_upload_file"])),
+        ),
+      ).not.toContain("slack_bot_upload_file");
+    }
+    const sessionless = buildOpenGeniMcpServer(deps(), {
+      ...grant(["connections:read", "files:read"], ["slack_bot_upload_file"]),
+      metadata: { firstPartyMcpTools: ["slack_bot_upload_file"] },
+    });
+    expect(registeredToolNames(sessionless)).not.toContain("slack_bot_upload_file");
+  });
+
   test("capability discovery is default-visible but separates search from human authorization", async () => {
     const server = buildOpenGeniMcpServer(
       deps(),
