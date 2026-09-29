@@ -60,5 +60,5 @@ export const embeddingMigrationTail = [
   // References the files scope identity introduced by withheld 0461.
   "0535_slack_file_upload_operations.sql",
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
-  "0536_scheduled_admission_refusals.sql",
+  "0538_scheduled_admission_refusals.sql",
 ];

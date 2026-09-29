@@ -143,13 +143,14 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0537_external_workspace_member_permission_updates.sql",
+          (migration) => migration.path === "0538_scheduled_admission_refusals.sql",
         )
-          ? "0537_external_workspace_member_permission_updates.sql"
+          ? "0538_scheduled_admission_refusals.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0536_scheduled_admission_refusals.sql",
+                (migration) =>
+                  migration.path === "0537_external_workspace_member_permission_updates.sql",
               )
-            ? "0536_scheduled_admission_refusals.sql"
+            ? "0537_external_workspace_member_permission_updates.sql"
             : sourceContract.migrations.some(
                   (migration) => migration.path === "0535_slack_file_upload_operations.sql",
                 )
@@ -329,7 +330,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0535_slack_file_upload_operations.sql",
     );
     const scheduledAdmissionRefusals = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0536_scheduled_admission_refusals.sql",
+      (migration) => migration.path === "0538_scheduled_admission_refusals.sql",
     );
     const externalWorkspaceMemberPermissionUpdates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0537_external_workspace_member_permission_updates.sql",
@@ -973,11 +974,11 @@ describe("release schema contract", () => {
       ...(slackFileUploadOperations
         ? { latestMigration: "0535_slack_file_upload_operations.sql" }
         : {}),
-      ...(scheduledAdmissionRefusals
-        ? { latestMigration: "0536_scheduled_admission_refusals.sql" }
-        : {}),
       ...(externalWorkspaceMemberPermissionUpdates
         ? { latestMigration: "0537_external_workspace_member_permission_updates.sql" }
+        : {}),
+      ...(scheduledAdmissionRefusals
+        ? { latestMigration: "0538_scheduled_admission_refusals.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -1007,7 +1008,7 @@ describe("release schema contract", () => {
             "0532_product_lifecycle_fact_export.sql",
             "0533_turn_surface_analytics.sql",
             "0535_slack_file_upload_operations.sql",
-            "0536_scheduled_admission_refusals.sql",
+            "0538_scheduled_admission_refusals.sql",
             "0537_external_workspace_member_permission_updates.sql",
           ].includes(migration.path),
       ),
@@ -2478,7 +2479,7 @@ describe("release schema contract", () => {
     let completeSourceContract = await contractWithoutMigrations([
       "0534_scheduled_admission_diagnostics.sql",
       "0535_slack_file_upload_operations.sql",
-      "0536_scheduled_admission_refusals.sql",
+      "0538_scheduled_admission_refusals.sql",
       "0537_external_workspace_member_permission_updates.sql",
       "0525_attached_browser_opaque_generations.sql",
       "0527_session_attention_excludes_commentary.sql",
@@ -3017,7 +3018,7 @@ describe("release schema contract", () => {
       "0532_product_lifecycle_fact_export.sql",
       "0533_turn_surface_analytics.sql",
       "0535_slack_file_upload_operations.sql",
-      "0536_scheduled_admission_refusals.sql",
+      "0538_scheduled_admission_refusals.sql",
       "0537_external_workspace_member_permission_updates.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),

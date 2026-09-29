@@ -14,7 +14,7 @@ const sharingMigration = "0501_session_sharing_execution.sql";
 // Replaces the owner trigger installed by this cutover.
 const admissionDiagnosticsMigration = "0534_scheduled_admission_diagnostics.sql";
 // Replaces 0534's scheduled-run triggers; withheld with it.
-const admissionRefusalsMigration = "0536_scheduled_admission_refusals.sql";
+const admissionRefusalsMigration = "0538_scheduled_admission_refusals.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {

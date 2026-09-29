@@ -92,7 +92,7 @@ const withheldMigrationNames = [
   // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
   "0534_scheduled_admission_diagnostics.sql",
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
-  "0536_scheduled_admission_refusals.sql",
+  "0538_scheduled_admission_refusals.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
