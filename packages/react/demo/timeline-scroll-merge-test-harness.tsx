@@ -4,6 +4,10 @@ import { createRoot } from "react-dom/client";
 
 import { MessageTimeline, type TimelineItem } from "@opengeni/react";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 type TimelineMergeHarness = {
   prependActivity: () => void;

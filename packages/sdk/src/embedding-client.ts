@@ -40,6 +40,19 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
+  /** Contract-checked successful JSON GET with its headers intact, for same-origin
+   * proxies that must forward paging metadata. Non-2xx responses throw. */
+  async requestJsonResponse(
+    path: string,
+    query: Record<string, string> = {},
+    options: import("./client").OpenGeniRequestOptions = {},
+  ): Promise<import("./client").FetchResponse> {
+    return await this.requestResponse("GET", path, query, {
+      ...options,
+      accept: "application/json",
+    });
+  }
+
   /** Server-side organization-key client scoped to one host-authenticated user.
    * Does not mutate this client, provision workspace membership, or link native
    * identities. The API verifies key and membership authority on each request. */
@@ -202,6 +215,24 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     return this.requestJson(
       "POST",
       `/v1/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(membershipId)}/revoke`,
+      request,
+    );
+  }
+
+  /** Replace an existing external member's permissions in one shared
+   * workspace. Keyed by `operationId`: reuse the exact body after response
+   * loss. Narrowing makes live authority re-check; nothing is cancelled. */
+  async updateExternalWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    request: import("@opengeni/contracts/external-identities").UpdateExternalWorkspaceMemberRequest,
+  ): Promise<
+    import("@opengeni/contracts/external-identities").UpdateExternalWorkspaceMemberResponse
+  > {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/external-members/${encodeURIComponent(membershipId)}`,
       request,
     );
   }

@@ -1022,7 +1022,9 @@ Two operator-visible consequences follow the commit. `POST /v1/organizations`
 becomes the one-time setup entry point rather than an organization factory: a
 human who already holds an organization membership can no longer create a
 second organization through it. And `OPENGENI_API_CONTRACT_REVISION` advances,
-so every mutating client must be on the new bundle before admission reopens.
+so every cookie-authenticated browser tab must reload onto the new bundle before
+its next mutation; bearer-authenticated integrations stay admitted (see
+`docs/architecture.md` §3.10).
 
 No backfill is required. A human left holding a legacy `better-auth:user`
 fallback organization whose organization membership was never anchored is
@@ -3792,3 +3794,17 @@ binary afterward. Do not use an older binary as the rollback image after this
 routine contract changes. Whole-session forks retain their existing signature.
 See [Forking at a message](organization-tenancy.md#forking-at-a-message) for
 boundary validation and compacted-history limitations.
+
+### Restricting native human accounts
+
+Set `OPENGENI_ALLOWED_USER_EMAILS` to a comma-separated list of exact email
+addresses to restrict native human signup, sign-in and existing browser sessions.
+Addresses are case-insensitive; email verification remains required. Unset keeps
+open registration; an explicitly empty or invalid list fails startup. Apply the
+same value to all API replicas and restart them when changing the list.
+
+This is deployment admission, not an organization membership grant. It does not
+change organization API keys, external-user authentication, sandbox credentials,
+webhook signatures or signed storage URLs. Review existing issued credentials
+separately when restricting an already-running deployment: removing an email does
+not revoke its previously issued API keys or cancel already accepted work.

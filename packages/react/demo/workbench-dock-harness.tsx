@@ -3,6 +3,10 @@ import { useState } from "react";
 import { Markdown, OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 /* ----------------------------------------------------------------------------
    M7 full-dock harness — mounts the real `<SandboxWorkspace>` (dock frame +

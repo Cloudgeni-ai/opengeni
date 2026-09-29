@@ -11,6 +11,7 @@ import { fakeCapabilities, fakeFileDiff, fakeHeadlessCapabilities } from "./sand
 import { desktopPrimaryShortcut, DesktopViewer } from "../src/components/desktop-viewer";
 import { DiffView } from "../src/components/diff-view";
 import { PierreDiff } from "../src/components/pierre-diff";
+import { enablePierreDiffs } from "../src/diffs";
 import { FileBrowser } from "../src/components/file-browser";
 import { SandboxFiles } from "../src/components/sandbox-files";
 import type { UseSandboxFilesResult } from "../src/hooks/use-sandbox-files";
@@ -18,6 +19,7 @@ import { CapturedFileUnavailableError } from "../src/hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../src/hooks/use-sandbox-git";
 
 registerDom();
+enablePierreDiffs();
 
 function filesResult(overrides: Partial<UseSandboxFilesResult> = {}): UseSandboxFilesResult {
   return {

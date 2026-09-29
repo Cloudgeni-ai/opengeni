@@ -620,22 +620,34 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     expect(result.action).toBe("start");
   });
 
-  test("settles a permanently blocked schedule occurrence instead of retrying forever", async () => {
+  test("settles a credit-blocked occurrence as a visible skipped run instead of retrying forever", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const { connection } = await botConnection(workspace);
     const task = await taskFixture(workspace, connection.id, "new_session_per_run");
-
-    expect(
-      await activities({
-        billingMode: "stripe",
-        usageLimitsMode: "managed",
-      }).dispatchScheduledTaskRun({
-        workspaceId: workspace.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-        producerKey: `slack-routing-${crypto.randomUUID()}`,
-      }),
-    ).toEqual({ action: "blocked", reason: "insufficient_credits" });
+    const input = {
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey: `slack-routing-${crypto.randomUUID()}`,
+    };
+    const blocked = activities({ billingMode: "stripe", usageLimitsMode: "managed" });
+    const expected = {
+      action: "blocked",
+      reason: "insufficient_credits",
+      runId: expect.any(String),
+      refusal: { version: 1, reason: "insufficient_credits", retryable: true },
+    };
+    expect(await blocked.dispatchScheduledTaskRun(input)).toEqual(expected);
+    // Redelivery replays the same receipt instead of adding a second run.
+    expect(await blocked.dispatchScheduledTaskRun(input)).toEqual(expected);
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "skipped",
+      error: "insufficient_credits",
+      sessionId: null,
+      admissionRefusal: { version: 1, reason: "insufficient_credits", retryable: true },
+    });
   });
 });

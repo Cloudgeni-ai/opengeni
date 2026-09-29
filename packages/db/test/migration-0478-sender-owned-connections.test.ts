@@ -13,6 +13,8 @@ const accountBindingsMigration = "0494_mcp_account_bindings.sql";
 const sharingMigration = "0501_session_sharing_execution.sql";
 // Replaces the owner trigger installed by this cutover.
 const admissionDiagnosticsMigration = "0534_scheduled_admission_diagnostics.sql";
+// Replaces 0534's scheduled-run triggers; withheld with it.
+const admissionRefusalsMigration = "0539_scheduled_admission_refusals.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
@@ -33,9 +35,9 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
     await owner.unsafe(
       `CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
     );
-    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration}), (${admissionDiagnosticsMigration})`;
+    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration}), (${admissionDiagnosticsMigration}), (${admissionRefusalsMigration})`;
     await migrate(db.ownerUrl);
-    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration}, ${admissionDiagnosticsMigration})`;
+    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration}, ${admissionDiagnosticsMigration}, ${admissionRefusalsMigration})`;
     const [posture] =
       await owner`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
     expect(posture).toMatchObject({ rolsuper: false, rolbypassrls: false });

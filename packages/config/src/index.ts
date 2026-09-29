@@ -1,3 +1,4 @@
+export { managedUserEmailAllowed } from "./managed-user-admission";
 import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
@@ -1371,6 +1372,10 @@ const SettingsSchema = z.object({
   managedAuthGithubClientSecret: z.string().optional(),
   // Rolling browser login-slot compatibility. Repository/deployment default is
   // deliberately legacy; changing to broker is an operator-authorized rollout.
+  allowedUserEmails: z
+    .array(z.email().transform((email) => email.toLowerCase()))
+    .min(1)
+    .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
@@ -3575,6 +3580,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthGoogleClientSecret: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET"),
     managedAuthGithubClientId: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID"),
     managedAuthGithubClientSecret: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET"),
+    allowedUserEmails:
+      source.OPENGENI_ALLOWED_USER_EMAILS === undefined
+        ? undefined
+        : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",

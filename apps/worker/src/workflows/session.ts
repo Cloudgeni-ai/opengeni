@@ -79,6 +79,12 @@ const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
  * nondeterministic until a patched worker returns.
  */
 export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
+/**
+ * A scheduled run's approval timeout sleeps on a durable Temporal timer. A
+ * history recorded by a worker that ignored the deadline has no timer command
+ * there, so replay only arms it behind this marker.
+ */
+export const SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH = "session-scheduled-human-wait-timeout-v1";
 export const CAPACITY_TIMER_WAKE_JITTER_MAX_MS = 60_000;
 export const CAPACITY_WAKE_JITTER_MAX_MS = 30_000;
 
@@ -791,8 +797,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenApprovalWakeups = approvalWakeups;
       const seenWakeups = wakeups;
       const seenInterruptionWakeups = interruptionWakeups;
+      const scheduledRunTimeout =
+        peek.scheduledRunTimeout && peek.expiresAt && patched(SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH)
+          ? peek.scheduledRunTimeout
+          : undefined;
       const timeoutMs =
-        (peek.humanInputRequestId || peek.interactionInterventionId) && peek.expiresAt
+        (peek.humanInputRequestId || peek.interactionInterventionId || scheduledRunTimeout) &&
+        peek.expiresAt
           ? humanInputDeadlineWaitMs(peek.expiresAt)
           : undefined;
       const wakeCondition = () =>
@@ -823,6 +834,20 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           interventionId: peek.interactionInterventionId,
+        });
+        if (expiry.action === "stale") {
+          await condition(wakeCondition, HUMAN_INPUT_EXPIRY_STALE_RETRY_MS);
+        }
+      } else if (!woke && scheduledRunTimeout) {
+        // The scheduler answers for the unanswered person through the same
+        // acceptance boundary (a labelled system rejection/skip); the loop
+        // then re-peeks and resumes the turn like any decision.
+        const expiry = await activity.expireScheduledRunHumanWait({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: scheduledRunTimeout.turnId,
+          runId: scheduledRunTimeout.runId,
         });
         if (expiry.action === "stale") {
           await condition(wakeCondition, HUMAN_INPUT_EXPIRY_STALE_RETRY_MS);

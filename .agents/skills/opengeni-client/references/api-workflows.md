@@ -32,7 +32,7 @@ import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
 
 const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;
@@ -62,10 +62,10 @@ for await (const event of client.streamEvents(workspace.id, created.id)) {
 }
 ```
 
-This code belongs on the product server, not in a browser bundle. For a browser
-timeline, expose a tenant-scoped same-origin route and use the SDK's
-`proxySessionEventStream` helper. Authenticate the product user and resolve the
-allowed workspace/session before opening the upstream stream.
+This code belongs on the product server, not in a browser bundle. For the
+browser, mount `createSessionProxyHandler` (the default conversation backend) or,
+in a custom route, the SDK's `proxySessionEventStream` helper. Authenticate the
+product user and resolve the allowed workspace/session before any upstream call.
 
 `ensureWorkspace` maps through `PUT /v1/workspaces/external`. Use a stable
 external source/id pair and persist the returned opaque id. The returned

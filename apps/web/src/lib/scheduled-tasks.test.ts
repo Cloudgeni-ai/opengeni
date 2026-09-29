@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ScheduledTask, ScheduledTaskRun } from "@/types";
 import {
   agentConfigFromFormState,
+  scheduledTaskAwaitingHumanText,
   applyScheduledTaskCadence,
   formStateFromScheduledTask,
   groupScheduledTasksForList,
@@ -961,5 +962,20 @@ describe("scheduled task access in plain words", () => {
         missingOpenGeniTools: [],
       }),
     ).toBe(false);
+  });
+});
+
+describe("scheduledTaskAwaitingHumanText", () => {
+  test("says when the latest run waits on a person and when the timeout answers", () => {
+    expect(scheduledTaskAwaitingHumanText(null)).toBeNull();
+    expect(
+      scheduledTaskAwaitingHumanText({ since: "2026-09-29T08:00:00.000Z", expiresAt: null }),
+    ).toBe("The latest run is waiting for a person to approve a tool or answer a question.");
+    expect(
+      scheduledTaskAwaitingHumanText({
+        since: "2026-09-29T08:00:00.000Z",
+        expiresAt: "2026-09-29T09:00:00.000Z",
+      }),
+    ).toContain("the scheduler rejects it automatically");
   });
 });
