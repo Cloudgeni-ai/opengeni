@@ -107,6 +107,8 @@ OpenGeni's durable event stream can support different product projections:
 
 The customer frontend chooses which event types and fields to render. Hiding an event from the chat view does not remove it from OpenGeni's durable history or from authorized audit readers. Do not promise data erasure or secrecy from presentation filtering.
 
+Each `session.requiresAction` event replaces the pending approval set. Read only `payload.approvals[].id`, `.name`, and `.arguments` (SDK type `SessionApprovalRequest`); other fields differ between a turn's first pause and later ones and exist for compatibility. Send `sendApprovalDecision({ approvalId: approval.id, decision })`: `id` is the pending tool call id, not the event id. `approvalsFromRequiresAction` / `projectPendingApprovals` from `@opengeni/react` already normalize older events.
+
 Even a final-answer-only UI should surface states the user must act on: failure, cancellation, credit or policy denial, approval requests, human-input requests, reconnect status, and a way to retry safely. Avoid presenting tool failures as ordinary assistant prose when product state can represent them more clearly.
 
 ## Fit the host product

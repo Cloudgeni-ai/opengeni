@@ -15904,6 +15904,39 @@ export function approvalIdentifier(value: unknown): string | null {
   return String(candidate);
 }
 
+/**
+ * Stable public fields on every `session.requiresAction` approval entry.
+ * `id` is exactly the `approvalId` that `user.approvalDecision` accepts (the
+ * tool call id); `name` is the model-visible tool name. Producers add these on
+ * top of their historical fields (`rawItem` on a turn's first pause, `raw` on
+ * later pauses), which stay for compatibility.
+ */
+export type SessionApprovalRequestPublicFields = {
+  id: string;
+  name: string;
+  arguments: unknown;
+};
+
+export function withPublicApprovalFields<T>(
+  value: T,
+): T | (T & SessionApprovalRequestPublicFields) {
+  const id = approvalIdentifier(value);
+  if (id === null || !value || typeof value !== "object") return value;
+  const approval = value as Record<string, unknown>;
+  const nested = [approval.rawItem, approval.raw].filter(
+    (candidate): candidate is Record<string, unknown> =>
+      Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate),
+  );
+  const name = [approval.name, approval.toolName, ...nested.map((item) => item.name)].find(
+    (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
+  );
+  const args =
+    approval.arguments !== undefined
+      ? approval.arguments
+      : (nested.find((item) => item.arguments !== undefined)?.arguments ?? null);
+  return { ...value, id, name: name ?? "tool", arguments: args };
+}
+
 function requireMessageTextOrAnnotations(
   value: { text: string; annotations: readonly unknown[] },
   ctx: z.RefinementCtx,

@@ -8002,10 +8002,28 @@ export type UserMessageEventInput = {
   };
 };
 
+/**
+ * Stable fields of each `session.requiresAction` `payload.approvals[]` entry.
+ * Entries also carry producer-specific compatibility fields (`rawItem` on a
+ * turn's first pause, `raw` on later ones); read only these three. Events
+ * written before these fields existed need `approvalsFromRequiresAction`
+ * from `@opengeni/react` or `approvalIdentifier` from `@opengeni/contracts`.
+ */
+export type SessionApprovalRequest = {
+  /** Pass as `sendApprovalDecision({ approvalId })`; this is the tool call id. */
+  id: string;
+  /** Model-visible tool name, for example `crm__update_record`. */
+  name: string;
+  /** Tool arguments as the model produced them (usually a JSON string). */
+  arguments: unknown;
+  [compatibilityField: string]: unknown;
+};
+
 export type UserApprovalDecisionEventInput = {
   type: "user.approvalDecision";
   clientEventId?: string | undefined;
   payload: {
+    /** `session.requiresAction` `approvals[].id` (the pending tool call id). */
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
