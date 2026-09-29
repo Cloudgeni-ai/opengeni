@@ -985,7 +985,7 @@ async function startLegacyDmTask(
   input: { channelId: string; rootTimestamp: string; text: string },
 ) {
   const eventId = `E_LEGACY_${crypto.randomUUID()}`;
-  value.slack.postFailuresByChannel.set(input.channelId, { status: 500 });
+  value.slack.postFailuresByChannel.set(input.channelId, { status: 429, retryAfterSeconds: 30 });
   expect(
     (
       await postEvent(value.app, {
@@ -5940,6 +5940,236 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     );
   }, 60_000);
 
+  test("a task that settles before its first message posts loses the button once it posts", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "D_SETTLE_EARLY";
+    const rootTimestamp = "1760200000.000001";
+    const eventId = `E_SETTLE_EARLY_${crypto.randomUUID()}`;
+    // Slack refuses the first message outright, so it is retried later.
+    value.slack.failuresByText.set("|OpenGeni started this task>", {
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: rootTimestamp,
+            text: "Answer before you can even say hello",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    expect(route?.session_id).toBeTruthy();
+    expect(value.slack.posts).toHaveLength(0);
+    // The result is delivered and the task settles while the first message is
+    // still waiting for its retry, so there is no posted message to update.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Early result." } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.map((post) => post.text)).toEqual(["Early result."]);
+    expect((await interactions(value.owner.workspaceId))[0]!.terminal_delivery_state).toBe(
+      "completed",
+    );
+
+    value.slack.failuresByText.clear();
+    await shared!.admin`
+      update slack_interaction_inbox
+      set status = 'pending', retry_at = null, claim_holder_id = null, claim_expires_at = null
+      where provider_event_id = ${eventId}`;
+    await drainAll(value.deps);
+    const first = value.slack.posts.find(isStartMessage)!;
+    expect(first).toBeDefined();
+    // Posted with its Stop, then immediately retired by its own acknowledgement.
+    expect(first.blocks).toEqual([{ type: "section", text: { type: "mrkdwn", text: first.text } }]);
+    const handles = await shared!.admin<{ action_kind: string; status: string; result: string }[]>`
+      select action_kind, status, result from slack_interaction_action_handles
+      where interaction_id = ${route!.id}`;
+    expect(handles).toEqual([
+      { action_kind: "session_pause", status: "stale", result: "task_settled" },
+    ]);
+  }, 60_000);
+
+  test("a first message Slack no longer has does not hold up the settled result", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "D_SETTLE_GONE";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_SETTLE_GONE_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1760300000.000001",
+            text: "Start a task whose first message is deleted",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    // Someone deleted the first message in Slack: its update now fails with
+    // `message_not_found`.
+    value.slack.posts.splice(value.slack.posts.findIndex(isStartMessage), 1);
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Result without a first message." } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.map((post) => post.text)).toEqual(["Result without a first message."]);
+    const [settled] = await interactions(value.owner.workspaceId);
+    expect(settled!.terminal_delivery_state).toBe("completed");
+    const handles = await shared!.admin<{ status: string; result: string }[]>`
+      select status, result from slack_interaction_action_handles
+      where interaction_id = ${route!.id}`;
+    expect(handles).toEqual([{ status: "stale", result: "task_settled" }]);
+  }, 60_000);
+
+  test("a labelled compact progress post keeps the workspace-line bytes an older image bound", async () => {
+    if (!available) return;
+    const value = await fixture({ slackWorkspaceRouting: true, routedWorkspaceName: "Platform" });
+    const routed = value.routed!;
+    const channelId = "C_PROGRESS_OLDER_IMAGE";
+    const rootTimestamp = "1760400000.000001";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PROGRESS_OLDER_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: rootTimestamp,
+            text: "a routed task with progress",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await shared!.admin<{ id: string; session_id: string }[]>`
+      select id, session_id from slack_interactions where workspace_id = ${routed.workspaceId}`;
+    value.slack.failuresByText.set("Progress an older image claimed", {
+      status: 429,
+      retryAfterSeconds: 30,
+    });
+    await appendSessionEvents(client.db, routed.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "Progress an older image claimed" } },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const attempted = value.slack.postAttempts.at(-1)!;
+    expect(attempted.text).toBe("Progress an older image claimed");
+    const operationId = attempted.clientMessageId!;
+    // Seed the claim an older image would have left for this same progress
+    // operation: bound to the bytes with the workspace line.
+    await shared!.admin`
+      update slack_bot_post_operations
+      set request_digest = ${slackPostDigest(value, {
+        operationId,
+        targetId: channelId,
+        threadTimestamp: rootTimestamp,
+        text: "Progress an older image claimed\n-> Platform",
+        blocks: null,
+      })}
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    value.slack.failuresByText.clear();
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    const postsBefore = value.slack.posts.length;
+    await drainAll(value.deps);
+    // The retry keeps the bound bytes under the same operation instead of
+    // conflicting on every attempt.
+    expect(value.slack.posts.slice(postsBefore)).toEqual([
+      expect.objectContaining({
+        text: "Progress an older image claimed\n-> Platform",
+        clientMessageId: operationId,
+      }),
+    ]);
+    const [delivery] = await shared!.admin<{ delivery_last_error_code: string | null }[]>`
+      select delivery_last_error_code from slack_interactions where id = ${route!.id}`;
+    expect(delivery!.delivery_last_error_code).toBeNull();
+  }, 60_000);
+
+  test("controls an older image rendered on a compact task keep that format's Resume card", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "D_OLDER_IMAGE_CONTROLS";
+    const rootTimestamp = "1760500000.000001";
+    const eventId = `E_OLDER_IMAGE_CONTROLS_${crypto.randomUUID()}`;
+    const start = {
+      teamId: value.teamId,
+      eventId,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: channelId,
+        ts: rootTimestamp,
+        text: "A compact task an older image also acknowledges",
+      },
+    };
+    expect((await postEvent(value.app, start)).status).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await shared!.admin<{ id: string; start_message_line: string }[]>`
+      select id, start_message_line from slack_interactions
+      where workspace_id = ${value.owner.workspaceId}`;
+    // An older image, which neither reads nor writes the start line, repairs the
+    // same acknowledgement during the rollout: it posts the previous format
+    // under its own operation id.
+    await shared!.admin`
+      update slack_interactions set start_message_line = null where id = ${route!.id}`;
+    await shared!.admin`
+      delete from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId} and provider_event_id = ${eventId}`;
+    expect((await postEvent(value.app, start)).status).toBe(200);
+    await drainAll(value.deps);
+    await shared!.admin`
+      update slack_interactions set start_message_line = ${route!.start_message_line}
+      where id = ${route!.id}`;
+    expect(value.slack.posts).toHaveLength(2);
+    const older = value.slack.posts[1]!;
+    expect(older.text).toContain("|Open in OpenGeni>");
+
+    await pressSlackButton(value, {
+      post: older,
+      rootTimestamp,
+      actionId: "opengeni.session.pause",
+      handleId: await pendingHandle(older, "session_pause"),
+      actionTs: "1760500000.000002",
+    });
+    expect(older.text).toBe("OpenGeni task paused.");
+    const card = value.slack.posts.at(-1)!;
+    expect(card.text).toBe("OpenGeni task controls.");
+    await pendingHandle(card, "session_resume");
+  }, 60_000);
+
   test("Stop swaps to Resume on the first message in place and the button leaves when the task settles", async () => {
     if (!available) return;
     const value = await fixture({ linkOther: true });
@@ -6816,6 +7046,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ).toBe(200);
     await drainAll(value.deps);
     const [route] = await interactions(value.owner.workspaceId);
+    const first = value.slack.posts.at(-1)!;
+    const stop = await pendingHandle(first, "session_pause");
 
     expect(
       (
@@ -6850,6 +7082,29 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and session_id = ${route!.session_id}
         and type = 'user.message'`;
     expect(messages[0]!.count).toBe(1);
+    // The first message says so the same way the Stop button does: it now
+    // offers Resume, and nothing new is posted.
+    expect(value.slack.posts).toHaveLength(1);
+    expect(first.text.split("\n")[1]).toBe("Stopped.");
+    const resume = await pendingHandle(first, "session_resume");
+    expect(JSON.stringify(first.blocks)).toContain(resume);
+    const [pressed] = await shared!.admin<{ status: string; result: string | null }[]>`
+      select status, result from slack_interaction_action_handles where id = ${stop}::uuid`;
+    expect(pressed).toEqual({ status: "completed", result: "paused" });
+    await pressSlackButton(value, {
+      post: first,
+      rootTimestamp: "1764000000.000001",
+      actionId: "opengeni.session.resume",
+      handleId: resume,
+      actionTs: "1764000000.000003",
+    });
+    const resumed = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${route!.session_id}
+        and type = 'session.control.resumed'`;
+    expect(resumed[0]!.count).toBe(1);
+    expect(first.text).not.toContain("Stopped.");
   });
 
   test("an old Status card carries Make recurring only for a requester with schedule authority", async () => {

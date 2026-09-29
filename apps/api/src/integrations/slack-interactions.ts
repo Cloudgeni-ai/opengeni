@@ -2779,7 +2779,26 @@ async function acknowledgeSlackSession(
     });
     if (!rekeyed) throw new Error("Slack acknowledgement could not rekey its durable route");
   }
+  if (interaction.startMessageLine !== null) {
+    // The task may have settled while this post was still being retried, when
+    // the delivery pump had no posted message to take the button off.
+    const current = await getSlackInteractionById(deps.db, {
+      accountId: interaction.accountId,
+      workspaceId: interaction.workspaceId,
+      interactionId: interaction.id,
+    });
+    if (current && SLACK_SETTLED_DELIVERY_STATES.has(current.terminalDeliveryState)) {
+      await retireSlackStartMessageButton(deps, client, current, {
+        accountId: entry.accountId,
+        workspaceId: entry.workspaceId,
+      });
+    }
+  }
 }
+
+/** Delivery states that mean the task itself settled. */
+const SLACK_SETTLED_DELIVERY_STATES: ReadonlySet<SlackInteraction["terminalDeliveryState"]> =
+  new Set(["completed", "failed", "cancelled"]);
 
 /**
  * Reserve the one button a compact first message carries. The action key is
@@ -3691,6 +3710,7 @@ async function continueSlackSession(
         reason: "Stopped from the originating Slack thread",
       },
     );
+    await showSlackStartMessageStopped(deps, grant, interaction, entry);
     return;
   }
   const pending = await listSessionHumanInputRequests(
@@ -3868,7 +3888,15 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     sessionId: handle.sessionId,
   });
   const outcome = await executeSlackAction(deps, grant, interaction, handle);
-  if (interaction.startMessageLine !== null) {
+  // A compact task's controls live only on its first message. Control buttons
+  // anywhere else on a compact interaction were rendered by an older image during
+  // a rolling deploy, so they keep that format's outcome, including the controls
+  // card that carries Resume.
+  if (
+    interaction.startMessageLine !== null &&
+    (!SLACK_CONTROL_ACTION_KINDS.has(handle.actionKind) ||
+      handle.messageOperationId === slackAcknowledgementOperationId(interaction))
+  ) {
     await applyCompactSlackActionOutcome(
       deps,
       client,
@@ -3950,39 +3978,18 @@ async function applyCompactSlackActionOutcome(
   entry: SlackInteractionInboxEntry,
 ) {
   const target = { accountId: handle.accountId, workspaceId: handle.workspaceId } as const;
-  const startOperationId = slackAcknowledgementOperationId(interaction);
   if (
     (handle.actionKind === "session_pause" || handle.actionKind === "session_resume") &&
-    handle.messageOperationId === startOperationId
+    handle.messageOperationId === slackAcknowledgementOperationId(interaction)
   ) {
-    const stopped = handle.actionKind === "session_pause";
-    const nextKind = stopped ? "session_resume" : "session_pause";
-    const next = await reserveSlackStartMessageButton(deps, interaction, startOperationId, {
-      actionKind: nextKind,
-      actionKey: `${startOperationId}:${nextKind}:${handle.id}`,
-    });
-    const message = slackStartMessage(deps, interaction.startMessageLine, {
-      hint: interaction.firstTaskHint === true,
-      stopped,
-      button: next,
-    });
-    await client.updateMessage({
-      // Its own seed: an older image renders the previous format for this click.
-      operationId: deterministicUuid(`slack-start-update:${handle.id}:${outcome.result}`),
+    await swapSlackStartMessageButton(deps, client, interaction, handle, outcome.result, {
       channelId: entry.slackChannelId,
       timestamp: entry.slackMessageTs,
-      text: message.text,
-      blocks: message.blocks,
-    });
-    await settleSlackInteractionActionHandles(deps.db, {
-      ...target,
-      handleId: handle.id,
-      result: outcome.result,
-      supersedeSiblings: false,
     });
     return;
   }
-  const text = boundedOutput(outcome.text);
+  // Exactly the previous format's bytes for an unlabelled interaction.
+  const text = outcome.text;
   await client.updateMessage({
     operationId: deterministicUuid(
       slackPostSeed(interaction, `slack-action-update:${handle.id}:${outcome.result}`),
@@ -4000,6 +4007,117 @@ async function applyCompactSlackActionOutcome(
   });
 }
 
+const SLACK_CONTROL_ACTION_KINDS: ReadonlySet<SlackInteractionActionKind> = new Set([
+  "session_status",
+  "session_pause",
+  "session_resume",
+]);
+
+/**
+ * Swap the one button on a compact task's first message after its lifecycle
+ * action ran: Stop becomes Resume (with a `Stopped.` note), Resume becomes Stop.
+ *
+ * The replacement is reserved under a key derived from the pressed handle, so a
+ * retry finds the same one, the message is re-rendered from its frozen line, and
+ * only then is the pressed handle settled, without superseding the replacement
+ * it now sits next to. The update has its own seed: an older image renders the
+ * previous format for the same click under a different id.
+ */
+async function swapSlackStartMessageButton(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  interaction: SlackInteraction & { startMessageLine: string },
+  pressed: SlackInteractionActionHandle,
+  result: string,
+  message: { channelId: string; timestamp: string },
+) {
+  const stopped = pressed.actionKind === "session_pause";
+  const nextKind = stopped ? "session_resume" : "session_pause";
+  const next = await reserveSlackStartMessageButton(deps, interaction, pressed.messageOperationId, {
+    actionKind: nextKind,
+    actionKey: `${pressed.messageOperationId}:${nextKind}:${pressed.id}`,
+  });
+  const rendered = slackStartMessage(deps, interaction.startMessageLine, {
+    hint: interaction.firstTaskHint === true,
+    stopped,
+    button: next,
+  });
+  await client.updateMessage({
+    operationId: deterministicUuid(`slack-start-update:${pressed.id}:${result}`),
+    channelId: message.channelId,
+    timestamp: message.timestamp,
+    text: rendered.text,
+    blocks: rendered.blocks,
+  });
+  await settleSlackInteractionActionHandles(deps.db, {
+    accountId: pressed.accountId,
+    workspaceId: pressed.workspaceId,
+    handleId: pressed.id,
+    result,
+    supersedeSiblings: false,
+  });
+}
+
+/**
+ * A `stop` reply pauses exactly like the Stop button, so the first message
+ * should say so too: swap its pending Stop to Resume, as a press would.
+ * Nothing to do for the previous format, a task without a button (a reaction),
+ * or a first message that already shows Resume or has settled.
+ *
+ * The pause has already committed, so a first message Slack no longer has does
+ * not fail the reply.
+ */
+async function showSlackStartMessageStopped(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  interaction: SlackInteraction,
+  entry: SlackInteractionInboxEntry,
+) {
+  if (interaction.startMessageLine === null || !interaction.sessionId) return;
+  const operationId = slackAcknowledgementOperationId(interaction);
+  const stop = (
+    await listPendingSlackInteractionMessageActionHandles(deps.db, {
+      accountId: interaction.accountId,
+      workspaceId: interaction.workspaceId,
+      interactionId: interaction.id,
+      messageOperationId: operationId,
+    })
+  ).find((handle) => handle.actionKind === "session_pause");
+  if (!stop) return;
+  // The first message is written by the bot credential, so its ledger row is HOME.
+  const post = await getSlackBotPostOperation(
+    deps.db,
+    entry.workspaceId,
+    entry.connectionId,
+    operationId,
+  );
+  if (post?.status !== "completed" || !post.slackChannelId || !post.slackMessageTimestamp) {
+    return;
+  }
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: entry.accountId,
+    workspaceId: entry.workspaceId,
+    connectionId: entry.connectionId,
+    subjectId: grant.subjectId,
+    sessionId: interaction.sessionId,
+  });
+  try {
+    await swapSlackStartMessageButton(
+      deps,
+      client,
+      { ...interaction, startMessageLine: interaction.startMessageLine },
+      stop,
+      "paused",
+      { channelId: post.slackChannelId, timestamp: post.slackMessageTimestamp },
+    );
+  } catch (error) {
+    if (!permanentSlackStartMessageUpdateError(error)) throw error;
+    console.warn("[slack-interactions] first message not marked stopped", {
+      code: slackDeliveryErrorCode(error),
+    });
+  }
+}
+
 /**
  * Take the button off a compact task's first message once the task settles.
  *
@@ -4009,16 +4127,28 @@ async function applyCompactSlackActionOutcome(
  * retires, so a retry reproduces the same operation and a later settle (after a
  * follow-up turn put nothing back) finds no pending handle and does nothing.
  *
+ * The first message's own acknowledgement calls it too, once its post
+ * completes, for a task that settled while that post was still being retried:
+ * the pump found nothing posted to update then.
+ *
  * A first message Slack no longer has, or that can no longer be updated, is not
- * worth failing a delivery over: the handle is retired anyway, so a leftover
- * button can no longer act on a finished task.
+ * worth failing a delivery over: the handle is retired anyway.
  */
 async function retireSlackStartMessageButton(
   deps: ApiRouteDeps,
   client: OpenGeniSlackBotClient,
-  interaction: SlackInteraction,
+  claimed: SlackInteraction,
   home: { accountId: string; workspaceId: string },
 ) {
+  if (claimed.startMessageLine === null) return;
+  // Re-read: the caller's snapshot can predate the frozen hint decision, and the
+  // settle update must render the same bytes on every attempt.
+  const interaction =
+    (await getSlackInteractionById(deps.db, {
+      accountId: claimed.accountId,
+      workspaceId: claimed.workspaceId,
+      interactionId: claimed.id,
+    })) ?? claimed;
   if (interaction.startMessageLine === null) return;
   const operationId = slackAcknowledgementOperationId(interaction);
   const pending = await listPendingSlackInteractionMessageActionHandles(deps.db, {
@@ -5642,10 +5772,12 @@ async function slackInfoCommandResponse(
   const canCreate = hasPermission(grant.permissions, "sessions:create");
   const canSchedule = hasPermission(grant.permissions, "scheduled_tasks:manage");
   const schedules = canSchedule ? slackSchedulesUrl(deps, installation.workspaceId) : null;
-  // The agent can set up a schedule itself only when new Slack tasks here get
-  // the scheduling tool; it is permission-gated on the same grant.
+  // Asking OpenGeni in a task's thread to repeat it needs the scheduling tool in
+  // new Slack tasks here, `scheduled_tasks:manage` for the tool, and
+  // `sessions:control` for the thread reply itself.
   const agentSchedules =
     canSchedule &&
+    canControl &&
     slackTaskFirstPartyMcpTools(deps.settings, workspace?.settings).includes(
       "scheduled_tasks_create",
     );
