@@ -153,8 +153,10 @@ opacity-muted text.
 - Two widths: **standard** 960px (settings, detail pages, resource lists) and **wide** 1136px
   (catalogs, dashboards). Form pages use one 640px column, left-aligned in the 960px frame so the
   back link and title sit where the detail page puts them.
-- Header rhythm: title top 24, subtitle +4, hairline 16 below; tabs 44px tall; first section 44
-  below the tab rule.
+- Header rhythm: title top 24, subtitle +4, then 16px of space and no hairline under the header
+  (the title and the first section breathe instead; `divider` draws one only where a page needs
+  it). On settings pages the first section heading sits 32px below that. Tabs are 44px tall
+  with their own rule; first section 44 below the tab rule.
 - Sections: heading to description 4, to content 12. **In settings (workspace and
   organization), every section is a grouped card**: the heading and description sit outside,
   above; the rows sit in one card (1px `border`, radius 14, `surface`, 20px side gutter, 4px top
@@ -164,6 +166,13 @@ opacity-muted text.
   no empty card. The settings shell sets this (`SectionVariantProvider variant="group"`); pages
   don't choose it. Outside settings, sections stay open: one hairline with 24 above and below,
   no boxes.
+- **No nested or indented sub-rows.** A setting that only applies while another is on (Voice
+  input > Transcription provider > Try another provider) is an ordinary sibling row in the same
+  card: same left edge, same hairline, same type. Hide dependent rows while the parent is off
+  (preferred), or disable them with the reason. A large group of dependent rows becomes its own
+  card with its own heading instead. `SettingRow` children render this way.
+- A block that is not a SettingRow list (e.g. "Linked product access") takes the same heading
+  plus card treatment; its empty or loading line is a row inside the card.
 - Rows: catalog 76px (40px tile, 2-column grid at 720px+, for discovery); resource 56-64px (32px
   tile, one column, hairline dividers, for things you own). A short list of accounts on a settings
   page may use the 40px tile. Inside an open section a resource list is `flush`: tiles and titles
@@ -227,9 +236,10 @@ Cancel and the action as the primary.
 - **No description that restates the label.** A page subtitle, section description or row
   description earns its place by adding something the label and value don't say. "General" does
   not need "The organization's name and ID"; a "Name" row shows the name, not "The name people
-  see". Drop it rather than paraphrase. The same goes for a section header that only repeats the
-  page title: Settings > General starts with its rows (Name, ID) and no "Organization" or
-  "Workspace" header.
+  see". Drop it rather than paraphrase.
+- **Every settings card has a short heading, and it never repeats the page title.** Settings >
+  General opens with a "Details" card (Name, Type, ID), not a headless card and not a
+  "General", "Workspace" or "Organization" heading.
 - The product is "Opengeni" (lowercase g) in every user-visible string: titles, labels, toasts,
   meta. Code identifiers, package names (`@opengeni/...`), env vars and URLs keep their own
   spelling.
