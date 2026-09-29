@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
+import { userErrorText } from "@/lib/api-error";
 import { managedAuthModeFromSearch } from "@/lib/managed-auth-url";
 import {
   browserAccountBridgeBlockersSnapshot,
@@ -146,13 +147,15 @@ export function BrowserAccountsSignedOutPanel(props: {
   function authenticate(kind: "add" | "reauth", slotId?: string) {
     popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
       onError: (error) =>
-        toast.error("Couldn't start account authentication", { description: String(error) }),
+        toast.error("Couldn't start account authentication", {
+          description: userErrorText(error),
+        }),
     });
   }
 
   function select(slotId: string) {
     void accounts.selectSlot(slotId).catch((error) => {
-      toast.error("Couldn't select that account", { description: String(error) });
+      toast.error("Couldn't select that account", { description: userErrorText(error) });
     });
   }
 
@@ -320,7 +323,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
     popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
       onError: (error) =>
         toast.error("Couldn't start account authentication", {
-          description: String(error),
+          description: userErrorText(error),
         }),
     });
   }
@@ -339,7 +342,9 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
     }
     void accounts
       .selectSlot(targetSlot.id)
-      .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
+      .catch((error) =>
+        toast.error("Couldn't switch accounts", { description: userErrorText(error) }),
+      );
   }
 
   async function signOutSelectedAccount(): Promise<void> {

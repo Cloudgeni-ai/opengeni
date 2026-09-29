@@ -39,6 +39,7 @@ import {
   retainSessionRestartAttemptAfterFailure,
   sessionRestartOperationController,
 } from "@/lib/session-restart-operation-controller";
+import { userErrorText } from "@/lib/api-error";
 import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
@@ -106,7 +107,7 @@ export function SessionInspector(props: {
         description: "The new ordered selection applies to the next turn after sandbox rotation.",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = userErrorText(error);
       setRuntimeFailure(message);
       toast.error("Variable Sets were not updated", { description: message });
     } finally {

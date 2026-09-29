@@ -24,6 +24,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasAccountPermission } from "@/lib/permissions";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact
@@ -147,9 +148,7 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
       setPhase("approved");
     } catch (error) {
       setPhase("error");
-      setErrorMessage(
-        error instanceof Error ? error.message : "Could not approve this machine. Try again.",
-      );
+      setErrorMessage(userErrorText(error, "Could not approve this machine. Try again."));
     }
   }
 
@@ -162,9 +161,7 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
       setPhase("denied");
     } catch (error) {
       setPhase("error");
-      setErrorMessage(
-        error instanceof Error ? error.message : "Could not deny this machine. Try again.",
-      );
+      setErrorMessage(userErrorText(error, "Could not deny this machine. Try again."));
     }
   }
 

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import type { SessionEvent } from "@/types";
 
 const PAGE_SIZE = 30;
@@ -100,7 +101,7 @@ export function ModelContextInspectorPane(props: {
           setError(null);
         }
       } catch (caught) {
-        if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
+        if (!cancelled) setError(userErrorText(caught));
       } finally {
         if (!cancelled) {
           setLoading(false);

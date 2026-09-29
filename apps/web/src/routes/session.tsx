@@ -84,6 +84,7 @@ import {
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
+import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
@@ -814,7 +815,7 @@ export function SessionRoute({
       });
     })().catch((error) => {
       toast.error("Connection succeeded, but setup needs attention", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     });
   }, [
@@ -850,7 +851,7 @@ export function SessionRoute({
         });
       })().catch((error) =>
         toast.error("Connection authorized, but setup needs attention", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         }),
       );
     } else {
@@ -1225,7 +1226,7 @@ export function SessionRoute({
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       throw error instanceof Error ? error : new Error(String(error));
     }
@@ -1973,9 +1974,9 @@ function SessionChatPane(props: {
         setDurableToolsSnapshot(updated);
         setConnectorCustomizingOverride((current) => (current === true ? true : null));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = userErrorText(error);
         setDurableToolsError(message);
-        toast.error("Failed to save session tools", { description: message });
+        toast.error("Couldn't save session tools", { description: message });
         try {
           const refreshed = await context.client.getSession(
             props.session.workspaceId,

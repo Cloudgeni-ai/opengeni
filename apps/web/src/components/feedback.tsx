@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { userErrorText } from "@/lib/api-error";
 
 type FeedbackClient = Pick<OpenGeniClient, "createFeedback" | "listOwnFeedback">;
 
@@ -60,7 +61,7 @@ export function FeedbackDialog(props: {
       props.onSubmitted?.(props.sentiment);
       props.onOpenChange(false);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Could not send feedback. Try again.");
+      setError(`Couldn't send feedback. ${userErrorText(error, "Try again.")}`);
     } finally {
       submitting.current = false;
       setBusy(false);

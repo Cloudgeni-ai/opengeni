@@ -1,6 +1,8 @@
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type { SessionVisibility } from "@opengeni/sdk";
 
+import { userErrorText } from "@/lib/api-error";
+
 type SessionTenancyBlocker =
   | "nonterminal_turn"
   | "nonterminal_attempt"
@@ -100,9 +102,7 @@ export function classifySessionTenancyFailure(error: unknown): SessionTenancyFai
       message:
         error instanceof TypeError
           ? "The server outcome is unknown. Opengeni is checking the session before retrying."
-          : error instanceof Error
-            ? error.message
-            : String(error),
+          : userErrorText(error),
       retainAttempt: error instanceof TypeError,
       reconcile: error instanceof TypeError,
     };
@@ -145,7 +145,7 @@ export function classifySessionTenancyFailure(error: unknown): SessionTenancyFai
   }
   return {
     kind: "other",
-    message: error.message,
+    message: userErrorText(error),
     retainAttempt: false,
     reconcile: error.status === 409,
   };

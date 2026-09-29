@@ -26,6 +26,7 @@ import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary"
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
+import { userErrorText } from "@/lib/api-error";
 import { isAbortError } from "@/lib/session-tools";
 import { orgLabel } from "@/lib/org";
 import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
@@ -199,7 +200,7 @@ export function WorkspaceShellRouteContent({
         if (ownsSlackOperation(operation)) {
           updateSlackAccess(workspaceId, (current) => ({
             ...current,
-            error: error instanceof Error ? error.message : String(error),
+            error: userErrorText(error),
           }));
         }
         return null;
@@ -242,7 +243,7 @@ export function WorkspaceShellRouteContent({
         if (disposed || !ownsSlackOperation(operation)) return;
         updateSlackAccess(workspaceId, (current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          error: userErrorText(error),
         }));
       });
     return () => {
@@ -291,7 +292,7 @@ export function WorkspaceShellRouteContent({
       if (ownsSlackOperation(operation)) {
         updateSlackAccess(workspaceId, (current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          error: userErrorText(error),
         }));
       }
     } finally {
@@ -330,7 +331,7 @@ export function WorkspaceShellRouteContent({
       if (ownsSlackOperation(operation)) {
         updateSlackAccess(workspaceId, (current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          error: userErrorText(error),
         }));
       }
     } finally {
@@ -357,8 +358,8 @@ export function WorkspaceShellRouteContent({
     void refreshPersonalGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
       if (!abortController.signal.aborted && !isAbortError(error)) {
-        toast.error("Failed to load workspace MCP tools", {
-          description: String(error),
+        toast.error("Couldn't load workspace MCP tools", {
+          description: userErrorText(error),
         });
       }
     });
