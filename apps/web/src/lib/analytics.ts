@@ -52,6 +52,11 @@ export type AnalyticsProperties = Record<string, AnalyticsProperty>;
 export type AnalyticsIdentity = Readonly<{
   userId: string;
   accountId: string | null;
+  /**
+   * False while the signed-in user's account is still loading. `app_opened`
+   * and `login_completed` wait for it so they carry the `account` group.
+   */
+  accountResolved: boolean;
 }>;
 type PostHogClient = typeof import("posthog-js").default;
 type ReoClient = {
@@ -78,6 +83,7 @@ let identityGeneration = 0;
 let activeIdentity: AnalyticsIdentity | null = null;
 let identifiedUserId: string | null = null;
 let identifiedAccountId: string | null = null;
+let openedUserId: string | null = null;
 let suspended = false;
 /** Sessions this page started, awaiting their first completed turn (bounded). */
 const pendingFirstTurns = new Map<string, AnalyticsProperties>();
@@ -333,14 +339,14 @@ function applyActiveIdentity(): void {
   if (!activeIdentity || !analyticsCollectionAllowed()) {
     return;
   }
-  const opened = identifiedUserId !== activeIdentity.userId;
-  if (opened) {
+  if (identifiedUserId !== activeIdentity.userId) {
     if (identifiedUserId) {
       posthogClient?.reset();
     }
     posthogClient?.identify(activeIdentity.userId);
     identifiedUserId = activeIdentity.userId;
     identifiedAccountId = null;
+    openedUserId = null;
   }
   if (activeIdentity.accountId && identifiedAccountId !== activeIdentity.accountId) {
     posthogClient?.group("account", activeIdentity.accountId);
@@ -349,7 +355,14 @@ function applyActiveIdentity(): void {
     posthogClient?.resetGroups();
     identifiedAccountId = null;
   }
-  if (opened) captureAnalyticsEvent("app_opened");
+  // The group is applied above before these identity events, so they carry
+  // it whenever the user has an account. A user without one yet (before
+  // organization setup) still reports them once the lookup has finished.
+  if (!activeIdentity.accountResolved) return;
+  if (openedUserId !== activeIdentity.userId) {
+    openedUserId = activeIdentity.userId;
+    captureAnalyticsEvent("app_opened");
+  }
   const login = takeSuccessfulLogin(activeIdentity.userId);
   if (login)
     captureAnalyticsEvent("login_completed", { method: login.method, $insert_id: login.eventId });
@@ -512,6 +525,7 @@ function resetProviderIdentity(force = false): void {
   }
   identifiedUserId = null;
   identifiedAccountId = null;
+  openedUserId = null;
   pendingFirstTurns.clear();
 }
 

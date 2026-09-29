@@ -2979,6 +2979,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(new Set(postPrincipals.map((row) => row.subject_id))).toEqual(
       new Set(["service:slack-interaction"]),
     );
+    // Analytics: the reaction-started task entered through Slack, not the web.
+    const reactionSurfaces = await shared!.admin<{ surface: string | null }[]>`
+      select surface from session_turns
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${route!.session_id}
+        and source in ('user', 'api')`;
+    expect(reactionSurfaces.map((row) => row.surface)).toEqual(["slack"]);
   });
 
   test("distinct same-owner reactions concurrently create one route with one durable message per Slack event", async () => {
@@ -4538,6 +4545,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and session_id = ${routes[0]!.session_id}
         and type = 'user.message'`;
     expect(continued!.count).toBe(2);
+    // Analytics: both new DM tasks and the thread reply entered through Slack,
+    // although Slack acts with the linked person's ordinary access.
+    const dmSurfaces = await shared!.admin<{ surface: string | null }[]>`
+      select surface from session_turns
+      where workspace_id = ${value.owner.workspaceId}
+        and source in ('user', 'api')`;
+    expect(dmSurfaces).toHaveLength(3);
+    expect(dmSurfaces.every((row) => row.surface === "slack")).toBe(true);
     const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
       select
         (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,

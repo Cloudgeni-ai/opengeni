@@ -15,3 +15,8 @@ export function sessionCreationMetadata(
   const origin = origins.getStore();
   return origin ? { ...rest, _opengeniSiteOrigin: origin } : rest;
 }
+
+/** The validated Site origin of the current request, if any. Provenance only. */
+export function currentSiteSessionOrigin(): SiteSessionOrigin | undefined {
+  return origins.getStore();
+}

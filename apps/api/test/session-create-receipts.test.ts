@@ -18,8 +18,11 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { withSiteSessionOrigin } from "@opengeni/core";
-import { resolveSiteSessionOrigin } from "../src/site-session-origin";
+import { resolveTurnSurface, withSiteSessionOrigin } from "@opengeni/core";
+import {
+  resolveSiteSessionOrigin,
+  withOptionalSiteCommandOrigin,
+} from "../src/site-session-origin";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -211,6 +214,23 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       select metadata, parent_session_id from sessions where id = ${sessionId}`;
     expect(row!.metadata._opengeniSiteOrigin).toEqual(origin);
     expect(row!.parent_session_id).toBeNull();
+    // Analytics: the Site-created conversation's first turn records `site`.
+    const siteTurns = await shared!.admin<{ surface: string | null }[]>`
+      select surface from session_turns where session_id = ${sessionId}`;
+    expect(siteTurns.map((turn) => turn.surface)).toEqual(["site"]);
+    // Follow-up Send/Steer from the Site bridge runs in the validated Site
+    // scope; a missing or unverifiable origin leaves the command unscoped.
+    const surfaceFor = (siteId: string | undefined, versionId: string | undefined) =>
+      withOptionalSiteCommandOrigin(client.db, grant.workspaceId, siteId, versionId, async () =>
+        resolveTurnSurface({ grant: { ...grant, principalKind: "human_session" } }),
+      );
+    expect(await surfaceFor(site!.id, version!.id)).toBe("site");
+    expect(await surfaceFor(undefined, undefined)).toBe("web");
+    expect(await surfaceFor("not-a-uuid", version!.id)).toBe("web");
+    expect(await surfaceFor(site!.id, crypto.randomUUID())).toBe("web");
+    expect(
+      await surfaceFor(site!.id, version!.id).then(() => surfaceFor(undefined, undefined)),
+    ).toBe("web");
     await shared!
       .admin`update workspace_artifacts set status = 'archived', title = 'Renamed' where id = ${site!.id}`;
     const renamed = await resolveSiteSessionOrigin(

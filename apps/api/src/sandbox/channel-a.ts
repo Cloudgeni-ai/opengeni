@@ -33,9 +33,7 @@ import {
   getSandboxSessionEnvelope,
   getLiveEnrollmentConnection,
   getSandbox,
-  getScheduledScopedRigVersionMetadata,
   touchLeaseHolder,
-  loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
   readLease,
@@ -58,6 +56,7 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -562,38 +561,12 @@ async function withChannelAOperation<T>(
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironmentValues: Record<string, string> = {};
-  const rigVersion =
-    session.rigId && session.rigVersionId
-      ? await getScheduledScopedRigVersionMetadata(
-          db,
-          {
-            accountId,
-            workspaceId,
-            subjectId: ctx.subjectId ?? "session-attach",
-          },
-          session.rigId,
-          session.rigVersionId,
-        )
-      : null;
-  for (const variableSetId of rigVersion?.version.defaultVariableSetIds ?? []) {
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
-      accountId,
-      workspaceId,
-      variableSetId,
-      authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
-    });
-    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
-  }
-  for (const variableSetId of session.variableSetIds) {
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
-      accountId,
-      workspaceId,
-      variableSetId,
-      authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
-    });
-    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
-  }
+  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(db, settings, {
+    accountId,
+    workspaceId,
+    session,
+    subjectId: ctx.subjectId,
+  });
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }

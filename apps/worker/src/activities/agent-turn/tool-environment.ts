@@ -33,6 +33,7 @@ import {
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
   mcpToolDisplayMetadata,
+  toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import {
   createGoogleDrivePublicationAttemptTool,
@@ -83,6 +84,7 @@ import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  type ResourceRef,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
@@ -174,6 +176,11 @@ export type PrepareTurnToolRuntimeDeps = {
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
   /** Deployment and workspace allow the Jev-backed code_search tool. */
   codeSearchEnabled: boolean;
+  /**
+   * False for an optional repository that sits this turn out after losing
+   * access (dropUnavailableOptionalRepositories), so no tool surface offers it.
+   */
+  retainsOptionalRepository?: (resource: ResourceRef) => boolean;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
 };
@@ -394,6 +401,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
     codeSearchEnabled,
+    retainsOptionalRepository,
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
   } = deps;
@@ -525,7 +533,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     sessionId: input.sessionId,
     attemptId: input.attemptId,
     turn,
-    resources: mergeResourceRefs(session.resources, turn.resources),
+    resources: mergeResourceRefs(session.resources, turn.resources).filter(
+      (resource) => retainsOptionalRepository?.(resource) ?? true,
+    ),
     tools: turnTools,
     resolveCredential,
   });
@@ -1181,6 +1191,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       undefined,
       {},
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
+      (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
     );
     eventing.codemodeDispatcher.start();
   };

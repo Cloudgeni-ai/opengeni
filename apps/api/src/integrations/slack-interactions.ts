@@ -2269,6 +2269,8 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
         idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
         clientEventId: `slack:${entry.providerEventId}`,
       },
+      undefined,
+      { surface: "slack" },
     );
   } catch (error) {
     if (error instanceof HTTPException) {
@@ -2911,6 +2913,8 @@ async function processSlackReactionInboxEntry(
         idempotencyKey: `slack-interaction:${interaction.id}`,
         clientEventId: `slack:${entry.providerEventId}`,
       },
+      undefined,
+      { surface: "slack" },
     );
     // The route-wide create key converges every replica on one reserved
     // session, but its first writer's initial message is the only event created
@@ -3438,6 +3442,7 @@ async function acceptSlackReactionTask(
       ...(modelContext ? { modelContext } : {}),
       resources,
       clientEventId,
+      surface: "slack",
     },
   );
 }
@@ -3532,6 +3537,7 @@ async function continueSlackSession(
       ...(options.modelContext ? { modelContext: options.modelContext } : {}),
       resources,
       clientEventId: `slack:${entry.providerEventId}`,
+      surface: "slack",
     },
   );
 }

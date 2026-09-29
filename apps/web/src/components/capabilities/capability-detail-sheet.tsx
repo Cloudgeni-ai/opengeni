@@ -52,6 +52,7 @@ import {
   type ConnectionHealth,
 } from "@/lib/capabilities";
 import { focusCapabilitySuccessor } from "@/lib/capability-focus";
+import { analyticsAction, type AnalyticsAction } from "@/lib/analytics-actions";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
 
@@ -551,6 +552,7 @@ export function DetailBody({
               <CredentialForm
                 compact={inline}
                 onCancel={onCancel}
+                analytics="connect_integration"
                 fields={plan.fields}
                 itemName={item.name}
                 keyPageUrl={keyPageUrl}
@@ -598,6 +600,7 @@ export function DetailBody({
                       ownership: connectionOwnership,
                     })
                   }
+                  {...analyticsAction("connect_integration")}
                 >
                   {busy ? <Loader2Icon className="animate-spin" /> : !inline ? <PlugIcon /> : null}
                   {inline
@@ -626,6 +629,7 @@ export function DetailBody({
                     : undefined
                 }
                 onClick={() => onAction({ type: "enable", item })}
+                {...analyticsAction("connect_integration")}
               >
                 {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
                 Add to workspace
@@ -687,6 +691,7 @@ function SkillControls({
             className="w-full"
             disabled={busy || !canManage || !item.runtime.available}
             onClick={() => onAction({ type: "install_skill", item })}
+            {...analyticsAction(item.enabled ? null : "install_skill")}
           >
             {busy ? <Loader2Icon className="animate-spin" /> : !setupOnly ? <SparklesIcon /> : null}
             {busy && setupOnly
@@ -1142,6 +1147,7 @@ export function CredentialForm({
   onSubmit,
   onCancel,
   compact = false,
+  analytics,
 }: {
   fields: { name: string; label: string }[];
   itemName: string;
@@ -1151,6 +1157,8 @@ export function CredentialForm({
   busy: boolean;
   onCancel?: (() => void) | undefined;
   compact?: boolean;
+  /** Closed analytics label for the submit control; omit for reconnects. */
+  analytics?: AnalyticsAction;
   onSubmit: (headers: Record<string, string>) => void;
 }) {
   const inputId = useId();
@@ -1208,7 +1216,12 @@ export function CredentialForm({
         </p>
       ) : null}
       <ConnectionActions onCancel={onCancel} busy={busy}>
-        <Button type="submit" className="w-full" disabled={busy || !ready}>
+        <Button
+          type="submit"
+          className="w-full"
+          disabled={busy || !ready}
+          {...analyticsAction(analytics)}
+        >
           {busy ? <Loader2Icon className="animate-spin" /> : compact ? null : submitIcon}
           {busy && compact ? "Connecting…" : submitLabel}
         </Button>

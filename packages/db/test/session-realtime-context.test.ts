@@ -422,6 +422,8 @@ describe("session realtime transcript tail and continuity", () => {
       initiatorSubjectId: value.subjectId,
       initiatingHumanSubjectId: value.subjectId,
       modelContext: userModelContext,
+      // Analytics: the end-of-call handoff entered through voice.
+      surface: "voice",
       metadata: {
         delivery: "steer",
         realtimeTailFlush: { source: SESSION_REALTIME_TAIL_SOURCE },

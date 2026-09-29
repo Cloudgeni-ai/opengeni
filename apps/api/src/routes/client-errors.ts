@@ -25,6 +25,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { isAllowedBrowserOrigin } from "../http/cors";
+import { createKeyedAdmission, type KeyedAdmission } from "../http/keyed-admission";
 
 export {
   CLIENT_ERROR_KINDS,
@@ -54,7 +55,7 @@ const CLIENT_ERROR_REJECTIONS_METRIC = {
   help: 'Web client error reports the API refused, by closed reason and kind ("unknown" when the body was not read or not valid).',
 } as const;
 
-export type ClientErrorAdmission = { admit(kind: ClientErrorKind): boolean };
+export type ClientErrorAdmission = KeyedAdmission<ClientErrorKind>;
 
 /**
  * One token bucket per closed kind bounds counter inflation and log volume
@@ -63,25 +64,7 @@ export type ClientErrorAdmission = { admit(kind: ClientErrorKind): boolean };
 export function createClientErrorAdmission(
   options: { capacity?: number; refillPerSecond?: number; now?: () => number } = {},
 ): ClientErrorAdmission {
-  const capacity = options.capacity ?? 30;
-  const refillPerMs = (options.refillPerSecond ?? 0.5) / 1_000;
-  const now = options.now ?? Date.now;
-  const buckets = new Map<ClientErrorKind, { tokens: number; updatedAt: number }>();
-  return {
-    admit(kind) {
-      const at = now();
-      const bucket = buckets.get(kind) ?? { tokens: capacity, updatedAt: at };
-      bucket.tokens = Math.min(
-        capacity,
-        bucket.tokens + Math.max(0, at - bucket.updatedAt) * refillPerMs,
-      );
-      bucket.updatedAt = at;
-      buckets.set(kind, bucket);
-      if (bucket.tokens < 1) return false;
-      bucket.tokens -= 1;
-      return true;
-    },
-  };
+  return createKeyedAdmission<ClientErrorKind>(options);
 }
 
 export function parseClientErrorReport(body: string | null): ClientErrorReport | null {

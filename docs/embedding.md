@@ -542,10 +542,17 @@ mount path in `skippedOptionalRepositories` on the `repository-clone`
 Without the flag a failed clone fails sandbox setup, as before. OpenGeni sets
 it only on repositories it attaches on a person's behalf (a Slack task's
 recently used repositories); it grants no access and changes no credential
-routing. The flag covers the clone step only: the per-turn GitHub App
-authorization and installation-token mint that run before it stay strict, so a
-GitHub App repository the workspace no longer authorizes, or one the
-installation can no longer reach, still fails the turn.
+routing. An optional clone is bounded to 60 seconds (90 seconds for all
+optional clones of one setup command) when the sandbox has a `timeout` binary,
+so a hung fetch is skipped the same way. Before each turn's strict GitHub App
+allowlist recheck and installation-token mint, the worker also drops, for that
+turn only, an optional GitHub App repository that the workspace allowlist no
+longer admits or, when OpenGeni's own App mints the token (no host
+`gitCredentials` port), that the installation can no longer reach; it reports
+them as `skippedOptionalRepositories` on a `sandbox.operation.completed` event
+named `optional-repository-access`. This only removes repositories from the
+turn. A repository without the flag keeps the strict checks and still fails
+the turn when its access is gone.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
@@ -988,7 +995,7 @@ registration repair in `0107_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 Accepted `user.message` events intentionally have no direct turn ID. Migration
-`0461_host_export_message_attribution.sql` derives export initiator and origin
+`0460_host_export_message_attribution.sql` derives export initiator and origin
 from the exact same-account/workspace/session turn whose `trigger_event_id`
 references the message, after the accepting transaction commits its turn. It
 never derives sender authority from payload fields or the session creator.
@@ -996,6 +1003,23 @@ An unbound event stays unattributed. The event's own turn ID and the existing
 immutable export rows/checkpoints are unchanged; downstream historical
 attribution repair is a separate operator action. Analytics consumers must expose
 unattributed coverage instead of equating missing identity with zero messages.
+
+Migration `0533_turn_surface_analytics.sql` adds three content-free analytics
+fields next to `origin`, each from a fixed list defined in
+`packages/contracts/src/product-analytics.ts`: `surface` (the attributed turn's
+entry surface, see [`run-lifecycle.md`](run-lifecycle.md)), `modelProvider` (the
+provider family from the turn's accepted execution policy; operator-configured
+registry providers export as `registry`), and, on `agent.toolCall.created` only,
+`toolFamily` (an OpenGeni first-party tool name, `integration:<reviewed domain>`,
+or `custom`, so a tenant's own MCP host never leaves the database). The worker
+stamps `toolFamily` on the event payload and the export trigger checks the wire
+format again, exporting NULL for anything malformed. Usage facts carry `surface`
+and `modelProvider` from their turn. The published claim function and its
+root/codec sidecar keep their signatures: SQL consumers read the new columns
+through `opengeni_host_export.host_export_claim_analytics_sidecars(kind,
+consumer, lease)` in the same transaction as the claim, and `createHostExportPump`
+sinks receive them on each `HostEventExport` / `HostUsageExport`. The fields are
+optional on the wire; rows enqueued before the migration export them as null.
 
 
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
@@ -1089,6 +1113,49 @@ enabled across deploy restarts. `pump.disable(kind)` retains that consumer and i
 continues to hold the pruning floor); when it disables the last consumer of a kind, capture stops and
 events in that interval are deliberately not recoverable. Normal deploys must use `stop()`, not
 `disable()`.
+
+#### Product lifecycle facts
+
+Canonical sources: `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES` in
+`packages/contracts/src/product-lifecycle-facts.ts`, the `HostLifecycleFactExport` contract in
+`packages/contracts/src/index.ts`, and migration `0532_product_lifecycle_fact_export.sql`.
+
+A third export kind, `lifecycle_fact`, carries one content-free fact per person-level product
+milestone, so a host can answer who signed up, verified, signed in, set up an organization, and
+adopted which features without reading tenant data. Register it like the other kinds, either with
+`registerHostExportConsumer(db, { kind: "lifecycle_fact", consumerId })` or with a
+`lifecycleSink: { consumerId, deliverLifecycleFacts }` on `createHostExportPump`. Capture is off
+until the first lifecycle consumer registers.
+
+| Fact | Attribute (fixed list) | Captured when |
+|---|---|---|
+| `auth.sign_up` | method: `email`, `google`, `github`, `other` | a managed account gets its first sign-in method |
+| `auth.email_verified` | none | the email is verified by link, or a social provider verified it at creation |
+| `auth.sign_in` | method of that session | a live sign-in session is created (discarded session-set provider sessions are not) |
+| `organization.setup` | `created`, `additional` | self-service setup or an additional organization commits |
+| `model.connected` | `codex`, `supergrok`, `vercel_gateway`, `openrouter` | a subscription account or organization model provider is connected |
+| `credits.purchased` | none | a credit top-up payment is granted |
+| `connection.created` | provider class, for example `slack`, `github`, `google`, `other` | an integration connection is created |
+| `scheduled_task.created` | none | a scheduled task is created |
+| `skill.installed` | none | a catalog Skill is installed into a workspace |
+| `slack.user_linked` | none | a Slack user is linked to an OpenGeni user |
+| `machine.enrolled` | none | a new Connected Machine is enrolled |
+| `member.joined` | none | a person becomes an active member of an organization that already had one |
+
+Row triggers on the source tables write each fact in the same transaction as the product change,
+so every writer path is covered and a rolled-back change leaves no fact. A capture error rolls back
+only the fact and raises a database warning; it never fails the product change. A self-service
+setup that fails writes nothing durable, so failed setups stay a count in
+`opengeni_organization_setup_total{outcome="failed"}` rather than a per-person fact.
+
+Facts are deliberately minimal. `fact.subjectId` is present only for opaque `user:` and `api_key:`
+subjects; every other subject (services, embedded-host identities) is reduced to `subjectKind`. Sign-up,
+verification and sign-in facts carry no organization (`accountId: null`), because a person can
+belong to several. No name, email, IP address, user agent, provider domain, credential, amount, or
+free text is exported: a connection to a domain outside the fixed provider list is exported as
+`other`. Fact ids are deterministic, so a re-captured fact has the same `idempotencyKey`. Retention
+of delivered facts belongs to the sink; the outbox keeps only undelivered and recently acknowledged
+rows, like the other kinds.
 
 ### EventBus
 

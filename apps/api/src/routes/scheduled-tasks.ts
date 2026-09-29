@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
+  RefreshScheduledTaskAccessRequest,
   ScheduledTaskSlackChannelId,
   ScheduledTaskSlackChannelListResponse,
   TriggerScheduledTaskRequest,
@@ -9,6 +10,7 @@ import {
 } from "@opengeni/contracts";
 import { listScheduledTaskRuns, listScheduledTasks } from "@opengeni/db";
 import type { Hono } from "hono";
+import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import {
   isAuthenticatedPersonAuthorization,
@@ -42,8 +44,15 @@ import {
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
+  listScheduledTaskAccessAttention,
+  refreshScheduledTaskAccess,
+  scheduledTaskAccessSource,
+  withScheduledTaskPolicyDrift,
+  withScheduledTaskRunAccessFailures,
 } from "@opengeni/core";
+import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
+import { permissionsRequiredByFirstPartyTools } from "../mcp/first-party-tool-permissions";
 import {
   createOpenGeniSlackBotInteractionClient,
   verifyScheduledTaskSlackChannel,
@@ -115,6 +124,56 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     );
   });
 
+  // Drift is advisory: it is attached for viewers who can act on a task and
+  // never fails the read it decorates.
+  async function withPolicyDrift(
+    authorization: AccessGrantAuthorization,
+    tasks: ScheduledTask[],
+  ): Promise<ScheduledTask[]> {
+    if (!tasks.some((task) => scheduledTaskAccessSource(task, authorization.grant))) {
+      return tasks;
+    }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: authorization.grant.accountId,
+        workspaceId: authorization.grant.workspaceId,
+      })
+    ).settings;
+    return await withScheduledTaskPolicyDrift({
+      db,
+      settings: catalogSettings,
+      authorization,
+      tasks,
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+      onError: (error) => {
+        deps.observability?.warn("Scheduled task access drift could not be computed", {
+          errorClass: error instanceof Error ? error.name : "ScheduledTaskPolicyDriftError",
+          origin: "api",
+        });
+      },
+    });
+  }
+
+  // Registered before `/:taskId` so the literal segment is never read as an id.
+  app.get("/v1/workspaces/:workspaceId/scheduled-tasks/attention", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    // The account plan reads only the MCP registry and tool defaults, which the
+    // model catalog does not change, so the deployment settings suffice here.
+    const tasks = await listScheduledTaskAccessAttention({
+      db,
+      settings: deps.settings,
+      grant,
+      onError: (error) => {
+        deps.observability?.warn("Scheduled task account availability could not be computed", {
+          errorClass: error instanceof Error ? error.name : "ScheduledTaskAccessAttentionError",
+          origin: "api",
+        });
+      },
+    });
+    return c.json({ tasks });
+  });
+
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -162,7 +221,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:run",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.query("sessionId");
     const offset = Number(c.req.query("offset") ?? 0);
     if (!Number.isSafeInteger(offset) || offset < 0) {
@@ -181,14 +246,64 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       offset,
       sessionId,
     );
-    return c.json(tasks.map((task) => scheduledTaskForGrant(task, grant)));
+    return c.json(
+      (await withPolicyDrift(authorization, tasks)).map((task) =>
+        scheduledTaskForGrant(task, grant),
+      ),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:run",
+    );
+    const grant = authorization.grant;
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    return c.json(scheduledTaskForGrant(task, grant));
+    const [withDrift] = await withPolicyDrift(authorization, [task]);
+    return c.json(scheduledTaskForGrant(withDrift ?? task, grant));
+  });
+
+  // The owner's explicit access refresh: re-freeze connectors, connector
+  // accounts and an agent-created task's OpenGeni tools with the calling
+  // person's current authority. It changes neither the schedule nor its
+  // status, so the Temporal schedule is untouched.
+  app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/refresh-access", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:manage",
+    );
+    const parsed = RefreshScheduledTaskAccessRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid scheduled task access refresh request" });
+    }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: authorization.grant.accountId,
+        workspaceId,
+      })
+    ).settings;
+    const task = await refreshScheduledTaskAccess({
+      settings: catalogSettings,
+      db,
+      objectStorage,
+      authorization,
+      taskId: c.req.param("taskId"),
+      request: parsed.data,
+      permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+      sessionAuthorization: deps.sessionAuthorization,
+      authorizationSurface: "http",
+    });
+    const [withDrift] = await withPolicyDrift(authorization, [task]);
+    return c.json(scheduledTaskForGrant(withDrift ?? task, authorization.grant));
   });
 
   app.patch("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
@@ -387,6 +502,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       task.id,
       boundedLimit(c.req.query("limit")),
     );
-    return c.json(taskRuns.map((run) => scheduledTaskRunForGrant(run, grant)));
+    const runs = await withScheduledTaskRunAccessFailures({
+      db,
+      settings: deps.settings,
+      grant,
+      task,
+      runs: taskRuns,
+    });
+    return c.json(runs.map((run) => scheduledTaskRunForGrant(run, grant)));
   });
 }

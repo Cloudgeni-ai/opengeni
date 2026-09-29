@@ -3,6 +3,7 @@ import { ChevronDownIcon, SquarePenIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
+import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
 import { ForYouLink } from "@/components/rail/for-you-link";
 import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
@@ -28,13 +29,20 @@ function initialWorkspaceShortcutsExpanded(): boolean {
 export function WorkspaceShortcutLinks({
   className,
   pending,
+  scheduleAttention,
 }: {
   className?: string;
   pending?: boolean;
+  scheduleAttention?: boolean;
 }) {
   const rail = useRail();
   const fetchedPending = useKnowledgeReviewIndicator(rail.workspaceId, pending === undefined);
   const pendingKnowledge = pending ?? fetchedPending;
+  const fetchedAttention = useScheduledTaskAttentionIndicator(
+    rail.workspaceId,
+    scheduleAttention === undefined,
+  );
+  const schedulesNeedAttention = scheduleAttention ?? fetchedAttention;
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
@@ -45,6 +53,9 @@ export function WorkspaceShortcutLinks({
           key={item.to}
           item={item}
           needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
+          needsAttention={
+            item.to === "/workspaces/$workspaceId/schedules" && schedulesNeedAttention
+          }
           workspaceId={rail.workspaceId}
           variant="rail"
           collapsed={rail.collapsed}
@@ -60,6 +71,7 @@ export function WorkspaceShortcutLinks({
 export function PrimaryNav() {
   const rail = useRail();
   const pendingKnowledge = useKnowledgeReviewIndicator(rail.workspaceId);
+  const schedulesNeedAttention = useScheduledTaskAttentionIndicator(rail.workspaceId);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
   const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
@@ -114,12 +126,18 @@ export function PrimaryNav() {
       </NewSessionLink>
 
       {rail.isMobile ? null : rail.collapsed ? (
-        <WorkspaceShortcutLinks pending={pendingKnowledge} />
+        <WorkspaceShortcutLinks
+          pending={pendingKnowledge}
+          scheduleAttention={schedulesNeedAttention}
+        />
       ) : (
         <div className="grid gap-0.5">
           {showShortcuts ? (
             <>
-              <WorkspaceShortcutLinks pending={pendingKnowledge} />
+              <WorkspaceShortcutLinks
+                pending={pendingKnowledge}
+                scheduleAttention={schedulesNeedAttention}
+              />
               {shortViewport ? (
                 <Button
                   type="button"
@@ -150,6 +168,24 @@ export function PrimaryNav() {
                     pathname,
                     rail.workspaceId,
                     "/workspaces/$workspaceId/state",
+                  )}
+                  onNavigate={() => rail.setDrawerOpen(false)}
+                />
+              ) : null}
+              {schedulesNeedAttention ? (
+                <WorkspaceConfigLink
+                  item={
+                    PRIMARY_WORKSPACE_ITEMS.find(
+                      (item) => item.to === "/workspaces/$workspaceId/schedules",
+                    )!
+                  }
+                  workspaceId={rail.workspaceId}
+                  variant="rail"
+                  needsAttention
+                  active={isConfigItemActive(
+                    pathname,
+                    rail.workspaceId,
+                    "/workspaces/$workspaceId/schedules",
                   )}
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />

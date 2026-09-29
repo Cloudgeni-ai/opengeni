@@ -1,4 +1,4 @@
-import type { HostEventSink, HostUsageSink } from "@opengeni/contracts";
+import type { HostEventSink, HostLifecycleFactSink, HostUsageSink } from "@opengeni/contracts";
 import {
   acknowledgeHostExportBatch,
   claimHostExportBatch,
@@ -35,6 +35,8 @@ export type HostExportPumpOptions = {
   db: Database;
   eventSink?: HostEventSink;
   usageSink?: HostUsageSink;
+  /** Content-free per-person product lifecycle facts (`lifecycle_fact`). */
+  lifecycleSink?: HostLifecycleFactSink;
   observability?: Observability;
   instanceId?: string;
   pollIntervalMs?: number;
@@ -77,7 +79,7 @@ export type HostExportPump = {
  * keys. Sink implementations must therefore deduplicate those keys.
  */
 export function createHostExportPump(options: HostExportPumpOptions): HostExportPump {
-  if (!options.eventSink && !options.usageSink) {
+  if (!options.eventSink && !options.usageSink && !options.lifecycleSink) {
     throw new Error("createHostExportPump requires at least one host sink");
   }
   const instanceId = validateInstanceId(
@@ -102,7 +104,9 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
   const configuredConsumer = (kind: HostExportKind): string | null =>
     kind === "session_event"
       ? (options.eventSink?.consumerId ?? null)
-      : (options.usageSink?.consumerId ?? null);
+      : kind === "usage_event"
+        ? (options.usageSink?.consumerId ?? null)
+        : (options.lifecycleSink?.consumerId ?? null);
 
   const recordResult = (result: HostExportDrainResult, durationSeconds: number) => {
     const labels = { kind: result.kind, outcome: result.outcome };
@@ -242,7 +246,7 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
           ...common,
         });
         if (batch) return await deliverClaim(batch.events.length, () => sink.deliverEvents(batch));
-      } else {
+      } else if (kind === "usage_event") {
         const sink = options.usageSink;
         if (!sink) return { kind, outcome: "not_configured" };
         const batch = await claimHostExportBatch(options.db, {
@@ -250,6 +254,16 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
           ...common,
         });
         if (batch) return await deliverClaim(batch.events.length, () => sink.deliverUsage(batch));
+      } else {
+        const sink = options.lifecycleSink;
+        if (!sink) return { kind, outcome: "not_configured" };
+        const batch = await claimHostExportBatch(options.db, {
+          kind,
+          ...common,
+        });
+        if (batch) {
+          return await deliverClaim(batch.events.length, () => sink.deliverLifecycleFacts(batch));
+        }
       }
     } catch (error) {
       return await settleFailure(error);
@@ -276,6 +290,7 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
     const results: HostExportDrainResult[] = [];
     if (options.eventSink) results.push(await drainKind("session_event"));
     if (options.usageSink) results.push(await drainKind("usage_event"));
+    if (options.lifecycleSink) results.push(await drainKind("lifecycle_fact"));
     return results;
   };
 
@@ -326,9 +341,16 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
               consumerId: options.usageSink.consumerId,
             });
           }
+          if (options.lifecycleSink) {
+            await registerHostExportConsumer(scoped, {
+              kind: "lifecycle_fact",
+              consumerId: options.lifecycleSink.consumerId,
+            });
+          }
         });
         if (options.eventSink) retiringKinds.delete("session_event");
         if (options.usageSink) retiringKinds.delete("usage_event");
+        if (options.lifecycleSink) retiringKinds.delete("lifecycle_fact");
         running = true;
         loopPromise = (async () => {
           while (true) {
