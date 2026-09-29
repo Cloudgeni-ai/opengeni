@@ -49,7 +49,11 @@ describe("session control surface architecture", () => {
     expect(newSession).not.toContain("voiceModel={{");
     expect(newSession).toContain('modelMenu="split"');
     const plus = await source("components/composer-mobile-plus.tsx");
-    expect(plus).toContain('setPanel("settings")');
+    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    expect(plus).toContain('import("./composer-mobile-plus-panel")');
+    expect(plus).toContain("{open ? (");
+    expect(panel).toContain('setPanel("settings")');
+    expect(panel).not.toContain("setSettingsOpen");
     expect(plus).not.toContain("setSettingsOpen");
   });
 

@@ -4,6 +4,7 @@ import {
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -627,6 +628,17 @@ export function RootRouteComponent() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
+  useEffect(() => {
+    const retireReconciledCreation = () => {
+      const feed = sessionEventFeedStore.getSnapshot();
+      if (!feed) return;
+      setSessionCreationHandoff((current) =>
+        creationHandoffReconciled(current, feed.events) ? null : current,
+      );
+    };
+    retireReconciledCreation();
+    return sessionEventFeedStore.subscribe(retireReconciledCreation);
+  }, [sessionEventFeedStore]);
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);

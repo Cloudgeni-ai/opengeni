@@ -3,7 +3,7 @@
 import { afterAll, beforeAll, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
@@ -20,6 +20,8 @@ const turnId = "44444444-4444-4444-8444-444444444444";
 let base: string;
 let web: StartedProcess | undefined;
 let browser: Browser;
+let questionAsset: string;
+let composerMenuAsset: string;
 
 async function cleanup() {
   await Promise.allSettled([browser?.close(), web?.stop()]);
@@ -38,6 +40,17 @@ beforeAll(async () => {
       throw new Error(
         `Production web build failed:\n${build.stderr}\n${build.stdout.slice(-6000)}`,
       );
+    const manifest = JSON.parse(
+      await readFile(`${repo}/apps/web/dist/.vite/manifest.json`, "utf8"),
+    ) as Record<string, { file: string; name?: string }>;
+    const questionEntry = Object.entries(manifest).find(
+      ([key, entry]) =>
+        key.endsWith("/hooks/latest-question.ts") || entry.name === "session-question-navigation",
+    );
+    assert.ok(questionEntry, "Latest question must retain its optional production chunk");
+    questionAsset = questionEntry[1].file;
+    composerMenuAsset = manifest["src/components/composer-mobile-plus-panel.tsx"]!.file;
+    assert.ok(composerMenuAsset, "Composer menu must retain its optional production chunk");
     const port = await freePort();
     base = `http://127.0.0.1:${port}`;
     web = await startProcess(
@@ -211,7 +224,12 @@ function fixtures() {
     failHistory: false,
     emptyHistory: false,
     paginatedHistory: false,
+    enableCreate: false,
+    created: false,
     failStream: false,
+    failQueue: false,
+    deferQueue: false,
+    nextQueueTransition: "" as "" | "fail" | "withdraw" | "hold",
     deferDetail: false,
     gates: {
       config: gate(),
@@ -223,6 +241,8 @@ function fixtures() {
       stream: gate(),
       streamError: gate(),
       dispatchDetail: gate(),
+      queue: gate(),
+      create: gate(),
     },
     draft: {
       revision: 0,
@@ -235,6 +255,19 @@ function fixtures() {
       sourceTurnVersion: null,
       updatedAt: null as string | null,
     },
+    newDraft: {
+      revision: 0,
+      text: "",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: session.model,
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      options: { sandboxBackend: "none" },
+      selectionHistory: { projects: [] },
+      updatedAt: null,
+    } as Record<string, unknown>,
   };
 }
 
@@ -262,6 +295,7 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
         mcpServers: [],
         fileUploads: { enabled: false, maxSizeBytes: 1048576 },
         productAccessMode: "configured",
+        defaultSandboxBackend: "none",
         auth: { mode: "none" },
         structuredServices: { fileSystem: false, git: false, terminalEvents: false },
       });
@@ -303,12 +337,41 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
     }
     if (path === "/v1/workspaces") return json([state.workspace]);
     if (path === `/v1/workspaces/${workspaceId}`) return json(state.workspace);
+    if (path === `/v1/workspaces/${workspaceId}/sessions` && request.method() === "POST") {
+      const input = request.postDataJSON();
+      await state.gates.create.wait();
+      state.created = true;
+      state.session.initialMessage = input.initialMessage;
+      state.session.lastSequence = 1;
+      state.events = [
+        {
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId,
+          sequence: 1,
+          clientEventId: input.clientEventId,
+          type: "user.message",
+          payload: { text: input.initialMessage, resources: [] },
+          occurredAt: state.session.createdAt,
+        },
+      ];
+      state.newDraft = {
+        ...state.newDraft,
+        text: "",
+        revision: Number(state.newDraft.revision) + 1,
+      };
+      return json(state.session);
+    }
     if (path === `/v1/workspaces/${workspaceId}/sessions`)
       return json({
-        sessions: [
-          state.session,
-          { ...state.session, id: otherSessionId, title: "Unloaded other session" },
-        ],
+        sessions:
+          state.enableCreate && !state.created
+            ? []
+            : [
+                state.session,
+                { ...state.session, id: otherSessionId, title: "Unloaded other session" },
+              ],
         pinned: [],
         pinnedTruncated: false,
         nextCursor: null,
@@ -332,6 +395,8 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       if (state.deferDetail) await state.gates.dispatchDetail.wait();
       return json(state.session);
     }
+    if (path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}/events/stream`)
+      return route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" });
     if (path.endsWith("/events/stream")) {
       if (state.failStream) {
         await state.gates.streamError.wait();
@@ -355,8 +420,12 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
         const limit = Number(params.get("limit") ?? 200);
         const before = Number(params.get("before") ?? Number.MAX_SAFE_INTEGER);
         const after = Number(params.get("after") ?? 0);
+        const includeTypes = params.get("includeTypes")?.split(",");
         const matching = state.events.filter(
-          (event) => Number(event.sequence) > after && Number(event.sequence) < before,
+          (event) =>
+            Number(event.sequence) > after &&
+            Number(event.sequence) < before &&
+            (!includeTypes || includeTypes.includes(String(event.type))),
         );
         return json(
           params.has("before") || params.get("direction") === "before"
@@ -441,8 +510,18 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
         };
       return json(state.draft);
     }
-    if (path.endsWith("/queue"))
-      return json({
+    if (path.endsWith("/queue")) {
+      if (path.includes(otherSessionId))
+        return json({
+          version: 0,
+          effectiveControl: control,
+          items: [],
+          pendingInputs: [],
+          pendingInputAttachment: null,
+        });
+      if (state.deferQueue) await state.gates.queue.wait();
+      if (state.failQueue) return json({ message: "Queue unavailable" }, 503);
+      const snapshot = {
         version: state.session.queueVersion,
         effectiveControl: state.session.effectiveControl,
         activePersonalConnections: [],
@@ -450,11 +529,97 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
         items: state.turns,
         pendingInputs: [],
         pendingInputAttachment: null,
-      });
+      };
+      const transition = state.nextQueueTransition;
+      state.nextQueueTransition = "";
+      if (transition === "fail") state.failQueue = true;
+      if (transition === "withdraw") {
+        state.turns = [];
+        state.session.queueVersion += 1;
+        state.events.push({
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId: snapshot.items[0]?.id,
+          sequence: 5,
+          type: "session.queue.changed",
+          payload: { operation: "delete", turnId: snapshot.items[0]?.id },
+          occurredAt: state.session.updatedAt,
+        });
+      }
+      if (transition === "hold") state.deferQueue = true;
+      return json(snapshot);
+    }
     if (path.endsWith("/goal")) return json({ message: "No goal" }, 404);
     if (path.endsWith("/lineage")) return json({ ancestors: [], children: [], truncated: false });
     if (path.endsWith("/human-input-requests")) return json({ requests: [] });
     if (path.endsWith("/background-commands")) return json({ commands: [] });
+    if (path.endsWith("/session-tenancy/capabilities"))
+      return json({ activated: true, canCreatePrivate: false, reason: "available" });
+    if (path.endsWith("/session-message-search")) {
+      const query = new URL(request.url()).searchParams.get("query") ?? "";
+      const match = state.events.find(
+        (event) => (event.payload as { text?: string })?.text === query,
+      );
+      return json({
+        matches: match
+          ? [
+              {
+                sessionId,
+                sessionTitle: state.session.title,
+                eventId: match.id,
+                sequence: match.sequence,
+                turnId: match.turnId,
+                role: "user",
+                messageId: null,
+                messageMatchOffset: 0,
+                snippet: { text: query, matchStart: 0, matchEnd: query.length },
+              },
+            ]
+          : [],
+        nextCursor: null,
+        hasMore: false,
+        scannedMessages: state.events.length,
+        matchedMessageCount: match ? 1 : 0,
+        matchedOccurrenceCount: match ? 1 : 0,
+        countIsExact: true,
+      });
+    }
+    if (path.endsWith("/new-session-draft")) {
+      if (request.method() === "PUT")
+        state.newDraft = {
+          ...state.newDraft,
+          ...request.postDataJSON(),
+          revision: Number(state.newDraft.revision) + 1,
+        };
+      return json(state.newDraft);
+    }
+    if (state.enableCreate && path.endsWith("/model-catalog"))
+      return json({
+        models: [
+          {
+            id: state.session.model,
+            label: "Fixture model",
+            provider: "openai",
+            providerLabel: "OpenAI",
+            api: "responses",
+            source: "opengeni",
+            cost: "credits",
+            policyAllowed: true,
+            capabilities: {
+              reasoning: { efforts: ["low"], defaultEffort: "low" },
+              latencyModes: [],
+            },
+            credentialReadiness: {
+              status: "ready",
+              reason: null,
+              basis: "configuration",
+              checkedAt: null,
+            },
+            availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+          },
+        ],
+      });
     if (path.endsWith("/models") || path.endsWith("/model-catalog")) return json({ models: [] });
     if (path.endsWith("/stream-capabilities"))
       return json(
@@ -738,89 +903,448 @@ for (const width of [1280, 390]) {
     }
   }, 90_000);
 
-  test(`production latest-tail reload never resurrects genesis at ${width}px`, async () => {
+  for (const origin of ["existing", "created"] as const) {
+    test(`production ${origin} latest-tail reload never resurrects genesis at ${width}px`, async () => {
+      const context = await browser.newContext({
+        viewport: { width, height: 900 },
+        reducedMotion: "reduce",
+      });
+      const page = await context.newPage();
+      const state = fixtures();
+      state.paginatedHistory = true;
+      state.enableCreate = origin === "created";
+      state.session.initialMessage = "Original first question must not reappear.";
+      state.session.lastSequence = 5000;
+      const history = Array.from({ length: 5000 }, (_, index) => ({
+        id: crypto.randomUUID(),
+        workspaceId,
+        sessionId,
+        turnId: crypto.randomUUID(),
+        sequence: index + 1,
+        type: "user.message",
+        payload: {
+          text: index === 0 ? state.session.initialMessage : `History question ${index + 1}`,
+          resources: [],
+        },
+        occurredAt: state.session.createdAt,
+      }));
+      state.events = history;
+      for (const name of ["config", "access", "detail", "create"] as const)
+        state.gates[name].release();
+      if (origin === "existing") state.gates.history.release();
+      await installApi(page, state);
+      const capture = (name: string) =>
+        page.screenshot({ path: `${output}/${width}-${origin}-${name}.png` });
+      const transcript = page.locator('[data-testid="timeline-user"]');
+      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      const assertRetained = async () => {
+        assert.equal(
+          await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
+          0,
+        );
+        assert.equal(await input.getAttribute("data-reload-probe"), "same-composer");
+        assert(await input.isVisible());
+      };
+      try {
+        if (origin === "created") {
+          await page.goto(`${base}/workspaces/${workspaceId}/sessions`);
+          const create = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+          await create.fill(state.session.initialMessage);
+          await create.press("Enter");
+          await state.gates.create.entered;
+          await state.gates.history.entered;
+          await transcript.getByText(state.session.initialMessage, { exact: true }).waitFor();
+          await capture("creation-pending");
+          state.gates.history.release();
+          await state.gates.stream.entered;
+          assert.equal(
+            await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
+            1,
+          );
+          await capture("creation-reconciled");
+          state.events = [state.events[0]!, ...history.slice(1)];
+          state.session.lastSequence = 5000;
+          state.gates.stream.release();
+        } else await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        await transcript.getByText("History question 5000", { exact: true }).waitFor();
+        if (origin === "created") {
+          await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
+          await page
+            .getByRole("searchbox", { name: "Find in conversation", exact: true })
+            .fill("History question 4000");
+          await page.locator('[data-og-search-sequence="4000"]').first().waitFor();
+          await page
+            .getByRole("button", { name: "Close conversation search", exact: true })
+            .click();
+        }
+        assert.equal(
+          await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
+          0,
+        );
+        await input.evaluate((node) => node.setAttribute("data-reload-probe", "same-composer"));
+        const scroller = page.locator("[data-og-timeline-scroller]");
+        await scroller.hover();
+        await page.mouse.wheel(0, -500);
+        await scroller.evaluate((node) => {
+          node.scrollTop = 0;
+        });
+        const oldest = page.getByRole("button", { name: "Jump to start", exact: true });
+        await oldest.click();
+        await page.getByRole("button", { name: "Jump to latest", exact: true }).waitFor();
+        state.gates.history = gate();
+        await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
+        await state.gates.history.entered;
+        await page.locator("[data-page-loading]").waitFor();
+        await assertRetained();
+        await capture("latest-pending");
+        state.failHistory = true;
+        state.gates.history.release();
+        await page.getByRole("button", { name: "Retry conversation", exact: true }).waitFor();
+        await assertRetained();
+        await capture("latest-failed");
+        state.failHistory = false;
+        state.gates.history = gate();
+        await page.getByRole("button", { name: "Retry conversation", exact: true }).click();
+        await state.gates.history.entered;
+        await page.locator("[data-page-loading]").waitFor();
+        await assertRetained();
+        await capture("latest-retry");
+        state.gates.history.release();
+        await transcript.getByText("History question 5000", { exact: true }).waitFor();
+        await assertRetained();
+        await capture("latest-ready");
+        if (origin === "created") {
+          if (width < 1024)
+            await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+          state.gates.other.release();
+          await page.locator(`a[data-session-row="${otherSessionId}"]:visible`).click();
+          await page.waitForURL(`**/sessions/${otherSessionId}`);
+          state.gates.history = gate();
+          await page.goBack();
+          await state.gates.history.entered;
+          await page.locator("[data-page-loading]").waitFor();
+          assert.equal(
+            await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
+            0,
+          );
+          await capture("creation-return-pending");
+          state.gates.history.release();
+          await transcript.getByText("History question 5000", { exact: true }).waitFor();
+          assert.equal(
+            await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
+            0,
+          );
+        }
+      } catch (error) {
+        await capture("latest-failure");
+        throw new Error(`${width}px latest reload: ${await page.locator("body").innerText()}`, {
+          cause: error,
+        });
+      } finally {
+        for (const deferred of Object.values(state.gates)) deferred.release();
+        await context.close();
+      }
+    }, 90_000);
+  }
+
+  test(`production Latest question focuses only the saved queued row at ${width}px`, async () => {
     const context = await browser.newContext({
       viewport: { width, height: 900 },
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
     const state = fixtures();
-    state.paginatedHistory = true;
-    state.session.initialMessage = "Original first question must not reappear.";
-    state.session.lastSequence = 5000;
-    state.events = Array.from({ length: 5000 }, (_, index) => ({
-      id: crypto.randomUUID(),
+    const queuedId = "55555555-5555-4555-8555-555555555555";
+    const queuedEventId = crypto.randomUUID();
+    const prompt = "Next queued question stays saved.";
+    const queued = {
+      id: queuedId,
       workspaceId,
       sessionId,
-      turnId: crypto.randomUUID(),
-      sequence: index + 1,
-      type: "user.message",
-      payload: {
-        text: index === 0 ? state.session.initialMessage : `History question ${index + 1}`,
-        resources: [],
+      triggerEventId: queuedEventId,
+      status: "queued",
+      source: "user",
+      position: 1,
+      prompt,
+      resources: [],
+      tools: [],
+      annotations: [],
+      metadata: {},
+      version: 1,
+      createdAt: state.session.createdAt,
+      updatedAt: state.session.updatedAt,
+    };
+    state.paginatedHistory = true;
+    state.turns = [queued];
+    Object.assign(state.session, {
+      status: "running",
+      activeTurnId: turnId,
+      queueVersion: 1,
+      lastSequence: 4,
+    });
+    state.events.push(
+      {
+        id: crypto.randomUUID(),
+        workspaceId,
+        sessionId,
+        turnId,
+        sequence: 2,
+        type: "agent.message.completed",
+        payload: {
+          text: Array.from(
+            { length: 60 },
+            (_, i) =>
+              `Completed answer paragraph ${i + 1}. This is retained conversation history, not the next queued question.`,
+          ).join("\n\n"),
+        },
+        occurredAt: state.session.createdAt,
       },
-      occurredAt: state.session.createdAt,
-    }));
-    for (const name of ["config", "access", "detail", "history"] as const)
+      {
+        id: queuedEventId,
+        workspaceId,
+        sessionId,
+        turnId: queuedId,
+        sequence: 3,
+        type: "user.message",
+        payload: { text: prompt, resources: [], routing: "queued_for_execution" },
+        occurredAt: state.session.createdAt,
+      },
+      {
+        id: crypto.randomUUID(),
+        workspaceId,
+        sessionId,
+        turnId: queuedId,
+        sequence: 4,
+        type: "turn.queued",
+        payload: { triggerEventId: queuedEventId, turnId: queuedId },
+        occurredAt: state.session.createdAt,
+      },
+    );
+    for (const name of ["config", "access", "detail", "history", "other"] as const)
       state.gates[name].release();
     await installApi(page, state);
+    const queueWrites: string[] = [];
+    let questionAssetRequested = false;
+    let composerMenuRequested = false;
+    const menuLoad = gate();
+    await page.route(`**/${composerMenuAsset}`, async (route) => {
+      composerMenuRequested = true;
+      await menuLoad.wait();
+      await route.continue();
+    });
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === `/${questionAsset}`) questionAssetRequested = true;
+      if (
+        request.method() !== "GET" &&
+        /\/(queue|turns)(\/|$)/.test(new URL(request.url()).pathname)
+      )
+        queueWrites.push(`${request.method()} ${request.url()}`);
+    });
     const capture = (name: string) => page.screenshot({ path: `${output}/${width}-${name}.png` });
-    const transcript = page.locator('[data-testid="timeline-user"]');
-    const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
-    const assertRetained = async () => {
+    const latest = page.getByRole("button", { name: "Latest question", exact: true });
+    const row = page.locator(`[data-queue-turn-id="${queuedId}"]`);
+    const collapseQueue = async () => {
+      if (await page.locator('[data-og-session-chrome-panel="queue"]').count())
+        await page.getByRole("button", { name: /1 queued prompt/ }).click();
+    };
+    const assertNotFocused = async () => {
       assert.equal(
-        await transcript.getByText(state.session.initialMessage, { exact: true }).count(),
-        0,
+        await page.evaluate(
+          (id) => document.activeElement?.closest(`[data-queue-turn-id="${id}"]`) !== null,
+          queuedId,
+        ),
+        false,
       );
-      assert.equal(await input.getAttribute("data-reload-probe"), "same-composer");
-      assert(await input.isVisible());
     };
     try {
       await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
-      await transcript.getByText("History question 5000", { exact: true }).waitFor();
-      await input.evaluate((node) => node.setAttribute("data-reload-probe", "same-composer"));
-      const scroller = page.locator("[data-og-timeline-scroller]");
-      await scroller.hover();
-      await page.mouse.wheel(0, -500);
-      await scroller.evaluate((node) => {
-        node.scrollTop = 0;
+      await row.waitFor();
+      await collapseQueue();
+      await latest.waitFor();
+      assert.equal(composerMenuRequested, false, "optional composer menu must not load with chat");
+      const composerActions = page.getByRole("button", {
+        name: "More composer actions",
+        exact: true,
       });
-      // Use the production keyboard action; the adjacent question-navigation
-      // overlay can cover this top-gutter pointer target while scrolling.
-      const oldest = page.getByRole("button", { name: "Jump to start", exact: true });
-      await oldest.focus();
-      await oldest.press("Enter");
-      await page.getByRole("button", { name: "Jump to latest", exact: true }).waitFor();
-      state.gates.history = gate();
-      await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
-      await state.gates.history.entered;
-      await page.locator("[data-page-loading]").waitFor();
-      await assertRetained();
-      await capture("latest-pending");
-      state.failHistory = true;
-      state.gates.history.release();
-      await page.getByRole("button", { name: "Retry conversation", exact: true }).waitFor();
-      await assertRetained();
-      await capture("latest-failed");
-      state.failHistory = false;
-      state.gates.history = gate();
-      await page.getByRole("button", { name: "Retry conversation", exact: true }).click();
-      await state.gates.history.entered;
-      await page.locator("[data-page-loading]").waitFor();
-      await assertRetained();
-      await capture("latest-retry");
-      state.gates.history.release();
-      await transcript.getByText("History question 5000", { exact: true }).waitFor();
-      await assertRetained();
-      await capture("latest-ready");
+      await composerActions.click();
+      await menuLoad.entered;
+      await page.getByRole("status").filter({ hasText: "Loading actions…" }).waitFor();
+      await capture("composer-menu-loading");
+      menuLoad.release();
+      await page.getByRole("menuitem", { name: "Connectors", exact: true }).waitFor();
+      await capture("composer-menu-ready");
+      await page.getByRole("menuitem", { name: "Repositories", exact: true }).click();
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Connectors", exact: true }).waitFor();
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("aria-label") === "More composer actions",
+      );
+      assert.equal(questionAssetRequested, false, "optional navigation must not load with chat");
+      await latest.click();
+      await page.waitForFunction(
+        (id) => document.activeElement?.closest(`[data-queue-turn-id="${id}"]`) !== null,
+        queuedId,
+      );
+      assert.equal(questionAssetRequested, true, "Latest question loads its resolver on demand");
+      assert.equal(
+        await page
+          .locator('[data-testid="timeline-user"]')
+          .getByText(prompt, { exact: true })
+          .count(),
+        0,
+      );
+      await capture("queued-question-focused");
+
+      await collapseQueue();
+      state.nextQueueTransition = "fail";
+      await latest.click();
+      await page.waitForFunction(() =>
+        document
+          .querySelector("[data-og-jump-to-question]")
+          ?.getAttribute("title")
+          ?.includes("Could not load"),
+      );
+      await assertNotFocused();
+      await capture("queued-question-refresh-error");
+
+      state.failQueue = false;
+      state.nextQueueTransition = "hold";
+      await latest.click();
+      await state.gates.queue.entered;
+      await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
+      await page
+        .getByRole("searchbox", { name: "Find in conversation", exact: true })
+        .fill(state.session.initialMessage);
+      await page.locator('[data-og-search-sequence="1"]').first().waitFor();
+      await page.getByRole("button", { name: "Close conversation search", exact: true }).click();
+      state.deferQueue = false;
+      state.gates.queue.release();
+      await page.waitForFunction(
+        () =>
+          document.querySelector("[data-og-jump-to-question]")?.getAttribute("aria-busy") !==
+          "true",
+      );
+      await assertNotFocused();
+      assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
+      await capture("queued-question-history-navigation");
+      await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+      });
+      await latest.waitFor();
+      state.nextQueueTransition = "withdraw";
+      await latest.click();
+      await page.waitForFunction(
+        () =>
+          document.querySelector("[data-og-jump-to-question]")?.getAttribute("aria-busy") !==
+          "true",
+      );
+      await assertNotFocused();
+      await row.waitFor({ state: "hidden" });
+      await capture("queued-question-withdrawn");
+
+      const replacementId = crypto.randomUUID();
+      const replacementEventId = crypto.randomUUID();
+      state.turns = [{ ...queued, id: replacementId, triggerEventId: replacementEventId }];
+      state.session.queueVersion += 1;
+      state.session.lastSequence = 7;
+      state.events.push(
+        {
+          id: replacementEventId,
+          workspaceId,
+          sessionId,
+          turnId: replacementId,
+          sequence: 6,
+          type: "user.message",
+          payload: { text: prompt, resources: [], routing: "queued_for_execution" },
+          occurredAt: state.session.updatedAt,
+        },
+        {
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId: replacementId,
+          sequence: 7,
+          type: "turn.queued",
+          payload: { triggerEventId: replacementEventId, turnId: replacementId },
+          occurredAt: state.session.updatedAt,
+        },
+      );
+      await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+      });
+      state.gates.queue = gate();
+      state.nextQueueTransition = "hold";
+      await latest.click();
+      await state.gates.queue.entered;
+      if (width < 1024)
+        await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+      await page.locator(`a[data-session-row="${otherSessionId}"]:visible`).click();
+      await page
+        .getByRole("textbox", { name: /Message|Prompt/i })
+        .first()
+        .waitFor();
+      state.deferQueue = false;
+      state.gates.queue.release();
+      await assertNotFocused();
+      assert.equal(await row.count(), 0);
+      assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
+      await capture("queued-question-session-switch");
+      assert.deepEqual(queueWrites, []);
+      assert.equal(
+        state.turns[0]?.id,
+        replacementId,
+        "navigation must not consume the saved prompt",
+      );
     } catch (error) {
-      await capture("latest-failure");
-      throw new Error(`${width}px latest reload: ${await page.locator("body").innerText()}`, {
+      await capture("queued-question-failure");
+      throw new Error(`${width}px queued question: ${await page.locator("body").innerText()}`, {
         cause: error,
       });
     } finally {
+      menuLoad.release();
       for (const deferred of Object.values(state.gates)) deferred.release();
       await context.close();
     }
   }, 90_000);
+
+  test(`production composer menu failure after deployment recovery preserves chat at ${width}px`, async () => {
+    const context = await browser.newContext({
+      viewport: { width, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    const state = fixtures();
+    for (const name of ["config", "access", "detail", "history"] as const)
+      state.gates[name].release();
+    await installApi(page, state);
+    await page.route(`**/${composerMenuAsset}`, (route) => route.abort("failed"));
+    try {
+      await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      const input = page.getByRole("textbox", { name: /Message|Prompt/i }).first();
+      await input.waitFor();
+      // Preserve the app's existing one-time stale-chunk reload; exercise the
+      // local fallback when that recovery has already been attempted.
+      await Promise.all([
+        page.waitForEvent("load"),
+        page.getByRole("button", { name: "More composer actions", exact: true }).click(),
+      ]);
+      await input.waitFor();
+      await input.fill("Draft survives optional menu failure");
+      await page.getByRole("button", { name: "More composer actions", exact: true }).click();
+      await page
+        .getByRole("alert")
+        .filter({ hasText: "Composer actions could not be loaded." })
+        .waitFor();
+      assert.equal(await page.getByRole("button", { name: "Reload", exact: true }).count(), 1);
+      await page.screenshot({ path: `${output}/${width}-composer-menu-load-error.png` });
+      await page.keyboard.press("Escape");
+      assert.equal(await input.inputValue(), "Draft survives optional menu failure");
+      await input.fill("Still editable");
+      assert.equal(await input.inputValue(), "Still editable");
+    } finally {
+      for (const deferred of Object.values(state.gates)) deferred.release();
+      await context.close();
+    }
+  }, 30_000);
 }

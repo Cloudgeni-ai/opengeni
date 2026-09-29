@@ -87,6 +87,8 @@ import { ConsoleComposer } from "@/components/Composer";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useSessionOpening } from "@/lib/session-opening";
+import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
+import { useQueuedQuestionFocus } from "@/lib/queued-question-focus";
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
@@ -295,6 +297,7 @@ export function SessionRoute({
   // bounded tail, then stream live events with resume-by-sequence.
   const {
     events,
+    timeline: eventTimeline,
     sessionStatus,
     sessionStatusSequence,
     connectionState,
@@ -350,6 +353,9 @@ export function SessionRoute({
     context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
       ? context.sessionCreationHandoff
       : null;
+  const pendingCreationHandoff = creationHandoffReconciled(creationHandoff, events)
+    ? null
+    : creationHandoff;
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -420,7 +426,7 @@ export function SessionRoute({
   );
   const { opened, hasObservedHistory } = useSessionOpening(
     `${workspaceId}:${sessionId}`,
-    Boolean(session && (initialHistoryReady || creationHandoff)),
+    Boolean(session && (initialHistoryReady || pendingCreationHandoff)),
     events.length > 0,
   );
   const timeline = useMemo(() => {
@@ -436,27 +442,29 @@ export function SessionRoute({
     if (
       (!opened || initialLoading || hasObservedHistory) &&
       visibleEvents.length === 0 &&
-      !creationHandoff
+      !pendingCreationHandoff
     ) {
       return [];
     }
     const projected = projectSessionTimeline(
       session,
       visibleEvents,
-      creationHandoff?.clientEventId,
+      pendingCreationHandoff?.clientEventId,
+      viewClearedAfter === null ? eventTimeline : undefined,
     );
     // projectSessionTimeline falls back to the session's initial message when
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
   }, [
-    creationHandoff,
+    pendingCreationHandoff,
     session,
     visibleEvents,
     viewClearedAfter,
     opened,
     initialLoading,
     hasObservedHistory,
+    eventTimeline,
   ]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
@@ -1534,7 +1542,7 @@ function SessionChatPane(props: {
   loadingOldest: boolean;
   onJumpToStart: () => Promise<boolean>;
   onJumpToLatest: () => Promise<void>;
-  onJumpToLatestQuestion: () => Promise<number | null>;
+  onJumpToLatestQuestion: ReturnType<typeof useSessionEvents>["jumpToLatestQuestion"];
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -1551,6 +1559,18 @@ function SessionChatPane(props: {
   onOpenSandboxFile: (path: string, line?: number) => void;
 }) {
   const context = useAppContext();
+  const { onQueuedQuestion, queueFocusTarget } = useQueuedQuestionFocus({
+    client: context.client,
+    subjectId: context.accessContext.subjectId,
+    workspaceId: props.session.workspaceId,
+    sessionId: props.session.id,
+    queue: props.queue,
+  });
+  const jumpToQuestion = props.onJumpToLatestQuestion;
+  const jumpToLatestQuestion = useCallback(
+    () => jumpToQuestion({ onQueuedQuestion }),
+    [jumpToQuestion, onQueuedQuestion],
+  );
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
@@ -2683,7 +2703,7 @@ function SessionChatPane(props: {
                   await props.onJumpToStart();
                 }}
                 onJumpToLatest={props.onJumpToLatest}
-                onJumpToLatestQuestion={props.onJumpToLatestQuestion}
+                onJumpToLatestQuestion={jumpToLatestQuestion}
                 emptyState={
                   // Clear view hides history, not the retained failure or retry operation.
                   failureRecovery ??
@@ -2835,6 +2855,7 @@ function SessionChatPane(props: {
             }
           />
           <SessionChrome
+            queueFocusTarget={queueFocusTarget}
             sessionStatus={props.session.status}
             onOpenSession={props.onOpenSession}
             queue={props.queue}
