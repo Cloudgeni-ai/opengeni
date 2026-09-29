@@ -1,14 +1,21 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import { AlertTriangleIcon, CopyIcon, InfoIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
-import { TechnicalDetails } from "@/components/ui/error-message";
 import { apiErrorTechnicalFacts, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 
 const RECONNECT_PILL_REVEAL_DELAY_MS = 1_500;
+
+// Startup code: the disclosure lives with the management UI primitives, so it
+// loads only once a load error actually has details to show.
+const TechnicalDetails = lazy(() =>
+  import("@/components/ui/error-message").then((module) => ({
+    default: module.TechnicalDetails,
+  })),
+);
 
 type ConnectionPillMeta = { label: string; dot: string; text: string };
 
@@ -250,9 +257,11 @@ export function LoadErrorState({
           </div>
         ) : null}
         {!denied && facts.length > 0 ? (
-          <div className="mt-1">
-            <TechnicalDetails facts={facts} />
-          </div>
+          <Suspense fallback={null}>
+            <div className="mt-1">
+              <TechnicalDetails facts={facts} />
+            </div>
+          </Suspense>
         ) : null}
       </div>
       {denied ? null : (

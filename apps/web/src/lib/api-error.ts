@@ -61,7 +61,10 @@ export function isPermissionDenied(error: unknown): boolean {
 /** A server sentence that is safe to show: short, and not a JSON or schema dump. */
 function readableServerSentence(message: string | undefined): string | undefined {
   if (!message || message.length > 160 || /^[[{]/u.test(message)) return undefined;
+  // A bare code ("invalid_transaction") is not a sentence.
+  if (!/\s/u.test(message.trim())) return undefined;
   if (/\b[A-Z][A-Z0-9]+_[A-Z0-9_]+\b/u.test(message)) return undefined; // env vars, enums
+  if (/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/u.test(message)) return undefined; // snake_case codes, fields
   const sentence = message.charAt(0).toLocaleUpperCase() + message.slice(1);
   return /[.!?]$/u.test(sentence) ? sentence : `${sentence}.`;
 }

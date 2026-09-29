@@ -69,6 +69,11 @@ describe("api errors in product words", () => {
     expect(apiErrorAdvice(apiError(422, '[{"code":"invalid_string"}]'))).toBe(
       "Check what you entered and try again.",
     );
+    const bareCode = Object.assign(new Error("invalid_transaction"), { status: 400 });
+    expect(apiErrorAdvice(bareCode)).toBe("Check what you entered and try again.");
+    expect(apiErrorAdvice(apiError(422, "field redirect_uri is not allowed"))).toBe(
+      "Check what you entered and try again.",
+    );
   });
 
   test("keeps the app's own messages and maps network failures", () => {
