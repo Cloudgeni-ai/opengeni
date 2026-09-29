@@ -52,11 +52,13 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Ask only for consequential product choices or external authority that cannot
-  be inferred. Offer a recommended setup and use the existing structured question
-  UI, when available, for the few unresolved choices about chat sharing, learning
-  across chats, or data access. Skip choices already settled; do not impose an
-  onboarding questionnaire. See [Discovery and autonomy](references/discovery-and-autonomy.md).
+- Before building, confirm the few choices only the user can make, in ONE
+  bundled question (the structured question UI when available) with a
+  recommended default for each: who shares what (a per-user or shared agent and
+  chats), when things run (schedule and time zone), where outputs land (which
+  screen, record, or channel), and whether the agent may write. Never ask what
+  the repository answers; skip settled choices. See
+  [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default when an unresolved choice is
   low-risk. Resolve privacy, tenant authority, data writes, cost exposure, and
   ambiguous external mutations before crossing those boundaries.
@@ -81,12 +83,15 @@ surfaces, and record why.
 // Server only: the organization API key never reaches the browser.
 import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
 
-const og = new OpenGeniClient({ baseUrl: OPENGENI_URL, apiKey: OPENGENI_API_KEY });
+const og = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!, // the deployment you target
+  apiKey: process.env.OPENGENI_API_KEY!, // organization API key
+});
 const source = "acme-app"; // stable external-identity namespace
 
 // 1. Onboarding, once per tenant and admitted user (persist workspace.id and operationId).
 const { workspace } = await og.ensureWorkspace({
-  accountId: OPENGENI_ORGANIZATION_ID, externalSource: source,
+  accountId: process.env.OPENGENI_ORGANIZATION_ID!, externalSource: source,
   externalId: tenant.id, name: tenant.name,
 });
 await og.addExternalWorkspaceMember(workspace.id, {
@@ -103,6 +108,7 @@ const session = await og.asUser(user.id, { source }).createSession(workspace.id,
   skills: productSkills, // product-owned, inline
   tools: [{ kind: "mcp", id: "acme" }], // explicit minimal selection
   firstPartyMcpTools: [],
+  sandboxBackend: "none", // pure chat/tool agent: no sandbox to start or shell around tools
 });
 
 // 3. Mount at /api/opengeni/* (Next.js route handler, Hono, Bun.serve, workers).
@@ -165,9 +171,26 @@ Read selectively: [Product integration shapes](references/product-integration-sh
 [Data tools and credentials](references/data-tools-and-credentials.md), and
 [External users and embedded connection setup](references/external-users-and-connect.md).
 
-This tree is the canonical developer guide for product integration. It does not
-define a runtime profile API, schedule Skill fields, or a new registry; an
-integration's "runtime profile" is configuration owned by the customer's code.
+## Build Gotchas
+
+- Always pass `baseUrl` (`process.env.OPENGENI_API_BASE_URL`); the chat facade
+  otherwise targets production `app.opengeni.ai`. The SDK is ESM-only.
+- A per-session `mcpServers` entry is usable only when also selected in
+  `tools: [{ kind: "mcp", id, eager? }]`, and attaching it needs
+  `mcp_servers:attach` for the acting user. MCP and OpenAPI spec URLs must be
+  public HTTPS the deployment can reach; tunnel local servers (for example
+  `cloudflared`).
+- `sandboxBackend: "none"` suits pure chat/tool agents: turns start in seconds
+  instead of minutes, and there is no shell to route around the product's tools.
+- Stop in a chat UI is `pauseSession`: resumable, and messages sent while
+  paused queue until `resumeSession`. `cancelSession` is terminal for the
+  session and its children; never wire it to Stop.
+- Background agents: use a scheduled task (`createScheduledTask`, with an
+  explicit schedule and time zone), or an inbound automation webhook for
+  events. Their agents reference a workspace OpenAPI Integration or MCP
+  connection by id in `tools` (scheduled tasks take no inline `mcpServers`) and
+  write results back through the product's own tools. OpenGeni sends no
+  outbound webhooks.
 
 ## Choose The Credential
 
@@ -186,8 +209,6 @@ integration's "runtime profile" is configuration owned by the customer's code.
 - Keep the organization API key and operator credentials on the product server.
 - Authenticate the product's user first, resolve their allowed OpenGeni
   workspace/session server-side, and expose only the routes that product needs.
-- Use `@opengeni/sdk` instead of reconstructing event streaming, upload signing,
-  retries, or wire types by hand.
 - Use `createSessionProxyHandler` for the React conversation, or
   `proxySessionEventStream` inside a custom same-origin SSE route.
 - Direct browser access is valid only when the deployment's normal browser auth
@@ -203,12 +224,13 @@ other.
 
 ## Organization And Workspace Bootstrap
 
-Use one organization API key for the external backend. Organization key
-administration is exposed through `listOrganizationApiKeys`,
-`createOrganizationApiKey`, and `deleteOrganizationApiKey`, corresponding to
-the organization-scoped `/v1/organizations/:organizationId/api-keys` routes.
-The create response shows the token once; store it only in the product's secret
-manager.
+Use one organization API key for the external backend (`createOrganizationApiKey`,
+`listOrganizationApiKeys`, `deleteOrganizationApiKey`); the token is shown once,
+so store it in the product's secret manager.
+
+The organization key needs `workspace:admin` (included in full-access keys;
+it implies session, file, MCP-attach, and member management). `/v1/access/me`
+shows only that account-level grant; an empty `workspaceGrants` is expected.
 
 For each chosen product sharing boundary, call `ensureWorkspace` /
 `PUT /v1/workspaces/external` with a stable external mapping identity and persist
@@ -219,8 +241,10 @@ excluded and must never be selected through a default-workspace fallback.
 
 Choose the workspace from who shares documents, workspace instructions,
 Connections, and integrations: normally one per customer, and a separate one
-when groups need different Connections, integrations, or instructions. Use
-`asUser(externalId)` for the authenticated product user; the server derives the
+when groups need different Connections, integrations, or instructions. When
+each end user is their own boundary, a workspace per user (the user id as
+`externalId`) called with the organization key alone is a valid, simpler
+option. Otherwise use `asUser(externalId)` for the authenticated product user; the server derives the
 canonical user, so never supply an `endUser` label as authority. Human
 visibility is `visibility` (verified external owners can create private sessions
 when the organization enables it; private sessions do not make workspace Files
@@ -241,13 +265,9 @@ OpenGeni, then pass the selected definitions inline in
 organization-wide Skill registry or Skill inheritance in this integration
 contract.
 
-Use `CreateSessionRequest.bundledSkillIds` to narrow OpenGeni's bundled guidance
-independently: omitted means defaults, `[]` means none, and explicit IDs such as
-`builtin:opengeni-documents` allow only those whose normal inclusion rules hold.
-Children inherit and can only narrow; scheduled-task `agentConfig` and automation
-`sessionTemplate` accept the same field. This does not hide workspace or inline
-Skills, grant tools, or disable eager `skill_read`. Keep the selection stable on
-keyed-create retries. Never try to control it through arbitrary session metadata.
+`CreateSessionRequest.bundledSkillIds` narrows OpenGeni's bundled guidance
+(omitted = defaults, `[]` = none); children, scheduled tasks, and automations
+accept it too. It grants no tools and does not hide workspace or inline Skills.
 
 New Skill inputs require valid `SKILL.md` frontmatter, which owns the name and
 description. Do not replay old headerless Skills as new session input.
@@ -262,11 +282,9 @@ Use each prompt surface for its exact authority and lifetime:
   message as a separate history part; standard timeline rendering omits it.
 - `initialMessage` and later message text: the visible part of that user message.
 
-`modelContext` is not secret, private, or privileged; full event/audit reads may
-return it. Do not hide business facts in a snapshot when the agent should inspect
-them with an authorized product MCP tool. Prefer concise message context plus
-canonical tool access. Changing `modelContext` must not change the persistent
-agent instruction prefix.
+`modelContext` is not secret or privileged; full event/audit reads return it.
+Prefer concise per-message context plus authorized product tools over large
+snapshots, and never move it into instructions.
 
 ## Client Workflow
 
@@ -292,14 +310,8 @@ agent instruction prefix.
   themselves.
 - Organization workspaces have wire `kind: "shared"`; Personal workspaces are
   outside the external product mapping.
-- Use one workspace per customer and private/shared visibility for human
-  access. Knowledge settings and prompt instructions do not create a tenant boundary.
-  `agentAccess` optionally restricts agent reach further; tool removal is
-  defense in depth, not a replacement for authorization.
-- Use separate workspaces only when groups must not share documents,
-  Connections, integrations, or workspace instructions.
-- Do not invent an organization-wide Skill registry or rely on Skill
-  inheritance. The external backend passes selected Skills inline per session.
+- Knowledge settings and prompt instructions never create a tenant boundary;
+  tool removal is defense in depth, not authorization.
 - The SDK cannot accept arbitrary customer backend functions as remote tools.
   Expose an existing API through a reviewed OpenAPI/GraphQL Integration or an
   MCP server.
@@ -309,9 +321,8 @@ agent instruction prefix.
 - Do not call Temporal, NATS, Postgres, workers, sandbox providers, object
   storage APIs, or MCP transports as substitutes for the public SDK/API.
 - Do not claim auth, model, tool, billing, CORS, storage, or compute behavior
-  until the live deployment or current source proves it.
-- Keep examples generic and parameterized. Skills may name non-secret origins
-  and conventions, but credentials come from a secret manager or environment.
+  until the live deployment or current source proves it. Credentials come from
+  a secret manager or environment, never from examples or Skills.
 - Generate a customer-specific skill only for stable facts their coding agents
   repeatedly need. Keep it beside their integration code, point it at the SDK,
   include a config/access smoke probe, and never paste secrets into it.

@@ -17,7 +17,11 @@ facade uses `asUser()` and never grants or restores membership.
 ```ts
 import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({ apiKey: OPENGENI_API_KEY, organizationId: OPENGENI_ORGANIZATION_ID });
+const og = new OpenGeni({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!, // omitted = production app.opengeni.ai
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
 
 export const POST = createChatHandler(og, {
   // Tenant and user come from the authenticated request, never the body.

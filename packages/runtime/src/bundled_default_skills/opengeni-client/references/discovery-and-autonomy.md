@@ -48,7 +48,7 @@ Good questions ask for a product decision, such as who may read another person's
 
 Poor questions ask the customer to restate their framework, API routes, auth library, CI command, or deployment topology when those are already visible. Do not make the customer choose OpenGeni internals they do not care about; translate their requirement into the appropriate contract.
 
-Group tightly related unresolved decisions when that makes them easier to answer. Do not impose a fixed question count. Do not repeat a question whose answer was already given. If the user explicitly asks the agent to determine the answer, investigate and make a reasoned choice instead of returning the decision to them.
+Asking zero questions is a failure when a user-owned choice below is unresolved and not inferable; asking about inferable facts is the opposite failure. Do not repeat an answered question. If the user explicitly asks the agent to decide, investigate and make a reasoned choice.
 
 For a missing privacy answer, default provisionally to the smaller sharing boundary and explain the operational cost. Do not silently weaken isolation to reduce workspace count.
 
@@ -74,6 +74,9 @@ Use product language for the relevant unresolved choices:
   more reports, or controlled queries for deeper analysis. State the meaningful
   limitation of the recommendation. Confirm broader access or writes separately
   only when they are part of the requested product.
+- **When things run:** on demand, or on a schedule (time and time zone).
+- **Where results land:** the chat, a product record or screen, or a channel;
+  OpenGeni has no outbound webhooks, so delivery goes through product tools.
 
 For example, if all three choices are unresolved for a simple dashboard, propose
 “Private chats, no learning between chats, and current-page data only” with a short

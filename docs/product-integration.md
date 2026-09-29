@@ -52,12 +52,15 @@ bun add @opengeni/sdk @opengeni/react
 // Server only: the organization API key never reaches the browser.
 import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
 
-const og = new OpenGeniClient({ baseUrl: OPENGENI_URL, apiKey: OPENGENI_API_KEY });
+const og = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!, // the deployment you target
+  apiKey: process.env.OPENGENI_API_KEY!, // organization API key
+});
 const source = "acme-app"; // stable external-identity namespace
 
 // 1. Onboarding, once per tenant and per admitted user. Persist the workspace id.
 const { workspace } = await og.ensureWorkspace({
-  accountId: OPENGENI_ORGANIZATION_ID,
+  accountId: process.env.OPENGENI_ORGANIZATION_ID!,
   externalSource: source,
   externalId: tenant.id,
   name: tenant.name,
@@ -76,6 +79,7 @@ const session = await og.asUser(user.id, { source }).createSession(workspace.id,
   skills: productSkills,
   tools: [{ kind: "mcp", id: "acme" }],
   firstPartyMcpTools: [],
+  sandboxBackend: "none", // pure chat/tool agent: no sandbox to start
 });
 
 // 3. Mount at /api/opengeni/* (Next.js route handler, Hono, Bun.serve, workers).
@@ -173,7 +177,11 @@ no goals, queue, or steer UI, and reopening restores only a text snapshot.
 ```ts
 import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({ apiKey: OPENGENI_API_KEY, organizationId: OPENGENI_ORGANIZATION_ID });
+const og = new OpenGeni({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!, // omitted = production app.opengeni.ai
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
 
 export const POST = createChatHandler(og, {
   resolve: async (request) => {
@@ -367,7 +375,7 @@ import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
 
 const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;

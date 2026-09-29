@@ -42,7 +42,8 @@ The built-in organization API-key scope includes `workspace:admin`, which
 implies the ordinary workspace capabilities this example uses, including
 external-member onboarding (`members:manage`), sessions, files, and MCP
 attachment. The server grants the fixed demo operator (`maya.chen`, source
-`northstar-demo`) only `workspace:read`, `sessions:*`, and `files:*` access. It still does not imply the literal
+`northstar-demo`) only `workspace:read`, `sessions:*`, `files:*`, and
+`mcp_servers:attach` (its sessions carry a per-session MCP server). It still does not imply the literal
 `secrets:read` permission. These are workspace capabilities, not browser-origin
 registrations; file bytes still travel through short-lived signed storage URLs.
 

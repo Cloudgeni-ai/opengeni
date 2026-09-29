@@ -32,7 +32,7 @@ import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
 
 const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;

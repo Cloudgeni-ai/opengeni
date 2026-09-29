@@ -82,6 +82,7 @@ const session = await og.asUser(me.userId, { source }).createSession(me.workspac
   skills: productSkills, // Your versioned product Skills.
   tools: [{ kind: "mcp", id: "acme" }], // Only the integrations this surface needs.
   firstPartyMcpTools: [],
+  sandboxBackend: "none", // A pure chat/tool agent needs no sandbox.
 });
 ```
 

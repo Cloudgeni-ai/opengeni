@@ -17,7 +17,7 @@ Skill beside the product's integration code and review it whenever the installed
 - Organization ID: `[non-secret UUID]`
 - External source convention: `[stable product namespace, for example acme-support]`
 - Workspace isolation unit: `[tenant | end user | chat | another explicit sharing group]`
-- Credential environment variable: `OPENGENI_ORGANIZATION_API_KEY`
+- Credential environment variables: `OPENGENI_API_KEY`, `OPENGENI_API_BASE_URL` (always pass `baseUrl`)
 - Base URL environment variable: `OPENGENI_API_BASE_URL`
 - Organization environment variable: `OPENGENI_ORGANIZATION_ID`
 

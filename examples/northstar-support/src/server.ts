@@ -52,6 +52,8 @@ const DEMO_USER_PERMISSIONS = [
   "sessions:control",
   "files:upload",
   "files:read",
+  // Sessions carry a per-session MCP server, which the acting user must be allowed to attach.
+  "mcp_servers:attach",
 ] as const;
 const IDEMPOTENCY_NAMESPACE = "6f0b8b2e-3d7c-4f7e-9a51-2f1c5e0d9b44";
 
@@ -64,7 +66,7 @@ function ensureDemoMembership(): Promise<void> {
       identity: { externalId: DEMO_USER.externalId, source: DEMO_USER.source },
       permissions: [...DEMO_USER_PERMISSIONS],
       operationId: await uuidV5(
-        `membership:${workspaceId}:${DEMO_USER.externalId}`,
+        `membership:${workspaceId}:${DEMO_USER.externalId}:${DEMO_USER_PERMISSIONS.join(",")}`,
         IDEMPOTENCY_NAMESPACE,
       ),
     });
@@ -596,7 +598,10 @@ async function createAgentSession(request: Request): Promise<Response> {
     tools: [{ kind: "mcp", id: MCP_SERVER_ID }],
     mcpServers: [mcpServer] as CreateSessionRequest["mcpServers"],
     // Explicit selections: only the Northstar MCP server, no first-party tools.
+    // A per-session MCP server must also be selected in `tools` to be usable.
     firstPartyMcpTools: [],
+    // A pure tool agent: no sandbox to start, and no shell around the product tools.
+    sandboxBackend: "none",
     metadata: { demo: "northstar-support", ticketId: ticket.id },
     // Stable per start: a retried request returns the same session.
     idempotencyKey: `northstar:${ticket.id}:${runId}`,
