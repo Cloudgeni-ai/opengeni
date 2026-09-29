@@ -47,6 +47,7 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
+import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
 import type {
   SkillRecord,
   SkillSummary,
@@ -693,6 +694,12 @@ export type OpenGeniClientOptions = {
   baseUrl: string;
   /** OpenGeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
+  /**
+   * Receives a notice (once per route per client) when the API advertises a
+   * `Deprecation`/`Sunset` header on a response. Defaults to a one-time
+   * `console.warn` per route; pass `false` to silence notices.
+   */
+  onDeprecation?: OpenGeniDeprecationHandler | false | undefined;
   /** Extra headers (static or computed per request) merged into every call. */
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
@@ -914,7 +921,10 @@ export class OpenGeniClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
     // Bind lazily so variable sets that polyfill fetch after module load work.
-    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
+    this.fetchImpl = withDeprecationNotices<FetchResponse>(
+      options.fetch ?? ((input, init) => fetch(input, init)),
+      options.onDeprecation,
+    );
     const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
     if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
       throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");

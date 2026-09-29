@@ -1091,10 +1091,14 @@ reconsider — they can change with their counterpart, not with the SDK.
 
 ## Compatibility
 
-Clients and servers are compatible within the same **major** release-train
-version; evolution is additive within a major and both sides are tolerant
-readers. Official server builds expose `serverVersion` on `/healthz` and
-`/v1/config/client`. Full policy: `docs/architecture.md` §3.10.
+Clients and servers are compatible within the same **major** version of this
+SDK; evolution is additive within a major and both sides are tolerant readers.
+Official server builds expose `serverVersion` on `/healthz` and
+`/v1/config/client`. A route scheduled for removal answers with `Deprecation`
+and `Sunset` headers at least 90 days (and a major) ahead; the client reports
+each deprecated route once through the `onDeprecation` option (default: one
+`console.warn` per route; `false` silences it). Full policy:
+`docs/design/api-compatibility-policy.md`.
 
 ## Proxy through your own API
 

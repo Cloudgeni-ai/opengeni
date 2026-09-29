@@ -80,6 +80,8 @@ import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { bearerApiContractHeaderCompatibility } from "./http/api-contract-compat";
+import { deprecationHeadersMiddleware } from "./http/deprecation";
 import {
   boundedRegisteredRouteLabel,
   registeredHandlerRoutePath,
@@ -528,6 +530,9 @@ export function createAppComposition(deps: AppDependencies): {
     exposeHeaders: [
       "Accept-Ranges",
       "Content-Range",
+      "Deprecation",
+      "Link",
+      "Sunset",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
@@ -626,6 +631,14 @@ export function createAppComposition(deps: AppDependencies): {
       c.res.headers.set("vary", appendVary(c.res.headers.get("vary"), "Accept-Encoding"));
     }
   });
+
+  // Public-route deprecations (docs/design/api-compatibility-policy.md) are
+  // advertised on every response of the affected route, errors included.
+  app.use("/v1/*", deprecationHeadersMiddleware());
+  // A pinned SDK must not be told about a revision it is built to reject; see
+  // the policy's contract-header rule. Registered before the contract fence so
+  // it observes the header that fence sets.
+  app.use("/v1/*", bearerApiContractHeaderCompatibility());
 
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
