@@ -84,8 +84,7 @@ import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
 const og = new OpenGeniClient({ baseUrl: OPENGENI_URL, apiKey: OPENGENI_API_KEY });
 const source = "acme-app"; // stable external-identity namespace
 
-// 1. Onboarding, once per tenant and per admitted user. Persist the workspace id;
-//    store operationId before calling so retries are safe.
+// 1. Onboarding, once per tenant and admitted user (persist workspace.id and operationId).
 const { workspace } = await og.ensureWorkspace({
   accountId: OPENGENI_ORGANIZATION_ID, externalSource: source,
   externalId: tenant.id, name: tenant.name,
@@ -121,19 +120,20 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at the mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { SessionConversation } from "@opengeni/react";
+import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-<SessionConversation client={client} workspaceId={workspaceId} sessionId={session.id} />;
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={session.id} />
+</OpenGeniProvider>;
 ```
 
 The proxy calls `resolve` per request, acts only through `asUser`, pins the
-workspace, and serves only conversation routes. Browser creation needs a
-server `createSession` hook that turns `{ initialMessage, idempotencyKey }` into
-the full request; `authorizeSession` and `modelSelection: false` narrow further.
-Never copy `examples/northstar-support`'s raw passthrough (any workspace path,
-service authority, no user). Reset UI state when the user or tenant changes.
+workspace, and serves only provider/conversation routes. Browser creation needs
+a server `createSession` hook returning the full request. Never replace the
+proxy with a raw passthrough of arbitrary paths under the organization key.
+Reset UI state when the user or tenant changes.
 
 ## Deliberate deviations
 

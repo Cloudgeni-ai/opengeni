@@ -92,11 +92,13 @@ export const handleOpenGeni = createSessionProxyHandler(og, {
 ```tsx
 // Browser
 import { OpenGeniClient } from "@opengeni/sdk";
-import { SessionConversation } from "@opengeni/react";
+import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-<SessionConversation client={client} workspaceId={workspaceId} sessionId={sessionId} />;
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={sessionId} />
+</OpenGeniProvider>;
 ```
 
 Your server maps tenants with `ensureWorkspace`, onboards users with `addExternalWorkspaceMember`, and creates sessions with explicit tools. If your product already has a Vercel `useChat` or OpenAI-shaped chat UI, `createChatHandler` from `@opengeni/sdk/chat` is a text-only fallback backend for it.

@@ -52,20 +52,24 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at your mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { SessionConversation } from "@opengeni/react";
+import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-<SessionConversation client={client} workspaceId={workspaceId} sessionId={sessionId} />;
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={sessionId} />
+</OpenGeniProvider>;
 ```
 
 Every request calls `resolve`, then runs through `asUser(user, { source })`
 (there is no service-authority fallback) against exactly the resolved
-workspace. Only the native routes the conversation uses are served: client
-config and the workspace model catalog; session read/rename, events (list and
-SSE with `Last-Event-ID` resume), send/steer/approval/human-input, queue,
-composer draft, pause/resume; and, unless `files: false`, attachment upload and
-download URLs. Everything else is a 404. Browser session creation is disabled
+workspace. Only the native routes `OpenGeniProvider` and the conversation use
+are served: client config; workspace read, model catalog, live control stream,
+and workspace Resume; session read/rename, events (list and SSE with
+`Last-Event-ID` resume), send/steer/approval/human-input, queue, composer
+draft, pause/resume; and, unless `files: false`, attachment upload and download
+URLs. Every other route or method is a 404 (cancel and workspace Pause are
+refused); unknown query parameters on served reads pass through. Browser session creation is disabled
 unless you supply `createSession`; the browser may then send only
 `initialMessage` and `idempotencyKey`, and your hook returns the full request
 (tools, MCP servers, Skills, instructions, model policy). Message bodies are

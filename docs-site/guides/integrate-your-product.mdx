@@ -105,7 +105,7 @@ export const handleOpenGeni = createSessionProxyHandler(og, {
 });
 ```
 
-`authenticate` is your existing cookie or bearer verifier. Never take the tenant, workspace, or user from the request body or an unverified header. On every request the proxy calls `resolve`, acts as that user through `asUser` (never with the key's own service authority), rejects any other workspace, and serves only the native routes the conversation uses. Everything else returns `404`.
+`authenticate` is your existing cookie or bearer verifier. Never take the tenant, workspace, or user from the request body or an unverified header. On every request the proxy calls `resolve`, acts as that user through `asUser` (never with the key's own service authority), rejects any other workspace, and serves only the native routes `OpenGeniProvider` and the conversation use, including the workspace live control stream and workspace Resume. Other routes and methods return `404`; cancel and workspace Pause are refused.
 
 | Option              | Purpose                                                                                                                           |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
@@ -123,13 +123,17 @@ Browsers cannot choose tools, MCP servers, Skills, instructions, or model policy
 
 ```tsx
 import { OpenGeniClient } from "@opengeni/sdk";
-import { SessionConversation } from "@opengeni/react";
+import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
 export function Assistant({ workspaceId, sessionId }: { workspaceId: string; sessionId: string }) {
-  return <SessionConversation client={client} workspaceId={workspaceId} sessionId={sessionId} />;
+  return (
+    <OpenGeniProvider client={client} workspaceId={workspaceId}>
+      <SessionConversation sessionId={sessionId} />
+    </OpenGeniProvider>
+  );
 }
 ```
 

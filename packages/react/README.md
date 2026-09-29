@@ -91,7 +91,9 @@ on your server, and point an unmodified browser
 ```tsx
 import "@opengeni/react/compiled.css";
 
-<SessionConversation client={client} workspaceId={workspaceId} sessionId={sessionId} />;
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={sessionId} />
+</OpenGeniProvider>;
 ```
 
 Compose `MessageTimeline` and `ChatComposer` with the session hooks only when

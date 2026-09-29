@@ -93,21 +93,25 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at the mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { SessionConversation } from "@opengeni/react";
+import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-<SessionConversation client={client} workspaceId={workspaceId} sessionId={session.id} />;
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={session.id} />
+</OpenGeniProvider>;
 ```
 
 The proxy calls `resolve` on every request and acts only through
 `asUser(user, { source })`; there is no fallback to the key's service
 authority. It rejects any workspace other than the resolved one and serves only
-the native routes the conversation uses: client config and model catalog,
+the native routes `OpenGeniProvider` and the conversation use: client config;
+workspace read, model catalog, live control stream, and workspace Resume;
 session read and rename, event list and SSE (with `Last-Event-ID` resume),
 send, steer, approval and human-input responses, queue, composer draft,
 pause/resume, and (unless `files: false`) attachment upload and download URLs.
-Everything else is a 404. Browser session creation is off unless the server
+Every other route or method is a 404 (cancel and workspace Pause are refused);
+unknown query parameters on served reads pass through for newer browser SDKs. Browser session creation is off unless the server
 supplies `createSession`; the browser may then send only `initialMessage` and
 `idempotencyKey`, and the hook returns the complete request, so tools, MCP
 servers, Skills, instructions, and model policy stay server-chosen. Bodies are
@@ -643,7 +647,7 @@ regardless of UI state.
 Deviate only for a stated reason. A materially different interaction model can
 use `@opengeni/react/session` headless hooks and projections, or compose
 `MessageTimeline` and `ChatComposer`; their client contracts are structural,
-and the packaged proxy serves the conversation subset. A non-React frontend
+and the packaged proxy serves the conversation subset of them. A non-React frontend
 (Svelte/SvelteKit, Vue, mobile) builds framework-native components against
 authenticated product backend routes that use the TypeScript SDK or the public
 HTTP contract. Products that expose agent compute add the workbench. Styling is

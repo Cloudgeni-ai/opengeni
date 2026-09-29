@@ -62,9 +62,8 @@ Resume is optional.
 **OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
 should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
-under `OpenGeniProvider`, or with explicit `client`/`workspaceId` props. A
-standalone product backs it with `createSessionProxyHandler`, which serves the
-conversation routes but not the provider's workspace-wide control stream. It wires queue actions, composer drafts, model policy,
+under `OpenGeniProvider`. A standalone product backs both with
+`createSessionProxyHandler`. It wires queue actions, composer drafts, model policy,
 pause/resume, human-input forms, optimistic delivery, and paged timeline history.
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
