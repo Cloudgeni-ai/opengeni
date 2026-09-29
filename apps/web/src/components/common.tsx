@@ -1,9 +1,11 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
-import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
+import { AlertTriangleIcon, CopyIcon, InfoIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
+import { TechnicalDetails } from "@/components/ui/error-message";
+import { apiErrorTechnicalFacts, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 
 const RECONNECT_PILL_REVEAL_DELAY_MS = 1_500;
@@ -206,7 +208,9 @@ export function EmptyState({ children }: { children: ReactNode }) {
 /**
  * Honest failed-load state for list surfaces. Renders the error with a retry
  * affordance instead of letting routes fall through to "No X yet…" copy when
- * the request failed.
+ * the request failed. Says what to do in product words; the raw status and
+ * request reference stay behind Technical details. A permission refusal is
+ * not a failure: it reads calmly, names who can help, and offers no retry.
  */
 export function LoadErrorState({
   title,
@@ -217,27 +221,50 @@ export function LoadErrorState({
   error?: Error | null;
   onRetry: () => void;
 }) {
+  const denied = error ? isPermissionDenied(error) : false;
+  const facts = error ? apiErrorTechnicalFacts(error) : [];
   return (
     <div
-      role="alert"
-      aria-live="assertive"
-      className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg"
+      role={denied ? undefined : "alert"}
+      aria-live={denied ? undefined : "assertive"}
+      className={cn(
+        "flex items-start gap-2 rounded-lg border p-3 text-sm text-fg",
+        denied ? "border-border bg-surface/40" : "border-status-failed/40 bg-status-failed/10",
+      )}
     >
-      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
+      {denied ? (
+        <InfoIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
+      ) : (
+        <AlertTriangleIcon
+          aria-hidden="true"
+          className="mt-0.5 size-4 shrink-0 text-status-failed"
+        />
+      )}
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>
-        {error?.message ? (
-          <div className="mt-0.5 break-words text-xs leading-4 text-fg-muted">{error.message}</div>
+        {error ? (
+          <div className="mt-0.5 break-words text-xs leading-4.5 text-fg-muted">
+            {denied
+              ? "You don't have access to this. Ask an admin for access."
+              : userErrorText(error)}
+          </div>
+        ) : null}
+        {!denied && facts.length > 0 ? (
+          <div className="mt-1">
+            <TechnicalDetails facts={facts} />
+          </div>
         ) : null}
       </div>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/50 px-2 text-xs font-medium text-fg transition-colors hover:bg-status-failed/20"
-      >
-        <RefreshCwIcon className="size-3" />
-        Retry
-      </button>
+      {denied ? null : (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/50 px-2 text-xs font-medium text-fg transition-colors hover:bg-status-failed/20"
+        >
+          <RefreshCwIcon className="size-3" />
+          Retry
+        </button>
+      )}
     </div>
   );
 }

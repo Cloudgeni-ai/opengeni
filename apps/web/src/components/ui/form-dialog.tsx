@@ -15,10 +15,12 @@ import { ArrowLeftIcon, LoaderCircleIcon, LockIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
+import { TechnicalDetails } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
 import { SectionFrameReset } from "@/components/ui/section-variant";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { AnalyticsAction } from "@/lib/analytics-actions";
+import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -120,9 +122,18 @@ export interface FormFrameProps {
   bodyClassName?: string;
 }
 
+/** What went wrong and what to do; an API error's status and reference go behind Technical details. */
 function errorMessage(error: unknown): ReactNode {
-  if (error instanceof Error && error.message) return error.message;
-  return "Something went wrong. Try again.";
+  const facts = apiErrorTechnicalFacts(error);
+  if (facts.length === 0) return userErrorText(error);
+  return (
+    <>
+      {userErrorText(error)}
+      <div className="mt-1">
+        <TechnicalDetails facts={facts} />
+      </div>
+    </>
+  );
 }
 
 const SUBMITTABLE =

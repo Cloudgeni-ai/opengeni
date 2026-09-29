@@ -3,6 +3,7 @@ import {
   noteSuccessfulLogin,
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 // Root providers: client config bootstrap, auth (deployment key / configured
@@ -1251,7 +1252,7 @@ export function RootRouteComponent() {
       created = creation.value;
     } catch (error) {
       toast.error("Failed to create workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1292,7 +1293,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to rename workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1368,7 +1369,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to update workspace settings", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1393,7 +1394,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to update the workspace default sandbox environment", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1432,7 +1433,7 @@ export function RootRouteComponent() {
       return updated;
     } catch (error) {
       toast.error("Failed to rename session", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1520,7 +1521,7 @@ export function RootRouteComponent() {
           ? "Session pin changed elsewhere"
           : `Couldn't ${pinned ? "pin" : "unpin"} session`,
         {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         },
       );
       return null;
@@ -1545,7 +1546,7 @@ export function RootRouteComponent() {
       if (deletion.status === "stale") return false;
     } catch (error) {
       toast.error("Failed to delete workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     }
@@ -1620,7 +1621,7 @@ export function RootRouteComponent() {
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
         toast.error("GitHub status unavailable", {
-          description: String(error),
+          description: userErrorText(error),
         });
       } finally {
         if (githubRefreshId.current === refreshId && ownsRefresh()) {
@@ -1714,7 +1715,7 @@ export function RootRouteComponent() {
         if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
         setPersonalGitHubCatalogReady(true);
         toast.error("Your GitHub account is unavailable", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       } finally {
         if (ownsRefresh()) setPersonalGitHubBusy(false);
@@ -1738,7 +1739,7 @@ export function RootRouteComponent() {
       window.location.assign(attempt.nextAction.url);
     } catch (error) {
       toast.error("Couldn't open GitHub sign-in", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     }
   }
@@ -1757,7 +1758,7 @@ export function RootRouteComponent() {
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect your GitHub account", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -1785,7 +1786,7 @@ export function RootRouteComponent() {
       return true;
     } catch (error) {
       toast.error("Couldn't update GitHub repository access", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -2113,7 +2114,7 @@ export function RootRouteComponent() {
         )
       ) {
         toast.error("GitHub App setup failed", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       }
     } finally {
@@ -2222,7 +2223,7 @@ export function RootRouteComponent() {
         setSelectedRepoIds(previousSelectedIds);
         setSelectedRepoRefs(previousSelectedRefs);
         toast.error("Failed to unlink GitHub installation", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       }
       return false;
@@ -2909,7 +2910,7 @@ export function RootRouteComponent() {
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
             void handleManagedSignOut().catch((error) =>
-              toast.error("Sign out failed", { description: String(error) }),
+              toast.error("Sign out failed", { description: userErrorText(error) }),
             );
           }}
           onSignOut={handleManagedSignOut}
