@@ -3129,8 +3129,18 @@ export type CreateSessionRequest = {
   // Exact actor-private pre-session draft revision represented by this create.
   // The server consumes only this revision after durable initialization.
   expectedNewSessionDraftRevision?: number | undefined;
+  /**
+   * Per-chat Learning override. It is the authenticated human's setting, so it
+   * requires a human principal (for example an `asUser` session); a bare
+   * organization/service key receives 403. Service callers remove agent
+   * learning writes with `firstPartyMcpTools: []` instead.
+   */
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /**
+   * Non-empty narrowing of the first-party token's permissions; `[]` is
+   * rejected. For no reachable first-party authority use `firstPartyMcpTools: []`.
+   */
   firstPartyMcpPermissions?: string[] | undefined;
   /**
    * Exact first-party OpenGeni tool selection. Omitted selects the deployment

@@ -2915,11 +2915,14 @@ async function createSessionForRequestInFileScope(
         )
       : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
-    // An empty set would sign an unusable zero-permission token; the default
-    // worker set is expressed by omitting the field.
+    // An empty set would sign an unusable zero-permission token (the signed
+    // delegation requires at least one permission, and older verifiers reject
+    // an empty one). Least privilege is expressed by selection instead:
+    // `firstPartyMcpTools: []` registers no first-party tool, so no permission
+    // in the token is reachable by the model.
     throw new HTTPException(422, {
       message:
-        "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set",
+        'firstPartyMcpPermissions must not be empty; omit it for the default worker permission set, or use firstPartyMcpTools: [] to expose no first-party tools (with a narrow set such as ["workspace:read"])',
     });
   }
   for (const permission of firstPartyMcpPermissions ?? []) {

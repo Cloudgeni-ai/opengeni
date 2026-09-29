@@ -15594,6 +15594,9 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // selection history. A newer sibling draft survives, while every failed
       // pre-initialization create leaves the submitted draft intact.
       expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
+      // A per-chat Learning override is the authenticated human's setting and
+      // requires a human principal; service/organization keys get 403 and use
+      // `firstPartyMcpTools: []` to remove agent learning writers instead.
       agentLearning: AgentLearningOverrides.optional(),
       // A child may lower its inherited limit freely; an increase requires
       // workspace:admin and is checked again at the DB transaction boundary.
