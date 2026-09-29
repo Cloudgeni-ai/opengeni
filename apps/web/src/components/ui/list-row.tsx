@@ -554,10 +554,12 @@ export function ListRow({
   // On one line the facts give way from the end: a later part truncates (and
   // then disappears) before an earlier one, so a narrow row reads "Fact ·
   // Staging runs on walrus-2…" instead of every part cut to a few letters.
+  // Only the last meta item and the folded facts after it shrink at all: any
+  // shrink, however small, would put an ellipsis into a short fact ("Fa…").
   const metaParts: ReactNode[] = [
     ...metaItems.map((item, index) => (
       // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
-      <MetaPart key={`meta-${index}`} order={index}>
+      <MetaPart key={`meta-${index}`} order={index} keep={index < metaItems.length - 1}>
         {item}
       </MetaPart>
     )),
