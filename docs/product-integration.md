@@ -468,8 +468,9 @@ the initial prompt; the agent reads relevant guidance on demand.
 
 `.agents/skills/opengeni-client` is the single authored source, also usable by
 coding agents in a cloned repository. `bun run sync:client-skill` copies it exactly
-to the runtime's bundled assets; `bun run check:client-skill` and the unit suite
-check for drift. These assets ship with runtime packages and production process
+to the runtime's bundled assets and renders the public docs mirror
+`docs-site/reference/opengeni-client-skill.mdx`; `bun run check:client-skill` and
+the unit suite check both for drift. These assets ship with runtime packages and production process
 bundles, so managed, self-hosted and local deployments use the same guide without
 fetching GitHub at runtime. Edit the canonical source, not the generated copy.
 The old `opengeni-product-integration` Pack is not needed or restored.

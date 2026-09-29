@@ -1,0 +1,53 @@
+---
+title: "Northstar support agent"
+description: "A small support SaaS that embeds the OpenGeni conversation and lets the agent work tickets through the product's own MCP tools."
+icon: "headset"
+---
+
+Northstar is a fictional customer-support product that shows the default integration end to end. Use it as a working reference for your own embed.
+
+## What it shows
+
+- **Before and after.** Use Northstar as a plain support tool, then flip the **OpenGeni** switch to open the agent panel beside the ticket.
+- **The default embed.** The backend onboards the demo operator as a workspace member, creates each session as that user, and mounts `createSessionProxyHandler` at `/api/opengeni/*`. The panel is `OpenGeniProvider` plus `SessionConversation`.
+- **Product tools.** The agent reads and updates tickets through Northstar's authenticated MCP server: `get_ticket`, `get_customer`, `update_ticket`, and `add_internal_note`. Changes appear in the product immediately.
+- **Custom tool rendering.** Tool calls render as Northstar ticket and customer cards through a `toolRegistry`.
+- **Branding.** The panel uses the compact density preset and Northstar colors through `--og-*` tokens.
+
+## Run it
+
+You need Bun, a repository checkout, an OpenGeni organization API key, a workspace id, and a public HTTPS tunnel for the MCP server.
+
+```bash
+git clone https://github.com/Cloudgeni-ai/opengeni.git
+cd opengeni && bun install
+cd examples/northstar-support
+cp .env.example .env.local   # set OPENGENI_WORKSPACE_ID, OPENGENI_API_KEY, OPENGENI_DEMO_MCP_TOKEN
+bun run server
+```
+
+In a second terminal, expose the MCP port:
+
+```bash
+ngrok http 4101
+```
+
+In a third terminal, start the UI and open http://127.0.0.1:3101:
+
+```bash
+cd examples/northstar-support && bun run dev
+```
+
+Without ngrok, set `OPENGENI_DEMO_MCP_URL` to any public HTTPS URL that reaches port 4101.
+
+## Where to look
+
+| File                             | Contents                                                            |
+| -------------------------------- | ------------------------------------------------------------------- |
+| `src/server.ts`                  | Onboarding, session creation, the session proxy, and the MCP server |
+| `src/support-agent-panel.tsx`    | `OpenGeniProvider` and `SessionConversation`                        |
+| `src/support-tool-renderers.tsx` | Product renderers for the MCP tool calls                            |
+
+The demo's proxy resolves one fixed operator and its tools are pre-approved. A real product authenticates users in `resolve`, checks CSRF in `authorizeMutation`, and keeps secrets in a secret manager.
+
+[View the source on GitHub](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/northstar-support).

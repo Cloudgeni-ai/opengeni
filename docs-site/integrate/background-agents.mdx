@@ -1,0 +1,64 @@
+---
+title: "Background agents"
+description: "Run agents on a schedule or from your product's events, and bring their results back into your product."
+icon: "clock"
+---
+
+Agents do not need a user in the conversation. Start them on a schedule or when something happens in your product, let them work to completion, and bring the results back into your product.
+
+## On a schedule
+
+```ts
+await og.createScheduledTask(workspaceId, {
+  name: "Daily ticket triage",
+  schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+  runMode: "new_session_per_run",
+  agentConfig: {
+    prompt: "Triage new support tickets and tag urgent ones.",
+    tools: [{ kind: "mcp", id: acmeServerId }],
+    sandboxBackend: "none",
+  },
+});
+```
+
+Always set an explicit schedule and time zone. `runMode` chooses a new session per run, one reusable session, or an existing session. Scheduled tasks cannot carry a per-session MCP server, so their tools come from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration), selected by id.
+
+Manage tasks with `listScheduledTasks`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, and `deleteScheduledTask`.
+
+## From your product's events
+
+An inbound automation turns a signed HTTP event from your product into an agent session. Create a **source** (it has a public webhook endpoint and a signing secret) and a **trigger** (which events match and the session to start), with `OpenGeniAutomationsClient` from `@opengeni/sdk/automations`. Your product then posts JSON events:
+
+```bash
+POST /v1/webhooks/automations/<endpoint id>
+x-opengeni-signature-256: sha256=<HMAC-SHA256 of the raw body>
+x-opengeni-delivery-id: <optional, for deduplication>
+
+{ "type": "ticket.created", "id": "evt_123", "data": { "ticketId": "T-42" } }
+```
+
+Redelivered events are deduplicated. Event data reaches the agent as untrusted input, never as instructions or permissions. See the [automations reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/automations.md).
+
+## Work until done
+
+Give a background session a **goal** with success criteria, and it keeps working across turns until it completes the goal with evidence or pauses with a reason:
+
+```ts
+agentConfig: {
+  prompt: "Reconcile yesterday's refunds.",
+  goal: {
+    text: "Every refund from yesterday is matched to a ledger entry",
+    successCriteria: "A summary lists each refund with its ledger id, or the reason it could not be matched",
+  },
+}
+```
+
+See [Goals](/concepts/goals).
+
+## Bring results back
+
+- **Write back through your tools.** The agent calls your API to update a ticket, post a comment, or store a report, with the same authorization as any other call. This is the most direct path.
+- **Workspace webhooks.** OpenGeni can notify your product when a turn completes or fails, when a session's status changes, or when an agent waits for an approval or a question. Events are signed, delivered at least once, and may arrive out of order; treat each as a signal to read the session through the API. See [Host-managed credentials & webhooks](/integrate/host-managed-integrations#webhooks).
+- **Read the session.** `listEvents` and `getSession` return the full history and final answer at any time.
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

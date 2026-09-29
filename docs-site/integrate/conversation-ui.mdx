@@ -1,0 +1,101 @@
+---
+title: "Conversation UI & theming"
+description: "Render the full OpenGeni conversation, brand it, and customize how tools appear."
+icon: "palette"
+---
+
+`SessionConversation` is the complete conversation for one session: streaming replies, tool activity, approvals, structured questions, file attachments, the message queue, Steer, and Pause/Resume. It uses the SDK client from `OpenGeniProvider`, so it works unchanged behind [the session proxy](/embed-manually).
+
+```tsx
+import { OpenGeniClient } from "@opengeni/sdk";
+import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import "@opengeni/react/compiled.css";
+
+const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
+
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={sessionId} height="100%" />
+</OpenGeniProvider>;
+```
+
+## Props
+
+| Prop                | Purpose                                                                    |
+| ------------------- | -------------------------------------------------------------------------- |
+| `sessionId`         | Required. The session to show                                              |
+| `attachments`       | File attachments in the composer. Defaults to `true`                       |
+| `modelPicker`       | Show the model picker. Hidden automatically when the proxy fixes the model |
+| `toolRegistry`      | Your own renderers for your tools; defaults to the built-in registry       |
+| `renderMessageText` | Custom rendering for message text, such as links into your product         |
+| `height`            | Defaults to filling its container; the host owns the available height      |
+| `className`         | Class on the root element                                                  |
+| `composerProps`     | Presentation options for the composer, such as placeholder text            |
+
+Remount or reset the component when the signed-in user or tenant changes.
+
+## Brand it
+
+`compiled.css` is scoped to the components and needs no Tailwind. Every visual decision is a `--og-*` CSS variable. Override them on any ancestor:
+
+```css
+.assistant-panel {
+  --og-color-accent: oklch(0.55 0.2 280);
+  --og-color-bg: #ffffff;
+  --og-font-sans: "Inter", system-ui, sans-serif;
+  --og-radius-md: 8px;
+}
+```
+
+Dark is the default. Add `data-og-theme="light"` to an ancestor for the light theme, and `data-og-density="compact"` for narrow side panels:
+
+```tsx
+<aside className="assistant-panel" data-og-theme="light" data-og-density="compact">
+  <SessionConversation sessionId={sessionId} />
+</aside>
+```
+
+Menus and dialogs that render in a portal copy the theme from the element that opened them. The full token list is in [`tokens.css`](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/styles/tokens.css).
+
+## Render your tools
+
+Tool calls to your own MCP server can render as product UI instead of a generic activity row. Tool names are `<server id>__<tool name>`:
+
+```tsx
+import { createDefaultToolRegistry, type ToolRendererProps } from "@opengeni/react";
+
+function TicketTool({ item }: ToolRendererProps) {
+  return <TicketCard call={item} />; // item.arguments, item.output, item.status
+}
+
+const toolRegistry = createDefaultToolRegistry({
+  entries: [{ match: "name", name: "acme__get_ticket", render: TicketTool }],
+});
+
+<SessionConversation sessionId={sessionId} toolRegistry={toolRegistry} />;
+```
+
+## Start sessions from the browser
+
+By default your server creates sessions. To let users start one from the page, add a `createSession` hook to the proxy. The browser sends only the first message and an idempotency key; your hook returns the full request, so tools, skills, and model policy stay server-side:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve,
+  createSession: (input) => ({
+    ...input,
+    tools: [{ kind: "mcp", id: "acme" }],
+    firstPartyMcpTools: [],
+    sandboxBackend: "none",
+  }),
+});
+```
+
+## Other UI shapes
+
+- **Headless hooks** from `@opengeni/react/session` when you need a materially different interaction model but want the same event, queue, composer, and approval behavior.
+- **The SDK alone** for a non-React frontend, a CLI, or backend automation.
+- **The chat facade** when you already have a chat UI. See [Keep your existing chat UI](/integrate/existing-chat-ui).
+
+See the [React reference](/reference/react) for the full component list.
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

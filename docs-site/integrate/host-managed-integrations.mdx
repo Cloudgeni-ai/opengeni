@@ -1,0 +1,73 @@
+---
+title: "Host-managed credentials & webhooks"
+sidebarTitle: "Advanced: credentials & webhooks"
+description: "For products that run background work with host-owned access: a workspace credential provider, outbound webhooks, and turn identity on MCP calls."
+icon: "sliders"
+---
+
+<Info>
+  This is an advanced tier. Most products only need the [default embed](/embed-manually) and
+  [per-session tools](/integrate/your-data). Use these primitives when agents run sandbox work that
+  needs credentials your product owns, or when your product must react to agent events without a
+  user watching.
+</Info>
+
+All three are configured per workspace through the API or `@opengeni/sdk` and require `workspace:admin`. Agents can never change them. OpenGeni generates each signing secret and returns it once, at creation.
+
+## One signature scheme
+
+Every request OpenGeni sends to your endpoints carries:
+
+```text
+OpenGeni-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>
+```
+
+Verify the raw body before parsing it; the SDK does this and rejects stale timestamps:
+
+```ts
+import { verifyWebhookEvent, verifyCredentialProviderRequest } from "@opengeni/sdk";
+
+const { event } = await verifyWebhookEvent({ body: rawBody, headers, secret });
+const request = await verifyCredentialProviderRequest({ body: rawBody, headers, secret });
+```
+
+## Credential provider
+
+One optional HTTPS endpoint per workspace that supplies short-lived credentials for sandbox work: environment variables, files, and Git credentials. OpenGeni calls it before a turn's sandbox work and again before the returned material expires.
+
+```ts
+const { secret } = await og.putWorkspaceCredentialProvider(workspaceId, {
+  url: "https://api.acme.com/opengeni/credentials",
+  timeoutMs: 10_000,
+});
+```
+
+Each request identifies the workspace, session, turn, and the human who started the work, so you can mint credentials scoped to exactly that. Your endpoint answers `ok` with the material and an optional `expiresAt`, `not_applicable`, or `auth_needed` with a reconnect message that OpenGeni shows to the user. Credentials never enter the sandbox manifest, and renewals replace files in place.
+
+## Webhooks
+
+Up to ten endpoints per workspace, each subscribed to a subset of:
+
+| Event                                               | Sent when                                     |
+| --------------------------------------------------- | --------------------------------------------- |
+| `turn.completed` / `turn.failed` / `turn.cancelled` | A turn settles                                |
+| `session.status.changed`                            | The session status changes                    |
+| `session.requiresAction`                            | The agent waits for a tool approval           |
+| `session.humanInput.requested`                      | The agent asks the user a structured question |
+
+```ts
+const { webhook, secret } = await og.createWorkspaceWebhook(workspaceId, {
+  url: "https://api.acme.com/opengeni/events",
+  eventTypes: ["turn.completed", "turn.failed", "session.requiresAction"],
+});
+```
+
+The body is a thin event with the session, turn, and sequence; read details through the API. Delivery is at least once and unordered: deduplicate on the event `id` and order by `sequence` within a session. Failed deliveries retry with backoff; `listWorkspaceWebhookDeliveries` and `redeliverWorkspaceWebhookDelivery` let you inspect and replay them.
+
+## Turn identity on MCP calls
+
+Every tool call the agent makes to an MCP server includes `_meta.opengeni` with the workspace, session, turn, attempt, and initiating user. Use it to attribute a call to the exact turn and person in your logs. It is informational: authorize with the connection's own credential.
+
+## Reference
+
+The full contract, including request and response bodies, retry schedules, and the allowlisted default sandbox image, is in the [workspace integrations reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/workspace-integrations.md).

@@ -55,8 +55,6 @@ access. Manage those connections separately.
 
 ## Organization key access
 
-Verify organization-key access against your deployment and installed SDK. See the [package and deployment setup](/guides/integrate-your-product#connect-your-backend) for compatibility checks.
-
 Choose an access tier when creating an organization key:
 
 | `access`           | Use                                                                                           |
@@ -74,7 +72,7 @@ Both tiers can use `listOrganizationSessions` or `iterateOrganizationSessions` t
 
 Conversation identity is independent of the acting user; different user IDs do not isolate a shared conversation ID. The host must authorize which conversations a user may open. An opaque end-user label does not grant workspace membership. If you omit the user label, the host must resolve an authorized conversation itself.
 
-On sign-out or user/tenant changes, abort old requests and clear transcripts and pending requests from your frontend. Reset or remount session components when their authenticated identity changes. Client cleanup does not replace server-side authorization. See [Integrate your product](/guides/integrate-your-product).
+On sign-out or user/tenant changes, abort old requests and clear transcripts and pending requests from your frontend. Reset or remount session components when their authenticated identity changes. Client cleanup does not replace server-side authorization. See [Users, tenants & privacy](/integrate/users-and-tenants).
 
 ## External-user onboarding
 
