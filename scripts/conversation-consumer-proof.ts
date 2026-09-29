@@ -81,6 +81,8 @@ export async function proveConversationConsumer(input: ConversationConsumerInput
       "@types/react": reactManifest.devDependencies?.["@types/react"],
       "@types/react-dom": reactManifest.devDependencies?.["@types/react-dom"],
       "@vitejs/plugin-react": reactManifest.devDependencies?.["@vitejs/plugin-react"],
+      // Next.js verifies its TypeScript setup with a classic TypeScript 5 compiler.
+      typescript: "^5.9.0",
       vite: reactManifest.devDependencies?.vite,
     },
     overrides: {
