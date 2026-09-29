@@ -72,6 +72,7 @@ import {
   type ResolvedApiIntegrationPreview,
 } from "../integrations/api-integrations";
 import { createGitHubSkillSourceClient } from "../integrations/github-skill-source";
+import { parseRequestJson } from "../http/request-body";
 
 const MAX_PLUGIN_MANIFEST_BYTES = 1024 * 1024;
 
@@ -188,7 +189,7 @@ export function registerPluginRoutes(
   app.post("/v1/workspaces/:workspaceId/plugins/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const payload = PreviewPluginRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, PreviewPluginRequest);
     const resolved = await resolvePluginPackage({
       deps,
       github,
@@ -211,7 +212,7 @@ export function registerPluginRoutes(
       "capabilities:manage",
     );
     const { grant } = access;
-    const payload = InstallPluginRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, InstallPluginRequest);
     const resolved = await resolvePluginPackage({
       skillActor: () => skillInstallerActor(access),
       deps,
@@ -372,7 +373,7 @@ export function registerPluginRoutes(
     const { grant } = access;
     const skillActor = skillRemovalActor(access);
     const pluginKey = decodeURIComponent(c.req.param("pluginKey"));
-    const payload = UninstallPluginRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UninstallPluginRequest);
     try {
       return c.json(
         UninstallPluginResult.parse({

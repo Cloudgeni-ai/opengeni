@@ -529,6 +529,10 @@ Official server builds expose `serverVersion` through health and client-config
 responses. There is no runtime negotiation protocol: tolerant reading and a
 shared major version are the compatibility mechanism.
 
+`x-opengeni-api-contract` fences only cookie-authenticated browser mutations
+(stale tabs); bearer integrations stay admitted across revisions. See
+[`product-integration.md`](product-integration.md#api-contract-revision).
+
 An optional field that changes execution authority is not an ordinary additive
 response field. Its readers must ship first, new external writes stay behind a
 default-off admission switch until every shared-queue consumer is compatible,
@@ -814,7 +818,7 @@ These producers all converge on the ordinary session/turn runtime:
 Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
 Schedules API filtering uses `sessionId`.
 
-Connection-account refusals retain immutable [diagnostic-only run receipts](scheduled-admission-diagnostics.md), never execution authority.
+Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; runs waiting on a person and their optional timeout are in [scheduled-task-access.md](scheduled-task-access.md#runs-waiting-on-a-person).
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;
 `tools: []` remains an empty override. Standalone scheduler-owned turns use a
@@ -986,44 +990,43 @@ separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
 Insights usage uses a four-column projection (0484) with tenant/actor/visibility
-checks; capability writes need a writable database, including 0537/0538.
+checks; capability writes need a writable database, including 0541/0542.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`.
 
-Codex and SuperGrok pools own credentials and capacity without changing logical
-turns. Shared and Personal workspaces inherit same-organization pools; each
-forms one allocator boundary and grants no workspace access. SuperGrok freezes
-scope on acceptance.
-Vercel AI Gateway and OpenRouter expose separate workspace- and
-organization-owned BYOK products. Organization products use dedicated encrypted
-FORCE-RLS storage, inherit only into same-organization shared workspaces, and
-retain organization payer identity through admission and execution; no rail
-implicitly falls back to another key.
-Provider-refusal cooldowns retain provenance and revisions: fresh usage repairs
-older quota refusals, never generic backpressure or newer refusals. All-capped
-admission and capacity waits reconcile through bounded refreshes.
+Codex/SuperGrok pools preserve logical turns. Shared/Personal workspaces inherit
+same-organization pools as separate allocator boundaries, not access grants.
+SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter BYOK keys
+belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
+inherit into same-organization shared workspaces, retain payer identity, and
+never fall back across rails.
+Provider-refusal cooldowns keep provenance and revisions: fresh usage repairs old
+quota refusals, not backpressure or newer refusals. Capped admission and waits
+use bounded refreshes. Codex quota labels require explicit `/wham/usage` window
+durations, never primary/secondary position. Headers lacking both durations cannot
+update labeled cache; absent reset timing does not clear an exhausted window.
+The account picker refreshes live usage on open rather than trusting stale labels.
 
-Codex turns require durable credential leases. `rotation_enabled` controls
-account switching: off waits on capped accounts; on allows same-turn recovery
-elsewhere. First allocation atomically freezes source, active-pointer, rotation,
-strategy, and pin in `codexCredentialPolicySnapshotV1`, before no-credential waits.
-Recovery reuses that policy with current health/cooldowns. Missing/expired confirmed
-deadlines fail closed; discard late heartbeats. Expiry SQL reads database time
-after locking.
+Codex turns require durable credential leases. `rotation_enabled` off waits on
+capped accounts; on permits same-turn failover. First allocation freezes source,
+active pointer, rotation, strategy, and pin in `codexCredentialPolicySnapshotV1`
+before no-credential waits. Recovery retains that policy with current health and
+cooldowns. Missing/expired deadlines fail closed; late heartbeats are discarded.
+Expiry SQL reads database time after locking.
 
-Source-advisory locks serialize changes without idle turns. Accepted pools govern
-allocation, recovery, capacity, tokens and wakes. Guarded content-free capture
-preserves immutable legacy pre-change sources in `codex_turn_source_bindings`,
-never rewriting history. New work uses new settings. Connecting preserves selected
-mode; Automatic prefers connected local accounts. Token loading/refresh requires
-exact live leases. Workspace lists use current pools; authorized session pickers use
-accepted pools for waits, current pools for new work. Membership, ownership, health,
-token-family CAS and live-lease disconnect fences remain enforced.
+Source-advisory locks serialize changes. Accepted pools govern
+allocation, recovery, capacity, tokens, and wakes. Guarded content-free capture
+preserves legacy sources in `codex_turn_source_bindings` without rewriting history.
+New work uses new settings; connecting preserves mode; Automatic prefers local
+accounts. Token loading/refresh requires exact live leases.
+Workspace lists use current pools; session pickers use accepted pools for waits,
+current pools for new work. Membership, ownership, health, token-family CAS,
+and live-lease disconnect fences remain enforced.
 
-Migration 0492 requires maintenance: drain API/control/turn processes, supply all
-runtime logins, migrate, provision roles; start compatible binaries only.
-Before/after guards reject live runtime DB sessions. Preserve checkpoints and
-recover—not cancel—accepted turns. Never restart pre-0492 binaries.
+Migration 0492 requires maintenance: drain API/control/turn processes, supply
+runtime logins, migrate, provision roles, then start compatible binaries.
+Guards reject live runtime DB sessions; recover accepted turns from checkpoints.
+Never restart pre-0492 binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
@@ -1388,7 +1391,7 @@ selection; connection-only setup never mutates sessions.
 Canonical mechanics: [shared connection presentation](connection-presentation.md).
 
 `SessionConversation` includes feed, queue/actions, durable composer, model policy,
-human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
+tool approvals, attachments, human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
 
@@ -1569,9 +1572,9 @@ Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 
 ---
 
-Skill approval atomically settles a verified managed/local human response and
-activates the exact folder under scope/head checks. Agents and delegated
-subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifecycle.md).
+Verified human Skill approvals activate folders under scope/head checks;
+agents/delegates cannot authorize them. Editor removal uses the human-authorized
+content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lifecycle.md).
 
 ## 10. Security and access model
 

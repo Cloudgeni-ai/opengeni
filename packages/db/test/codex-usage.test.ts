@@ -361,6 +361,39 @@ describe("fetchCodexUsageForAccount under RLS", () => {
     expect(row!.secondaryUsedPercent).toBe(7);
   });
 
+  test("weekly-only primary quota is cached as weekly, not as 5-hour", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const id = await connect(
+      ws,
+      "acct_weekly_only",
+      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
+      new Date(Date.now() + 3_600_000),
+    );
+    mockFetch({
+      wham: () =>
+        json(
+          whamBody(66, 0, {
+            rate_limit: {
+              allowed: true,
+              primary_window: {
+                used_percent: 66,
+                reset_after_seconds: 200000,
+                limit_window_seconds: 604800,
+              },
+              secondary_window: null,
+            },
+          }),
+        ),
+    });
+    const usage = await fetchCodexUsageForAccount(db, settings, ws.workspaceId, id);
+    expect(usage.fiveHour).toBeNull();
+    expect(usage.weekly?.remaining).toBe(34);
+    const [row] = await listCodexAccountStatuses(db, ws.workspaceId);
+    expect(row!.primaryUsedPercent).toBeNull();
+    expect(row!.secondaryUsedPercent).toBe(66);
+  });
+
   test("a stale-token account: refreshes (CAS bumps version), then reads usage", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

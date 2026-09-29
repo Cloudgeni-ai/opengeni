@@ -148,7 +148,7 @@ describe("organization API keys section", () => {
       "og_secret_full_value",
     );
     expect(container.textContent).toContain("won't be able to see it again");
-    expect(container.textContent).toContain("OPENGENI_ORGANIZATION_API_KEY");
+    expect(container.textContent).toContain("OPENGENI_API_KEY");
     expect(container.textContent).toContain(
       "Organization API key created. Copy it before you leave this page.",
     );

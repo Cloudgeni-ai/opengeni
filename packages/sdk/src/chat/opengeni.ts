@@ -1,5 +1,6 @@
 import { OpenGeniEmbeddingClient as OpenGeniClient } from "../embedding-client";
 import { OpenGeniApiError } from "../errors";
+import type { SendMessageInput } from "../client";
 import type { CreateSessionRequest, Session, SessionEvent } from "../types";
 import { ChatPendingFold, ChatTurnFold, asRecord, stringValue } from "./fold";
 import { chatIdempotencyKey, chatSessionId } from "./ids";
@@ -23,10 +24,7 @@ export const DEFAULT_CHAT_SOURCE = "app";
 
 type SubmittedTurn = { after: number; turnId: string | null };
 
-type BuildCreate = (
-  text: string,
-  importedHistory: ChatImportedMessage[] | undefined,
-) => CreateSessionRequest;
+type BuildCreate = (text: string, send: ChatSendOptions) => CreateSessionRequest;
 
 type ChatInit = {
   workspaceId: string;
@@ -38,6 +36,8 @@ type ChatInit = {
 
 /** Upper bound on the `modelContext` built from `importedHistory`, header included. */
 export const IMPORTED_HISTORY_MAX_CHARS = 30_000;
+/** Server limit for one message's `modelContext`. */
+const MODEL_CONTEXT_MAX_CHARS = 32_768;
 const IMPORTED_HISTORY_HEADER = "Earlier conversation imported from the product, oldest first:";
 const IMPORTED_HISTORY_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "system"]);
 
@@ -125,11 +125,19 @@ export class OpenGeni {
     const workspaceId = await this.workspaceId(options);
     const sessionId = options.sessionId ?? (await chatSessionId(workspaceId, options.conversation));
     const session = await this.findSession(client, workspaceId, sessionId);
-    const buildCreate: BuildCreate = (text, importedHistory) => {
-      const context =
-        options.create?.modelContext === undefined && importedHistory
-          ? formatImportedHistory(importedHistory)
-          : undefined;
+    const buildCreate: BuildCreate = (text, send) => {
+      const { modelContext: createContext, ...create } = options.create ?? {};
+      const messageContext = send.modelContext?.trim() || undefined;
+      const reserved = messageContext ? messageContext.length + 2 : 0;
+      const baseContext =
+        createContext ??
+        (send.importedHistory
+          ? formatImportedHistory(
+              send.importedHistory,
+              Math.min(IMPORTED_HISTORY_MAX_CHARS, MODEL_CONTEXT_MAX_CHARS - reserved),
+            )
+          : undefined);
+      const context = [baseContext, messageContext].filter(Boolean).join("\n\n") || undefined;
       return {
         agentAccess,
         memoryScope,
@@ -137,8 +145,9 @@ export class OpenGeni {
         ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
         ...(options.skills !== undefined ? { skills: options.skills } : {}),
         ...(options.tools !== undefined ? { tools: options.tools } : {}),
+        ...create,
         ...(context !== undefined ? { modelContext: context } : {}),
-        ...(options.create ?? {}),
+        ...messagePolicy(send),
         initialMessage: text,
         requestedSessionId: sessionId,
         idempotencyKey: chatIdempotencyKey(sessionId),
@@ -241,8 +250,8 @@ export class Chat {
     options: ChatSendOptions = {},
   ): AsyncGenerator<ChatChunk, void, void> {
     const submitted = options.steer
-      ? await this.submitSteer(text, options.importedHistory)
-      : await this.submit(text, options.importedHistory);
+      ? await this.submitSteer(text, options)
+      : await this.submit(text, options);
     yield* this.streamTurn(submitted, options.signal);
   }
 
@@ -363,17 +372,14 @@ export class Chat {
     return { messages, pending: pending.pending(), status };
   }
 
-  private async submit(
-    text: string,
-    importedHistory: ChatImportedMessage[] | undefined,
-  ): Promise<SubmittedTurn> {
+  private async submit(text: string, send: ChatSendOptions): Promise<SubmittedTurn> {
     if (!this.session) {
       if (!this.buildCreate) {
         throw new OpenGeniChatError("session_missing", "This session no longer exists.");
       }
       const created = await this.client.createSession(
         this.workspaceId,
-        this.buildCreate(text, importedHistory),
+        this.buildCreate(text, send),
       );
       this.session = created;
       if (created.initialMessage === text) {
@@ -381,16 +387,21 @@ export class Chat {
       }
       // The idempotent create replayed an earlier session; deliver this message too.
     }
-    const event = await this.client.sendMessage(this.workspaceId, this.sessionId, text);
+    const event = await this.client.sendMessage(
+      this.workspaceId,
+      this.sessionId,
+      messageInput(text, send),
+    );
     return submittedFrom(event);
   }
 
-  private async submitSteer(
-    text: string,
-    importedHistory: ChatImportedMessage[] | undefined,
-  ): Promise<SubmittedTurn> {
-    if (!this.session) return await this.submit(text, importedHistory);
-    const result = await this.client.steerMessage(this.workspaceId, this.sessionId, text);
+  private async submitSteer(text: string, send: ChatSendOptions): Promise<SubmittedTurn> {
+    if (!this.session) return await this.submit(text, send);
+    const result = await this.client.steerMessage(
+      this.workspaceId,
+      this.sessionId,
+      messageInput(text, send),
+    );
     return { after: result.accepted.sequence, turnId: result.turn.id ?? null };
   }
 
@@ -430,11 +441,20 @@ export class Chat {
     if (signal?.aborted) upstream.abort();
     else signal?.addEventListener("abort", onAbort, { once: true });
     const fold = new ChatTurnFold(this.workspaceId, this.sessionId, submitted.turnId);
+    // Iterate by hand rather than with for-await: leaving a for-await loop
+    // awaits the inner iterator's return(), which awaits the SSE body's
+    // cancel(), and some fetch implementations (Next.js on Node) settle that
+    // cancel only after the request is aborted. The finally below aborts
+    // first and never waits on the inner unwinding.
+    const events = this.client.streamEvents(this.workspaceId, this.sessionId, {
+      after: submitted.after,
+      signal: upstream.signal,
+    });
     try {
-      for await (const event of this.client.streamEvents(this.workspaceId, this.sessionId, {
-        after: submitted.after,
-        signal: upstream.signal,
-      })) {
+      while (true) {
+        const next = await events.next();
+        if (next.done) break;
+        const event = next.value;
         const step = fold.push(event);
         for (const chunk of step.chunks) yield chunk;
         // Resuming one member of a parallel interruption group re-emits the
@@ -469,6 +489,7 @@ export class Chat {
     } finally {
       signal?.removeEventListener("abort", onAbort);
       upstream.abort();
+      void Promise.resolve(events.return(undefined)).catch(() => undefined);
     }
   }
 }
@@ -478,6 +499,20 @@ async function settle(chunks: AsyncIterable<ChatChunk>): Promise<ChatReply> {
     if (chunk.type === "done") return chunk.reply;
   }
   throw new OpenGeniChatError("stream_ended", "The event stream ended before the turn settled.");
+}
+
+/** Per-message model policy fields that the send options carry. */
+function messagePolicy(send: ChatSendOptions): Partial<SendMessageInput> {
+  return {
+    ...(send.model !== undefined ? { model: send.model } : {}),
+    ...(send.reasoningEffort !== undefined ? { reasoningEffort: send.reasoningEffort } : {}),
+    ...(send.latencyMode !== undefined ? { latencyMode: send.latencyMode } : {}),
+  };
+}
+
+function messageInput(text: string, send: ChatSendOptions): SendMessageInput {
+  const modelContext = send.modelContext?.trim();
+  return { text, ...messagePolicy(send), ...(modelContext ? { modelContext } : {}) };
 }
 
 function submittedFrom(event: SessionEvent): SubmittedTurn {
@@ -492,7 +527,10 @@ function submittedFrom(event: SessionEvent): SubmittedTurn {
  * line per message, oldest first, trimmed from the oldest end to
  * {@link IMPORTED_HISTORY_MAX_CHARS}. Undefined when nothing usable remains.
  */
-export function formatImportedHistory(messages: ChatImportedMessage[]): string | undefined {
+export function formatImportedHistory(
+  messages: ChatImportedMessage[],
+  maxChars: number = IMPORTED_HISTORY_MAX_CHARS,
+): string | undefined {
   const lines = messages
     .filter(
       (message) =>
@@ -502,7 +540,7 @@ export function formatImportedHistory(messages: ChatImportedMessage[]): string |
     )
     .map((message) => `${message.role}: ${message.text}`);
   if (lines.length === 0) return undefined;
-  let budget = IMPORTED_HISTORY_MAX_CHARS - IMPORTED_HISTORY_HEADER.length;
+  let budget = Math.min(maxChars, IMPORTED_HISTORY_MAX_CHARS) - IMPORTED_HISTORY_HEADER.length;
   const kept: string[] = [];
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]!;

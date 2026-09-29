@@ -65,6 +65,7 @@ import type {
   SkillSummary,
   SkillWriteReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 import {
@@ -717,7 +718,28 @@ export type OpenGeniClientOptions = {
   beginSharedRead?: (() => number) | undefined;
   /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
   sessionCommandTimeoutMs?: number;
+  /**
+   * How this client treats an API that advertises a different
+   * `x-opengeni-api-contract` revision.
+   *
+   * - `"strict"`: fail with `OpenGeniApiContractMismatchError` so a browser
+   *   page served alongside the API can reload onto the matching bundle.
+   * - `"compatible"`: keep working. Within a major release train the API is
+   *   additive (see the compatibility policy), and the API admits bearer
+   *   (API key / delegated token) mutations from older SDK revisions, so a
+   *   backend pinned to an older SDK is not broken by every deployment.
+   *
+   * Defaults to `"strict"` in a browser client without an `apiKey`, and to
+   * `"compatible"` everywhere else.
+   */
+  apiContract?: "strict" | "compatible" | undefined;
 };
+
+function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "compatible" {
+  if (options.apiContract) return options.apiContract;
+  const browser = typeof window !== "undefined" && typeof document !== "undefined";
+  return browser && !options.apiKey ? "strict" : "compatible";
+}
 
 /** Per-request cancellation for operations whose caller owns an AbortSignal. */
 export type OpenGeniRequestOptions = {
@@ -915,6 +937,7 @@ export class OpenGeniClient {
   protected readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
+  private readonly apiContractStrict: boolean;
   private readonly active = new Map<string, SingleFlightReadEntry>();
   private readonly generations = new Map<string, number>();
   private readonly queued = new Map<string, SingleFlightReadEntry>();
@@ -933,6 +956,7 @@ export class OpenGeniClient {
       throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
+    this.apiContractStrict = defaultApiContractMode(options) === "strict";
     this.interaction = new OpenGeniInteractionClient(this);
     this.tools = createLazyToolsFacade(this);
   }
@@ -977,7 +1001,7 @@ export class OpenGeniClient {
       if (input.signal?.aborted) throw error;
       throw mutationTransportError(correlationId);
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok)
       throw await apiErrorFromResponse(response, {
         method: "POST",
@@ -1085,7 +1109,7 @@ export class OpenGeniClient {
       if (input.signal?.aborted) throw error;
       throw mutationTransportError(correlationId);
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok)
       throw await apiErrorFromResponse(response, {
         method: "PUT",
@@ -2326,7 +2350,7 @@ export class OpenGeniClient {
         headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2548,7 +2572,7 @@ export class OpenGeniClient {
       headers: { ...this.headers(correlationId), Accept: "text/event-stream" },
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2798,7 +2822,7 @@ export class OpenGeniClient {
         headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2874,7 +2898,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2915,7 +2939,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -3510,7 +3534,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -4566,7 +4590,7 @@ export class OpenGeniClient {
       {},
       options,
     );
-    if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+    if (this.apiContractStrict && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
       throw new OpenGeniApiContractMismatchError(
         OPENGENI_API_CONTRACT_REVISION,
         String(config.apiContractRevision || "(missing)"),
@@ -4974,7 +4998,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Delete a shared workspace through organization-administrator authority. */
+  /**
+   * Delete an organization (shared) workspace. Accepts an organization owner
+   * session or an organization API key with `workspace:admin` (for tenant
+   * offboarding); never deletes a Personal workspace. 409 until quiescent.
+   */
   async deleteOrganizationWorkspace(organizationId: string, workspaceId: string): Promise<void> {
     await this.requestVoid(
       "DELETE",
@@ -6614,7 +6642,7 @@ export class OpenGeniClient {
       ...(options.signal ? { signal: options.signal } : {}),
     });
     try {
-      assertApiContractResponse(response);
+      assertApiContractResponse(response, this.apiContractStrict);
     } catch (error) {
       await cancelResponseBody(response, "retained artifact API contract mismatch");
       throw error;
@@ -7573,6 +7601,19 @@ export class OpenGeniClient {
     request: SaveWorkspaceSkillRequest,
   ): Promise<SkillWriteReceipt> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
+  }
+
+  /** Permanently remove a personal/workspace Skill and all its saved revisions. */
+  async removeWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: RemoveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/remove`,
+      request,
+    );
   }
 
   async approveWorkspaceSkill(
@@ -8753,7 +8794,7 @@ export class OpenGeniClient {
         }
         throw error;
       }
-      assertApiContractResponse(response);
+      assertApiContractResponse(response, this.apiContractStrict);
       try {
         if (!response.ok) {
           throw await awaitWithAbort(
@@ -8781,7 +8822,7 @@ export class OpenGeniClient {
     method: string,
     path: string,
     query: Record<string, string> = {},
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { accept?: string } = {},
   ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
     let response: FetchResponse;
@@ -8790,7 +8831,7 @@ export class OpenGeniClient {
         method,
         headers: {
           ...this.headers(correlationId),
-          Accept: "application/octet-stream",
+          Accept: options.accept ?? "application/octet-stream",
         },
         ...(options.signal ? { signal: options.signal } : {}),
       });
@@ -8798,7 +8839,7 @@ export class OpenGeniClient {
       if (isMutationMethod(method)) throw mutationTransportError(correlationId);
       throw error;
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
     }
@@ -8825,14 +8866,15 @@ export class OpenGeniClient {
       }
       throw error;
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
     }
   }
 }
 
-function assertApiContractResponse(response: FetchResponse): void {
+function assertApiContractResponse(response: FetchResponse, strict: boolean): void {
+  if (!strict) return;
   const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);

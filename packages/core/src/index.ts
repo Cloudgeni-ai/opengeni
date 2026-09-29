@@ -47,6 +47,8 @@ export {
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  configureManagedUserAdmission,
+  assertManagedUserAdmission,
   ManagedAuthActorLeaseOutcomeUnknownError,
   markManagedAuthRequestActorTransitionApplied,
   releaseManagedAuthRequestActorLease,

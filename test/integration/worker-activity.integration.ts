@@ -3606,6 +3606,10 @@ describe("worker activities integration", () => {
       }),
     });
 
+    // The occurrence is refused before any session or model cost, and the
+    // refusal is a visible, transient (skipped) run rather than a silently
+    // dropped occurrence; a later occurrence is admitted normally.
+    const refusal = { version: 1, reason: "monthly_model_cost_limit", retryable: true };
     await expect(
       activities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
@@ -3613,8 +3617,20 @@ describe("worker activities integration", () => {
         triggerType: "scheduled",
         producerKey: `worker-activity-${crypto.randomUUID()}`,
       }),
-    ).resolves.toEqual({ action: "blocked", reason: "monthly_model_cost_limit" });
-    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
+    ).resolves.toEqual({
+      action: "blocked",
+      reason: "monthly_model_cost_limit",
+      runId: expect.any(String),
+      refusal,
+    });
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "skipped",
+      error: "monthly_model_cost_limit",
+      sessionId: null,
+      admissionRefusal: refusal,
+    });
   });
 
   test("does not double count a manually reserved scheduled task run", async () => {

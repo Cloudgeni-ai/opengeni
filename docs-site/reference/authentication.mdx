@@ -64,13 +64,13 @@ Choose an access tier when creating an organization key:
 | `"full"` (default) | Provision workspaces, create and control sessions, and administer keys                        |
 | `"read"`           | Inventory shared workspaces and read their sessions, events, and files for reporting or audit |
 
-Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for the chat handler, which creates tenant workspaces and sends messages.
+Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for product integrations, which create tenant workspaces and send messages.
 
 Both tiers can use `listOrganizationSessions` or `iterateOrganizationSessions` to discover readable sessions across the organization's shared workspaces. Personal workspaces and Only me sessions are excluded. Agent access scopes and end-user filters do not restrict the organization key's authority.
 
 ## Authenticate users of your chat
 
-`createChatHandler` uses your product's `resolve(request)` hook on sends, history reads, and approval/question responses. Verify the product's session cookie or bearer, then return the user's allowed tenant and user ID. The organization key authenticates your backend to OpenGeni; it does not authenticate a product user to your backend.
+`createSessionProxyHandler` and the fallback `createChatHandler` call your product's `resolve(request)` hook on every request. Verify the product's session cookie or bearer, then return the user's allowed tenant and user ID. The organization key authenticates your backend to OpenGeni; it does not authenticate a product user to your backend.
 
 Conversation identity is independent of the acting user; different user IDs do not isolate a shared conversation ID. The host must authorize which conversations a user may open. An opaque end-user label does not grant workspace membership. If you omit the user label, the host must resolve an authorized conversation itself.
 

@@ -1,3 +1,4 @@
+import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { retainedImageId } from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
@@ -187,6 +188,10 @@ import type {
   UpdateSessionToolPolicyRequest,
 } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+// Highlighted diffs and file views load @pierre/diffs only here, in the lazy
+// session route, so the peer and its highlighter stay out of the initial graph.
+enablePierreDiffs();
 
 const InlineChatArtifact = lazy(() =>
   import("@/components/artifacts/retained-file-preview").then((module) => ({

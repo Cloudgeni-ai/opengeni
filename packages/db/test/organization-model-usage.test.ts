@@ -46,9 +46,9 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-test("0538 is additive and reuses the audited fact capability instead of widening a policy", async () => {
+test("0542 is additive and reuses the audited fact capability instead of widening a policy", async () => {
   const candidate = await Bun.file(
-    new URL("../drizzle/0538_organization_model_usage.sql", import.meta.url),
+    new URL("../drizzle/0542_organization_model_usage.sql", import.meta.url),
   ).text();
   expect(candidate).toStartWith("-- deployment-mode: rolling");
   expect(candidate.match(/CREATE FUNCTION/g)).toHaveLength(1);

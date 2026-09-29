@@ -835,6 +835,17 @@ function openGeniToolLabel(tool: string): string {
   return tool.replaceAll("_", " ");
 }
 
+/** "The latest run is waiting for a person to approve a tool or answer a question." */
+export function scheduledTaskAwaitingHumanText(
+  awaitingHuman: { since: string; expiresAt: string | null } | null | undefined,
+): string | null {
+  if (!awaitingHuman) return null;
+  const base = "The latest run is waiting for a person to approve a tool or answer a question.";
+  return awaitingHuman.expiresAt
+    ? `${base} If nobody answers by ${formatTimestamp(awaitingHuman.expiresAt)}, the scheduler rejects it automatically.`
+    : base;
+}
+
 /** "The account chosen for Slack can no longer be used, so new runs cannot start." */
 export function scheduledTaskUnavailableAccountsText(
   connectors: readonly { name: string }[] | undefined,

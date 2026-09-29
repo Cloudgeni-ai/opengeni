@@ -106,6 +106,7 @@ export const settleSessionInputWait = defaultControlActivities.settleSessionInpu
 export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;
 export const expireSessionInteractionIntervention =
   defaultControlActivities.expireSessionInteractionIntervention;
+export const expireScheduledRunHumanWait = defaultControlActivities.expireScheduledRunHumanWait;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
 export const dispatchAutomationRun = defaultControlActivities.dispatchAutomationRun;

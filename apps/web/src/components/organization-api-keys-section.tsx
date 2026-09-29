@@ -348,7 +348,7 @@ function CreateApiKeyPage({
               <>
                 Store it on your server as{" "}
                 <code translate="no" className="font-mono text-fg">
-                  OPENGENI_ORGANIZATION_API_KEY
+                  OPENGENI_API_KEY
                 </code>
                 . Never ship it to a browser or app.
               </>
@@ -484,7 +484,7 @@ function organizationQuickStart(organizationId: string): string {
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
 
 const { workspace } = await client.ensureWorkspace({

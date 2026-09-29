@@ -289,7 +289,7 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
 
 /**
  * One bounded model-fact query for the Workspace Insights response. Each UTC
- * window is read once through the narrow scoped projection (migration 0537) and
+ * window is read once through the narrow scoped projection (migration 0541) and
  * aggregated in one grouping-sets pass. A filtered or session-scoped request adds
  * one unfiltered current-window read because facets and the freshness watermark
  * are deliberately workspace-wide; an unfiltered request reuses current_visible.

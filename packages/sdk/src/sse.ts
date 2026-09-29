@@ -87,7 +87,13 @@ export async function* parseSseStream(
     // still pending at end-of-stream came from a truncated connection and is
     // discarded — the streaming layer replays from its cursor on reconnect.
   } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
+    // Never await cancel(): some fetch bodies settle it only once their request
+    // aborts, which would deadlock the consumer's unwinding.
+    void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // A pending read (older stream implementations) keeps the lock; cancel releases it.
+    }
   }
 }

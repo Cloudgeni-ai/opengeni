@@ -59,6 +59,7 @@ import {
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./scheduled-task-access";
+export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
   CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
@@ -113,6 +114,10 @@ import {
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
+  scheduledRunHumanWaitsInRlsContext,
+} from "./scheduled-human-wait";
 import {
   appendGoalReportRequirements,
   goalReportRequirements,
@@ -182,6 +187,7 @@ import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
   ConnectionAccountSelectionDiagnostic,
+  ScheduledTaskAdmissionRefusal,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
@@ -11713,9 +11719,20 @@ export type SlackInteraction = {
   /**
    * One line naming what the bound session started with, frozen when the
    * session bound so an acknowledgement repair renders the same bytes. Null
-   * means no line.
+   * means no line. No longer written; kept so interactions that already posted
+   * it re-render identically.
    */
   sessionDefaultsLine: string | null;
+  /**
+   * The opening sentence of the task's first Slack message, frozen when the
+   * session binds so every re-render (repair, Stop/Resume, settle) produces the
+   * same bytes for the digest-bound post and update ledgers.
+   *
+   * Also the message-format discriminator: null means the interaction keeps the
+   * format it had before this field existed (Status button, task controls card,
+   * and a workspace line on every message).
+   */
+  startMessageLine: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -12337,6 +12354,7 @@ export async function getOrCreateSlackInteraction(
     | "routedWorkspaceLabel"
     // Owned by `bindSlackInteractionSession`, frozen with the bound session.
     | "sessionDefaultsLine"
+    | "startMessageLine"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -12624,6 +12642,41 @@ export async function getSlackInteractionActionHandle(
   });
 }
 
+/**
+ * The still-pending handles one interaction rendered on one exact message,
+ * oldest first. The message is identified by the post operation that created
+ * it, which is what every handle on it carries as `messageOperationId`.
+ */
+export async function listPendingSlackInteractionMessageActionHandles(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    interactionId: string;
+    messageOperationId: string;
+  },
+): Promise<SlackInteractionActionHandle[]> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.slackInteractionActionHandles)
+      .where(
+        and(
+          eq(schema.slackInteractionActionHandles.accountId, input.accountId),
+          eq(schema.slackInteractionActionHandles.workspaceId, input.workspaceId),
+          eq(schema.slackInteractionActionHandles.interactionId, input.interactionId),
+          eq(schema.slackInteractionActionHandles.messageOperationId, input.messageOperationId),
+          eq(schema.slackInteractionActionHandles.status, "pending"),
+        ),
+      )
+      .orderBy(
+        asc(schema.slackInteractionActionHandles.createdAt),
+        asc(schema.slackInteractionActionHandles.id),
+      );
+    return rows.map(mapSlackInteractionActionHandle);
+  });
+}
+
 export async function settleSlackInteractionActionHandles(
   db: Database,
   input: {
@@ -12632,6 +12685,13 @@ export async function settleSlackInteractionActionHandles(
     handleId: string;
     result: string;
     stale?: boolean;
+    /**
+     * Settle every other pending handle rendered on the same message as
+     * superseded (the default: one card, one decision). A message whose single
+     * button is replaced in place by a freshly reserved one (Stop becoming
+     * Resume) passes false, so the replacement stays pending.
+     */
+    supersedeSiblings?: boolean;
   },
 ): Promise<SlackInteractionActionHandle | null> {
   return await withRlsContext(
@@ -12654,23 +12714,25 @@ export async function settleSlackInteractionActionHandles(
           .limit(1);
         if (!current) return null;
         if (current.status === "pending") {
-          await tx
-            .update(schema.slackInteractionActionHandles)
-            .set({
-              status: "stale",
-              result: "superseded",
-              completedAt: sql`now()`,
-              updatedAt: sql`now()`,
-            })
-            .where(
-              and(
-                eq(
-                  schema.slackInteractionActionHandles.messageOperationId,
-                  current.messageOperationId,
+          if (input.supersedeSiblings !== false) {
+            await tx
+              .update(schema.slackInteractionActionHandles)
+              .set({
+                status: "stale",
+                result: "superseded",
+                completedAt: sql`now()`,
+                updatedAt: sql`now()`,
+              })
+              .where(
+                and(
+                  eq(
+                    schema.slackInteractionActionHandles.messageOperationId,
+                    current.messageOperationId,
+                  ),
+                  eq(schema.slackInteractionActionHandles.status, "pending"),
                 ),
-                eq(schema.slackInteractionActionHandles.status, "pending"),
-              ),
-            );
+              );
+          }
           const [settled] = await tx
             .update(schema.slackInteractionActionHandles)
             .set({
@@ -12847,7 +12909,7 @@ export async function bindSlackInteractionSession(
      * Written only by the bind that wins; a replayed bind of the same session
      * returns the line the first bind froze and never rewrites it.
      */
-    sessionDefaultsLine?: string | null;
+    startMessageLine?: string | null;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -12855,7 +12917,7 @@ export async function bindSlackInteractionSession(
       .update(schema.slackInteractions)
       .set({
         sessionId: input.sessionId,
-        sessionDefaultsLine: input.sessionDefaultsLine ?? null,
+        startMessageLine: input.startMessageLine ?? null,
         updatedAt: sql`now()`,
       })
       .where(
@@ -13395,6 +13457,7 @@ function mapSlackInteraction(
       "sessionDefaultsLine",
       "session_defaults_line",
     ),
+    startMessageLine: slackRowNullableString(row, "startMessageLine", "start_message_line"),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
@@ -18057,6 +18120,112 @@ export async function recordScheduledTaskAdmissionFailure(
   });
 }
 
+/** Reasons a scheduled occurrence is refused before accepting execution. */
+export type ScheduledTaskAdmissionRefusalReason =
+  | "scheduled_authority_unavailable"
+  | "machine_target_unavailable"
+  | "machine_enrollment_inactive"
+  | "variable_set_unavailable"
+  | "rig_version_unavailable"
+  | "insufficient_credits"
+  | "monthly_model_cost_limit"
+  | "monthly_agent_run_limit";
+
+/**
+ * Record a refused occurrence as an immutable run receipt under its producer
+ * identity (migration 0539). A transient refusal is `skipped`, a terminal one
+ * `failed`; neither carries accepted execution. An existing receipt for the
+ * producer wins, so redelivery never duplicates a run: the caller replays it.
+ */
+export async function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+    taskExecutionDigest: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+    scheduledAt?: Date | null;
+    reason: ScheduledTaskAdmissionRefusalReason;
+    retryable: boolean;
+  },
+): Promise<ScheduledTaskRun> {
+  if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  const refusal = ScheduledTaskAdmissionRefusal.parse({
+    version: 1,
+    reason: input.reason,
+    retryable: input.retryable,
+  });
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) throw new Error("Scheduled task not found");
+    const readPrior = async () => {
+      const [prior] = await tx
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (prior && (prior.taskId !== input.taskId || prior.triggerType !== input.triggerType)) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      return prior;
+    };
+    const prior = await readPrior();
+    if (prior) return mapScheduledTaskRun(prior);
+    if (
+      task.status !== "active" ||
+      task.deletedAt ||
+      task.authorityRevision !== input.taskAuthorityRevision ||
+      task.executionDigest !== input.taskExecutionDigest
+    ) {
+      throw new Error("scheduled task changed before refusal recording");
+    }
+    const now = new Date();
+    const [inserted] = await tx
+      .insert(schema.scheduledTaskRuns)
+      .values({
+        accountId: task.accountId,
+        workspaceId: input.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+        triggerType: input.triggerType,
+        producerKey: input.producerKey,
+        scheduledAt: input.scheduledAt ?? null,
+        firedAt: now,
+        completedAt: now,
+        actionKind: "agent_turn",
+        status: refusal.retryable ? "skipped" : "failed",
+        error: refusal.reason,
+        admissionRefusal: refusal,
+      })
+      .onConflictDoNothing({
+        target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+        where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+      })
+      .returning();
+    const result = inserted ?? (await readPrior());
+    if (!result) throw new Error("scheduled refusal receipt missing");
+    return mapScheduledTaskRun(result);
+  });
+}
+
 export async function createScheduledTaskRun(
   db: Database,
   input: {
@@ -19084,7 +19253,19 @@ export async function listScheduledTaskRuns(
       )
       .orderBy(desc(schema.scheduledTaskRuns.createdAt))
       .limit(limit);
-    return rows.map(mapScheduledTaskRun);
+    const runs = rows.map(mapScheduledTaskRun);
+    // A dispatched run whose own turn waits on a person is visible as such
+    // instead of looking merely "dispatched" until someone answers.
+    const waits = await scheduledRunHumanWaitsInRlsContext(scopedDb, workspaceId, {
+      runIds: runs.filter((run) => run.status === "dispatched").map((run) => run.id),
+    });
+    const byRun = new Map(waits.map((wait) => [wait.runId, wait]));
+    return runs.map((run) => {
+      const wait = byRun.get(run.id);
+      return wait
+        ? { ...run, awaitingHuman: { since: wait.since, expiresAt: wait.expiresAt } }
+        : run;
+    });
   });
 }
 
@@ -34793,52 +34974,6 @@ export async function getSessionTurnMcpAccountBindings(
     async (scopedDb) =>
       await mcpAccountBindingsForTurnInTransaction(scopedDb, workspaceId, sessionId, turnId),
   );
-}
-
-/**
- * The connector authority frozen on a session's first accepted turn: its exact
- * MCP account bindings and personal connection delegations. For display only
- * (Slack's "Using" line names just the connectors this snapshot can reach);
- * runtime authority keeps reading the claimed turn itself. Null when the
- * session has no turn yet.
- */
-export async function getSessionFirstTurnConnectionAuthority(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<{
-  mcpAccountBindings: McpConnectionAccountBinding[] | null;
-  personalConnectionDelegations: McpPersonalConnectionDelegation[];
-} | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        id: schema.sessionTurns.id,
-        bindings: schema.sessionTurns.mcpAccountBindings,
-        delegations: schema.sessionTurns.personalConnectionDelegations,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-        ),
-      )
-      .orderBy(
-        asc(schema.sessionTurns.position),
-        asc(schema.sessionTurns.createdAt),
-        asc(schema.sessionTurns.id),
-      )
-      .limit(1);
-    if (!row) return null;
-    return {
-      mcpAccountBindings: parseAcceptedMcpAccountBindings(row.bindings),
-      personalConnectionDelegations: parsedPersonalConnectionDelegations(
-        row.delegations,
-        `session_turns:${workspaceId}:${sessionId}:${row.id}`,
-      ),
-    };
-  });
 }
 
 export async function getSessionParentMcpAccountBindings(
@@ -72726,6 +72861,8 @@ export type SessionWorkPeek =
       kind: "approval-wait";
       humanInputRequestId?: string;
       interactionInterventionId?: string;
+      /** The scheduled run's approval timeout is the earliest deadline. */
+      scheduledRunTimeout?: { runId: string; turnId: string };
       expiresAt?: string;
     }
   | {
@@ -73342,25 +73479,50 @@ export async function peekSessionWork(
             asc(schema.interactionInterventions.id),
           )
           .limit(1);
-        if (
-          expiringHumanInput?.expiresAt &&
-          (!expiringInteractionIntervention ||
-            expiringHumanInput.expiresAt.getTime() <=
-              expiringInteractionIntervention.expiresAt.getTime())
-        ) {
-          return {
-            kind: "approval-wait",
-            humanInputRequestId: expiringHumanInput.id,
-            expiresAt: expiringHumanInput.expiresAt.toISOString(),
-          };
+        // A scheduled run's frozen approval timeout joins the same earliest-
+        // deadline choice; the workflow sleeps on it with a durable timer.
+        const scheduledDeadline = await scheduledHumanWaitDeadlineInRlsContext(
+          scopedDb,
+          workspaceId,
+          turn,
+        );
+        const candidates: Array<{
+          at: number;
+          wait: Extract<SessionWorkPeek, { kind: "approval-wait" }>;
+        }> = [];
+        if (expiringHumanInput?.expiresAt) {
+          candidates.push({
+            at: expiringHumanInput.expiresAt.getTime(),
+            wait: {
+              kind: "approval-wait",
+              humanInputRequestId: expiringHumanInput.id,
+              expiresAt: expiringHumanInput.expiresAt.toISOString(),
+            },
+          });
         }
-        return expiringInteractionIntervention
-          ? {
+        if (expiringInteractionIntervention) {
+          candidates.push({
+            at: expiringInteractionIntervention.expiresAt.getTime(),
+            wait: {
               kind: "approval-wait",
               interactionInterventionId: expiringInteractionIntervention.id,
               expiresAt: expiringInteractionIntervention.expiresAt.toISOString(),
-            }
-          : { kind: "approval-wait" };
+            },
+          });
+        }
+        if (scheduledDeadline) {
+          candidates.push({
+            at: Date.parse(scheduledDeadline.expiresAt),
+            wait: {
+              kind: "approval-wait",
+              scheduledRunTimeout: { runId: scheduledDeadline.runId, turnId: turn.id },
+              expiresAt: scheduledDeadline.expiresAt,
+            },
+          });
+        }
+        // Stable: on a tie, the per-request deadlines keep their precedence.
+        candidates.sort((left, right) => left.at - right.at);
+        return candidates[0]?.wait ?? { kind: "approval-wait" };
       }
       if (turn.status === "running") {
         if (observerAccountId && turn.activeAttemptId) {
@@ -81738,6 +81900,190 @@ export type ExpireSessionInteractionInterventionResult = {
   events: SessionEvent[];
 };
 
+/**
+ * What the scheduler's approval timeout would answer for this exact
+ * requires_action turn: the first pending tool approval, else the first pending
+ * structured human-input request that a system response may settle (a Skill
+ * review needs a person, so it is never timed out). Null means the timeout has
+ * nothing it may settle, so no timer is offered for it.
+ */
+async function scheduledHumanWaitTargetInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  turn: { id: string; sessionId: string; executionGeneration: number },
+): Promise<{ kind: "approval"; approvalId: string } | { kind: "input"; requestId: string } | null> {
+  const [runState] = await scopedDb
+    .select({
+      pendingApprovals: schema.agentRunStates.pendingApprovals,
+      pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
+    })
+    .from(schema.agentRunStates)
+    .where(
+      and(
+        eq(schema.agentRunStates.workspaceId, workspaceId),
+        eq(schema.agentRunStates.sessionId, turn.sessionId),
+        eq(schema.agentRunStates.turnId, turn.id),
+      ),
+    )
+    .orderBy(desc(schema.agentRunStates.stateVersion))
+    .limit(1);
+  const pendingApprovals = runState
+    ? fromPostgresLosslessJson(runState.pendingApprovals, runState.pendingApprovalsCodecVersion)
+    : [];
+  const approvalId = (Array.isArray(pendingApprovals) ? pendingApprovals : [])
+    .map((pending) => approvalIdentifier(pending))
+    .find((id): id is string => typeof id === "string" && id.length > 0);
+  if (approvalId) return { kind: "approval", approvalId };
+  const requests = await scopedDb
+    .select({
+      id: schema.sessionHumanInputRequests.id,
+      questions: schema.sessionHumanInputRequests.questions,
+    })
+    .from(schema.sessionHumanInputRequests)
+    .where(
+      and(
+        eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+        eq(schema.sessionHumanInputRequests.sessionId, turn.sessionId),
+        eq(schema.sessionHumanInputRequests.turnId, turn.id),
+        eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
+        eq(schema.sessionHumanInputRequests.status, "pending"),
+      ),
+    )
+    .orderBy(
+      asc(schema.sessionHumanInputRequests.createdAt),
+      asc(schema.sessionHumanInputRequests.id),
+    )
+    .limit(16);
+  const request = requests.find(
+    (candidate) => !candidate.questions.some((question) => question.skillReview != null),
+  );
+  return request ? { kind: "input", requestId: request.id } : null;
+}
+
+/**
+ * The scheduled-run approval timeout deadline of this requires_action turn, when
+ * the task set one and there is something it may settle.
+ */
+async function scheduledHumanWaitDeadlineInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  turn: {
+    id: string;
+    sessionId: string;
+    executionGeneration: number;
+    scheduledTaskRunId: string | null;
+  },
+): Promise<{ runId: string; expiresAt: string } | null> {
+  if (!turn.scheduledTaskRunId) return null;
+  const [wait] = await scheduledRunHumanWaitsInRlsContext(scopedDb, workspaceId, {
+    turnId: turn.id,
+  });
+  if (!wait?.expiresAt || wait.runId !== turn.scheduledTaskRunId) return null;
+  const target = await scheduledHumanWaitTargetInRlsContext(scopedDb, workspaceId, turn);
+  return target ? { runId: wait.runId, expiresAt: wait.expiresAt } : null;
+}
+
+export type ExpireScheduledRunHumanWaitResult = {
+  action: "expired" | "stale" | "not_found";
+  events: SessionEvent[];
+};
+
+/**
+ * The scheduler's approval timeout for one scheduled run's turn: when the
+ * task's frozen `approvalTimeoutSeconds` elapsed with no person answering,
+ * reject the first pending approval (or skip the first pending structured
+ * question) through the exact same acceptance boundary a person uses, as a
+ * clearly labelled system decision with a deterministic client event id. It
+ * re-derives the deadline from durable facts and never acts early; a race with
+ * a person's answer settles as `stale`. Remaining approvals surface as a new
+ * wait whose deadline has already passed, so they are rejected in turn.
+ */
+export async function expireScheduledRunHumanWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    runId: string;
+  },
+): Promise<ExpireScheduledRunHumanWaitResult> {
+  const snapshot = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          sessionId: schema.sessionTurns.sessionId,
+          executionGeneration: schema.sessionTurns.executionGeneration,
+          scheduledTaskRunId: schema.sessionTurns.scheduledTaskRunId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .limit(1);
+      if (!turn || turn.sessionId !== input.sessionId || turn.scheduledTaskRunId !== input.runId) {
+        return null;
+      }
+      const [wait] = await scheduledRunHumanWaitsInRlsContext(scopedDb, input.workspaceId, {
+        turnId: turn.id,
+      });
+      if (!wait?.expiresAt) return null;
+      const target = await scheduledHumanWaitTargetInRlsContext(scopedDb, input.workspaceId, turn);
+      return target ? { turn, wait, target } : null;
+    },
+  );
+  if (!snapshot) return { action: "not_found", events: [] };
+  if (Date.parse(snapshot.wait.expiresAt!) > Date.now()) return { action: "stale", events: [] };
+  const { turn, wait, target } = snapshot;
+  const minutes = Math.max(1, Math.round((wait.timeoutSeconds ?? 0) / 60));
+  const clientEventId = `${SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX}${createHash("sha256")
+    .update(
+      `${turn.id}\0${turn.executionGeneration}\0${target.kind}\0${
+        target.kind === "approval" ? target.approvalId : target.requestId
+      }`,
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 32)}`;
+  if (target.kind === "approval") {
+    const result = await acceptSessionApprovalDecision(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      subjectId: "system:scheduled-approval-timeout",
+      respondedByKind: "system",
+      payload: {
+        approvalId: target.approvalId,
+        decision: "reject",
+        message: `Rejected automatically by the scheduler: no person decided within this scheduled task's approval timeout (${minutes} min).`,
+      },
+      clientEventId,
+    });
+    return result.action === "accepted"
+      ? { action: "expired", events: result.events }
+      : { action: "stale", events: [] };
+  }
+  const result = await acceptSessionHumanInputResponse(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    requestId: target.requestId,
+    response: { outcome: "skipped" },
+    respondedBy: "system:scheduled-approval-timeout",
+    respondedByKind: "system",
+    clientEventId,
+  });
+  return result.action === "accepted"
+    ? { action: "expired", events: result.events }
+    : { action: "stale", events: [] };
+}
+
 function deterministicSystemUuid(seed: string): string {
   const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
@@ -83278,6 +83624,10 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
       row.admissionDiagnostic == null
         ? null
         : ConnectionAccountSelectionDiagnostic.parse(row.admissionDiagnostic),
+    admissionRefusal:
+      row.admissionRefusal == null
+        ? null
+        : ScheduledTaskAdmissionRefusal.parse(row.admissionRefusal),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

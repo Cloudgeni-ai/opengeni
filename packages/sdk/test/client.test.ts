@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import {
   OpenGeniApiContractMismatchError,
@@ -53,7 +53,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function makeClient(responder: (request: RecordedRequest) => Response): {
+function makeClient(
+  responder: (request: RecordedRequest) => Response,
+  options: Pick<OpenGeniClientOptions, "apiContract"> = {},
+): {
   client: OpenGeniClient;
   requests: RecordedRequest[];
 } {
@@ -62,9 +65,12 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
     baseUrl: "https://api.example.test/",
     apiKey: "og_test_key",
     fetch,
+    ...options,
   });
   return { client, requests };
 }
+
+const STRICT = { apiContract: "strict" } as const;
 
 describe("OpenGeniClient", () => {
   test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
@@ -2034,10 +2040,11 @@ describe("OpenGeniClient", () => {
     expect((error as Error).message.length).toBeLessThan(256);
   });
 
-  test("JSON and void requests fail closed when the API response contract differs", async () => {
+  test("strict JSON and void requests fail closed when the API response contract differs", async () => {
     const mismatchHeaders = { [OPENGENI_API_CONTRACT_HEADER]: "future-contract" };
     const jsonClient = makeClient(
       () => new Response(JSON.stringify({ id: SESSION_ID }), { headers: mismatchHeaders }),
+      STRICT,
     ).client;
     await expect(jsonClient.getSession(WORKSPACE_ID, SESSION_ID)).rejects.toEqual(
       expect.objectContaining({
@@ -2049,19 +2056,70 @@ describe("OpenGeniClient", () => {
 
     const voidClient = makeClient(
       () => new Response(null, { status: 204, headers: mismatchHeaders }),
+      STRICT,
     ).client;
     await expect(voidClient.clearSessionContext(WORKSPACE_ID, SESSION_ID)).rejects.toBeInstanceOf(
       OpenGeniApiContractMismatchError,
     );
   });
 
-  test("client bootstrap validates its payload contract even if a proxy strips the header", async () => {
-    const { client } = makeClient(() => jsonResponse({ apiContractRevision: "future-contract" }));
+  test("strict client bootstrap validates its payload contract even if a proxy strips the header", async () => {
+    const { client } = makeClient(
+      () => jsonResponse({ apiContractRevision: "future-contract" }),
+      STRICT,
+    );
     await expect(client.getClientConfig()).rejects.toMatchObject({
       name: "OpenGeniApiContractMismatchError",
       expected: OPENGENI_API_CONTRACT_REVISION,
       actual: "future-contract",
     });
+  });
+
+  test("a server-side API key client keeps working across additive contract revisions", async () => {
+    const mismatchHeaders = { [OPENGENI_API_CONTRACT_HEADER]: "future-contract" };
+    const { client, requests } = makeClient((request) =>
+      request.url.endsWith("/v1/config/client")
+        ? new Response(JSON.stringify({ apiContractRevision: "future-contract" }), {
+            headers: { "content-type": "application/json", ...mismatchHeaders },
+          })
+        : request.method === "GET"
+          ? new Response(JSON.stringify({ id: SESSION_ID }), {
+              headers: { "content-type": "application/json", ...mismatchHeaders },
+            })
+          : new Response(null, { status: 204, headers: mismatchHeaders }),
+    );
+    expect((await client.getClientConfig()).apiContractRevision).toBe("future-contract");
+    expect(await client.getSession(WORKSPACE_ID, SESSION_ID)).toMatchObject({ id: SESSION_ID });
+    await client.clearSessionContext(WORKSPACE_ID, SESSION_ID);
+    // It still states its own revision so the API can refuse a truly breaking one.
+    expect(requests.at(-1)!.headers[OPENGENI_API_CONTRACT_HEADER]).toBe(
+      OPENGENI_API_CONTRACT_REVISION,
+    );
+  });
+
+  test("a browser client without an API key defaults to strict", async () => {
+    const globals = globalThis as { window?: unknown; document?: unknown };
+    const previous = { window: globals.window, document: globals.document };
+    globals.window = {};
+    globals.document = {};
+    try {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse({ apiContractRevision: "future-contract" }),
+      );
+      const browser = new OpenGeniClient({ baseUrl: "https://api.example.test", fetch });
+      await expect(browser.getClientConfig()).rejects.toBeInstanceOf(
+        OpenGeniApiContractMismatchError,
+      );
+      const keyed = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        apiKey: "delegated-token",
+        fetch,
+      });
+      expect((await keyed.getClientConfig()).apiContractRevision).toBe("future-contract");
+    } finally {
+      globals.window = previous.window;
+      globals.document = previous.document;
+    }
   });
 
   test("merges extra headers from a header factory", async () => {
@@ -2467,6 +2525,7 @@ describe("OpenGeniClient", () => {
             [OPENGENI_API_CONTRACT_HEADER]: "future-contract",
           },
         }),
+      STRICT,
     );
     await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toBeInstanceOf(
       OpenGeniApiContractMismatchError,

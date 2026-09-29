@@ -1,6 +1,6 @@
 ---
 title: "SDK"
-description: "Choose the backend chat handler or the full TypeScript session client and React surfaces."
+description: "The TypeScript session client, the packaged session proxy, React surfaces, and the chat facade fallback."
 icon: "code"
 ---
 
@@ -11,16 +11,21 @@ icon: "code"
 
 ## Choose an entry point
 
-| Import               | Use it for                                                                       |
-| -------------------- | -------------------------------------------------------------------------------- |
-| `@opengeni/sdk/chat` | Server-side chat, tenant mapping, conversation identity, and a host HTTP handler |
-| `@opengeni/sdk`      | The full session, workspace, file, tool, and event API                           |
+| Import               | Use it for                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| `@opengeni/sdk`      | The full session, workspace, file, tool, and event API, plus `createSessionProxyHandler`   |
+| `@opengeni/react`    | `SessionConversation` and the other React surfaces                                         |
+| `@opengeni/sdk/chat` | Fallback: a text-only handler for an existing Vercel/OpenAI-shaped chat UI, or server bots |
 
-For a product adding chat, start with [Integrate your product](/guides/integrate-your-product). Keep the organization API key on your backend.
+For a product adding an agent, start with [Integrate your product](/guides/integrate-your-product): `SessionConversation` in the browser, backed by `createSessionProxyHandler` on your server. Keep the organization API key on your backend.
 
-## Chat API
+## Session proxy
 
-Use a compatible SDK release and server deployment for these examples. Follow the [package and deployment setup](/guides/integrate-your-product#connect-your-backend) before using the backend chat handler. Repository access is optional.
+`createSessionProxyHandler(client, { resolve, authorizeMutation?, authorizeSession?, createSession?, modelSelection?, files?, maxBodyBytes?, basePath? })` returns a web-standard `(request: Request) => Promise<Response>`. Mount it at a catch-all route such as `/api/opengeni/*` and point an unmodified browser `new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it. Every request calls `resolve`, runs as the resolved external user through `asUser`, is pinned to the resolved workspace, and may use only the routes the conversation needs. Session creation from the browser is disabled unless your `createSession` hook builds the request. Pass the chat facade's `OpenGeni` instead of a client to resolve `{ tenant, user }`. See [Mount the proxy](/guides/integrate-your-product#mount-the-proxy).
+
+## Chat facade (fallback)
+
+Use `@opengeni/sdk/chat` only when your product keeps its own chat UI speaking the Vercel `useChat` or an OpenAI-shaped protocol, or for server-side bots. It is a text-only projection: tool outputs are dropped, there are no files, attachments, artifacts, or images, no goals, queue, or steer UI, and reopening restores only a text snapshot.
 
 ```ts
 import { OpenGeni } from "@opengeni/sdk/chat";
@@ -32,25 +37,13 @@ const og = new OpenGeni({
   source: "acme-product",
 });
 
-// Once per user, when your product admits them to the tenant. Chat requests
-// never grant workspace membership; without it the API answers 403.
-await og.client.addExternalWorkspaceMember(await og.workspaceId({ tenant: "acme" }), {
-  identity: { externalId: "u_42", source: og.source },
-  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
-});
-
-const chat = await og.chat({
-  tenant: "acme",
-  user: "u_42",
-  conversation: "c_9",
-  agentAccess: "session",
-  memory: "user",
-});
+// After explicit onboarding of u_42 (chat requests never grant membership):
+const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
 const reply = await chat.send("What did we decide last time?");
 console.log(reply.text);
 ```
 
-In an authenticated product, resolve `tenant` and `user` on your server and complete [external-user onboarding](/reference/authentication#external-user-onboarding). The session is created on first send. Conversation identity is independent of the acting user, whose authority is checked separately; different user IDs do not isolate a shared conversation ID. `agentAccess` defaults to `"session"`, with omitted `memory` defaulting to `false`. For user or workspace agent access, omitted `memory` follows that scope. This compatibility option selects personal or workspace Knowledge; `false` initializes Knowledge authoring to Off and leaves authorized retrieval available. Both settings apply at creation, not when reopening an existing session.
+The session is created on first send. Conversation identity is independent of the acting user, whose authority is checked separately. `agentAccess` defaults to `"session"` and `memory` to `false`; for user or workspace agent access, omitted `memory` follows that scope. Both apply at creation, not when reopening.
 
 | API                                          | Purpose                                                                    |
 | -------------------------------------------- | -------------------------------------------------------------------------- |
@@ -61,21 +54,11 @@ In an authenticated product, resolve `tenant` and `user` on your server and comp
 | `createChatHandler(og, { resolve, format })` | Serve your authenticated chat, history, and decision routes                |
 | `og.client`                                  | Use the full SDK on the same session                                       |
 
-A reply can be `completed`, `pending`, or `cancelled`. Present pending requests to the user before calling `respond`; a text reply alone does not imply that the turn completed. Reply text is the agent's answer: progress notes it writes while working are activity, like tool calls, and stay out of `text` and the streamed text. A turn that ends with only progress notes, for example while it waits for a worker, replies with its latest note. The handler supports native, Vercel UI message stream, OpenAI Chat Completions, and OpenAI Responses text-chat formats. Its history and decision endpoints remain native. See the [handler setup and protocol choices](/guides/integrate-your-product#mount-the-handler) for route registration and history ownership.
-
-For embedded agents, use `create: { bundledSkillIds: [] }` in chat options to
-exclude bundled product guidance, or list the individual capability guides the
-product supports. Workspace and inline Skills and tool permissions remain
-separate. See [Product guidance in embedded agents](/guides/integrate-your-product#product-guidance-in-embedded-agents).
-
-Chat replies and the Vercel/OpenAI formatters currently have no first-class
-monetary cost field. The separate permissioned `getBillingUsage` method returns
-bounded accounting data, not an AI SDK response extension. See
-[Request cost and verification](/guides/integrate-your-product#request-cost-and-verification).
+A reply can be `completed`, `pending`, or `cancelled`. Present pending requests to the user before calling `respond`. Reply text is the agent's answer; progress notes stay out of `text`. The handler supports native, Vercel UI message stream, OpenAI Chat Completions, and OpenAI Responses text-chat formats; its history and decision endpoints remain native. Chat replies have no first-class monetary cost field. See [Keep an existing chat UI](/guides/integrate-your-product#keep-an-existing-chat-ui-fallback).
 
 ## Full TypeScript client
 
-A framework-agnostic TypeScript client with zero runtime dependencies. It needs only WHATWG `fetch` and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
+A framework-agnostic TypeScript client. Its runtime dependencies are the published `@opengeni/contracts` wire schemas and `@opengeni/connect`. It needs only WHATWG `fetch` and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
 
 ```bash
 bun add @opengeni/sdk
@@ -104,17 +87,17 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 
 What it covers:
 
-| Area                         | Highlights                                                                                                                        |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Organizations and workspaces | Full/read-only organization API keys, idempotent `ensureWorkspace`, workspace settings                                            |
-| Organization sessions        | Paginated `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                   |
-| Sessions                     | Create with resources, files, Skills, tools, a goal, and a compute target; list, get, archive, cancel                             |
-| Input and control            | Send, Steer, queue management, Pause and Resume, approval decisions, human-input answers                                          |
-| Events                       | Replay by sequence, bounded event pages, and a streaming iterator with reconnect, resume, gap backfill, and duplicate suppression |
-| Files                        | Upload, attach, and download workspace files                                                                                      |
-| Goals                        | Read, pause, resume, and clear a session goal                                                                                     |
-| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                        |
-| Proxy helpers                | Re-emit a session stream from your own server with an identical wire format                                                       |
+| Area                         | Highlights                                                                                                                          |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Organizations and workspaces | Full/read-only organization API keys, idempotent `ensureWorkspace`, workspace settings                                              |
+| Organization sessions        | Paginated `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                     |
+| Sessions                     | Create with resources, files, Skills, tools, a goal, and a compute target; list, get, archive, cancel                               |
+| Input and control            | Send, Steer, queue management, Pause and Resume, approval decisions, human-input answers                                            |
+| Events                       | Replay by sequence, bounded event pages, and a streaming iterator with reconnect, resume, gap backfill, and duplicate suppression   |
+| Files                        | Upload, attach, and download workspace files                                                                                        |
+| Goals                        | Read, pause, resume, and clear a session goal                                                                                       |
+| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                          |
+| Proxy helpers                | `createSessionProxyHandler` for the React conversation; re-emit a session stream from your own server with an identical wire format |
 
 Full reference: [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
 
@@ -135,7 +118,7 @@ Subpaths keep the root import lean:
 
 Full reference: [packages/react/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/README.md).
 
-Use `SessionConversation` with the normal SDK for an existing session, or compose the timeline and composer. These components do not consume the backend chat-handler protocol. Import `@opengeni/react/compiled.css` for the supplied styles. See the [React integration guide](/guides/integrate-your-product#render-the-chat).
+`SessionConversation` is the default product integration: the complete conversation for an existing session, driven by the normal SDK through `createSessionProxyHandler`. Import `@opengeni/react/compiled.css` once. Compose the timeline, composer, and headless hooks only when the product needs a materially different interaction model. These components do not consume the chat facade protocol. See [Render the conversation](/guides/integrate-your-product#render-the-conversation).
 
 ## Compatibility
 

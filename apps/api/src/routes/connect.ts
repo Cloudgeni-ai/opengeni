@@ -83,6 +83,7 @@ import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
 } from "@opengeni/config";
+import { parseRequestJson } from "../http/request-body";
 
 /** Shared durable setup entry. Provider completion is distinct from
  * subsequent preview/install; never report an OAuth token as a ready integration. */
@@ -629,7 +630,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     ...(deps.apiIntegrationSourceFetch ? { fetchImpl: deps.apiIntegrationSourceFetch } : {}),
   });
   app.post("/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance", async (c) => {
-    const input = AdvanceConnectRequest.parse(await c.req.json());
+    const input = await parseRequestJson(c, AdvanceConnectRequest);
     const action = input.action;
     const workspaceId = c.req.param("workspaceId");
     const permission =
@@ -1229,7 +1230,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
   app.post("/v1/workspaces/:workspaceId/connect/attempts/:attemptId/cancel", async (c) => {
-    const input = ConnectOperationRequest.parse(await c.req.json());
+    const input = await parseRequestJson(c, ConnectOperationRequest);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const continuation = externalActorContinuationForAuthorization(authorization);
@@ -1291,7 +1292,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
     const workspaceId = c.req.param("workspaceId");
-    const input = BeginConnectRequest.parse(await c.req.json());
+    const input = await parseRequestJson(c, BeginConnectRequest);
     const setupPermission =
       input.providerId === "mcp-install"
         ? "capabilities:manage"

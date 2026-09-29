@@ -62,6 +62,7 @@ import {
 } from "../workspace-tool-gateway";
 import { sanitizeFilename } from "./files";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage, documentIndexer, getDocumentServices } = deps;
@@ -94,7 +95,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/document-bases", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
-    const payload = CreateDocumentBaseRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateDocumentBaseRequest);
     return c.json(
       DocumentBase.parse(
         await createDocumentBase(db, { ...payload, accountId: grant.accountId, workspaceId }),
@@ -138,7 +139,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
     const accountAdminAuthorization = requireAccountAdminAuthorizationStamp(authorization);
-    const payload = RunDocumentDefaultCollectionBackfillRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, RunDocumentDefaultCollectionBackfillRequest);
     try {
       return c.json(
         DocumentDefaultCollectionBackfill.parse(
@@ -269,7 +270,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       action: "document:index",
       quantity: 0,
     });
-    const payload = AddDocumentRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, AddDocumentRequest);
     const organizationAuthorityGranted =
       access.accountGrant?.permissions.includes("account:admin") === true;
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
@@ -339,7 +340,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         "documents:manage",
       );
-      const payload = ReclassifyDocumentAuthorityRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, ReclassifyDocumentAuthorityRequest);
       const accountAdminAuthorized = hasAccountAdminAuthority(authorization);
       const accountAdminAuthorization = accountAdminAuthorized
         ? requireAccountAdminAuthorizationStamp(authorization)
@@ -595,7 +596,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       action: "document:index",
       quantity: 0,
     });
-    const payload = CreateKnowledgeDropRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateKnowledgeDropRequest);
     const personalFileOwner =
       payload.authorityKind === "personal"
         ? (await fileOwnerContextForAccess(deps, access, "documents:manage"))
@@ -716,7 +717,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const { grant } = authorization;
     const organizationAuthorityGranted = hasAccountAdminAuthority(authorization);
-    const payload = MoveDocumentRequest.parse(await c.req.json().catch(() => ({})));
+    const payload = parseRequestBody(MoveDocumentRequest, await c.req.json().catch(() => ({})));
     try {
       const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
         viewerSubjectId: grant.subjectId,

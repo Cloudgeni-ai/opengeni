@@ -658,6 +658,63 @@ describe("managed personal workspace access", () => {
     });
     expect(createAtLimit.status).toBe(429);
     expect(await countWorkspacesForAccount(client.db, accountId)).toBe(workspaceCount);
+
+    // An organization key can only create workspaces in its own organization,
+    // so it may omit accountId; replaying with an explicit id is the same row.
+    const implicitEnsure = await app.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-implicit-organization",
+        name: "Tenant implicit organization",
+      }),
+    });
+    expect(implicitEnsure.status).toBe(201);
+    const implicitBody = (await implicitEnsure.json()) as { workspace: Workspace };
+    expect(implicitBody.workspace).toMatchObject({ accountId, kind: "shared" });
+    const explicitReplay = await app.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId,
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-implicit-organization",
+        name: "Tenant implicit organization",
+      }),
+    });
+    expect(explicitReplay.status).toBe(200);
+    expect(((await explicitReplay.json()) as { workspace: Workspace }).workspace.id).toBe(
+      implicitBody.workspace.id,
+    );
+
+    // A human may belong to several organizations: never guess one for them.
+    const humanWithoutAccount = await app.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-human-no-account",
+        name: "Tenant human",
+      }),
+    });
+    expect(humanWithoutAccount.status).toBe(400);
+    expect(await humanWithoutAccount.text()).toContain("accountId");
+
+    // Settings have their own route; the workspace PATCH names it instead of
+    // failing with an unhandled schema error.
+    const settingsOnWorkspacePatch = await app.request(
+      `http://x/v1/workspaces/${implicitBody.workspace.id}`,
+      {
+        method: "PATCH",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Renamed", settings: { memoryEnabled: false } }),
+      },
+    );
+    expect(settingsOnWorkspacePatch.status).toBe(400);
+    expect(await settingsOnWorkspacePatch.text()).toContain(
+      "PATCH /v1/workspaces/:workspaceId/settings",
+    );
   });
 
   test("organization API key routes isolate null-workspace keys and support rotation", async () => {

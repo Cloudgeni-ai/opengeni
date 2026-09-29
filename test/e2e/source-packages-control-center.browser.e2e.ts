@@ -78,6 +78,104 @@ describe("Bundles section browser acceptance", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
+  test("inactive skill removal preserves the originating tab and visible status", async () => {
+    const state = readyState({ skillInstalled: false, pluginInstalled: false });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const page = await context.newPage();
+    const id = "11111111-1111-4111-8111-111111111111";
+    const skill = {
+      id,
+      title: "Inactive example",
+      stableKey: "inactive-example",
+      scope: "workspace",
+      scopeVersion: 1,
+      status: "disabled",
+      activeRevisionId: null,
+      revisionId: "22222222-2222-4222-8222-222222222222",
+      pendingRevisionIds: [],
+      activationMode: "workspace_managed",
+      description: "Example skill",
+      source: null,
+      contentHash: "b".repeat(64),
+      files: [
+        {
+          path: "SKILL.md",
+          content:
+            "---\nname: inactive-example\ndescription: Example skill\n---\nExample instructions.",
+        },
+      ],
+    };
+    let removed = false;
+    const requests: unknown[] = [];
+    try {
+      await installApi(page, state);
+      const json = (body: unknown) => ({
+        headers: { "x-opengeni-api-contract": apiContractRevision },
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+      await page.route("**/skills/content**", async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        if (path.endsWith("/remove")) {
+          requests.push(route.request().postDataJSON());
+          removed = true;
+          return route.fulfill(json({ removed: true, outcome: "applied" }));
+        }
+        return route.fulfill(
+          json(
+            path.endsWith("/content")
+              ? { skills: removed ? [] : [skill], nextCursor: null }
+              : skill,
+          ),
+        );
+      });
+      await page.route(`**/preferences/${id}`, (route) => route.fulfill(json({ revisions: [] })));
+      await openCapabilities(page);
+      const shortcut = page
+        .locator(".og-connection-installed button")
+        .filter({ hasText: "Inactive example" });
+      await expectVisible(
+        shortcut.locator(".og-connection-installed-status", { hasText: "Inactive" }),
+      );
+      await shortcut.click();
+      await expectVisible(page.getByRole("heading", { name: "Inactive example", exact: true }));
+      await leaveCapabilityPage(page);
+      expect(
+        await page.getByRole("tab", { name: "Skills", exact: true }).getAttribute("aria-selected"),
+      ).toBe("true");
+      await page.getByRole("tab", { name: "All", exact: true }).click();
+      const row = page
+        .locator("button.og-capability-catalog-row")
+        .filter({ hasText: "Inactive example" });
+      await row.click();
+      await expectVisible(
+        page.getByRole("button", { name: "Restore as a new revision", exact: true }),
+      );
+      await leaveCapabilityPage(page);
+      expect(
+        await page.getByRole("tab", { name: "All", exact: true }).getAttribute("aria-selected"),
+      ).toBe("true");
+      await row.click();
+      await page.getByRole("button", { name: "Remove skill", exact: true }).click();
+      const confirmation = page.getByRole("dialog", { name: "Remove “Inactive example”?" });
+      await expectVisible(confirmation);
+      await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+      expect(requests).toHaveLength(0);
+      await page.getByRole("button", { name: "Remove skill", exact: true }).click();
+      await confirmation.getByRole("button", { name: "Remove skill", exact: true }).click();
+      await expectHidden(confirmation);
+      await expectVisible(page.getByRole("tab", { name: "All", exact: true }));
+      expect(
+        await page.getByRole("tab", { name: "All", exact: true }).getAttribute("aria-selected"),
+      ).toBe("true");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({ expectedRevisionId: null, expectedScopeVersion: 1 });
+      expect(await row.count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("desktop installs immutable Skill and Plugin sources with an exact account recheck", async () => {
     const state = readyState({ skillInstalled: false, pluginInstalled: false });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });

@@ -15,6 +15,7 @@ type WorkflowControlActivities = Pick<
   | "enqueueGoalRetryWake"
   | "expireSessionHumanInput"
   | "expireSessionInteractionIntervention"
+  | "expireScheduledRunHumanWait"
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"

@@ -148,8 +148,22 @@ export function useSessionEvents(
   const replay = options.replay ?? "windowed";
   const fullReplay = replay === "full" || after !== 0;
   const streamKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${after}\u0000${fullReplay ? "full" : "windowed"}`;
+  // Bind callbacks to this read lifetime, including a return to a previous
+  // identity. Publish during render so old callbacks are fenced before passive
+  // cleanup can advance the navigation generation.
   const navigationIdentityRef = useRef({ client, streamKey, enabled });
-  navigationIdentityRef.current = { client, streamKey, enabled };
+  if (
+    navigationIdentityRef.current.client !== client ||
+    navigationIdentityRef.current.streamKey !== streamKey ||
+    navigationIdentityRef.current.enabled !== enabled
+  ) {
+    navigationIdentityRef.current = { client, streamKey, enabled };
+  }
+  const navigationIdentity = navigationIdentityRef.current;
+  const ownsNavigation = useCallback(
+    () => navigationIdentityRef.current === navigationIdentity,
+    [navigationIdentity],
+  );
 
   const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
   // One navigation witness, not a second history cache. Raw events stay contiguous.
@@ -569,7 +583,7 @@ export function useSessionEvents(
   const loadOlder = useCallback(
     (): OlderHistoryLoadReceipt =>
       createOlderHistoryLoadReceipt(async (markCommitted, preserveTail, markTailPreserved) => {
-        if (!sessionId || navigationBusy() || !hasOlderRef.current) {
+        if (!ownsNavigation() || !sessionId || navigationBusy() || !hasOlderRef.current) {
           return false;
         }
         const before = oldestSequenceRef.current;
@@ -580,6 +594,7 @@ export function useSessionEvents(
           return false;
         }
         const generation = navigationGenerationRef.current;
+        const isCurrent = () => ownsNavigation() && navigationGenerationRef.current === generation;
         loadingOlderRef.current = true;
         setLoadingOlder(true);
         let published = false;
@@ -589,8 +604,9 @@ export function useSessionEvents(
             pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: OLDER_GROUP_TARGET,
             maxFetches: OLDER_FETCH_CAP,
+            isCurrent,
           });
-          if (navigationGenerationRef.current !== generation) {
+          if (!isCurrent()) {
             return false;
           }
           if (window.events.length === 0) {
@@ -676,22 +692,26 @@ export function useSessionEvents(
           });
           published = true;
           return olderStillAvailable;
+        } catch (reason) {
+          if (!isCurrent()) return false;
+          throw reason;
         } finally {
-          if (!published && navigationGenerationRef.current === generation) {
+          if (!published && isCurrent()) {
             loadingOlderRef.current = false;
             setLoadingOlder(false);
           }
         }
       }),
-    [client, workspaceId, sessionId],
+    [client, workspaceId, sessionId, ownsNavigation],
   );
 
   const loadOldest = useCallback(async (): Promise<boolean> => {
-    if (!sessionId || navigationBusy() || !hasOlderRef.current) {
+    if (!ownsNavigation() || !sessionId || navigationBusy() || !hasOlderRef.current) {
       return false;
     }
     // Explicit window replacement supersedes unresolved question destinations.
     const generation = ++navigationGenerationRef.current;
+    const isCurrent = () => ownsNavigation() && navigationGenerationRef.current === generation;
     setQuestionEvidence(null);
     loadingOldestRef.current = true;
     setLoadingOldest(true);
@@ -702,8 +722,9 @@ export function useSessionEvents(
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: OLDEST_GROUP_TARGET,
         maxFetches: OLDEST_FETCH_CAP,
+        isCurrent,
       });
-      if (navigationGenerationRef.current !== generation) {
+      if (!isCurrent()) {
         return false;
       }
       if (window.events.length === 0) {
@@ -746,16 +767,19 @@ export function useSessionEvents(
       });
       published = true;
       return newer;
+    } catch (reason) {
+      if (!isCurrent()) return false;
+      throw reason;
     } finally {
-      if (!published && navigationGenerationRef.current === generation) {
+      if (!published && isCurrent()) {
         loadingOldestRef.current = false;
         setLoadingOldest(false);
       }
     }
-  }, [client, workspaceId, sessionId]);
+  }, [client, workspaceId, sessionId, ownsNavigation]);
 
   const loadNewer = useCallback(async (): Promise<boolean> => {
-    if (!sessionId || navigationBusy() || !hasNewerRef.current) {
+    if (!ownsNavigation() || !sessionId || navigationBusy() || !hasNewerRef.current) {
       return false;
     }
     const afterSequence = newestSequenceRef.current;
@@ -765,6 +789,7 @@ export function useSessionEvents(
       return false;
     }
     const generation = navigationGenerationRef.current;
+    const isCurrent = () => ownsNavigation() && navigationGenerationRef.current === generation;
     loadingNewerRef.current = true;
     setLoadingNewer(true);
     let published = false;
@@ -774,8 +799,9 @@ export function useSessionEvents(
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: NEWER_GROUP_TARGET,
         maxFetches: NEWER_FETCH_CAP,
+        isCurrent,
       });
-      if (navigationGenerationRef.current !== generation) {
+      if (!isCurrent()) {
         return false;
       }
       if (window.events.length === 0) {
@@ -849,7 +875,7 @@ export function useSessionEvents(
     } catch (reason) {
       // A settled request from an old navigation lifetime is not a failure of
       // the current session. Preserve current loading/error state as well.
-      if (navigationGenerationRef.current !== generation) {
+      if (!isCurrent()) {
         return false;
       }
       setNewerError(reason instanceof Error ? reason : new Error(String(reason)));
@@ -857,28 +883,25 @@ export function useSessionEvents(
       // timeline-owned invocations attach their own explicit recovery UI.
       throw reason;
     } finally {
-      if (!published && navigationGenerationRef.current === generation) {
+      if (!published && isCurrent()) {
         loadingNewerRef.current = false;
         setLoadingNewer(false);
       }
     }
-  }, [client, workspaceId, sessionId]);
+  }, [client, workspaceId, sessionId, ownsNavigation]);
 
   const jumpToSequence = useCallback(
     async (sequence: number, navigationOptions?: { signal?: AbortSignal }): Promise<boolean> => {
       const signal = navigationOptions?.signal;
-      if (!sessionId || !Number.isSafeInteger(sequence) || sequence < 1) return false;
+      if (!ownsNavigation() || !sessionId || !Number.isSafeInteger(sequence) || sequence < 1)
+        return false;
       // A navigation that was already cancelled (for example Find closed before
       // the caller could react) must not disturb any current view state.
       if (signal?.aborted) return false;
       // Explicit targets supersede both other targets and adjacent-page requests.
       const generation = ++navigationGenerationRef.current;
       setQuestionEvidence(null);
-      const current = () =>
-        generation === navigationGenerationRef.current &&
-        navigationIdentityRef.current.client === client &&
-        navigationIdentityRef.current.streamKey === streamKey &&
-        navigationIdentityRef.current.enabled === enabled;
+      const current = () => generation === navigationGenerationRef.current && ownsNavigation();
       const previousMode = viewModeRef.current;
       streamAbortRef.current?.abort();
       generationRef.current += 1;
@@ -954,25 +977,14 @@ export function useSessionEvents(
         }
       }
     },
-    [client, workspaceId, sessionId, streamKey, enabled],
+    [client, workspaceId, sessionId, ownsNavigation],
   );
 
   const jumpToLatestQuestion = useCallback(
     async (questionOptions?: LatestQuestionOptions): Promise<number | null> => {
-      if (
-        !sessionId ||
-        navigationIdentityRef.current.client !== client ||
-        navigationIdentityRef.current.streamKey !== streamKey ||
-        navigationIdentityRef.current.enabled !== enabled
-      )
-        return null;
-      const identity = navigationIdentityRef.current;
+      if (!sessionId || !ownsNavigation()) return null;
       let generation = navigationGenerationRef.current;
-      const current = () =>
-        identity.client === navigationIdentityRef.current.client &&
-        identity.streamKey === navigationIdentityRef.current.streamKey &&
-        identity.enabled === navigationIdentityRef.current.enabled &&
-        generation === navigationGenerationRef.current;
+      const current = () => ownsNavigation() && generation === navigationGenerationRef.current;
       try {
         // Optional action code stays off the session-open path. Capture identity
         // before the import and fence its completion just like network reads.
@@ -1004,18 +1016,13 @@ export function useSessionEvents(
         throw reason;
       }
     },
-    [client, workspaceId, sessionId, streamKey, enabled, jumpToSequence],
+    [client, workspaceId, sessionId, streamKey, ownsNavigation, jumpToSequence],
   );
 
   const jumpToLatest = useCallback(async (): Promise<void> => {
     // An old host retry closure must not clear a replacement session's error
     // or abort its live feed before the passive effect cleanup has run.
-    if (
-      navigationIdentityRef.current.client !== client ||
-      navigationIdentityRef.current.streamKey !== streamKey ||
-      navigationIdentityRef.current.enabled !== enabled
-    )
-      return;
+    if (!ownsNavigation()) return;
     if (loadingTargetRef.current) {
       navigationGenerationRef.current += 1;
       loadingTargetRef.current = false;
@@ -1060,7 +1067,7 @@ export function useSessionEvents(
         setLoadingLatest(false);
       }
     }
-  }, [after, sessionId, client, streamKey, enabled]);
+  }, [after, sessionId, ownsNavigation]);
 
   const identityMatches = stateStreamKey === streamKey;
   const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
@@ -1282,6 +1289,7 @@ async function loadEventWindow(
     maxFetches: number;
     boundaryPageCap?: number;
     signal?: AbortSignal;
+    isCurrent?: () => boolean;
   },
 ): Promise<LoadedEventWindow> {
   let cursor = options.before;
@@ -1297,6 +1305,7 @@ async function loadEventWindow(
       pageSize: options.pageSize,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    if (options.isCurrent?.() === false) throw abortError();
     fetches += 1;
     if (page.length === 0) {
       reachedStart = true;
@@ -1327,6 +1336,7 @@ async function loadEventWindow(
       pageSize: options.pageSize,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    if (options.isCurrent?.() === false) throw abortError();
     fetches += 1;
     snapPages += 1;
     if (page.length === 0) {
@@ -1390,6 +1400,7 @@ async function loadForwardEventWindow(
     targetGroups: number;
     maxFetches: number;
     signal?: AbortSignal;
+    isCurrent?: () => boolean;
   },
 ): Promise<LoadedForwardEventWindow> {
   let cursor = options.after;
@@ -1405,6 +1416,7 @@ async function loadForwardEventWindow(
       pageSize: options.pageSize,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    if (options.isCurrent?.() === false) throw abortError();
     fetches += 1;
     if (page.length === 0) {
       reachedEnd = true;
