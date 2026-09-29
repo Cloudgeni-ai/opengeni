@@ -169,7 +169,12 @@ function parseIntHeader(value: string | null): number | null {
  * not already cleared; the ranker keeps an exhausted window capped under a
  * bounded cooldown until live refresh.
  */
-function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs: number): Date | null {
+function resolveResetAt(
+  headers: Headers,
+  atKey: string,
+  afterKey: string,
+  nowMs: number,
+): Date | null {
   const at = parseIntHeader(headers.get(atKey));
   if (at !== null) {
     return new Date(at * 1000);
