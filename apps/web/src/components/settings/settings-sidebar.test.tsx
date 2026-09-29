@@ -26,7 +26,7 @@ GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { Link } = await import("@tanstack/react-router");
 const { SettingsShell, settingsHomeLink } = await import("./settings-sidebar");
-const { SlidersHorizontalIcon, SparklesIcon } = await import("lucide-react");
+const { CpuIcon, SlidersHorizontalIcon, SparklesIcon } = await import("lucide-react");
 const originalMatchMedia = window.matchMedia;
 let narrow = true;
 let media: ReturnType<typeof window.matchMedia>;
@@ -46,7 +46,7 @@ function shell(currentPage = "General", page: { title: string } | null = { title
     // The application owns the main landmark; settings supplies a named region.
     <main>
       <SettingsShell
-        label="Workspace settings"
+        label="Settings"
         back={{
           label: "Back to sessions",
           link: (
@@ -54,22 +54,46 @@ function shell(currentPage = "General", page: { title: string } | null = { title
           ),
         }}
         home={settingsHomeLink("workspace")}
-        scope={<button type="button">Switch workspace</button>}
-        groups={[
+        sections={[
           {
-            items: [
+            id: "workspace",
+            label: "Workspace",
+            scope: <button type="button">Switch workspace</button>,
+            groups: [
               {
-                id: "general",
-                label: "General",
-                icon: SlidersHorizontalIcon,
-                link: <a href="#general" />,
+                items: [
+                  {
+                    id: "general",
+                    label: "General",
+                    icon: SlidersHorizontalIcon,
+                    link: <a href="#general" />,
+                  },
+                  { id: "models", label: "Models", icon: SparklesIcon, link: <a href="#models" /> },
+                ],
               },
-              { id: "models", label: "Models", icon: SparklesIcon, link: <a href="#models" /> },
+            ],
+          },
+          {
+            id: "organization",
+            label: "Organization",
+            scope: <p>Acme Robotics</p>,
+            groups: [
+              {
+                items: [
+                  {
+                    id: "organization:models",
+                    label: "Models",
+                    icon: CpuIcon,
+                    link: <a href="#organization-models" />,
+                  },
+                ],
+              },
             ],
           },
         ]}
         activeId={currentPage === "Models" ? "models" : "general"}
         currentPage={currentPage}
+        currentScope="Workspace · Design preview"
         page={page}
       >
         <p>Page body</p>
@@ -85,7 +109,7 @@ test("desktop settings draw the settings rail in place of the main rail, with a 
   const root = createRoot(container);
   try {
     await act(async () => root.render(shell()));
-    const rail = container.querySelector('nav[aria-label="Workspace settings"]');
+    const rail = container.querySelector('nav[aria-label="Settings"]');
     expect(rail).not.toBeNull();
     expect(rail?.getAttribute("data-variant")).toBe("rail");
     const back = Array.from(rail!.querySelectorAll("a")).find(
@@ -97,6 +121,19 @@ test("desktop settings draw the settings rail in place of the main rail, with a 
     );
     expect(rail?.textContent).toContain("Switch workspace");
     expect(rail?.querySelector('a[href="#general"]')?.getAttribute("aria-current")).toBe("page");
+    // Workspace and organization pages sit in one rail, each under its labeled section.
+    const sections = Array.from(rail!.querySelectorAll<HTMLElement>("[data-settings-section]"));
+    expect(sections.map((section) => section.getAttribute("aria-labelledby") !== null)).toEqual([
+      true,
+      true,
+    ]);
+    const [workspaceSection, organizationSection] = sections;
+    expect(workspaceSection?.textContent).toContain("Workspace");
+    expect(workspaceSection?.querySelector('a[href="#models"]')).not.toBeNull();
+    expect(organizationSection?.textContent).toContain("Organization");
+    expect(organizationSection?.textContent).toContain("Acme Robotics");
+    expect(organizationSection?.querySelector('a[href="#organization-models"]')).not.toBeNull();
+    expect(workspaceSection?.querySelector('a[href="#organization-models"]')).toBeNull();
     // The page renders full width beside the rail with its own header.
     const content = container.querySelector('section[aria-label="General"]');
     expect(content).not.toBeNull();
@@ -105,7 +142,7 @@ test("desktop settings draw the settings rail in place of the main rail, with a 
     expect(content?.contains(rail)).toBe(false);
     expect(content?.closest("main")).not.toBeNull();
     expect(container.querySelectorAll('main, [role="main"]').length).toBe(1);
-    expect(container.querySelector('button[aria-label="Open workspace settings menu"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Open settings menu"]')).toBeNull();
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -120,7 +157,7 @@ test("narrow settings keep navigation in a dismissible drawer and restore the de
   const open = async () => {
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('button[aria-label="Open workspace settings menu"]')!
+        .querySelector<HTMLButtonElement>('button[aria-label="Open settings menu"]')!
         .click();
     });
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
@@ -131,11 +168,13 @@ test("narrow settings keep navigation in a dismissible drawer and restore the de
     expect(content?.querySelector("h1")?.textContent).toBe("General");
     expect(content?.textContent).toContain("Page body");
     expect(container.querySelectorAll('main, [role="main"]').length).toBe(1);
-    expect(container.querySelector('nav[aria-label="Workspace settings"]')).toBeNull();
+    expect(container.querySelector('nav[aria-label="Settings"]')).toBeNull();
     expect(container.querySelector('a[aria-label="Back to sessions"]')?.getAttribute("href")).toBe(
       "/workspaces/workspace/sessions",
     );
     expect(container.querySelector("header")?.textContent).toContain("General");
+    // The narrow header names the scope of the current page.
+    expect(container.querySelector("header")?.textContent).toContain("Workspace · Design preview");
     expect(document.body.textContent).not.toContain("Switch workspace");
     await open();
     expect(document.body.textContent).toContain("Switch workspace");
@@ -157,8 +196,8 @@ test("narrow settings keep navigation in a dismissible drawer and restore the de
       media.dispatchEvent(new Event("change"));
     });
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(container.querySelector('nav[aria-label="Workspace settings"]')).not.toBeNull();
-    expect(container.querySelector('button[aria-label="Open workspace settings menu"]')).toBeNull();
+    expect(container.querySelector('nav[aria-label="Settings"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Open settings menu"]')).toBeNull();
   } finally {
     await act(async () => root.unmount());
     container.remove();

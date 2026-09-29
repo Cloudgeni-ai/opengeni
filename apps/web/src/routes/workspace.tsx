@@ -398,6 +398,7 @@ export function WorkspaceShellRouteContent({
             workspaceId={workspaceId}
             workspaceName={administration.workspace.name}
             organizationName={administration.overview.organization.name}
+            organizationId={administration.organizationId}
             organizationSettingsWorkspaceId={
               context.workspaces.find(
                 (candidate) => candidate.accountId === administration.organizationId,
@@ -526,8 +527,6 @@ function AuthorizedWorkspaceShell({
   onMount?: () => void;
 }) {
   const location = useRouterState({ select: (state) => state.location });
-  const organizationPath = `/workspaces/${encodeURIComponent(workspaceId)}/organization`;
-  const usesOrganizationShell = location.pathname === organizationPath;
   const managementLocation = workspaceManagementLocation(
     location.pathname,
     workspaceId,
@@ -551,12 +550,10 @@ function AuthorizedWorkspaceShell({
         }
       }}
     >
-      {/* Settings mode swaps the rail: organization settings and the workspace
-          management shell draw the settings rail, and "Back to sessions"
-          returns to the main rail. */}
-      {usesOrganizationShell ? (
-        children
-      ) : managementLocation ? (
+      {/* Settings mode swaps the rail: workspace and organization settings
+          share one settings shell that draws the settings rail, and "Back to
+          sessions" returns to the main rail. */}
+      {managementLocation ? (
         <WorkspaceManagementShell
           workspaceId={workspaceId}
           workspaceName={activeWorkspace?.name}

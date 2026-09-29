@@ -5,19 +5,70 @@ import { createRoot } from "react-dom/client";
 
 import type { WorkspaceManagementLocation } from "./workspace-settings-shell";
 
-const fallbackWorkspaceId = "33333333-3333-4333-8333-333333333333";
+const workspaceId = "11111111-1111-4111-8111-111111111111";
+const personalWorkspaceId = "22222222-2222-4222-8222-222222222222";
+const northwindWorkspaceId = "33333333-3333-4333-8333-333333333333";
+const northwindPersonalId = "44444444-4444-4444-8444-444444444444";
+const betaWorkspaceId = "55555555-5555-4555-8555-555555555555";
+const acme = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const northwind = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const beta = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const navigate = mock((_options: unknown) => undefined);
 const resetSessionView = mock(() => undefined);
 let workspacePermissions: string[] = [];
+let acmeRole: "owner" | "admin" | "member" = "owner";
+
+function workspace(id: string, accountId: string, name: string, kind = "shared") {
+  return { id, accountId, name, kind, inferenceControl: { state: "active" } };
+}
+const workspaces = [
+  workspace(workspaceId, acme, "Design preview"),
+  workspace(personalWorkspaceId, acme, "Personal workspace", "personal"),
+  workspace(northwindPersonalId, northwind, "Personal workspace", "personal"),
+  workspace(northwindWorkspaceId, northwind, "General"),
+  workspace(betaWorkspaceId, beta, "Launch room"),
+];
+function grant(accountId: string, name: string, role: "owner" | "admin" | "member") {
+  return {
+    accountId,
+    subjectId: "user:alex",
+    role,
+    permissions:
+      role === "member"
+        ? ["account:read"]
+        : ["account:read", "account:admin", "workspace:create", "billing:read", "api_keys:manage"],
+    metadata: { accountName: name },
+  };
+}
 
 mock.module("@/context", () => ({
   useAppContext: () => ({
     resetSessionView,
-    workspaces: [{ id: fallbackWorkspaceId }],
-    accessContext: {
-      workspaceGrants: [
-        { workspaceId: "11111111-1111-4111-8111-111111111111", permissions: workspacePermissions },
+    workspaces,
+    clientConfig: { productAccessMode: "managed", auth: { mode: "managedSession" } },
+    authSession: { user: { id: "alex", emailVerified: true } },
+    managedSelfContext: {
+      identity: { credentialGeneration: 1, managedUserId: "alex", subjectId: "user:alex" },
+      memberships: [
+        {
+          id: "membership-acme",
+          organizationId: acme,
+          status: "active",
+          personalWorkspaceId,
+        },
       ],
+    },
+    client: { getOrganizationAdministrationOverview: async () => null },
+    accessContext: {
+      mode: "managed",
+      subjectId: "user:alex",
+      defaultAccountId: acme,
+      accountGrants: [
+        grant(acme, "Acme Robotics", acmeRole),
+        grant(northwind, "Northwind Labs", "owner"),
+        grant(beta, "Beta Partners", "member"),
+      ],
+      workspaceGrants: [{ workspaceId, accountId: acme, permissions: workspacePermissions }],
     },
   }),
 }));
@@ -41,16 +92,13 @@ mock.module("@tanstack/react-router", () => ({
       children,
     ),
   useNavigate: () => navigate,
+  useRouter: () => ({ state: { location: { pathname: "/", search: {} } } }),
   useRouterState: ({ select }: { select: (state: unknown) => unknown }) =>
     select({ location: { search: {} } }),
 }));
 
-mock.module("@/components/rail/workspace-switcher", () => ({
-  WorkspaceSwitcherMenu: () => createElement("button", { type: "button" }, "Switch workspace"),
-}));
-
 mock.module("@/components/rail/workspace-paused-banner", () => ({
-  WorkspacePausedBanner: () => null,
+  WorkspacePausedBanner: () => createElement("p", null, "Paused banner"),
 }));
 
 GlobalRegistrator.register();
@@ -62,9 +110,7 @@ const {
   workspaceSettingsSectionFromSearch,
 } = await import("./workspace-settings-shell");
 
-const workspaceId = "11111111-1111-4111-8111-111111111111";
 const base = `/workspaces/${workspaceId}`;
-const shellSource = await Bun.file(`${import.meta.dir}/workspace-settings-shell.tsx`).text();
 
 afterAll(() => {
   mock.restore();
@@ -75,6 +121,8 @@ beforeEach(() => {
   navigate.mockClear();
   resetSessionView.mockClear();
   workspacePermissions = [];
+  acmeRole = "owner";
+  document.body.replaceChildren();
 });
 
 async function renderShell(
@@ -94,7 +142,7 @@ async function renderShell(
           WorkspaceManagementShell,
           {
             workspaceId,
-            organizationName: "CloudGeni",
+            organizationName: "Acme Robotics",
             location,
             ...overrides,
           } as ComponentProps<typeof WorkspaceManagementShell>,
@@ -105,6 +153,9 @@ async function renderShell(
   });
   return {
     container,
+    rail: () => container.querySelector<HTMLElement>('nav[aria-label="Settings"]')!,
+    section: (id: string) =>
+      container.querySelector<HTMLElement>(`[data-settings-section="${id}"]`),
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -112,54 +163,207 @@ async function renderShell(
   };
 }
 
-describe("workspace settings rail", () => {
-  test("lists settings plus the Agents and Insights dashboards; no Memory, Capabilities or Danger zone", async () => {
+function linkLabels(section: HTMLElement | null): string[] {
+  return Array.from(section?.querySelectorAll("a") ?? []).map((link) => link.textContent ?? "");
+}
+
+async function openMenu(trigger: HTMLElement) {
+  await act(async () => {
+    trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    await Promise.resolve();
+  });
+}
+
+function menuItems(): HTMLElement[] {
+  return Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+}
+
+describe("settings rail", () => {
+  test("shows workspace, organization and account pages in labeled sections of one rail", async () => {
     workspacePermissions = ["workspace:admin"];
     const view = await renderShell({ kind: "settings", section: null });
     try {
-      const text = view.container.textContent ?? "";
-      for (const label of [
+      const sections = Array.from(
+        view.rail().querySelectorAll<HTMLElement>("[data-settings-section]"),
+      ).map((section) => section.getAttribute("data-settings-section"));
+      expect(sections).toEqual(["workspace", "organization", "account"]);
+
+      const workspaceSection = view.section("workspace");
+      expect(workspaceSection?.textContent).toContain("Workspace");
+      expect(workspaceSection?.textContent).toContain("Design preview");
+      expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
         "Models",
         "API keys",
+        "Developer",
+        "Agents",
+        "Insights",
         "Variable sets",
         "Sandbox environments",
         "Machines",
-        "CloudGeni",
-        "Workspace activity",
-        "Agents",
-        "Insights",
-      ]) {
-        expect(text).toContain(label);
+      ]);
+      expect(workspaceSection?.textContent).toContain("Activity");
+      expect(workspaceSection?.textContent).toContain("Runtime");
+
+      const organizationSection = view.section("organization");
+      expect(organizationSection?.textContent).toContain("Organization");
+      expect(organizationSection?.textContent).toContain("Acme Robotics");
+      expect(linkLabels(organizationSection)).toEqual([
+        "General",
+        "People",
+        "Workspaces",
+        "Models",
+        "Integrations",
+        "Organization identity",
+        "Billing & usage",
+        "Developer",
+        "Security & data",
+      ]);
+      for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
+        expect(link.getAttribute("href")).toBe(`${base}/organization`);
+        expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
       }
+
+      expect(linkLabels(view.section("account"))).toEqual(["Security"]);
+      expect(view.section("account")?.querySelector("a")?.getAttribute("href")).toBe(
+        "/settings/security",
+      );
+      // No separate jump out to an organization shell any more.
+      expect(view.rail().textContent).not.toContain("Organization settings for");
       for (const label of ["Members", "Memory", "Danger zone", "Capabilities"]) {
-        expect(text).not.toContain(label);
+        expect(view.rail().textContent).not.toContain(label);
       }
     } finally {
       await view.unmount();
     }
   });
 
-  test("hides Insights from people who are not workspace admins", async () => {
+  test("lists only the organization pages a member can use", async () => {
+    acmeRole = "member";
     workspacePermissions = ["sessions:create"];
     const view = await renderShell({ kind: "settings", section: null });
     try {
-      const text = view.container.textContent ?? "";
-      expect(text).toContain("Agents");
-      expect(text).not.toContain("Insights");
+      expect(linkLabels(view.section("organization"))).toEqual([
+        "Organization identity",
+        "Security & data",
+      ]);
+      // Insights needs workspace admin.
+      expect(linkLabels(view.section("workspace"))).toContain("Agents");
+      expect(linkLabels(view.section("workspace"))).not.toContain("Insights");
     } finally {
       await view.unmount();
     }
   });
 
-  test("settings, the Agents and Insights dashboards and runtime pages open in settings mode", () => {
+  test("an organization page is current in the same rail, and the page draws its own header", async () => {
+    const view = await renderShell({ kind: "organization", section: "people" });
+    try {
+      const current = view.rail().querySelector('a[aria-current="page"]');
+      expect(current?.textContent).toBe("People");
+      expect(view.section("organization")?.contains(current)).toBe(true);
+      const content = view.container.querySelector('section[aria-label="People"]');
+      expect(content).not.toBeNull();
+      expect(content?.querySelector("h1")).toBeNull();
+      expect(content?.textContent).toContain("Settings content");
+      // Workspace state belongs to workspace pages.
+      expect(view.container.textContent).not.toContain("Paused banner");
+      const back = Array.from(view.rail().querySelectorAll("a")).find(
+        (link) => link.textContent === "Back to sessions",
+      );
+      expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a page this person can't use falls back to the first organization page they can", async () => {
+    acmeRole = "member";
+    const view = await renderShell({ kind: "organization", section: "people" });
+    try {
+      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe(
+        "Organization identity",
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("switching organization keeps the organization page and opens a shared workspace there", async () => {
+    const view = await renderShell({ kind: "organization", section: "people" });
+    try {
+      await openMenu(
+        view.section("organization")!.querySelector<HTMLElement>('button[aria-haspopup="menu"]')!,
+      );
+      const labels = menuItems().map((item) => item.textContent);
+      expect(labels).toEqual([
+        "Acme Robotics",
+        "Beta Partners",
+        "Northwind Labs",
+        "New organization",
+      ]);
+      await act(async () =>
+        menuItems()
+          .find((item) => item.textContent === "Northwind Labs")!
+          .click(),
+      );
+      expect(resetSessionView).toHaveBeenCalledTimes(1);
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId: northwindWorkspaceId },
+        search: { section: "people" },
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the workspace switcher lists this organization's workspaces and names where it creates", async () => {
+    const view = await renderShell({ kind: "settings", section: "models" });
+    try {
+      await openMenu(
+        view.section("workspace")!.querySelector<HTMLElement>('button[aria-haspopup="menu"]')!,
+      );
+      expect(document.body.textContent).toContain("Workspaces in Acme Robotics");
+      const labels = menuItems().map((item) => item.textContent ?? "");
+      expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
+      expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
+      expect(labels.at(-1)).toBe("New workspace in Acme Robotics");
+      await act(async () =>
+        menuItems()
+          .find((item) => item.textContent?.includes("Personal workspace"))!
+          .click(),
+      );
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId: personalWorkspaceId },
+        search: { section: "models" },
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("settings, the Agents and Insights dashboards, runtime pages and organization pages open in settings mode", () => {
     expect(workspaceManagementLocation(`${base}/settings`, workspaceId, "api-keys")).toEqual({
       kind: "settings",
       section: "api-keys",
     });
     expect(workspaceManagementLocation(`${base}/settings`, workspaceId)).toEqual({
       kind: "settings",
+      section: null,
+    });
+    expect(workspaceManagementLocation(`${base}/organization`, workspaceId, "people")).toEqual({
+      kind: "organization",
+      section: "people",
+    });
+    // Older organization section names land on the page that holds them now.
+    expect(workspaceManagementLocation(`${base}/organization`, workspaceId, "overview")).toEqual({
+      kind: "organization",
+      section: "general",
+    });
+    expect(workspaceManagementLocation(`${base}/organization`, workspaceId)).toEqual({
+      kind: "organization",
       section: null,
     });
     for (const route of ["agents", "insights", "variable-sets", "rigs", "machines"]) {
@@ -179,6 +383,7 @@ describe("workspace settings rail", () => {
       "artifacts",
       "priority",
       "rigs-archive",
+      "organization-archive",
     ]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).toBeNull();
     }
@@ -192,28 +397,33 @@ describe("workspace settings rail", () => {
     expect(workspaceSettingsSectionFromSearch("danger")).toBe("general");
   });
 
-  test("links to organization settings at the bottom of the settings rail", () => {
-    expect(shellSource).toContain('to="/workspaces/$workspaceId/organization"');
-    expect(shellSource).toContain("Organization settings for ${organizationName}");
-    expect(shellSource).toContain('label="Workspace settings"');
-  });
-
   test("an organization admin without workspace access sees General and Access only", async () => {
+    const managed = "66666666-6666-4666-8666-666666666666";
     const rendered = await renderShell(
       { kind: "settings", section: null },
       {
+        workspaceId: managed,
         organizationManagementOnly: true,
-        organizationSettingsWorkspaceId: fallbackWorkspaceId,
+        organizationId: acme,
+        organizationSettingsWorkspaceId: workspaceId,
         workspaceName: "Managed without content access",
       },
     );
     try {
-      const text = rendered.container.textContent ?? "";
-      expect(text).toContain("Managed without content access");
-      expect(text).toContain("General");
-      expect(text).toContain("Access");
-      expect(text).not.toContain("API keys");
-      expect(text).not.toContain("Variable sets");
+      const workspaceSection = rendered.section("workspace");
+      expect(workspaceSection?.textContent).toContain("Managed without content access");
+      expect(linkLabels(workspaceSection)).toEqual(["General", "Access"]);
+      for (const link of Array.from(workspaceSection!.querySelectorAll("a"))) {
+        expect(link.getAttribute("href")).toBe(`/workspaces/${managed}/settings`);
+      }
+      // Organization pages open through an accessible workspace of the same organization.
+      const organizationSection = rendered.section("organization");
+      expect(organizationSection?.textContent).toContain("Acme Robotics");
+      expect(organizationSection?.querySelector("a")?.getAttribute("href")).toBe(
+        `${base}/organization`,
+      );
+      expect(rendered.rail().textContent).not.toContain("API keys");
+      expect(rendered.rail().textContent).not.toContain("Variable sets");
     } finally {
       await rendered.unmount();
     }
@@ -223,7 +433,7 @@ describe("workspace settings rail", () => {
     workspacePermissions = ["workspace:admin"];
     const view = await renderShell({ kind: "page", target: "/workspaces/$workspaceId/agents" });
     try {
-      const rail = view.container.querySelector('nav[aria-label="Workspace settings"]')!;
+      const rail = view.rail();
       expect(rail).not.toBeNull();
       expect(rail.querySelector('a[aria-current="page"]')?.textContent).toBe("Agents");
       const back = Array.from(rail.querySelectorAll("a")).find(

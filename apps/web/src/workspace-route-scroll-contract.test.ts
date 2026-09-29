@@ -138,7 +138,6 @@ describe("workspace route scroll ownership", () => {
     expect(shellClasses).not.toContain("h-dvh");
     for (const path of [
       "components/settings/workspace-settings-shell.tsx",
-      "components/settings/organization-settings-shell.tsx",
       "components/settings/personal-settings-shell.tsx",
     ]) {
       const shellSource = await source(path);

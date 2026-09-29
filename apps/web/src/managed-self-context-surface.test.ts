@@ -7,7 +7,7 @@ const switcherSource = await Bun.file(
 const settingsSource = await Bun.file(`${import.meta.dir}/routes/workspace-settings.tsx`).text();
 const organizationSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();
 const organizationShellSource = await Bun.file(
-  `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
+  `${import.meta.dir}/components/settings/organization-settings-pages.ts`,
 ).text();
 const peoplePageSource = await Bun.file(
   `${import.meta.dir}/components/organization/people-page.tsx`,

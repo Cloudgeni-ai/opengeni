@@ -1,0 +1,458 @@
+// The one settings rail: every settings page the person can use, in labeled
+// sections. "Workspace" lists the current workspace's pages, "Organization"
+// the pages of the organization it belongs to, "Your account" the person's own.
+// Workspace, organization and personal settings all draw this same rail, so a
+// page never moves to another rail and the scope of every page is visible.
+import { Link, useNavigate } from "@tanstack/react-router";
+import {
+  BarChart3Icon,
+  BotIcon,
+  ContainerIcon,
+  GraduationCapIcon,
+  KeyRoundIcon,
+  LaptopIcon,
+  ShieldCheckIcon,
+  SlidersHorizontalIcon,
+  SparklesIcon,
+  UsersIcon,
+  VariableIcon,
+  WebhookIcon,
+} from "lucide-react";
+import type { ReactElement } from "react";
+
+import {
+  ORGANIZATION_SETTINGS_ITEMS,
+  organizationSettingsLabel,
+} from "./organization-settings-pages";
+import {
+  SettingsOrganizationSwitcher,
+  SettingsWorkspaceSwitcher,
+} from "./settings-scope-switchers";
+import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
+import { OrganizationTile } from "@/components/rail/workspace-switcher";
+import { useAppContext } from "@/context";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { orgLabel, organizationLandingWorkspaceId } from "@/lib/org";
+import {
+  organizationSettingsAccess,
+  resolveOrganizationSettingsSection,
+} from "@/lib/organization-settings-access";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
+import { useOrganizationName } from "@/lib/use-organization-name";
+import type {
+  WorkspaceManagementLocation,
+  WorkspaceSettingsSection,
+} from "@/lib/workspace-management-location";
+
+/** Where in settings the person is: a workspace page, an organization page, or their account. */
+export type SettingsLocation = WorkspaceManagementLocation | { kind: "account" };
+
+/** One name, one icon and one description per workspace settings page. */
+export const WORKSPACE_SETTINGS_COPY: Record<
+  WorkspaceSettingsSection,
+  {
+    title: string;
+    /** Omitted when it would only list what the page shows. */
+    description?: (names: { workspace: string; organization: string }) => string;
+  }
+> = {
+  general: {
+    title: "General",
+  },
+  access: {
+    title: "Access",
+    description: ({ workspace, organization }) =>
+      `People from ${organization} who can use ${workspace}.`,
+  },
+  models: {
+    title: "Models",
+    description: () => "Which models this workspace can use, and who pays for them.",
+  },
+  "api-keys": {
+    title: "API keys",
+    description: () => "Keys that let your own tools start work in this workspace.",
+  },
+  developer: {
+    title: "Developer",
+    description: () => "Webhooks and a credential provider for products built on this workspace.",
+  },
+  learning: {
+    title: "Agent learning",
+    description: () => "How agents save knowledge, instructions and skills.",
+  },
+};
+
+const SECTION_ICONS = {
+  general: SlidersHorizontalIcon,
+  access: UsersIcon,
+  models: SparklesIcon,
+  learning: GraduationCapIcon,
+  "api-keys": KeyRoundIcon,
+  developer: WebhookIcon,
+} as const;
+
+// Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
+const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
+  "general",
+  "access",
+  "models",
+  "api-keys",
+  "developer",
+];
+
+// Workspace dashboards in the settings rail. They open as their own pages.
+export const ACTIVITY_PAGES = [
+  {
+    to: "/workspaces/$workspaceId/agents" as const,
+    label: "Agents",
+    icon: BotIcon,
+    requiresAdmin: false,
+  },
+  {
+    to: "/workspaces/$workspaceId/insights" as const,
+    label: "Insights",
+    icon: BarChart3Icon,
+    requiresAdmin: true,
+  },
+] as const;
+
+export const RUNTIME_PAGES = [
+  {
+    to: "/workspaces/$workspaceId/variable-sets" as const,
+    label: "Variable sets",
+    icon: VariableIcon,
+  },
+  {
+    to: "/workspaces/$workspaceId/rigs" as const,
+    label: "Sandbox environments",
+    icon: ContainerIcon,
+  },
+  {
+    to: "/workspaces/$workspaceId/machines" as const,
+    label: "Machines",
+    icon: LaptopIcon,
+  },
+] as const;
+
+/** The name of a workspace settings page or dashboard. */
+export function workspacePageLabel(location: WorkspaceManagementLocation): string {
+  if (location.kind === "settings")
+    return WORKSPACE_SETTINGS_COPY[location.section ?? "general"].title;
+  if (location.kind === "page") {
+    return (
+      [...ACTIVITY_PAGES, ...RUNTIME_PAGES].find((page) => page.to === location.target)?.label ??
+      "Settings"
+    );
+  }
+  return "Settings";
+}
+
+/** The rail id of a destination, unique across the three sections. */
+export function settingsRailItemId(location: SettingsLocation): string | null {
+  switch (location.kind) {
+    case "settings":
+      return `workspace:${location.section ?? "general"}`;
+    case "page":
+      return `workspace:${location.target}`;
+    case "organization":
+      return location.section ? `organization:${location.section}` : null;
+    case "account":
+      return "account:security";
+  }
+}
+
+/**
+ * A workspace an organization owner or admin manages without being able to
+ * open it: only its General and Access pages.
+ */
+export type ManagedWorkspaceScope = {
+  id: string;
+  name: string;
+  organizationId: string;
+  organizationName: string;
+  /** An accessible workspace of the same organization, for its settings. */
+  organizationSettingsWorkspaceId?: string | undefined;
+};
+
+export type SettingsRail = {
+  sections: SettingsRailSection[];
+  back: { link: ReactElement; label: string };
+  home: ReactElement;
+  /** The organization's name, as the rail shows it. */
+  organizationName: string | null;
+  workspaceName: string | null;
+  /** The scope of a location, for the narrow header: "Organization · Acme Robotics". */
+  scopeOf: (location: SettingsLocation) => string | undefined;
+  /** The current organization page, after hiding pages this person can't use. */
+  organizationSection: ReturnType<typeof resolveOrganizationSettingsSection> | null;
+};
+
+export function useSettingsRail(input: {
+  /** The accessible workspace settings open through; null when there is none. */
+  workspaceId: string | null;
+  location: SettingsLocation;
+  /** The organization's name when the page knows it better than the access grants. */
+  organizationName?: string | undefined;
+  managedWorkspace?: ManagedWorkspaceScope | undefined;
+}): SettingsRail {
+  const context = useAppContext();
+  const navigate = useNavigate();
+  const { location, managedWorkspace } = input;
+  const workspace = input.workspaceId
+    ? (context.workspaces.find((candidate) => candidate.id === input.workspaceId) ?? null)
+    : null;
+  // The workspace whose organization pages are linked.
+  const organizationWorkspaceId = managedWorkspace
+    ? (managedWorkspace.organizationSettingsWorkspaceId ?? null)
+    : (workspace?.id ?? null);
+  const accountId = managedWorkspace?.organizationId || workspace?.accountId || null;
+  const access = accountId
+    ? organizationSettingsAccess({
+        accessContext: context.accessContext,
+        clientConfig: context.clientConfig,
+        accountId,
+      })
+    : null;
+  // The real name: from the access grant, else (for an admin) the organization overview.
+  const knownName = useOrganizationName(accountId ?? "", access?.administrator ?? false);
+  const organizationName =
+    input.organizationName ??
+    managedWorkspace?.organizationName ??
+    knownName ??
+    (accountId ? orgLabel(accountId, context.accessContext.accountGrants) : null);
+  const organizationSection =
+    access && location.kind === "organization"
+      ? resolveOrganizationSettingsSection(location.section, access.visibleSections)
+      : null;
+
+  function openWorkspace(nextWorkspaceId: string) {
+    context.resetSessionView();
+    switch (location.kind) {
+      case "settings":
+        void navigate({
+          to: "/workspaces/$workspaceId/settings",
+          params: { workspaceId: nextWorkspaceId },
+          search: location.section ? { section: location.section } : {},
+        });
+        return;
+      case "page":
+        void navigate({ to: location.target, params: { workspaceId: nextWorkspaceId } });
+        return;
+      case "organization":
+        void navigate({
+          to: "/workspaces/$workspaceId/organization",
+          params: { workspaceId: nextWorkspaceId },
+          search: organizationSection ? { section: organizationSection } : {},
+        });
+        return;
+      case "account":
+        void navigate({
+          to: "/workspaces/$workspaceId/settings",
+          params: { workspaceId: nextWorkspaceId },
+        });
+    }
+  }
+
+  function openOrganization(nextAccountId: string) {
+    const landing = organizationLandingWorkspaceId(context.workspaces, nextAccountId);
+    if (landing) openWorkspace(landing);
+  }
+
+  const sections: SettingsRailSection[] = [];
+
+  if (managedWorkspace) {
+    sections.push({
+      id: "workspace",
+      label: "Workspace",
+      scope: (
+        <div className="min-w-0 px-2.5">
+          <p className="truncate text-sm leading-5 font-semibold text-fg">
+            {managedWorkspace.name}
+          </p>
+          <p className="text-xs leading-4.5 text-fg-subtle">Organization management</p>
+        </div>
+      ),
+      groups: [
+        {
+          items: (["general", "access"] as const).map((section) => ({
+            id: `workspace:${section}`,
+            label: WORKSPACE_SETTINGS_COPY[section].title,
+            icon: SECTION_ICONS[section],
+            link: (
+              <Link
+                to="/workspaces/$workspaceId/settings"
+                params={{ workspaceId: managedWorkspace.id }}
+                search={{ section }}
+              />
+            ),
+          })),
+        },
+      ],
+    });
+  } else if (workspace) {
+    const workspaceId = workspace.id;
+    const canReadInsights = hasWorkspacePermission(
+      context.accessContext,
+      workspaceId,
+      "workspace:admin",
+    );
+    const activityPages = ACTIVITY_PAGES.filter((page) => !page.requiresAdmin || canReadInsights);
+    sections.push({
+      id: "workspace",
+      label: "Workspace",
+      scope: (
+        <SettingsWorkspaceSwitcher
+          workspaceId={workspaceId}
+          organizationName={organizationName ?? "your organization"}
+          onSelect={openWorkspace}
+        />
+      ),
+      groups: [
+        {
+          items: SECTION_ORDER.map((section) => ({
+            id: `workspace:${section}`,
+            label: WORKSPACE_SETTINGS_COPY[section].title,
+            icon: SECTION_ICONS[section],
+            link: (
+              <Link
+                to="/workspaces/$workspaceId/settings"
+                params={{ workspaceId }}
+                search={{ section }}
+              />
+            ),
+          })),
+        },
+        {
+          label: "Activity",
+          items: activityPages.map((page) => ({
+            id: `workspace:${page.to}`,
+            label: page.label,
+            icon: page.icon,
+            link: <Link to={page.to} params={{ workspaceId }} />,
+          })),
+        },
+        {
+          label: "Runtime",
+          items: RUNTIME_PAGES.map((page) => ({
+            id: `workspace:${page.to}`,
+            label: page.label,
+            icon: page.icon,
+            link: <Link to={page.to} params={{ workspaceId }} />,
+          })),
+        },
+      ],
+    });
+  }
+
+  if (accountId && organizationName && access) {
+    const anchor = organizationWorkspaceId;
+    sections.push({
+      id: "organization",
+      label: "Organization",
+      scope:
+        workspace && !managedWorkspace ? (
+          <SettingsOrganizationSwitcher
+            accountId={accountId}
+            organizationName={organizationName}
+            onSelect={openOrganization}
+            onCreated={openWorkspace}
+          />
+        ) : (
+          <div className="flex min-w-0 items-center gap-2 px-2.5 py-1">
+            <OrganizationTile className="size-6 rounded-md" />
+            <p
+              className="truncate text-sm leading-5 font-semibold text-fg"
+              title={organizationName}
+            >
+              {organizationName}
+            </p>
+          </div>
+        ),
+      groups: anchor
+        ? [
+            {
+              items: ORGANIZATION_SETTINGS_ITEMS.filter((item) =>
+                access.visibleSections.has(item.id),
+              ).map((item) => ({
+                id: `organization:${item.id}`,
+                label: item.label,
+                icon: item.icon,
+                link: (
+                  <Link
+                    to="/workspaces/$workspaceId/organization"
+                    params={{ workspaceId: anchor }}
+                    search={{ section: item.id }}
+                    aria-label={`${item.label}, ${organizationName} organization settings`}
+                  />
+                ),
+              })),
+            },
+          ]
+        : [],
+    });
+  }
+
+  const workspaceName = managedWorkspace?.name ?? workspace?.name ?? null;
+  if (context.clientConfig.auth.mode === "managedSession") {
+    // Your account opens outside workspace settings; its back link returns here.
+    const here =
+      location.kind === "account"
+        ? undefined
+        : currentPageReturnTo(
+            location.kind === "organization"
+              ? `${organizationName ?? "Organization"} · ${organizationSettingsLabel(organizationSection ?? "identity")}`
+              : `${workspaceName ?? "Workspace"} · ${workspacePageLabel(location)}`,
+          );
+    sections.push({
+      id: "account",
+      label: "Your account",
+      groups: [
+        {
+          items: [
+            {
+              id: "account:security",
+              label: "Security",
+              icon: ShieldCheckIcon,
+              link: <Link to="/settings/security" search={returnToSearch(here)} />,
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  // Leaving settings returns to the sessions settings were opened from.
+  const sessionsWorkspaceId = managedWorkspace
+    ? (managedWorkspace.organizationSettingsWorkspaceId ?? null)
+    : (workspace?.id ?? null);
+  const back = sessionsWorkspaceId
+    ? {
+        label: "Back to sessions",
+        link: (
+          <Link
+            to="/workspaces/$workspaceId/sessions"
+            params={{ workspaceId: sessionsWorkspaceId }}
+          />
+        ),
+      }
+    : { label: "Back to Opengeni", link: <Link to="/" /> };
+
+  const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
+  return {
+    sections,
+    back,
+    home: settingsHomeLink(sessionsWorkspaceId ?? undefined),
+    organizationName,
+    workspaceName,
+    organizationSection,
+    scopeOf: (at) => {
+      if (at.kind === "account") return "Your account";
+      if (at.kind === "organization") {
+        return organizationName ? `Organization · ${organizationName}` : "Organization";
+      }
+      if (!workspaceName) return "Workspace";
+      return `${personal ? "Personal workspace" : "Workspace"} · ${workspaceName}`;
+    },
+  };
+}
