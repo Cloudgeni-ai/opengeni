@@ -598,6 +598,11 @@ lifecycle should not be described as interchangeable.
 
 API-key Connections may carry validated header, query, or cookie placement;
 exact supported auth behavior comes from the live preview and installed SDK.
+The credential bundle is `{ headers: { "<Header-Name>": "<value>" } }` or
+`{ placements: [{ carrier, name, value, prefix? }] }` (SDK type
+`ApiKeyConnectionCredential`); create and update reject any other `api_key`
+shape with 422, and `previewApiIntegration` warns when the selected Connection
+does not place its credential at the description's declared carrier and name.
 Rotate an ordinary API-key Connection with `updateConnection` and its expected
 version. OAuth Connections use the supported reconnect flow. Installed API
 Integrations continue to refer to the stable Connection ID.

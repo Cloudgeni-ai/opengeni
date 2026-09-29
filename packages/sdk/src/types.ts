@@ -811,18 +811,61 @@ export type ConnectionMetadata = {
   updatedAt: string;
 };
 
-export type CreateConnectionRequest = {
+/** Where a brokered credential is written on each outbound provider request. */
+export type ConnectionCredentialPlacement = {
+  carrier: "header" | "query" | "cookie";
+  name: string;
+  value: string;
+  /** Prepended to `value`, for example `"Bearer "` or `"Token "`. */
+  prefix?: string | undefined;
+};
+
+/**
+ * Write-only secret for a brokered `api_key` Connection (API Integrations and
+ * MCP servers). The broker never infers a location: use exact `headers`, or
+ * `placements` when the provider expects a query parameter or cookie (API
+ * Integrations only) or a prefixed value. Match the carrier/name reported by
+ * `previewApiIntegration().auth`. A bare `{ apiKey }` is rejected with 422.
+ *
+ * @example { headers: { Authorization: "Token abc123" } }
+ * @example { placements: [{ carrier: "header", name: "X-Api-Key", value: "abc123" }] }
+ */
+export type ApiKeyConnectionCredential =
+  | { headers: Record<string, string>; placements?: never }
+  | { placements: ConnectionCredentialPlacement[]; headers?: never };
+
+type CreateConnectionRequestBase = {
   providerDomain: string;
-  kind: ConnectionKind;
   ownership?: ConnectionOwnership | undefined;
   /** @deprecated use ownership */
   subjectId?: string | null | undefined;
-  credential: Record<string, unknown>;
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
-  metadata?: Record<string, unknown> | undefined;
   operationId?: string | undefined;
 };
+
+export type CreateConnectionRequest = CreateConnectionRequestBase &
+  (
+    | {
+        kind: "api_key";
+        credential: ApiKeyConnectionCredential;
+        metadata?: Record<string, unknown> | undefined;
+      }
+    | {
+        /**
+         * Workspace model-provider key lane (Vercel AI Gateway / OpenRouter),
+         * selected by `metadata.credentialRole`; not usable by integrations.
+         */
+        kind: "api_key";
+        credential: { apiKey: string };
+        metadata: { credentialRole: string } & Record<string, unknown>;
+      }
+    | {
+        kind: Exclude<ConnectionKind, "api_key">;
+        credential: Record<string, unknown>;
+        metadata?: Record<string, unknown> | undefined;
+      }
+  );
 
 export type PersonalGitHubConnectionMetadata = {
   credentialRole: "opengeni_github_personal";

@@ -732,6 +732,8 @@ export type {
   UpdateSlackChannelRoutesRequest,
   SlackReactionChannel,
   SlackReactionChannelListResponse,
+  ApiKeyConnectionCredential,
+  ConnectionCredentialPlacement,
   CreateConnectionRequest,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
