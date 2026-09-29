@@ -347,7 +347,7 @@ export function RailShell({ children }: { children: ReactNode }) {
 
         {/* Main canvas. */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <SessionStartupProvider key={pathname} session={context.session}>
+          <SessionStartupProvider session={context.session}>
             <CanvasTopStrip hamburgerRef={hamburgerRef} />
             <WorkspacePausedBanner workspaceId={rail.workspaceId} />
             <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
