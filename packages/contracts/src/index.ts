@@ -15586,7 +15586,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       firstPartyMcpPermissions: z.array(Permission).optional(),
       // Exact model-visible selection from the broad first-party OpenGeni MCP
       // catalog. Omission selects the safe non-connector default; [] intentionally
-      // exposes none.
+      // exposes none, which also withholds the in-process Skill-management tools
+      // (skill_search/install/save/publish/remove/checkout; skill_read remains).
       // This does not grant authority: every registered tool is permission-gated.
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
       // Third-party MCP servers attached only to this session. For an agent-created

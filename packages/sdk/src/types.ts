@@ -3089,6 +3089,12 @@ export type CreateSessionRequest = {
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
+  /**
+   * Exact first-party OpenGeni tool selection. Omitted selects the deployment
+   * default; `[]` exposes none, including the in-process Skill-management tools
+   * (`skill_search`, `skill_install`, `skill_save`, `skill_publish`,
+   * `skill_remove`, `skill_checkout`). Read-only `skill_read` remains.
+   */
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;

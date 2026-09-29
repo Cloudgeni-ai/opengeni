@@ -826,6 +826,13 @@ implicitly select a tool. This separation lets a host keep a broad delegated
 authorization envelope while exposing only the tools appropriate to one
 embedded session.
 
+The in-process Skill-management tools (`skill_search`, `skill_install`,
+`skill_save`, `skill_publish`, `skill_remove`, `skill_checkout`) predate the
+selectable catalog, so a selection cannot name them individually. An empty
+effective selection (explicit `[]`, or a deployment ceiling of none) withholds
+them; any non-empty selection keeps them, with every write still governed by
+Learning mode. Read-only `skill_read` stays available so selected Skills load.
+
 Resources are unaffected by that selection. File/document/repository
 attachments still materialize when `firstPartyMcpTools` is empty or contains
 only `set_session_title`; the dedicated `files` and `docs` MCP servers are

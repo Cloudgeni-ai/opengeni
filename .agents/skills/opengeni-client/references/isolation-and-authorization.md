@@ -40,7 +40,7 @@ promoting historical rows into workspace visibility.
 For a customer-facing headless session, never rely accidentally on omission:
 
 - Omitting tools uses the workspace's configured MCP defaults; an explicit empty tools list suppresses them.
-- Omitting firstPartyMcpTools selects the deployment's non-connector default catalog; an explicit empty list exposes none.
+- Omitting firstPartyMcpTools selects the deployment's non-connector default catalog; an explicit empty list exposes none, including the in-process Skill-management tools (skill_search, skill_install, skill_save, skill_publish, skill_remove, skill_checkout). Read-only skill_read stays so selected Skills still load. Any non-empty list currently keeps those Skill-management tools, whose writes remain governed by the workspace Learning mode; use [] for a read-only customer-facing assistant.
 - Build an allowlist from the product's actual use case and the live SDK type or client configuration.
 - Exclude cross-session tools unless collaboration is an explicit feature. Current examples include sessions_list, session_get, session_events, session_wait, session_send_message, session_pause, session_resume, session_steer, session_human_input_respond, set_other_session_title, and workspace-scoped discovery. Recheck the live catalog rather than treating this list as permanent.
 - Also examine Knowledge, notes, files, artifacts, browsers, computers, scheduling, and capability-management tools. A tool is safe only when both its scope and its necessity fit the product.

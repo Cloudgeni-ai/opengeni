@@ -69,6 +69,14 @@ export function createWorkspaceSkillTools(input: {
     indexedSkillIds: () => ReadonlySet<string> | null;
     observe: (observation: SkillReadObservation) => void;
   };
+  /**
+   * Register the Skill lifecycle tools (search, install, save, publish,
+   * remove, checkout). False keeps only read-only `skill_read`. The caller
+   * derives it from the session's effective first-party tool selection, so an
+   * explicit `firstPartyMcpTools: []` exposes no Skill-management surface.
+   * Learning mode still governs every write when these are registered.
+   */
+  includeLifecycleTools?: boolean;
 }) {
   const context = {
     accountId: input.accountId,
@@ -152,7 +160,7 @@ export function createWorkspaceSkillTools(input: {
       }),
     );
   };
-  return [
+  const definitions = [
     createSkillRemoveAttemptToolDefinition({
       authorize,
       remove: async (request) =>
@@ -313,6 +321,22 @@ export function createWorkspaceSkillTools(input: {
     }),
     createSkillPublishAttemptToolDefinition({ authorize, filesystem: input.filesystem, save }),
   ];
+  return input.includeLifecycleTools === false
+    ? definitions.filter((definition) => definition.modelName === SKILL_READ_TOOL_NAME)
+    : definitions;
+}
+
+/**
+ * Skill lifecycle tools are in-process first-party tools that predate the
+ * selectable first-party catalog, so a stored selection cannot name them. An
+ * empty effective selection is the documented "expose none" choice (explicit
+ * `firstPartyMcpTools: []` or a deployment ceiling of none) and must withhold
+ * them too; any non-empty selection keeps their historical availability.
+ */
+export function skillLifecycleToolsSelected(
+  selectedFirstPartyMcpTools: readonly string[],
+): boolean {
+  return selectedFirstPartyMcpTools.length > 0;
 }
 
 function registrySkillSource(scope: SkillScope): SkillReadOrigin["source"] {

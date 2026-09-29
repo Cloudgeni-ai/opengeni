@@ -116,7 +116,7 @@ import {
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
-import { createWorkspaceSkillTools } from "./skill-tools";
+import { createWorkspaceSkillTools, skillLifecycleToolsSelected } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 
@@ -689,6 +689,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       executionGeneration: attempt.executionGeneration,
     },
     selected: selectedSkills,
+    includeLifecycleTools: skillLifecycleToolsSelected(selectedFirstPartyMcpTools),
     modelToolOutputTruncationTokens: () =>
       eventing.modelRunSettings.modelToolOutputTruncationTokens,
     onSkillReadHistoryLookupFailed: () =>
