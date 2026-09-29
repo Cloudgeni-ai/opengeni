@@ -2177,8 +2177,8 @@ describe("parseCodexUsageHeaders", () => {
     expect(snap).not.toBeNull();
     expect(snap!.primaryUsedPercent).toBe(42);
     expect(snap!.secondaryUsedPercent).toBe(7);
-    expect(snap!.primaryResetAt.getTime()).toBe(resetPrimary * 1000);
-    expect(snap!.secondaryResetAt.getTime()).toBe(resetSecondary * 1000);
+    expect(snap!.primaryResetAt?.getTime()).toBe(resetPrimary * 1000);
+    expect(snap!.secondaryResetAt?.getTime()).toBe(resetSecondary * 1000);
     expect(snap!.checkedAt).toBeInstanceOf(Date);
   });
 
@@ -2214,6 +2214,20 @@ describe("parseCodexUsageHeaders", () => {
     ).toBeNull();
   });
 
+  test("explicit durations without reset headers leave exhausted windows unknown", () => {
+    const snap = parseCodexUsageHeaders(
+      new Headers({
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-limit-window-seconds": "18000",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-limit-window-seconds": "604800",
+      }),
+    );
+    expect(snap).not.toBeNull();
+    expect(snap?.primaryResetAt).toBeNull();
+    expect(snap?.secondaryResetAt).toBeNull();
+  });
+
   test("explicit reversed durations are placed into the canonical cache columns", () => {
     const snap = parseCodexUsageHeaders(
       new Headers({
@@ -2226,9 +2240,9 @@ describe("parseCodexUsageHeaders", () => {
       }),
     );
     expect(snap?.primaryUsedPercent).toBe(10);
-    expect(snap?.primaryResetAt.getTime()).toBe(1782700000 * 1000);
+    expect(snap?.primaryResetAt?.getTime()).toBe(1782700000 * 1000);
     expect(snap?.secondaryUsedPercent).toBe(66);
-    expect(snap?.secondaryResetAt.getTime()).toBe(1783200000 * 1000);
+    expect(snap?.secondaryResetAt?.getTime()).toBe(1783200000 * 1000);
   });
 
   test("absent / non-integer used-percent → null (safe no-op)", () => {
@@ -2256,8 +2270,8 @@ describe("parseCodexUsageHeaders", () => {
       }),
     );
     expect(snap).not.toBeNull();
-    expect(snap!.primaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
-    expect(snap!.secondaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 7200 * 1000);
+    expect(snap!.primaryResetAt?.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
+    expect(snap!.secondaryResetAt?.getTime()).toBeGreaterThanOrEqual(before + 7200 * 1000);
   });
 });
 

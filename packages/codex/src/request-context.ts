@@ -19,14 +19,14 @@ export type CodexTokenSnapshot = {
  * identify their durations. Untyped headers are ignored rather than mislabeled;
  * /wham/usage remains authoritative. parseCodexUsageHeaders returns this only
  * when both windows parse, so a write is always a full 5-column snapshot.
- * Shape mirrors db's CodexAccountUsageSnapshot
- * (non-null here: a partial read is filtered to null upstream, never half-written).
+ * Shape mirrors db's CodexAccountUsageSnapshot: a partial read is filtered to
+ * null upstream, never half-written; missing reset timestamps remain unknown.
  */
 export type CodexUsageHeaderSnapshot = {
   primaryUsedPercent: number;
-  primaryResetAt: Date;
+  primaryResetAt: Date | null;
   secondaryUsedPercent: number;
-  secondaryResetAt: Date;
+  secondaryResetAt: Date | null;
   checkedAt: Date;
 };
 

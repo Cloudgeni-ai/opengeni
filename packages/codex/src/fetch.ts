@@ -165,11 +165,11 @@ function parseIntHeader(value: string | null): number | null {
 /**
  * Resolve a window reset instant from the response headers: prefer the absolute
  * `*-reset-at` (epoch SECONDS → ms, mirroring codex-token-resolver's usage parse),
- * else the relative `*-reset-after-seconds` from now, else now (a missing reset
- * reads as "already cleared" — availableAt treats an elapsed reset as a bounded
- * default cooldown, so the ranker never strands on it).
+ * else the relative `*-reset-after-seconds` from now. Absent timing is unknown,
+ * not already cleared; the ranker keeps an exhausted window capped under a
+ * bounded cooldown until live refresh.
  */
-function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs: number): Date {
+function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs: number): Date | null {
   const at = parseIntHeader(headers.get(atKey));
   if (at !== null) {
     return new Date(at * 1000);
@@ -178,7 +178,7 @@ function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs
   if (after !== null) {
     return new Date(nowMs + after * 1000);
   }
-  return new Date(nowMs);
+  return null;
 }
 
 /**
