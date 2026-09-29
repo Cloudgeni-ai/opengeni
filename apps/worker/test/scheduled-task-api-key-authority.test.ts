@@ -262,6 +262,37 @@ describe("organization API key scheduled tasks", () => {
     ).toBe(false);
   }, 180_000);
 
+  test("an unavailable Connected Machine target is a visible terminal run, not a thrown retry", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const key = organizationKey(workspace);
+    const task = await createWithKey(workspace, key, { type: "manual" });
+    // The machine the task names no longer exists.
+    await admin`update scheduled_tasks
+      set agent_config = agent_config || ${admin.json({
+        machineTarget: { targetSandboxId: crypto.randomUUID() },
+      })}
+      where id = ${task.id}`;
+    const input = {
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "manual" as const,
+      producerKey: `machine-target:${crypto.randomUUID()}`,
+      initiator: { kind: "subject" as const, subjectId: key.subjectId },
+    };
+    const expected = {
+      action: "blocked",
+      reason: "machine_target_unavailable",
+      runId: expect.any(String),
+      refusal: { version: 1, reason: "machine_target_unavailable", retryable: false },
+    };
+    expect(await scheduler().dispatchScheduledTaskRun(input)).toEqual(expected);
+    expect(await scheduler().dispatchScheduledTaskRun(input)).toEqual(expected);
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", error: "machine_target_unavailable" });
+  }, 180_000);
+
   test("an occurrence whose frozen owner authority cannot be proven is a visible failed run", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -296,7 +327,7 @@ describe("organization API key scheduled tasks", () => {
       action: "blocked",
       reason: "scheduled_authority_unavailable",
       runId: expect.any(String),
-      diagnostic: { version: 1, reason: "owner_access_unavailable", accounts: [] },
+      refusal: { version: 1, reason: "scheduled_authority_unavailable", retryable: false },
     };
     expect(await scheduler().dispatchScheduledTaskRun(input)).toEqual(expected);
     // A redelivered activity replays the recorded refusal instead of throwing.
@@ -307,7 +338,11 @@ describe("organization API key scheduled tasks", () => {
       status: "failed",
       error: "scheduled_authority_unavailable",
       sessionId: null,
-      admissionDiagnostic: { version: 1, reason: "owner_access_unavailable", accounts: [] },
+      admissionRefusal: {
+        version: 1,
+        reason: "scheduled_authority_unavailable",
+        retryable: false,
+      },
     });
     expect(runs[0]!.completedAt).not.toBeNull();
   }, 180_000);

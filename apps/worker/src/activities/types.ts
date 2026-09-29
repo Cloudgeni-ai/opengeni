@@ -442,6 +442,8 @@ export type DispatchScheduledTaskRunResult =
       action: "blocked";
       runId?: string;
       diagnostic?: import("@opengeni/contracts").ConnectionAccountSelectionDiagnostic;
+      /** Present when the occurrence was refused as a visible run receipt. */
+      refusal?: import("@opengeni/contracts").ScheduledTaskAdmissionRefusal;
       reason:
         | "insufficient_credits"
         | "monthly_model_cost_limit"
@@ -453,6 +455,10 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_execution_unrepresentable"
         | "connection_account_unavailable"
         | "scheduled_authority_unavailable"
+        | "machine_target_unavailable"
+        | "machine_enrollment_inactive"
+        | "variable_set_unavailable"
+        | "rig_version_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "incident_preflight_metadata_missing"

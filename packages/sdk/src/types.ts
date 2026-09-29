@@ -5688,10 +5688,32 @@ export type ScheduledTaskRun = {
       }
     | null
     | undefined;
+  /**
+   * Why the scheduler refused this occurrence before running it; `error`
+   * equals `reason`. `retryable: true` (status `skipped`): a later occurrence
+   * runs once the condition clears. `retryable: false` (status `failed`):
+   * every occurrence is refused until the task or a resource it names changes.
+   */
+  admissionRefusal?: ScheduledTaskAdmissionRefusal | null | undefined;
   createdAt: string;
   updatedAt: string;
   /** Connectors this run could not use; projected only for a viewer who can act on the task. */
   accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+};
+
+export type ScheduledTaskAdmissionRefusal = {
+  version: 1;
+  reason:
+    | "scheduled_authority_unavailable"
+    | "machine_target_unavailable"
+    | "machine_enrollment_inactive"
+    | "variable_set_unavailable"
+    | "rig_version_unavailable"
+    | "insufficient_credits"
+    | "monthly_model_cost_limit"
+    | "monthly_agent_run_limit"
+    | (string & {});
+  retryable: boolean;
 };
 
 export type ScheduledTaskAccessFailureReason =

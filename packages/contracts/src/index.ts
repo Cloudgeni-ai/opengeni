@@ -10109,6 +10109,27 @@ export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
 });
 export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
 
+/**
+ * Why the scheduler refused an occurrence before accepting execution. The run
+ * carries it with `error` equal to `reason`. `retryable: true` (run status
+ * `skipped`) means this occurrence was not run but a later one is admitted
+ * normally once the condition clears; `retryable: false` (status `failed`)
+ * means every occurrence is refused until the task or a resource it names
+ * changes. Known reasons: `scheduled_authority_unavailable`,
+ * `machine_target_unavailable`, `machine_enrollment_inactive`,
+ * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
+ * `insufficient_credits`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
+ * (transient). Readers must tolerate new reasons.
+ */
+export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ z
+  .object({
+    version: z.literal(1),
+    reason: z.string().min(1).max(128),
+    retryable: z.boolean(),
+  })
+  .strict();
+export type ScheduledTaskAdmissionRefusal = z.infer<typeof ScheduledTaskAdmissionRefusal>;
+
 /** Non-secret evidence of a refused connection selection, never execution authority. */
 export const ConnectionAccountSelectionDiagnostic = /* @__PURE__ */ z
   .object({
@@ -10186,6 +10207,8 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
   admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
+  /** Why the scheduler refused this occurrence before running it (see the schema). */
+  admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   /**

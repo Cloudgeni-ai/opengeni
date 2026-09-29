@@ -132,15 +132,15 @@ test("blocked admission is a durable terminal occurrence, not accepted execution
   ).rejects.toThrow();
 });
 
-test("an authority refusal is the same terminal receipt with only the owner diagnostic", async () => {
+test("an admission refusal is a terminal or skipped receipt, never accepted execution", async () => {
   const suffix = crypto.randomUUID();
   const access = await db.bootstrapWorkspace(client.db, {
     accountExternalSource: "scheduled-diagnostic-test",
-    accountExternalId: `authority-${suffix}`,
-    accountName: "Authority refusal test",
+    accountExternalId: `refusal-${suffix}`,
+    accountName: "Admission refusal test",
     workspaceExternalSource: "scheduled-diagnostic-test",
-    workspaceExternalId: `authority-${suffix}`,
-    workspaceName: "Authority refusal test",
+    workspaceExternalId: `refusal-${suffix}`,
+    workspaceName: "Admission refusal test",
     subjectId: `user:${suffix}`,
     subjectLabel: "Owner",
   });
@@ -148,75 +148,96 @@ test("an authority refusal is the same terminal receipt with only the owner diag
   const task = await db.createScheduledTask(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
-    name: "Synthetic authority task",
+    name: "Synthetic refusal task",
     status: "active",
     schedule: { type: "manual" },
-    temporalScheduleId: `authority-${suffix}`,
+    temporalScheduleId: `refusal-${suffix}`,
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
     agentConfig: { prompt: "Synthetic task", tools: [], resources: [], metadata: {} },
     createdBy: { kind: "service", subjectId: "scheduler" },
     metadata: {},
   });
-  const input = {
+  const base = {
     workspaceId: task.workspaceId,
     taskId: task.id,
     taskAuthorityRevision: task.authorityRevision,
     taskExecutionDigest: task.executionDigest,
     triggerType: "scheduled" as const,
-    producerKey: `scheduled-authority:${suffix}`,
-    error: "scheduled_authority_unavailable" as const,
-    diagnostic: db.SCHEDULED_AUTHORITY_REFUSAL_DIAGNOSTIC,
   };
-  const refused = await db.recordScheduledTaskAdmissionFailure(client.db, input);
-  expect(refused).toMatchObject({
-    status: "failed",
-    error: "scheduled_authority_unavailable",
-    sessionId: null,
-    admissionDiagnostic: { version: 1, reason: "owner_access_unavailable", accounts: [] },
+  const terminal = await db.recordScheduledTaskAdmissionRefusal(client.db, {
+    ...base,
+    producerKey: `refusal-terminal:${suffix}`,
+    reason: "rig_version_unavailable",
+    retryable: false,
   });
-  expect(refused.completedAt).not.toBeNull();
-  expect(await db.recordScheduledTaskAdmissionFailure(client.db, input)).toEqual(refused);
-  // The application seam refuses an authority receipt that names accounts.
-  await expect(
-    db.recordScheduledTaskAdmissionFailure(client.db, {
-      ...input,
-      producerKey: `${input.producerKey}:accounts`,
-      diagnostic: {
-        version: 1,
-        reason: "owner_access_unavailable",
-        accounts: [{ serverId: "mail", connectionId: null, reason: "account_not_visible" }],
-      },
+  expect(terminal).toMatchObject({
+    status: "failed",
+    error: "rig_version_unavailable",
+    sessionId: null,
+    admissionDiagnostic: null,
+    admissionRefusal: { version: 1, reason: "rig_version_unavailable", retryable: false },
+  });
+  expect(terminal.completedAt).not.toBeNull();
+  const transient = await db.recordScheduledTaskAdmissionRefusal(client.db, {
+    ...base,
+    producerKey: `refusal-transient:${suffix}`,
+    reason: "insufficient_credits",
+    retryable: true,
+  });
+  expect(transient).toMatchObject({
+    status: "skipped",
+    error: "insufficient_credits",
+    admissionRefusal: { version: 1, reason: "insufficient_credits", retryable: true },
+  });
+  expect(
+    await db.getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: task.workspaceId,
+      runId: transient.id,
     }),
-  ).rejects.toThrow();
-  // So does the database guard, independently of the application seam.
-  for (const [error, diagnostic] of [
+  ).toBeNull();
+  // The same producer replays its receipt; it never becomes a second run.
+  expect(
+    await db.recordScheduledTaskAdmissionRefusal(client.db, {
+      ...base,
+      producerKey: `refusal-terminal:${suffix}`,
+      reason: "insufficient_credits",
+      retryable: true,
+    }),
+  ).toEqual(terminal);
+  // The database guard rejects shapes the seam never writes, and immutability holds.
+  for (const [status, error, refusal] of [
     [
-      "scheduled_authority_unavailable",
-      { version: 1, reason: "selected_account_unavailable", accounts: [] },
+      "failed",
+      "insufficient_credits",
+      { version: 1, reason: "insufficient_credits", retryable: true },
+    ],
+    ["skipped", "not_a_reason", { version: 1, reason: "not_a_reason", retryable: true }],
+    [
+      "failed",
+      "rig_version_unavailable",
+      { version: 1, reason: "variable_set_unavailable", retryable: false },
     ],
     [
-      "scheduled_authority_unavailable",
-      {
-        version: 1,
-        reason: "owner_access_unavailable",
-        accounts: [{ serverId: "mail", connectionId: null, reason: "account_not_visible" }],
-      },
+      "failed",
+      "rig_version_unavailable",
+      { version: 1, reason: "rig_version_unavailable", retryable: false, detail: "x" },
     ],
-    ["scheduled_run_terminal", { version: 1, reason: "owner_access_unavailable", accounts: [] }],
   ] as const) {
     await expect(
       (async () =>
-        await shared.admin.begin(async (tx) => {
-          await tx`insert into scheduled_task_runs (account_id, workspace_id, task_id,
-            task_authority_revision, task_execution_digest, trigger_type, producer_key,
-            fired_at, completed_at, action_kind, status, error, admission_diagnostic)
-            values (${task.accountId}, ${task.workspaceId}, ${task.id},
-              ${task.authorityRevision}, ${task.executionDigest}, 'scheduled',
-              ${`${input.producerKey}:${crypto.randomUUID()}`}, now(), now(),
-              'agent_turn', 'failed', ${error}, ${tx.json(diagnostic)})`;
-        }))(),
-    ).rejects.toThrow("invalid scheduled admission diagnostic");
+        await shared.admin`insert into scheduled_task_runs (account_id, workspace_id, task_id,
+          task_authority_revision, task_execution_digest, trigger_type, producer_key,
+          fired_at, completed_at, action_kind, status, error, admission_refusal)
+          values (${task.accountId}, ${task.workspaceId}, ${task.id},
+            ${task.authorityRevision}, ${task.executionDigest}, 'scheduled',
+            ${`refusal-invalid:${crypto.randomUUID()}`}, now(), now(),
+            'agent_turn', ${status}, ${error}, ${shared.admin.json(refusal)})`)(),
+    ).rejects.toThrow("invalid scheduled admission refusal");
   }
-  expect(await db.listScheduledTaskRuns(client.db, task.workspaceId, task.id, 10)).toHaveLength(1);
+  await expect(
+    (async () =>
+      await shared.admin`update scheduled_task_runs set status = 'queued' where id = ${transient.id}`)(),
+  ).rejects.toThrow();
+  expect(await db.listScheduledTaskRuns(client.db, task.workspaceId, task.id, 10)).toHaveLength(2);
 });

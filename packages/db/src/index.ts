@@ -182,6 +182,7 @@ import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
   ConnectionAccountSelectionDiagnostic,
+  ScheduledTaskAdmissionRefusal,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
@@ -17969,19 +17970,6 @@ export async function deleteScheduledTask(
 }
 
 /** A terminal refusal is evidence, not accepted execution or permission to retry. */
-/** Terminal refusal codes a diagnostic scheduled-run receipt may carry. */
-export type ScheduledTaskAdmissionRefusalError =
-  | "connection_account_unavailable"
-  | "scheduled_authority_unavailable";
-
-/** The fixed diagnostic of an authority refusal: it names no account. */
-export const SCHEDULED_AUTHORITY_REFUSAL_DIAGNOSTIC: ConnectionAccountSelectionDiagnostic =
-  Object.freeze({
-    version: 1 as const,
-    reason: "owner_access_unavailable" as const,
-    accounts: [],
-  });
-
 export async function recordScheduledTaskAdmissionFailure(
   db: Database,
   input: {
@@ -17992,23 +17980,10 @@ export async function recordScheduledTaskAdmissionFailure(
     triggerType: ScheduledTaskTriggerType;
     producerKey: string;
     scheduledAt?: Date | null;
-    /**
-     * Which refusal this is. A connection-account refusal names the refused
-     * accounts; an authority refusal (the schedule's frozen owner authority
-     * cannot be proven) always carries the fixed owner diagnostic.
-     */
-    error?: ScheduledTaskAdmissionRefusalError;
     diagnostic: ConnectionAccountSelectionDiagnostic;
   },
 ): Promise<ScheduledTaskRun> {
   const diagnostic = ConnectionAccountSelectionDiagnostic.parse(input.diagnostic);
-  const error = input.error ?? "connection_account_unavailable";
-  if (
-    error === "scheduled_authority_unavailable" &&
-    (diagnostic.reason !== "owner_access_unavailable" || diagnostic.accounts.length > 0)
-  ) {
-    throw new Error("scheduled authority refusal carries only the owner diagnostic");
-  }
   if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
   return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     // Same task lock as accepted admission; both outcomes share the existing
@@ -18067,8 +18042,114 @@ export async function recordScheduledTaskAdmissionFailure(
         completedAt: now,
         actionKind: "agent_turn",
         status: "failed",
-        error,
+        error: "connection_account_unavailable",
         admissionDiagnostic: diagnostic,
+      })
+      .onConflictDoNothing({
+        target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+        where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+      })
+      .returning();
+    const result = inserted ?? (await readPrior());
+    if (!result) throw new Error("scheduled refusal receipt missing");
+    return mapScheduledTaskRun(result);
+  });
+}
+
+/** Reasons a scheduled occurrence is refused before accepting execution. */
+export type ScheduledTaskAdmissionRefusalReason =
+  | "scheduled_authority_unavailable"
+  | "machine_target_unavailable"
+  | "machine_enrollment_inactive"
+  | "variable_set_unavailable"
+  | "rig_version_unavailable"
+  | "insufficient_credits"
+  | "monthly_model_cost_limit"
+  | "monthly_agent_run_limit";
+
+/**
+ * Record a refused occurrence as an immutable run receipt under its producer
+ * identity (migration 0536). A transient refusal is `skipped`, a terminal one
+ * `failed`; neither carries accepted execution. An existing receipt for the
+ * producer wins, so redelivery never duplicates a run: the caller replays it.
+ */
+export async function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+    taskExecutionDigest: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+    scheduledAt?: Date | null;
+    reason: ScheduledTaskAdmissionRefusalReason;
+    retryable: boolean;
+  },
+): Promise<ScheduledTaskRun> {
+  if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  const refusal = ScheduledTaskAdmissionRefusal.parse({
+    version: 1,
+    reason: input.reason,
+    retryable: input.retryable,
+  });
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) throw new Error("Scheduled task not found");
+    const readPrior = async () => {
+      const [prior] = await tx
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (prior && (prior.taskId !== input.taskId || prior.triggerType !== input.triggerType)) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      return prior;
+    };
+    const prior = await readPrior();
+    if (prior) return mapScheduledTaskRun(prior);
+    if (
+      task.status !== "active" ||
+      task.deletedAt ||
+      task.authorityRevision !== input.taskAuthorityRevision ||
+      task.executionDigest !== input.taskExecutionDigest
+    ) {
+      throw new Error("scheduled task changed before refusal recording");
+    }
+    const now = new Date();
+    const [inserted] = await tx
+      .insert(schema.scheduledTaskRuns)
+      .values({
+        accountId: task.accountId,
+        workspaceId: input.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+        triggerType: input.triggerType,
+        producerKey: input.producerKey,
+        scheduledAt: input.scheduledAt ?? null,
+        firedAt: now,
+        completedAt: now,
+        actionKind: "agent_turn",
+        status: refusal.retryable ? "skipped" : "failed",
+        error: refusal.reason,
+        admissionRefusal: refusal,
       })
       .onConflictDoNothing({
         target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
@@ -83302,6 +83383,10 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
       row.admissionDiagnostic == null
         ? null
         : ConnectionAccountSelectionDiagnostic.parse(row.admissionDiagnostic),
+    admissionRefusal:
+      row.admissionRefusal == null
+        ? null
+        : ScheduledTaskAdmissionRefusal.parse(row.admissionRefusal),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

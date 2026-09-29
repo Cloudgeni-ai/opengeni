@@ -40,7 +40,8 @@ import {
   bindScheduledTaskRunSessionInTransaction,
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
-  SCHEDULED_AUTHORITY_REFUSAL_DIAGNOSTIC,
+  recordScheduledTaskAdmissionRefusal,
+  type ScheduledTaskAdmissionRefusalReason,
   createSession,
   createSessionWithIdempotencyKeyResult,
   enqueueSessionWorkflowWakeIfRunnable,
@@ -287,7 +288,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         producerKey: stableProducerKey,
       });
       if (priorRun?.actionKind === "agent_turn") {
-        if (priorRun.admissionDiagnostic) {
+        if (priorRun.admissionDiagnostic || priorRun.admissionRefusal) {
           return scheduledAdmissionRefusalResult(priorRun);
         }
         const acceptedExecution = await getScheduledTaskRunAcceptedExecution(db, {
@@ -415,26 +416,32 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskAuthorityRevision: task.authorityRevision,
       });
       const taskAuthoritySubjectId = task.ownerSubjectId;
-      // Every authority check below is deterministic for this exact task
-      // revision and digest, so a failure can never succeed on retry. Record
-      // it as a terminal, visible run receipt under this producer identity
-      // instead of throwing: a thrown activity is retried to exhaustion and
-      // leaves no run or error anyone can see.
-      const refuseAuthority = async (detail: string): Promise<DispatchScheduledTaskRunResult> => {
+      // Every pre-admission refusal below is recorded as a visible run receipt
+      // under this producer identity instead of throwing (a thrown activity is
+      // retried to exhaustion and leaves no run) or returning a bare blocked
+      // result (the occurrence silently disappears). Terminal refusals are
+      // deterministic for this task revision and digest; transient ones
+      // (`retryable`) are skipped and a later occurrence is admitted normally.
+      // Redelivery replays the same receipt, so no occurrence gets two runs.
+      const refuseAdmission = async (
+        reason: ScheduledTaskAdmissionRefusalReason,
+        retryable: boolean,
+        detail: string,
+      ): Promise<DispatchScheduledTaskRunResult> => {
         console.warn(
-          `[scheduled-task] refused occurrence of ${task.id} (revision ${task.authorityRevision}): ${detail}`,
+          `[scheduled-task] refused occurrence of ${task.id} (revision ${task.authorityRevision}): ${reason}: ${detail}`,
         );
-        const receipt = await recordScheduledTaskAdmissionFailure(db, {
+        const receipt = await recordScheduledTaskAdmissionRefusal(db, {
           workspaceId: task.workspaceId,
           taskId: task.id,
           taskAuthorityRevision: task.authorityRevision,
           taskExecutionDigest: task.executionDigest,
           triggerType: input.triggerType,
           producerKey: stableProducerKey,
-          error: "scheduled_authority_unavailable",
-          diagnostic: SCHEDULED_AUTHORITY_REFUSAL_DIAGNOSTIC,
+          reason,
+          retryable,
         });
-        if (!receipt.admissionDiagnostic) {
+        if (!receipt.admissionRefusal) {
           // A concurrent delivery accepted this producer first. Follow the
           // existing exact-receipt recovery path, never replace its outcome.
           return createScheduledTaskActivities(services).dispatchScheduledTaskRun(input);
@@ -448,7 +455,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             (subject) => subject !== null && subject !== taskAuthoritySubjectId,
           ))
       ) {
-        return await refuseAuthority(
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
           "scheduled authority differs from its immutable execution owner",
         );
       }
@@ -602,16 +611,37 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           !machine.enrollmentId ||
           machine.scope === "user"
         ) {
-          throw new Error("scheduled Connected Machine target is unavailable");
+          return await refuseAdmission(
+            "machine_target_unavailable",
+            false,
+            "scheduled Connected Machine target is unavailable",
+          );
         }
         const enrollment = await getEnrollment(db, access, machine.enrollmentId);
-        if (!enrollment || enrollment.status !== "active") {
-          throw new Error("scheduled Connected Machine enrollment is unavailable");
+        if (!enrollment) {
+          return await refuseAdmission(
+            "machine_target_unavailable",
+            false,
+            "scheduled Connected Machine enrollment is gone",
+          );
+        }
+        if (enrollment.status !== "active") {
+          // A paused/suspended enrollment can be re-activated; skip this
+          // occurrence rather than failing the schedule.
+          return await refuseAdmission(
+            "machine_enrollment_inactive",
+            true,
+            `scheduled Connected Machine enrollment is ${enrollment.status}`,
+          );
         }
         sandboxBackend = "selfhosted";
         sandboxOs = enrollment.os;
       } else if (generatedTarget && sandboxBackend === "selfhosted") {
-        throw new Error("self-hosted scheduled task has no Connected Machine target");
+        return await refuseAdmission(
+          "machine_target_unavailable",
+          false,
+          "self-hosted scheduled task has no Connected Machine target",
+        );
       }
       const generatedSessionDepthPolicy = generatedTarget
         ? await (async () => {
@@ -698,7 +728,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             )
           : null;
       if (generatedTarget && task.variableSetId && !acceptedVariableSet) {
-        throw new Error(`variable set not found: ${task.variableSetId}`);
+        return await refuseAdmission(
+          "variable_set_unavailable",
+          false,
+          `variable set not found: ${task.variableSetId}`,
+        );
       }
       const acceptedRig =
         generatedTarget && task.rigId
@@ -713,12 +747,17 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             )
           : null;
       if (generatedTarget && task.rigId && (!acceptedRig || !acceptedRig.activeVersion)) {
-        throw new Error(`sandbox environment has no active version to bind: ${task.rigId}`);
+        return await refuseAdmission(
+          "rig_version_unavailable",
+          false,
+          `sandbox environment has no active version to bind: ${task.rigId}`,
+        );
       }
-      const acceptedRigDefaultVariableSets = acceptedRig?.activeVersion
+      const acceptedRigDefaultVariableSetRows = acceptedRig?.activeVersion
         ? await Promise.all(
-            acceptedRig.activeVersion.defaultVariableSetIds.map(async (variableSetId) => {
-              const variableSet = await getVariableSet(
+            acceptedRig.activeVersion.defaultVariableSetIds.map(async (variableSetId) => ({
+              variableSetId,
+              variableSet: await getVariableSet(
                 db,
                 {
                   accountId: task.accountId,
@@ -726,16 +765,23 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
                 },
                 variableSetId,
-              );
-              if (!variableSet) {
-                throw new Error(
-                  `sandbox environment default Variable Set not found: ${variableSetId}`,
-                );
-              }
-              return { id: variableSet.id, generation: variableSet.generation };
-            }),
+              ),
+            })),
           )
         : [];
+      const missingRigDefaultVariableSet = acceptedRigDefaultVariableSetRows.find(
+        (row) => !row.variableSet,
+      );
+      if (missingRigDefaultVariableSet) {
+        return await refuseAdmission(
+          "variable_set_unavailable",
+          false,
+          `sandbox environment default Variable Set not found: ${missingRigDefaultVariableSet.variableSetId}`,
+        );
+      }
+      const acceptedRigDefaultVariableSets = acceptedRigDefaultVariableSetRows.map(
+        ({ variableSet }) => ({ id: variableSet!.id, generation: variableSet!.generation }),
+      );
       let incidentPreflightRequired = incidentDeclaration.action === "required";
       if (incidentPreflightRequired) {
         const existingSessionId =
@@ -822,21 +868,31 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? task.createdBy.subjectId
           : null;
       if (taskXaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-        return await refuseAuthority("scheduled user-scoped xAI authority has no causal human");
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
+          "scheduled user-scoped xAI authority has no causal human",
+        );
       }
       if (
         xaiAuthoritySubjectId &&
         taskAuthoritySubjectId &&
         xaiAuthoritySubjectId !== taskAuthoritySubjectId
       ) {
-        return await refuseAuthority("scheduled authority classes have different causal humans");
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
+          "scheduled authority classes have different causal humans",
+        );
       }
       const causalHumanSubjectId = taskAuthoritySubjectId ?? xaiAuthoritySubjectId;
       if (
         task.agentConfig.knowledgeSource &&
         causalHumanSubjectId !== task.agentConfig.knowledgeSource.initiatingSubjectId
       ) {
-        return await refuseAuthority(
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
           "Source schedule requires its connection owner's current human authorization; update the source schedule to authorize it",
         );
       }
@@ -848,7 +904,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         (acceptedVariableSet?.scope === "user" || acceptedRig?.scope === "user") &&
         !causalHumanSubjectId
       ) {
-        return await refuseAuthority("scheduled personal-resource execution has no causal human");
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
+          "scheduled personal-resource execution has no causal human",
+        );
       }
       const admissionDenial = await agentRunAdmissionDenial(
         { ...baseService, settings },
@@ -860,7 +920,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         },
       );
       if (admissionDenial) {
-        return { action: "blocked", reason: admissionDenial };
+        // Credits and monthly limits clear on their own (top-up, new period):
+        // skip this occurrence visibly; a later one is admitted normally.
+        return await refuseAdmission(admissionDenial, true, "agent run admission denied");
       }
       const acceptedModel = targetSessionExecution?.model ?? model;
       const acceptedReasoningEffort = targetSessionExecution?.reasoningEffort ?? reasoningEffort;
@@ -1875,14 +1937,19 @@ function scheduledRunRecoveryTerminalError(
 
 /** The blocked result of a diagnostic (refused) run receipt, fresh or replayed. */
 function scheduledAdmissionRefusalResult(
-  run: Pick<ScheduledTaskRun, "id" | "error" | "admissionDiagnostic">,
+  run: Pick<ScheduledTaskRun, "id" | "admissionDiagnostic" | "admissionRefusal">,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
+  if (run.admissionRefusal) {
+    return {
+      action: "blocked",
+      reason: run.admissionRefusal.reason as ScheduledTaskAdmissionRefusalReason,
+      runId: run.id,
+      refusal: run.admissionRefusal,
+    };
+  }
   return {
     action: "blocked",
-    reason:
-      run.error === "scheduled_authority_unavailable"
-        ? "scheduled_authority_unavailable"
-        : "connection_account_unavailable",
+    reason: "connection_account_unavailable",
     runId: run.id,
     ...(run.admissionDiagnostic ? { diagnostic: run.admissionDiagnostic } : {}),
   };

@@ -58,6 +58,7 @@ export const embeddingMigrationTail = [
   // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
   "0534_scheduled_admission_diagnostics.sql",
   // References the files scope identity introduced by withheld 0461.
-  "0535_slack_file_upload_operations.sql", // Replaces the diagnostic guard installed by withheld-then-replayed 0534.
-  "0536_scheduled_authority_refusals.sql",
+  "0535_slack_file_upload_operations.sql",
+  // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
+  "0536_scheduled_admission_refusals.sql",
 ];
