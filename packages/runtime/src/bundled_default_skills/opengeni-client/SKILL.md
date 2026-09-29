@@ -217,12 +217,13 @@ Read selectively: [Product integration shapes](references/product-integration-sh
   workspace integrations (check `/v1/config/client` and the SDK exports), a
   signed workspace webhook (`createWorkspaceWebhook`, verify with
   `verifyWebhookEvent`) tells the product when turns finish or need a person;
-  treat it as an at-least-once, unordered signal and read the session.
+  treat it as an at-least-once, unordered signal and read the session (see
+  `docs/workspace-integrations.md`).
 - Advanced, not the default path: products that need background work with
   host-owned access can add a workspace credential provider (short-lived
   sandbox credentials, including Git) and recognize the calling turn from the
-  informational `_meta.opengeni` on MCP calls. See the workspace integrations
-  guide in the OpenGeni repository.
+  informational `_meta.opengeni` on MCP calls. See
+  `docs/workspace-integrations.md`.
 
 ## Choose The Credential
 
