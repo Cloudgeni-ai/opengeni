@@ -78,7 +78,11 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
-import { isRequestBodyValidationError, requestBodyValidationHttpError } from "./http/request-body";
+import {
+  isRequestBodyValidationError,
+  requestBodyValidationHttpError,
+  tagRequestJsonParseErrors,
+} from "./http/request-body";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
 import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -716,6 +720,12 @@ export function createAppComposition(deps: AppDependencies): {
       return;
     }
     return await accessKeyBoundary(c, next);
+  });
+
+  // Malformed JSON in a client request body is a 400 wherever a route reads it.
+  app.use("/v1/*", async (c, next) => {
+    tagRequestJsonParseErrors(c);
+    await next();
   });
 
   // A request no registered handler answers is a 404 (or a 405 when the path

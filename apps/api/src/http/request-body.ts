@@ -1,5 +1,4 @@
 import type { Context } from "hono";
-import { HTTPException } from "hono/http-exception";
 import type { z } from "zod";
 import { ZodError } from "zod";
 
@@ -16,6 +15,8 @@ import { ApiHttpError } from "./api-error";
  * server fault.
  */
 const requestBodyValidationErrors = new WeakSet<ZodError>();
+/** Malformed-JSON failures raised by reading a client request body. */
+const requestBodyJsonErrors = new WeakSet<SyntaxError>();
 
 const MAX_REPORTED_ISSUES = 10;
 
@@ -59,8 +60,38 @@ export async function parseRequestJson<Schema extends z.ZodType>(
   return parseRequestBody(schema, await readRequestJson(c));
 }
 
-export function isRequestBodyValidationError(error: unknown): error is ZodError {
-  return error instanceof ZodError && requestBodyValidationErrors.has(error);
+/**
+ * Tag malformed-JSON failures of `c.req.json()` for this request. The same
+ * `SyntaxError` instance is rethrown so routes that already catch it keep
+ * their own mapping; an uncaught one becomes a 400 in `app.onError` instead of
+ * a 500. A `SyntaxError` from parsing stored or upstream data is never tagged.
+ */
+export function tagRequestJsonParseErrors(c: Context): void {
+  const original = c.req.json.bind(c.req);
+  const tagged = async () => {
+    try {
+      return await original();
+    } catch (error) {
+      if (error instanceof SyntaxError) requestBodyJsonErrors.add(error);
+      throw error;
+    }
+  };
+  (c.req as { json: typeof tagged }).json = tagged;
+}
+
+export function isRequestBodyValidationError(error: unknown): error is ZodError | SyntaxError {
+  return requestBodyInputError(error) !== null;
+}
+
+/** Walk a bounded cause chain for a tagged client-input failure. */
+function requestBodyInputError(error: unknown): ZodError | SyntaxError | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+    if (current instanceof ZodError && requestBodyValidationErrors.has(current)) return current;
+    if (current instanceof SyntaxError && requestBodyJsonErrors.has(current)) return current;
+    current = current.cause;
+  }
+  return null;
 }
 
 /**
@@ -68,13 +99,17 @@ export function isRequestBodyValidationError(error: unknown): error is ZodError 
  * offending field (bounded) so API callers can correct the request.
  */
 export function requestBodyValidationHttpError(error: unknown): ApiHttpError | null {
-  const zodError =
-    error instanceof HTTPException && isRequestBodyValidationError(error.cause)
-      ? error.cause
-      : isRequestBodyValidationError(error)
-        ? error
-        : null;
-  if (!zodError) return null;
+  const inputError = requestBodyInputError(error);
+  if (!inputError) return null;
+  if (inputError instanceof SyntaxError) {
+    return new ApiHttpError(400, {
+      code: "validation_failed",
+      message: "Request body must be valid JSON.",
+      retryable: false,
+      details: { code: "invalid_json" },
+    });
+  }
+  const zodError = inputError;
   const issues = zodError.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
     path: issue.path.map(String).join("."),
     message: issue.message,

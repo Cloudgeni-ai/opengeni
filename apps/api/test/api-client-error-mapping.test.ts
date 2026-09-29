@@ -82,6 +82,18 @@ describe("request body validation", () => {
     const app = appFor();
     app.post("/v1/test-probe/body", async (c) => c.json(await parseRequestJson(c, Body)));
     app.get("/v1/test-probe/projection", (c) => c.json(Projection.parse({ id: "not-a-uuid" })));
+    // A route that reads the body itself, without the parsing helpers.
+    app.post("/v1/test-probe/raw", async (c) => c.json(await c.req.json()));
+    // A request-body failure surfacing through a wrapping error (e.g. a
+    // transaction boundary) keeps its client classification.
+    app.post("/v1/test-probe/wrapped", async (c) => {
+      try {
+        return c.json(await parseRequestJson(c, Body));
+      } catch (error) {
+        throw new Error("transaction failed", { cause: error });
+      }
+    });
+    app.get("/v1/test-probe/stored-json", (c) => c.json(JSON.parse("{stored")));
     return app;
   }
 
@@ -110,6 +122,31 @@ describe("request body validation", () => {
       code: "validation_failed",
       details: { code: "invalid_json" },
     });
+  });
+
+  test("malformed JSON read directly by a route is a 400", async () => {
+    const response = await appWithProbeRoutes().request("/v1/test-probe/raw", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    expect(response.status).toBe(400);
+    expect(await envelope(response)).toMatchObject({ details: { code: "invalid_json" } });
+  });
+
+  test("a wrapped request-body failure stays a 400", async () => {
+    const response = await appWithProbeRoutes().request("/v1/test-probe/wrapped", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "x" }),
+    });
+    expect(response.status).toBe(400);
+    expect((await envelope(response)).message).toContain("accountId");
+  });
+
+  test("malformed stored JSON stays a 500", async () => {
+    const response = await appWithProbeRoutes().request("/v1/test-probe/stored-json");
+    expect(response.status).toBe(500);
   });
 
   test("a server-side projection failure stays a 500", async () => {

@@ -2748,7 +2748,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    CompactSessionContextRequest.parse((await c.req.json().catch(() => ({}))) ?? {});
+    parseRequestBody(CompactSessionContextRequest, (await c.req.json().catch(() => ({}))) ?? {});
     // /compact sets one durable request. The worker clears it only in the same
     // fenced transaction that installs replacement history, so failed or stale
     // attempts cannot lose the request.

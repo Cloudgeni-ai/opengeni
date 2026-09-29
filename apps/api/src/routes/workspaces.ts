@@ -128,6 +128,7 @@ import {
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
+import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 
 export function canonicalWorkspacePolicyModelIds(
@@ -243,13 +244,12 @@ export function externalWorkspaceAccountId(
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/external-members", async (c) => {
+    // Validate at the HTTP boundary so a malformed body is a 400, not a raw
+    // schema error from the application layer.
+    const body = await readRequestJson(c);
+    parseRequestBody(AddExternalWorkspaceMemberRequest, body);
     return c.json(
-      await addExternalWorkspaceMemberForRequest(
-        c,
-        deps,
-        c.req.param("workspaceId"),
-        await c.req.json(),
-      ),
+      await addExternalWorkspaceMemberForRequest(c, deps, c.req.param("workspaceId"), body),
     );
   });
   app.get("/v1/access/me", async (c) => {

@@ -28,7 +28,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 
 function nativeConfirmation(authorization: AccessGrantAuthorization) {
   if (
@@ -125,7 +125,7 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
     if (operation === "preview" || operation === "confirm" || !external)
       nativeConfirmation(authorization);
     const grant = authorization.grant;
-    const input = c.req.method === "POST" ? await c.req.json() : null;
+    const input = c.req.method === "POST" ? await readRequestJson(c) : null;
     try {
       const result = await withWorkspaceSubjectRls(
         deps.db,
@@ -134,10 +134,10 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
         async (tx) => {
           await externalContinuationCommitAuthorizer(authorization)?.(tx);
           if (operation === "preview") {
-            const request = z
-              .object({ challenge: ConfirmExternalIdentityLinkRequest.shape.challenge })
-              .strict()
-              .parse(input);
+            const request = parseRequestBody(
+              z.object({ challenge: ConfirmExternalIdentityLinkRequest.shape.challenge }).strict(),
+              input,
+            );
             const preview = await previewExternalIdentityLink(tx, {
               accountId: grant.accountId,
               linkId,
@@ -148,7 +148,7 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
               : null;
           }
           if (operation === "confirm") {
-            const request = ConfirmExternalIdentityLinkRequest.parse(input);
+            const request = parseRequestBody(ConfirmExternalIdentityLinkRequest, input);
             await lockExternalWorkspaceMembershipLifecycle(tx, grant.accountId);
             const personalWorkspaceId = await namedSubjectPersonalWorkspaceId(tx, {
               accountId: grant.accountId,
@@ -181,10 +181,10 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
           }
           const scope = { accountId: grant.accountId, linkId, subjectId: grant.subjectId };
           if (operation === "revoke") {
-            const request = z
-              .object({ expectedRevision: z.number().int().positive().safe() })
-              .strict()
-              .parse(input);
+            const request = parseRequestBody(
+              z.object({ expectedRevision: z.number().int().positive().safe() }).strict(),
+              input,
+            );
             return revokeExternalIdentityLink(tx, { ...scope, ...request });
           }
           return getExternalIdentityLink(tx, scope);

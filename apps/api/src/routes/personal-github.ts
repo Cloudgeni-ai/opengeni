@@ -89,7 +89,8 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
-    const payload = PersonalGitHubOAuthStartRequest.omit({ connectionId: true }).parse(
+    const payload = parseRequestBody(
+      PersonalGitHubOAuthStartRequest.omit({ connectionId: true }),
       await c.req.json().catch(() => ({})),
     );
     return c.json(
