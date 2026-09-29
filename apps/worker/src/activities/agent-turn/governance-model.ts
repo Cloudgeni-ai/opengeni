@@ -48,6 +48,7 @@ import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceAgentWebSearchEnabled,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
@@ -94,6 +95,8 @@ export type GovernanceModelOk = {
     | null;
   rigName: string | null;
   agentHumanInputEnabled: boolean;
+  /** Workspace has not switched hosted web search off. */
+  agentWebSearchEnabled: boolean;
   /** Deployment and workspace allow the Jev-backed code_search tool. */
   codeSearchEnabled: boolean;
   workspaceAgentInstructions: string | null | undefined;
@@ -237,6 +240,7 @@ export async function prepareGovernanceAndModel(
   workspaceRefs.rigVersionId = session.rigVersionId ?? "";
   if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
   const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
+  const agentWebSearchEnabled = resolveWorkspaceAgentWebSearchEnabled(workspace.settings);
   // The session's decision was frozen when it was created, so only a
   // deliberate switch-off (deployment or workspace Off), or undoing one,
   // changes its tool list.
@@ -475,6 +479,7 @@ export async function prepareGovernanceAndModel(
       rigVersion,
       rigName,
       agentHumanInputEnabled,
+      agentWebSearchEnabled,
       codeSearchEnabled,
       workspaceAgentInstructions,
       workspaceGovernance,

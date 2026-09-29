@@ -3,6 +3,7 @@ import {
   UpdateWorkspaceSettingsRequest,
   WorkspaceSettingsSchema,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceAgentWebSearchEnabled,
 } from "../src/index";
 
 describe("agent structured human-input workspace setting", () => {
@@ -20,6 +21,17 @@ describe("agent structured human-input workspace setting", () => {
     ).toBe(true);
     expect(
       UpdateWorkspaceSettingsRequest.safeParse({ agentHumanInputEnabled: "false" }).success,
+    ).toBe(false);
+  });
+});
+
+describe("agent hosted web-search workspace setting", () => {
+  test("defaults permitted and honors an explicit switch-off", () => {
+    expect(resolveWorkspaceAgentWebSearchEnabled(undefined)).toBe(true);
+    expect(resolveWorkspaceAgentWebSearchEnabled({})).toBe(true);
+    expect(resolveWorkspaceAgentWebSearchEnabled({ agentWebSearchEnabled: false })).toBe(false);
+    expect(
+      UpdateWorkspaceSettingsRequest.safeParse({ agentWebSearchEnabled: "false" }).success,
     ).toBe(false);
   });
 });

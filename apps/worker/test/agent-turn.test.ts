@@ -6471,6 +6471,13 @@ describe("hostedWebSearchForTurn (provider support)", () => {
     expect(hostedWebSearchForTurn(null, true)).toBe(true);
     expect(hostedWebSearchForTurn(null, false)).toBe(false);
   });
+
+  test("a workspace switch-off narrows but never enables", () => {
+    expect(hostedWebSearchForTurn(resolved(true), true, false)).toBe(false);
+    expect(hostedWebSearchForTurn(null, true, false)).toBe(false);
+    expect(hostedWebSearchForTurn(resolved(false), true, true)).toBe(false);
+    expect(hostedWebSearchForTurn(null, false, true)).toBe(false);
+  });
 });
 
 describe("connectedSubscriptionImageGenerationAuthority", () => {

@@ -833,6 +833,14 @@ effective selection (explicit `[]`, or a deployment ceiling of none) withholds
 them; any non-empty selection keeps them, with every write still governed by
 Learning mode. Read-only `skill_read` stays available so selected Skills load.
 
+Two built-in tools are governed by workspace settings rather than the session
+selection: `agentHumanInputEnabled: false` removes `request_human_input`, and
+`agentWebSearchEnabled: false` removes provider-hosted `web_search` (it only
+narrows the deployment/model capability). The progressive-disclosure router
+(`tool_search`, `tool_list`, `tool_invoke`) is present whenever a selected MCP
+server is not `eager`, including the mandatory first-party server; it only
+reveals already-authorized tools. Read-only `list_models` is a base tool.
+
 Resources are unaffected by that selection. File/document/repository
 attachments still materialize when `firstPartyMcpTools` is empty or contains
 only `set_session_title`; the dedicated `files` and `docs` MCP servers are

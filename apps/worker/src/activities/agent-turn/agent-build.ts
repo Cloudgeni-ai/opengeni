@@ -110,6 +110,7 @@ export type BuildTurnAgentDeps = {
   modelInputPolicy: GovernanceModelOk["modelInputPolicy"];
   supportsImageInput: GovernanceModelOk["supportsImageInput"];
   agentHumanInputEnabled: GovernanceModelOk["agentHumanInputEnabled"];
+  agentWebSearchEnabled: GovernanceModelOk["agentWebSearchEnabled"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
@@ -172,6 +173,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     modelInputPolicy,
     supportsImageInput,
     agentHumanInputEnabled,
+    agentWebSearchEnabled,
     workspaceAgentInstructions,
     workspaceGovernance,
     structuredWorkspacePolicyActive,
@@ -241,7 +243,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           },
         }
       : {};
-  const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+  const hostedWebSearch = hostedWebSearchForTurn(
+    resolvedModel,
+    runSettings.webSearchEnabled,
+    agentWebSearchEnabled,
+  );
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>

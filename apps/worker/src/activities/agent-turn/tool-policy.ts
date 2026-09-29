@@ -184,8 +184,13 @@ export function shouldDeferNonEagerToolPreparation(args: {
 export function hostedWebSearchForTurn(
   resolvedModel: { configured: { hostedWebSearch: boolean } } | null,
   deploymentWebSearchEnabled: boolean,
+  /** Workspace `agentWebSearchEnabled`; it only ever narrows. */
+  workspaceWebSearchEnabled = true,
 ): boolean {
-  return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
+  return (
+    workspaceWebSearchEnabled &&
+    (resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled)
+  );
 }
 
 /**

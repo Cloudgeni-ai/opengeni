@@ -2356,6 +2356,10 @@ export const WorkspaceSettingsSchema = z
     // Whether agents may expose and invoke the built-in structured human-input
     // tool. Absent preserves the historical enabled behavior.
     agentHumanInputEnabled: z.boolean().optional(),
+    // Narrow-only: false removes the provider-hosted web_search tool from this
+    // workspace's turns. Absent/true follows the deployment and model; it can
+    // never enable web search a deployment or model does not offer.
+    agentWebSearchEnabled: z.boolean().optional(),
     // Whether agents get the Jev-backed `code_search` tool. Absent or null
     // follows the deployment default; the deployment can always keep it off.
     codeSearchEnabled: z.boolean().nullable().optional(),
@@ -2417,6 +2421,15 @@ export function resolveWorkspaceCodexCompactionDefault(settings: unknown): Codex
 export function resolveWorkspaceAgentHumanInputEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.agentHumanInputEnabled !== false : true;
+}
+
+/**
+ * Whether this workspace permits hosted web search (permitted when unset).
+ * Only narrows: the deployment and resolved model must also offer it.
+ */
+export function resolveWorkspaceAgentWebSearchEnabled(settings: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? parsed.data.agentWebSearchEnabled !== false : true;
 }
 
 /**
@@ -2509,6 +2522,7 @@ export const UpdateWorkspaceSettingsRequest = z
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
+    agentWebSearchEnabled: z.boolean().optional(),
     // null returns the workspace to the deployment default.
     codeSearchEnabled: z.boolean().nullable().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
