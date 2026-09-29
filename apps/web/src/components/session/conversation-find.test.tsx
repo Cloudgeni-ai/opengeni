@@ -32,6 +32,7 @@ let ConversationFind: ComponentType<{
   open: boolean;
   focusRevision: number;
   initial: SessionSearchRoute;
+  showBackToSessionSearch: boolean;
   onClose: () => void;
   onTarget: (target: TimelineSearchTarget | null) => void;
   onJump: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
@@ -68,6 +69,7 @@ test.each([false, true])(
             open
             focusRevision={0}
             initial={initial}
+            showBackToSessionSearch={false}
             onTarget={onTarget}
             onJump={onJump}
             onClose={() => {}}
@@ -112,6 +114,7 @@ test("an authority scope change discards a pending replacement-route occurrence"
             open
             focusRevision={0}
             initial={initial}
+            showBackToSessionSearch={false}
             onTarget={onTarget}
             onJump={onJump}
             onClose={() => {}}
@@ -158,6 +161,7 @@ test("deep-link occurrence stays selected, Enter moves matches, Escape clears wi
         open={open}
         focusRevision={0}
         initial={{ find: "test", matchSequence: 7, matchOffset: 12 }}
+        showBackToSessionSearch={false}
         onTarget={onTarget}
         onJump={onJump}
         onClose={() => {
@@ -246,6 +250,7 @@ test("closing while navigation is pending aborts it and suppresses late highligh
         open={open}
         focusRevision={0}
         initial={{ find: "test", matchSequence: 7 }}
+        showBackToSessionSearch={false}
         onTarget={onTarget}
         onJump={onJump}
         onClose={() => render(false)}
@@ -258,6 +263,54 @@ test("closing while navigation is pending aborts it and suppresses late highligh
     expect(signal?.aborted).toBe(true);
     await act(async () => finish(true));
     expect(targets.every((target) => target === null)).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+test("return link appears only while the find bar was opened from session search", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const render = (showBackToSessionSearch: boolean) =>
+    act(async () => {
+      root.render(
+        <ConversationFind
+          workspaceId="workspace"
+          sessionId="session"
+          open
+          focusRevision={0}
+          initial={{}}
+          showBackToSessionSearch={showBackToSessionSearch}
+          onTarget={() => {}}
+          onJump={async () => true}
+          onClose={() => {}}
+        />,
+      );
+    });
+  try {
+    await render(false);
+    expect(host.textContent).toContain("All saved user and completed assistant messages");
+    expect(host.textContent).not.toContain("Back to session search");
+    await render(true);
+    const back = [...host.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Back to session search",
+    );
+    expect(back).toBeDefined();
+    let requestedWorkspace: string | undefined;
+    const onSearch = (event: Event) => {
+      requestedWorkspace = (event as CustomEvent<{ workspaceId: string }>).detail.workspaceId;
+    };
+    window.addEventListener("opengeni:open-session-search", onSearch);
+    try {
+      await act(async () => back!.click());
+      expect(requestedWorkspace).toBe("workspace");
+    } finally {
+      window.removeEventListener("opengeni:open-session-search", onSearch);
+    }
+    await render(false);
+    expect(host.textContent).not.toContain("Back to session search");
   } finally {
     await act(async () => root.unmount());
     host.remove();

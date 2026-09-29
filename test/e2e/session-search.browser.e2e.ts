@@ -643,6 +643,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await page.keyboard.press("Control+f");
       await find.waitFor();
       await expectFocused(find.getByRole("searchbox", { name: "Find in conversation" }));
+      expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(0);
     } finally {
       await page.screenshot({ path: `${artifactDir}/session-search-find.png` });
       await context.close();
@@ -733,6 +734,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         find.getByRole("searchbox", { name: "Find in conversation" }),
         "harborlight",
       );
+      expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(1);
 
       // …and the strip's explicit return path reopens the same search.
       await find.getByRole("button", { name: "Back to session search", exact: true }).click();
@@ -859,7 +861,9 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       ).toBeLessThanOrEqual(2);
       await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
       await find.waitFor();
-      await find.getByRole("button", { name: "Back to session search", exact: true }).click();
+      expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(0);
+      await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+      await openSearchDialog(page);
       await expectValue(input, "narrowpine");
       await preview.getByRole("button", { name: "Back to search results", exact: true }).click();
       await waitFor(async () => (await results.count()) === 2, { timeoutMs: 10_000 });

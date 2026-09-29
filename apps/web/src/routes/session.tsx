@@ -1513,11 +1513,15 @@ function SessionChatPane(props: {
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
+  const [findFromSessionSearch, setFindFromSessionSearch] = useState(
+    props.searchTarget.searchOrigin === "session-search",
+  );
   const [activeSearchTarget, setActiveSearchTarget] = useState<TimelineSearchTarget | null>(null);
   const findButton = useRef<HTMLButtonElement>(null);
-  const openFind = useCallback(() => {
+  const openFind = useCallback((fromSessionSearch = false) => {
     setFindMounted(true);
     setFindOpen(true);
+    setFindFromSessionSearch(fromSessionSearch);
     setFindFocusRevision((value) => value + 1);
   }, []);
   const closeFind = useCallback(() => {
@@ -1526,11 +1530,12 @@ function SessionChatPane(props: {
     requestAnimationFrame(() => findButton.current?.focus({ preventScroll: true }));
   }, []);
   useEffect(() => {
-    if (props.searchTarget.find) openFind();
+    if (props.searchTarget.find) openFind(props.searchTarget.searchOrigin === "session-search");
   }, [
     props.searchTarget.find,
     props.searchTarget.matchSequence,
     props.searchTarget.matchOffset,
+    props.searchTarget.searchOrigin,
     openFind,
   ]);
   useEffect(() => {
@@ -2531,7 +2536,7 @@ function SessionChatPane(props: {
           type="button"
           variant="ghost"
           size="sm"
-          onClick={openFind}
+          onClick={() => openFind()}
           aria-label="Find in conversation"
           title="Find in conversation (Ctrl/Cmd+F)"
           className="text-xs text-fg-muted"
@@ -2548,6 +2553,7 @@ function SessionChatPane(props: {
             open={findOpen}
             focusRevision={findFocusRevision}
             initial={props.searchTarget}
+            showBackToSessionSearch={findFromSessionSearch}
             onClose={closeFind}
             onTarget={setActiveSearchTarget}
             onJump={props.onJumpToSequence}
