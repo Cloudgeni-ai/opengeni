@@ -163,17 +163,6 @@ function integrationCredentialResolver(
           result,
           connectionRef,
         );
-        if (result.detail === "invalid_credential") {
-          // The Connection exists and is active; reconnecting an account or a
-          // refresh cannot help. Name the actual repair instead of the generic
-          // connection-required result.
-          throw new IntegrationInvocationError(
-            "connection_credential_invalid",
-            'The selected API-key Connection stores no usable credential. Update it with { headers: { "<Header-Name>": "<value>" } } or { placements: [{ carrier, name, value, prefix? }] }.',
-            "not_started",
-            false,
-          );
-        }
         return null;
       }
       const destination = new URL(request.destinationUrl);

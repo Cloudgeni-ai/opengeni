@@ -533,13 +533,7 @@ async function connectionCredentialPlacementWarnings(
   } catch {
     return [];
   }
-  if (result.status === "auth_needed") {
-    return result.detail === "invalid_credential"
-      ? [
-          "The selected Connection stores no usable credential. Update it with headers or placements before installing; calls would otherwise fail as unauthenticated.",
-        ]
-      : [];
-  }
+  if (result.status === "auth_needed") return [];
   const expected =
     preview.auth.kind === "api_key"
       ? { carrier: preview.auth.carrier, name: preview.auth.name }

@@ -916,8 +916,6 @@ describe("API Integration routes", () => {
     expect(
       await preview({ placements: [{ carrier: "query", name: "api_key", value: "synthetic" }] }),
     ).toEqual([]);
-    const legacy = await preview({ apiKey: "synthetic" });
-    expect(legacy.join("\n")).toContain("stores no usable credential");
   }, 60_000);
 
   test("controls generic Integration facets through the public lifecycle", async () => {
