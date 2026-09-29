@@ -816,10 +816,19 @@ export class OpenGeniSlackBotClient {
   }
 
   /** Server-only upload preparation; the temporary URL never enters a tool result. */
-  async allocateFileUpload(input: { channelId: string; filename: string; sizeBytes: number }) {
+  async allocateFileUpload(input: {
+    channelId: string;
+    privateRecipientSlackUserId?: string;
+    filename: string;
+    sizeBytes: number;
+  }) {
     this.requireFileUploadScope();
     return this.withAudit("file.upload", async (authority) => {
-      await this.requireActiveNonSharedMemberChannel(authority, input.channelId);
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
       const payload = await this.call(authority, "files.getUploadURLExternal", {
         filename: input.filename,
         length: String(input.sizeBytes),
@@ -833,11 +842,20 @@ export class OpenGeniSlackBotClient {
     });
   }
 
-  async transferFileUpload(input: { channelId: string; uploadUrl: URL; bytes: Uint8Array }) {
+  async transferFileUpload(input: {
+    channelId: string;
+    privateRecipientSlackUserId?: string;
+    uploadUrl: URL;
+    bytes: Uint8Array;
+  }) {
     this.requireFileUploadScope();
     const uploadUrl = slackFileUploadUrl(input.uploadUrl.toString());
     return this.withAudit("file.upload", async (authority) => {
-      await this.requireActiveNonSharedMemberChannel(authority, input.channelId);
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
       // Reauthorize this exact destination and live attempt immediately before
       // I/O, but do NOT forward the bot token to Slack's temporary upload URL.
       await this.headersForDestination("file.upload", uploadUrl.toString());
@@ -866,13 +884,18 @@ export class OpenGeniSlackBotClient {
 
   async completeFileUpload(input: {
     channelId: string;
+    privateRecipientSlackUserId?: string;
     threadTimestamp: string;
     fileId: string;
     title: string;
   }) {
     this.requireFileUploadScope();
     return this.withAudit("file.upload", async (authority) => {
-      await this.requireActiveNonSharedMemberChannel(authority, input.channelId);
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
       const payload = await this.call(authority, "files.completeUploadExternal", {
         files: JSON.stringify([{ id: input.fileId, title: input.title }]),
         channel_id: input.channelId,
@@ -888,10 +911,19 @@ export class OpenGeniSlackBotClient {
     });
   }
 
-  async reconcileFileUpload(input: { channelId: string; threadTimestamp: string; fileId: string }) {
+  async reconcileFileUpload(input: {
+    channelId: string;
+    privateRecipientSlackUserId?: string;
+    threadTimestamp: string;
+    fileId: string;
+  }) {
     this.requireFileUploadScope();
     return this.withAudit("file.upload", async (authority) => {
-      await this.requireActiveNonSharedMemberChannel(authority, input.channelId);
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
       let payload: SlackPayload;
       try {
         payload = await this.call(authority, "files.info", { file: input.fileId });
@@ -1887,6 +1919,7 @@ export class OpenGeniSlackBotClient {
   private async requireActiveNonSharedMemberChannel(
     headers: SlackCallAuthority,
     channelId: string,
+    privateRecipientSlackUserId?: string,
   ) {
     const projected = await this.requireMemberChannel(headers, channelId);
     if (projected.isArchived) {
@@ -1894,6 +1927,9 @@ export class OpenGeniSlackBotClient {
     }
     if (projected.isShared || projected.isExternallyShared || projected.isOrgShared) {
       throw new SlackBotProviderError("slack_connect_unsupported");
+    }
+    if (privateRecipientSlackUserId) {
+      assertSlackPrivateTaskRecipient(projected, privateRecipientSlackUserId);
     }
     return projected;
   }
@@ -2504,6 +2540,7 @@ function projectChannel(value: unknown) {
     isMember: channel.is_member === true,
     isDirectMessage: channel.is_im === true,
     isMpim: channel.is_mpim === true,
+    userId: nullableBoundedSlackString(channel.user, 128),
     isArchived: channel.is_archived === true,
     isShared: channel.is_shared === true,
     isExternallyShared: channel.is_ext_shared === true,
@@ -2519,6 +2556,16 @@ function projectChannel(value: unknown) {
         ? channel.num_members
         : null,
   };
+}
+
+/** A private route needs live provider proof of the exact linked requester's bot IM. */
+export function assertSlackPrivateTaskRecipient(
+  channel: { isDirectMessage: boolean; isMpim: boolean; userId: string | null },
+  slackUserId: string,
+): void {
+  if (!channel.isDirectMessage || channel.isMpim || channel.userId !== slackUserId) {
+    throw new SlackBotProviderError("private_task_recipient_changed");
+  }
 }
 
 function projectSlackTaskPolicyUser(value: unknown, installationTeamId: string) {

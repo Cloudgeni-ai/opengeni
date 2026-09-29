@@ -211,6 +211,7 @@ function fakeSlack(
     fileListResponse?: (input: { count: number; page: number }) => Record<string, unknown>;
     /** Extra channels, with realistic IDs, that the bot is a member of. */
     extraMemberChannels?: string[];
+    dmUserId?: string;
   } = {},
 ) {
   const isMemberChannel = (channel: string) =>
@@ -459,6 +460,9 @@ function fakeSlack(
           name: isMemberChannel(channel) ? "general" : "private",
           is_private: channel.startsWith("G"),
           is_member: isMemberChannel(channel),
+          is_im: channel.startsWith("D"),
+          is_mpim: channel === "G_GROUP",
+          ...(channel.startsWith("D") ? { user: options.dmUserId ?? "U_OWNER" } : {}),
           is_archived: isMemberChannel(channel) && memberChannelState.isArchived,
           is_shared: isMemberChannel(channel) && memberChannelState.isShared,
           is_ext_shared: isMemberChannel(channel) && memberChannelState.isExternallyShared,
@@ -2461,6 +2465,25 @@ describe("OpenGeni Slack bot connection", () => {
       bot.allocateFileUpload({ channelId: "C_MEMBER", filename: "preview.png", sizeBytes: 1 }),
     ).rejects.toThrow("slack_bot_file_upload_scope_missing");
     expect(slack.calls).toHaveLength(before);
+  });
+
+  test("private file upload validates the exact live requester IM before allocation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ dmUserId: "U_OWNER", extraMemberChannels: ["G_GROUP"] });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const input = { filename: "private.png", sizeBytes: 1, privateRecipientSlackUserId: "U_OWNER" };
+    await expect(bot.allocateFileUpload({ ...input, channelId: "G_GROUP" })).rejects.toThrow(
+      "private_task_recipient_changed",
+    );
+    await expect(
+      bot.allocateFileUpload({
+        ...input,
+        channelId: "D_OWNER",
+        privateRecipientSlackUserId: "U_OTHER",
+      }),
+    ).rejects.toThrow("private_task_recipient_changed");
+    expect(slack.calls.some((call) => call.method === "files.getUploadURLExternal")).toBe(false);
   });
 
   test("denies a revoked byte-transfer continuation before sending any bytes", async () => {

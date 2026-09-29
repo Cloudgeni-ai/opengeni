@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0531_slack_file_upload_operations.sql",
+          (migration) => migration.path === "0535_slack_file_upload_operations.sql",
         )
-          ? "0531_slack_file_upload_operations.sql"
+          ? "0535_slack_file_upload_operations.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0530_scheduled_slack_bot_messages.sql",
               )
@@ -290,7 +290,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0530_scheduled_slack_bot_messages.sql",
     );
     const slackFileUploadOperations = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0531_slack_file_upload_operations.sql",
+      (migration) => migration.path === "0535_slack_file_upload_operations.sql",
     );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
@@ -900,7 +900,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0530_scheduled_slack_bot_messages.sql" }
         : {}),
       ...(slackFileUploadOperations
-        ? { latestMigration: "0531_slack_file_upload_operations.sql" }
+        ? { latestMigration: "0535_slack_file_upload_operations.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -925,7 +925,7 @@ describe("release schema contract", () => {
             "0528_system_update_outbox_claim_order.sql",
             "0529_slack_interaction_session_defaults_line.sql",
             "0530_scheduled_slack_bot_messages.sql",
-            "0531_slack_file_upload_operations.sql",
+            "0535_slack_file_upload_operations.sql",
           ].includes(migration.path),
       ),
     };
@@ -2393,7 +2393,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
-      "0531_slack_file_upload_operations.sql",
+      "0535_slack_file_upload_operations.sql",
       "0525_attached_browser_opaque_generations.sql",
       "0527_session_attention_excludes_commentary.sql",
       "0528_system_update_outbox_claim_order.sql",
@@ -2923,7 +2923,7 @@ describe("release schema contract", () => {
       "0528_system_update_outbox_claim_order.sql",
       "0529_slack_interaction_session_defaults_line.sql",
       "0530_scheduled_slack_bot_messages.sql",
-      "0531_slack_file_upload_operations.sql",
+      "0535_slack_file_upload_operations.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

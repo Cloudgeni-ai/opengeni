@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   fileOwnerContextForAgent,
+  hasPermission,
   requireOpenGeniSlackBotConnection,
   requirePermission,
   type ApiRouteDeps,
@@ -23,6 +24,7 @@ import {
   resolveSlackInstallationRoute,
   resolveSlackTargetAuthority,
   withSessionRlsActorContext,
+  type SlackInteraction,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { createOpenGeniSlackBotInteractionClient } from "./slack-bot";
@@ -69,6 +71,7 @@ export async function uploadSlackTaskFile(
         message: "Private Slack file delivery requires the task owner's current attempt",
       });
     }
+    assertSlackTaskUploadTarget(interaction);
     const home = await resolveSlackInstallationRoute(deps.db, interaction.slackTeamId);
     if (
       !home ||
@@ -91,10 +94,7 @@ export async function uploadSlackTaskFile(
       targetAccountId: grant.accountId,
       targetWorkspaceId: grant.workspaceId,
     });
-    if (
-      !requester?.permissions.includes("files:read") ||
-      !requester.permissions.includes("sessions:read")
-    ) {
+    if (!requester || !slackTaskRequesterCanReceiveFile(requester.permissions)) {
       throw new HTTPException(403, {
         message: "Slack task requester no longer has file delivery access",
       });
@@ -236,6 +236,9 @@ export async function uploadSlackTaskFile(
         checkpoint: (update) => checkpointSlackFileUpload(deps.db, { ...claimScope, ...update }),
         channelId: target.interaction.slackChannelId,
         threadTimestamp: target.interaction.slackThreadTs!,
+        ...(target.interaction.visibility === "private"
+          ? { privateRecipientSlackUserId: target.interaction.initiatingSlackUserId! }
+          : {}),
         filename,
         bytes: stored.bytes,
       });
@@ -272,6 +275,30 @@ export async function uploadSlackTaskFile(
       if (claim.status === "claimed") await releaseSlackFileUploadClaim(deps.db, claimScope);
     }
   });
+}
+
+export function slackTaskRequesterCanReceiveFile(permissions: AccessGrant["permissions"]): boolean {
+  return hasPermission(permissions, "files:read") && hasPermission(permissions, "sessions:read");
+}
+
+/** Private shortcuts bind a runnable session before its bot-DM route commits. */
+export function assertSlackTaskUploadTarget(
+  interaction: Pick<
+    SlackInteraction,
+    "visibility" | "slackChannelId" | "slackThreadTs" | "routeKey" | "ackSlackMessageTs"
+  >,
+): void {
+  if (
+    interaction.visibility === "private" &&
+    (!interaction.slackChannelId.startsWith("D") ||
+      interaction.routeKey !== `${interaction.slackChannelId}:${interaction.slackThreadTs}` ||
+      (interaction.ackSlackMessageTs !== null &&
+        interaction.ackSlackMessageTs !== interaction.slackThreadTs))
+  ) {
+    throw new HTTPException(409, {
+      message: "Private Slack file delivery must wait for this task's committed bot-DM thread",
+    });
+  }
 }
 
 export function assertSlackTaskUploadFile(

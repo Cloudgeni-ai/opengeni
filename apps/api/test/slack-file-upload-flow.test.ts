@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { slackFileSharedToThread, slackFileUploadUrl } from "../src/integrations/slack-bot";
+import {
+  assertSlackPrivateTaskRecipient,
+  slackFileSharedToThread,
+  slackFileUploadUrl,
+} from "../src/integrations/slack-bot";
 import {
   runSlackFileUpload,
   SlackFileUploadClaimLostError,
@@ -142,6 +146,32 @@ describe("durable Slack file delivery flow", () => {
     expect(f.events).toContain("complete:FNEW");
   });
 
+  test("private recipient identity follows allocation, transfer, completion and reconciliation", async () => {
+    for (const phase of ["pending", "outcome_unknown"] as const) {
+      const f = fixture(phase, phase === "pending" ? null : "FEXISTING");
+      const checked: string[] = [];
+      for (const method of [
+        "allocateFileUpload",
+        "transferFileUpload",
+        "completeFileUpload",
+        "reconcileFileUpload",
+      ] as const) {
+        const original = f.input.provider[method];
+        f.input.provider[method] = (async (input: never) => {
+          expect(input).toMatchObject({ privateRecipientSlackUserId: "UOWNER" });
+          checked.push(method);
+          return await original(input);
+        }) as typeof original;
+      }
+      await runSlackFileUpload({ ...f.input, privateRecipientSlackUserId: "UOWNER" });
+      expect(checked).toEqual(
+        phase === "pending"
+          ? ["allocateFileUpload", "transferFileUpload", "completeFileUpload"]
+          : ["reconcileFileUpload"],
+      );
+    }
+  });
+
   test("a transport error after starting completion remains uncertain and is not retried", async () => {
     const f = fixture("uploaded", "FUPLOADED");
     f.failCompletion();
@@ -155,6 +185,21 @@ describe("durable Slack file delivery flow", () => {
 });
 
 describe("Slack file upload provider boundaries", () => {
+  test("private delivery accepts only the linked requester's live bot IM", () => {
+    const ownerIm = { isDirectMessage: true, isMpim: false, userId: "UOWNER" };
+    expect(() => assertSlackPrivateTaskRecipient(ownerIm, "UOWNER")).not.toThrow();
+    for (const channel of [
+      { ...ownerIm, isDirectMessage: false, isMpim: true },
+      { ...ownerIm, isDirectMessage: false },
+      { ...ownerIm, userId: "UOTHER" },
+      { ...ownerIm, userId: null },
+    ]) {
+      expect(() => assertSlackPrivateTaskRecipient(channel, "UOWNER")).toThrow(
+        "private_task_recipient_changed",
+      );
+    }
+  });
+
   test("accepts only a temporary Slack HTTPS upload endpoint", () => {
     expect(
       slackFileUploadUrl("https://files.slack.com/upload/v1/temporary?signature=fixture").hostname,

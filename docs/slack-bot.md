@@ -217,6 +217,9 @@ user, bot connection, or URL supplied by the agent. Nonempty, ready, SHA-256-bou
 files up to 25 MiB are supported. Personal files remain in private task threads;
 shared/externally shared and archived conversations are refused. There is no
 automatic attachment scraping or upload triggered by assistant Markdown.
+Private shortcuts and handoffs must finish their durable bot-DM route rekey
+before any file delivery; Slack's live conversation must be an IM with the linked
+requester. The original source conversation is never a destination.
 
 Source-file read authority, the live initiating attempt, the linked task requester,
 installation identity, current bot scope, and channel membership are rechecked

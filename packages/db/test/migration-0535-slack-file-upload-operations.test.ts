@@ -4,7 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { slackFileUploadOperations } from "../src/schema";
 import { SLACK_FILE_UPLOAD_OPERATIONS_TABLE } from "../src/runtime-posture";
 
-const migration = new URL("../drizzle/0531_slack_file_upload_operations.sql", import.meta.url);
+const migration = new URL("../drizzle/0535_slack_file_upload_operations.sql", import.meta.url);
 
 test("Slack upload rolling migration has immutable source bindings and ordinary session RLS", async () => {
   const source = await readFile(migration, "utf8");

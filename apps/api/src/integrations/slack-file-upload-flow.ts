@@ -15,22 +15,26 @@ export type SlackFileUploadState = {
 export type SlackFileUploadProvider = {
   allocateFileUpload(input: {
     channelId: string;
+    privateRecipientSlackUserId?: string;
     filename: string;
     sizeBytes: number;
   }): Promise<{ fileId: string; uploadUrl: URL }>;
   transferFileUpload(input: {
     channelId: string;
+    privateRecipientSlackUserId?: string;
     uploadUrl: URL;
     bytes: Uint8Array;
   }): Promise<unknown>;
   completeFileUpload(input: {
     channelId: string;
+    privateRecipientSlackUserId?: string;
     threadTimestamp: string;
     fileId: string;
     title: string;
   }): Promise<unknown>;
   reconcileFileUpload(input: {
     channelId: string;
+    privateRecipientSlackUserId?: string;
     threadTimestamp: string;
     fileId: string;
   }): Promise<{ shared: boolean }>;
@@ -62,6 +66,7 @@ export async function runSlackFileUpload(input: {
     slackFileId?: string;
   }) => Promise<boolean>;
   channelId: string;
+  privateRecipientSlackUserId?: string;
   threadTimestamp: string;
   filename: string;
   bytes: Uint8Array;
@@ -91,6 +96,9 @@ export async function runSlackFileUpload(input: {
     const id = requireFileId();
     const result = await input.provider.reconcileFileUpload({
       channelId: input.channelId,
+      ...(input.privateRecipientSlackUserId
+        ? { privateRecipientSlackUserId: input.privateRecipientSlackUserId }
+        : {}),
       threadTimestamp: input.threadTimestamp,
       fileId: id,
     });
@@ -105,12 +113,18 @@ export async function runSlackFileUpload(input: {
     // worker is fenced from completing it, and Slack discards unfinished files.
     const allocated = await input.provider.allocateFileUpload({
       channelId: input.channelId,
+      ...(input.privateRecipientSlackUserId
+        ? { privateRecipientSlackUserId: input.privateRecipientSlackUserId }
+        : {}),
       filename: input.filename,
       sizeBytes: input.bytes.byteLength,
     });
     await checkpoint("uploading", allocated.fileId);
     await input.provider.transferFileUpload({
       channelId: input.channelId,
+      ...(input.privateRecipientSlackUserId
+        ? { privateRecipientSlackUserId: input.privateRecipientSlackUserId }
+        : {}),
       uploadUrl: allocated.uploadUrl,
       bytes: input.bytes,
     });
@@ -121,6 +135,9 @@ export async function runSlackFileUpload(input: {
   await checkpoint("completing");
   await input.provider.completeFileUpload({
     channelId: input.channelId,
+    ...(input.privateRecipientSlackUserId
+      ? { privateRecipientSlackUserId: input.privateRecipientSlackUserId }
+      : {}),
     threadTimestamp: input.threadTimestamp,
     fileId: id,
     title: input.filename,
