@@ -178,7 +178,8 @@ opacity-muted text.
   plus card treatment; its empty or loading line is a row inside the card.
 - **Never a card inside a card.** Nothing inside a settings card draws its own box: a list is
   rows split by the card's hairlines, a Notice drops its border, and choice cards become flat
-  radio rows (radio, title, consequence line; the selected row keeps a faint `selection` fill).
+  radio rows (radio, title, consequence line) on the card's text column; the filled radio marks
+  the choice, with no fill or inset of its own.
   `ChoiceCards` and `ListRow` do this themselves when they sit in a card. A section whose content
   is a single boxed control (a large textarea, a code editor) stays open (`variant="open"`): the
   control is the card. A dialog or sheet opened from a card starts fresh (`SectionFrameReset`).

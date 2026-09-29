@@ -171,7 +171,7 @@ export function ChoiceCards({
           className={cn(
             "grid min-w-0",
             inCard
-              ? "-mx-2 divide-y divide-border"
+              ? "divide-y divide-border"
               : effectiveVariant === "list"
                 ? "-mx-2 gap-0.5"
                 : "gap-2",
@@ -240,9 +240,9 @@ export function ChoiceCard({
       className={cn(
         "group/choice relative flex w-full min-w-0 items-start gap-3 text-left transition-colors duration-[120ms] disabled:cursor-not-allowed",
         rows
-          ? // A row of the card: no box of its own; the selected row keeps a
-            // faint selection fill besides its filled radio.
-            "px-2 py-3 hover:bg-surface-2 data-[state=checked]:bg-selection/60 disabled:hover:bg-transparent"
+          ? // A row of the card, on the card's own 20px text column: no box and
+            // no fill of its own; the filled radio marks the choice.
+            "py-3"
           : variant === "list"
             ? "rounded-[10px] px-2 py-2.5 hover:bg-surface-2 disabled:hover:bg-transparent"
             : "rounded-[14px] border px-4 py-3",
