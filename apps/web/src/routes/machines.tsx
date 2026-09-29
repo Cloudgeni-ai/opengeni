@@ -38,11 +38,11 @@ import {
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
-import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Notice } from "@/components/ui/notice";
+import { PageHeader } from "@/components/ui/page-header";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
   Dialog,
@@ -215,7 +215,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other Opengeni workspaces or deployments already connected to the machine."
       />
 
-      <div className="mt-5">
+      <div className="pt-6">
         {!machines.canRead ? (
           <Notice tone="muted" title="Machines are managed by your workspace admin">
             You do not have permission to view connected machines in this workspace. Ask a workspace

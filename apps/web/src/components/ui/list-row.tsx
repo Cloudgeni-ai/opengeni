@@ -750,7 +750,8 @@ export function ListRow({
         <div className="flex min-w-0 items-center gap-2">
           {titleNode}
           {titleAddon ? (
-            <span className="flex shrink-0 items-center gap-1.5">{titleAddon}</span>
+            // Held to the title's 20px line: a chip never makes its row taller.
+            <span className="flex h-5 shrink-0 items-center gap-1.5">{titleAddon}</span>
           ) : null}
         </div>
         {secondary && (catalog || (disabled && disabledReason)) ? (

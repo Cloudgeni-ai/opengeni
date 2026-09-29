@@ -360,7 +360,9 @@ export function SettingsShell({
             {/* Settings sections are grouped cards: heading above, rows in one card. */}
             <SectionVariantProvider variant="group">
               {layout === "page" ? (
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                // A full page keeps its own scroller but starts its title at the
+                // same height as every other settings page.
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
                   {children}
                 </div>
               ) : (
