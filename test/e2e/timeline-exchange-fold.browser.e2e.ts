@@ -130,6 +130,16 @@ describe("readable timeline browser regression", () => {
           const latest = page.locator("[data-og-jump-to-question]");
           await latest.waitFor({ state: "visible" });
           expect(await latest.count()).toBe(1);
+          const resolverRequests = () =>
+            page.evaluate(() =>
+              performance
+                .getEntriesByType("resource")
+                .filter((entry) =>
+                  new URL(entry.name).pathname.endsWith("/hooks/latest-question.ts"),
+                )
+                .map((entry) => entry.name),
+            );
+          expect(await resolverRequests()).toEqual([]);
           await latest.click();
           if (mode === "pending") {
             await page.waitForFunction(
@@ -180,6 +190,7 @@ describe("readable timeline browser regression", () => {
                 "Newest queued question",
               );
           }
+          expect(await resolverRequests()).toHaveLength(1);
           const directory = process.env.TIMELINE_QUESTION_PREVIEW_DIR;
           if (directory) {
             mkdirSync(directory, { recursive: true });

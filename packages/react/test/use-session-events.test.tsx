@@ -18,10 +18,8 @@ import {
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
-import {
-  TIMELINE_TURN_ANCHOR_EVENT_TYPES,
-  timelineQuestionPlacement,
-} from "../src/timeline/projection";
+import { timelineQuestionPlacement } from "../src/timeline/projection";
+import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
 import { SESSION_EVENT_TYPES } from "@opengeni/sdk";
 import {
   invokeOlderHistoryLoaderWithReceiptCapture,
@@ -119,6 +117,43 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  for (const target of ["sequence", "latest", "oldest"] as const) {
+    test(`Latest question cancelled by ${target} while importing does not start a lookup`, async () => {
+      const { client, listCalls } = scriptedClient({
+        store: Array.from({ length: 2000 }, (_, index) => event(index + 1)),
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        expect(listCalls.some((call) => call.includeTypes)).toBe(false);
+        const onQueuedQuestion = jest.fn();
+        await actRun(async () => {
+          const lookup = hook.result.current.jumpToLatestQuestion({ onQueuedQuestion });
+          // No await: supersede while even a cached dynamic import is pending.
+          const navigation =
+            target === "sequence"
+              ? hook.result.current.jumpToSequence(1)
+              : target === "latest"
+                ? hook.result.current.jumpToLatest()
+                : hook.result.current.loadOldest();
+          expect(await lookup).toBeNull();
+          await navigation;
+        });
+        expect(listCalls.some((call) => call.includeTypes)).toBe(false);
+        expect(onQueuedQuestion).not.toHaveBeenCalled();
+        // Cancellation does not poison the optional resolver for a later click.
+        await actRun(async () =>
+          expect(await hook.result.current.jumpToLatestQuestion()).toBe(2000),
+        );
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
   test("navigation evidence includes every registry type accepted by canonical queued-turn projection", () => {
     const question = event(1, "user.message", { text: "queued" });
     const queued = {
@@ -654,6 +689,7 @@ describe("useSessionEvents", () => {
     try {
       await flush(20);
       const lookup = hook.result.current.jumpToLatestQuestion();
+      await flush(20);
       await actRun(async () => expect(await hook.result.current.jumpToSequence(100)).toBe(true));
       release([event(2000)]);
       await actRun(async () => expect(await lookup).toBeNull());
@@ -716,6 +752,9 @@ describe("useSessionEvents", () => {
       try {
         await flush(20);
         const lookup = hook.result.current.jumpToLatestQuestion();
+        // Let the lazy module start its read; this case fences a late network
+        // success/failure, separately from cancellation at the import boundary.
+        await flush(20);
         await hook.rerender({ sessionId: SECOND_SESSION_ID });
         await flush(20);
         if (outcome === "resolve") resolve([event(1000)]);

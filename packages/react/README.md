@@ -944,6 +944,8 @@ arbitrary question from a loaded old page. Queued/legacy admission uses filtered
 lifecycle evidence to locate its real turn start. A distant prompt is retained as
 one projection-only witness in `events.timeline`; `events.events` remains the
 bounded contiguous raw window, so pass `items` as above.
+The optional resolver loads on the first click, not when opening a session.
+Identity and navigation guards also cover that module-loading delay.
 
 `SessionConversation` also opens and focuses the newest pending prompt in
 `SessionChrome`. Custom hosts can provide the same destination without changing
