@@ -5559,6 +5559,17 @@ export type CreateAgentScheduledTaskRequest = {
    */
   rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * OpenGeni (first-party MCP) tools every generated session may see, like
+   * `CreateSessionRequest.firstPartyMcpTools`. Omitted keeps the deployment
+   * default. Not allowed for `runMode: "existing_session"`.
+   */
+  firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  /**
+   * Permission set of every generated session's OpenGeni worker token; only
+   * permissions the creating key/person holds. Omitted keeps the default.
+   */
+  firstPartyMcpPermissions?: Permission[] | undefined;
 };
 
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {

@@ -7,7 +7,9 @@ A scheduled task freezes what its runs may use when it is saved:
   `connectionAccountsFrozen`), resolved against its immutable owner at each
   fresh occurrence;
 - for a task an agent created, the creating session's OpenGeni tools,
-  permissions and access policy (the creator policy, migration 0428).
+  permissions and access policy (the creator policy, migration 0428); a person
+  or API key may instead set `firstPartyMcpTools`/`firstPartyMcpPermissions`
+  explicitly at create (tools and permissions only).
 
 Later workspace changes never reach a task on their own. That is deliberate:
 a schedule must not widen itself, and an agent must not widen a narrowed
@@ -63,8 +65,14 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   `attachableAccounts`. The Google Drive publication and personal GitHub
   surfaces keep their own account contract and pass through unchanged; a
   blocked occurrence caused by one of them is not reported yet.
-- **OpenGeni tools** (agent-created tasks only). A human- or API-created task
-  has no creator policy and already follows the deployment default at each run.
+- **OpenGeni tools** (tasks with a frozen creator policy). A human- or
+  API-created task without `firstPartyMcpTools`/`firstPartyMcpPermissions` has
+  no creator policy and already follows the deployment default at each run. A
+  create request may set those two fields, with the same meaning and narrowing
+  rules as `CreateSessionRequest` (deployment-allowed tools; permissions the
+  creating grant holds; not for `existing_session`); they are frozen exactly
+  like an agent creator's policy, so the drift report may list default tools
+  the creator deliberately left out (keep them off with `leaveOut`).
   For a frozen creator policy, the default tools it lacks are reported
   (`missingOpenGeniTools`) and added. Permissions stay least-privilege: a
   frozen permission is kept only while the refreshing person holds it, and the

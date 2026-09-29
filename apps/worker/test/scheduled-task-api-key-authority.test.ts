@@ -9,6 +9,7 @@ import {
 import {
   createDb,
   getScheduledTaskRunAcceptedExecution,
+  getSession,
   listScheduledTaskRuns,
   type DbClient,
 } from "@opengeni/db";
@@ -189,6 +190,76 @@ describe("organization API key scheduled tasks", () => {
       }),
     ).toEqual([]);
     expect(errors).toEqual([]);
+  }, 180_000);
+
+  test("a key freezes the same minimal tool surface it uses on sessions", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const key = organizationKey(workspace);
+    const task = await createValidatedScheduledTask({
+      settings: settings(),
+      db: client.db,
+      objectStorage: null,
+      grant: key,
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Minimal embedded digest",
+        schedule: { type: "manual" },
+        agentConfig: { prompt: "Summarize", tools: [], sandboxBackend: "none" },
+        firstPartyMcpTools: ["set_session_title"],
+        firstPartyMcpPermissions: ["sessions:read"],
+      }),
+    });
+    const dispatched = await scheduler().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+      producerKey: `api-key-minimal:${crypto.randomUUID()}`,
+      initiator: { kind: "subject", subjectId: key.subjectId },
+    });
+    if (dispatched.action !== "start") throw new Error(JSON.stringify(dispatched));
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 1);
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: run!.id,
+    });
+    expect(accepted).toMatchObject({
+      resolvedSandboxBackend: "none",
+      resolvedFirstPartyMcpTools: ["set_session_title"],
+      resolvedFirstPartyMcpPermissions: ["sessions:read"],
+    });
+    const session = await getSession(client.db, workspace.workspaceId, dispatched.sessionId);
+    expect(session).toMatchObject({
+      sandboxBackend: "none",
+      firstPartyMcpTools: ["set_session_title"],
+      firstPartyMcpPermissions: ["sessions:read"],
+    });
+
+    // Only narrowing: never a permission the key does not hold.
+    await expect(
+      createValidatedScheduledTask({
+        settings: settings(),
+        db: client.db,
+        objectStorage: null,
+        grant: key,
+        payload: CreateScheduledTaskRequest.parse({
+          name: "Too wide",
+          schedule: { type: "manual" },
+          agentConfig: { prompt: "Summarize" },
+          firstPartyMcpPermissions: ["billing:manage"],
+        }),
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(
+      CreateScheduledTaskRequest.safeParse({
+        name: "Existing",
+        schedule: { type: "manual" },
+        runMode: "existing_session",
+        targetSessionId: crypto.randomUUID(),
+        agentConfig: { prompt: "Summarize" },
+        firstPartyMcpTools: ["set_session_title"],
+      }).success,
+    ).toBe(false);
   }, 180_000);
 
   test("a legacy schedule owned by a key is refused as a visible terminal run", async () => {
