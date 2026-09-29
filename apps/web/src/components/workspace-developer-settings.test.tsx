@@ -69,6 +69,15 @@ GlobalRegistrator.register();
 
 const { WorkspaceDeveloperSettings, WorkspaceSandboxImageRow } =
   await import("./workspace-developer-settings");
+const { OpenGeniApiError } = await import("@opengeni/sdk");
+
+function apiError(status: number, message: string) {
+  return new OpenGeniApiError(
+    status,
+    JSON.stringify({ error: { message, requestId: "7f1c2d4e-0000-4000-8000-000000000001" } }),
+    { mutation: false },
+  );
+}
 
 async function flush() {
   await act(async () => {
@@ -145,7 +154,11 @@ describe("workspace developer settings", () => {
       url: "https://new.example/hook",
       eventTypes: ["turn.completed", "turn.failed"],
     });
-    expect(container.textContent).toContain("whsec_one_time_value");
+    expect(
+      Array.from(container.querySelectorAll<HTMLInputElement>("input[readonly]")).map(
+        (input) => input.value,
+      ),
+    ).toContain("whsec_one_time_value");
     expect(container.textContent).toContain("won't be shown again");
 
     await act(async () =>
@@ -157,7 +170,7 @@ describe("workspace developer settings", () => {
     await flush();
     expect(client.redeliverWorkspaceWebhookDelivery).toHaveBeenCalled();
 
-    await act(async () => button(container, "Pause").click());
+    await act(async () => button(container, `Send events to ${existing.url}`).click());
     expect(client.updateWorkspaceWebhook).toHaveBeenCalledWith(workspaceId, existing.id, {
       enabled: false,
     });
@@ -177,7 +190,11 @@ describe("workspace developer settings", () => {
       url: "https://product.example/credentials",
       enabled: true,
     });
-    expect(container.textContent).toContain("ogcp_one_time_value");
+    expect(
+      Array.from(container.querySelectorAll<HTMLInputElement>("input[readonly]")).map(
+        (input) => input.value,
+      ),
+    ).toContain("ogcp_one_time_value");
 
     const readOnly = await render(
       <WorkspaceDeveloperSettings
@@ -190,6 +207,62 @@ describe("workspace developer settings", () => {
     expect(readOnly.querySelector<HTMLInputElement>("#credential-provider-url")!.disabled).toBe(
       true,
     );
+  });
+
+  test("a missing permission reads as unavailable, not as an error", async () => {
+    client.listWorkspaceWebhooks.mockImplementationOnce(async () => {
+      throw apiError(403, "missing permission: workspace:admin");
+    });
+    client.getWorkspaceCredentialProvider.mockImplementationOnce(async () => {
+      throw apiError(403, "missing permission: workspace:admin");
+    });
+    const container = await render(
+      <WorkspaceDeveloperSettings
+        client={client as never}
+        workspaceId={workspaceId}
+        canManage={false}
+      />,
+    );
+    expect(container.textContent).toContain("Only workspace admins can manage webhooks.");
+    expect(container.textContent).toContain("Ask a workspace admin for access.");
+    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("missing permission");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      Array.from(container.querySelectorAll("button")).map((b) => b.textContent),
+    ).not.toContain("Try again");
+
+    client.listWorkspaceWebhooks.mockImplementationOnce(async () => {
+      throw apiError(403, "missing permission: workspace:admin");
+    });
+    const personal = await render(
+      <WorkspaceDeveloperSettings
+        client={client as never}
+        workspaceId={workspaceId}
+        canManage={false}
+        personal
+      />,
+    );
+    expect(personal.textContent).toContain("Webhooks aren't available in a Personal workspace.");
+  });
+
+  test("a failed load says what to do and keeps the reference in Technical details", async () => {
+    client.listWorkspaceWebhooks.mockImplementationOnce(async () => {
+      throw apiError(503, "upstream unavailable");
+    });
+    const container = await render(
+      <WorkspaceDeveloperSettings client={client as never} workspaceId={workspaceId} canManage />,
+    );
+    expect(container.textContent).toContain("Couldn't load webhooks.");
+    expect(container.textContent).toContain("Try again in a moment.");
+    expect(container.textContent).not.toContain("OpenGeni API");
+    const reference = container.querySelector("dl");
+    expect(reference?.hidden).toBe(true);
+    expect(reference?.textContent).toContain("7f1c2d4e-0000-4000-8000-000000000001");
+
+    await act(async () => button(container, "Try again").click());
+    await flush();
+    expect(container.textContent).toContain("https://receiver.example/events");
   });
 
   test("offers only allowlisted sandbox images", async () => {

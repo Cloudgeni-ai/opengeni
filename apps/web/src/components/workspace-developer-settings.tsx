@@ -4,26 +4,29 @@ import type {
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEventType,
 } from "@opengeni/sdk";
-import {
-  CopyIcon,
-  KeyRoundIcon,
-  PlusIcon,
-  RotateCcwIcon,
-  Trash2Icon,
-  WebhookIcon,
-} from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { PlusIcon, RotateCcwIcon, Trash2Icon, WebhookIcon } from "lucide-react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { LoadErrorState } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { CopyField } from "@/components/ui/copy-field";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { ErrorMessage } from "@/components/ui/error-message";
+import { CheckboxField, Field, TextInput } from "@/components/ui/field";
+import { ListRow, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
+import { RowButton } from "@/components/ui/page-actions";
+import { RelativeTime } from "@/components/ui/relative-time";
+import { Section, SectionStack } from "@/components/ui/section";
 import { Select } from "@/components/ui/select";
+import { SettingDangerRow, SettingRow, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { Skeleton } from "@/components/ui/skeleton";
+import { StatusBadge } from "@/components/ui/status-badge";
+import type { SemanticTone } from "@/components/ui/status-dot";
+import { Switch } from "@/components/ui/switch";
+import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@/lib/api-error";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 type IntegrationsClient = Pick<
@@ -50,105 +53,234 @@ const EVENT_OPTIONS: ReadonlyArray<{ type: WorkspaceWebhookEventType; label: str
   { type: "session.humanInput.requested", label: "Question for the user" },
 ];
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Something went wrong";
+function eventLabel(type: string): string {
+  return EVENT_OPTIONS.find((option) => option.type === type)?.label ?? type;
 }
 
-function SecretNotice({ label, secret }: { label: string; secret: string }) {
+/**
+ * A section's data: loading, ready, refused for this viewer (a permission they
+ * lack, never an error), or failed.
+ */
+type Load<T> =
+  | { kind: "loading" }
+  | { kind: "ready"; value: T }
+  | { kind: "denied" }
+  | { kind: "failed"; error: unknown };
+
+function loadFailure<T>(error: unknown): Load<T> {
+  return isPermissionDenied(error) ? { kind: "denied" } : { kind: "failed", error };
+}
+
+/** A failed action: what happened as the title, what to do under it. */
+function actionFailed(what: string, error: unknown) {
+  toast.error(what, { description: apiErrorAdvice(error) });
+}
+
+/** A section's rows failed to load: one row with Try again, the reference in Technical details. */
+function LoadFailure({
+  title,
+  error,
+  onRetry,
+}: {
+  title: string;
+  error: unknown;
+  onRetry: () => void;
+}) {
   return (
-    <Notice tone="success" title={`Copy this ${label} now — it won't be shown again.`}>
-      <div className="mt-2 flex min-w-0 items-center gap-2">
-        <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
-          {secret}
-        </code>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={`Copy ${label}`}
-          onClick={() =>
-            void navigator.clipboard.writeText(secret).then(() => toast.success("Copied"))
-          }
-        >
-          <CopyIcon className="size-3.5" />
-        </Button>
-      </div>
+    <ErrorMessage
+      className="py-4"
+      title={title}
+      action={<RowButton onClick={onRetry}>Try again</RowButton>}
+      {...apiErrorDetails(error)}
+    >
+      {apiErrorAdvice(error)}
+    </ErrorMessage>
+  );
+}
+
+/**
+ * The viewer can't manage this: say who can, calmly. In a Personal workspace
+ * nobody can, so point to a shared workspace instead.
+ */
+function Unavailable({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <Notice tone="muted" title={title}>
+      {children}
     </Notice>
   );
 }
+
+/** Shown once, right after creating a signing secret. */
+function SecretNotice({ label, secret }: { label: string; secret: string }) {
+  return (
+    <Notice tone="success" title={`Copy this ${label} now. It won't be shown again.`}>
+      <CopyField variant="field" className="mt-2" value={secret} label={label} />
+    </Notice>
+  );
+}
+
+const DELIVERY_STATUS: Record<
+  WorkspaceWebhookDelivery["status"],
+  { label: string; tone: SemanticTone }
+> = {
+  pending: { label: "Pending", tone: "neutral" },
+  delivered: { label: "Delivered", tone: "success" },
+  failed: { label: "Failed", tone: "danger" },
+};
 
 function DeliveryList({
   client,
   workspaceId,
   webhookId,
+  canManage,
 }: {
   client: IntegrationsClient;
   workspaceId: string;
   webhookId: string;
+  canManage: boolean;
 }) {
-  const [deliveries, setDeliveries] = useState<WorkspaceWebhookDelivery[] | null>(null);
-  const [error, setError] = useState<Error | null>(null);
+  const [state, setState] = useState<Load<WorkspaceWebhookDelivery[]>>({ kind: "loading" });
   const load = useCallback(async () => {
     try {
       const response = await client.listWorkspaceWebhookDeliveries(workspaceId, webhookId, {
         limit: 10,
       });
-      setDeliveries(response.deliveries);
-      setError(null);
+      setState({ kind: "ready", value: response.deliveries });
     } catch (caught) {
-      setError(caught instanceof Error ? caught : new Error(errorMessage(caught)));
+      setState(loadFailure(caught));
     }
   }, [client, workspaceId, webhookId]);
   useEffect(() => {
     void load();
   }, [load]);
-  if (error)
-    return <LoadErrorState title="Couldn't load deliveries" error={error} onRetry={load} />;
-  if (!deliveries) return <Skeleton className="h-4 w-40" />;
-  if (deliveries.length === 0) {
-    return <p className="text-2xs text-fg-subtle">No deliveries yet.</p>;
+
+  if (state.kind === "loading") return <Skeleton className="h-4 w-48" />;
+  if (state.kind === "denied") {
+    return (
+      <p className="text-xs leading-4.5 text-fg-muted">Only workspace admins can see deliveries.</p>
+    );
+  }
+  if (state.kind === "failed") {
+    return (
+      <ErrorMessage
+        variant="inline"
+        title="Couldn't load deliveries."
+        action={
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="text-sm font-medium text-brand underline-offset-4 hover:underline"
+          >
+            Try again
+          </button>
+        }
+        {...apiErrorDetails(state.error)}
+      />
+    );
+  }
+  if (state.value.length === 0) {
+    return <p className="text-xs leading-4.5 text-fg-muted">No deliveries yet.</p>;
   }
   return (
-    <ul className="grid gap-1">
-      {deliveries.map((delivery) => (
-        <li key={delivery.id} className="flex min-w-0 items-center gap-2 text-2xs">
-          <span
-            className={
-              delivery.status === "delivered"
-                ? "text-status-completed"
-                : delivery.status === "failed"
-                  ? "text-status-failed"
-                  : "text-fg-muted"
-            }
-          >
-            {delivery.status}
-          </span>
-          <span className="truncate text-fg-muted">{delivery.eventType}</span>
-          <span className="truncate text-fg-subtle">
-            {delivery.lastError ?? (delivery.lastStatus ? `HTTP ${delivery.lastStatus}` : "")}
-          </span>
-          <span className="ml-auto shrink-0 text-fg-subtle">
-            {new Date(delivery.createdAt).toLocaleString()}
-          </span>
-          {delivery.status !== "pending" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Send again"
-              onClick={() =>
-                void client
-                  .redeliverWorkspaceWebhookDelivery(workspaceId, webhookId, delivery.id)
-                  .then(load)
-                  .catch((caught: unknown) => toast.error(errorMessage(caught)))
-              }
-            >
-              <RotateCcwIcon className="size-3" />
-            </Button>
-          ) : null}
-        </li>
-      ))}
+    <ul aria-label="Recent deliveries" className="grid gap-1">
+      {state.value.map((delivery) => {
+        const status = DELIVERY_STATUS[delivery.status];
+        const detail =
+          delivery.lastError ?? (delivery.lastStatus ? `HTTP ${delivery.lastStatus}` : null);
+        return (
+          <li key={delivery.id} className="flex min-h-7 min-w-0 items-center gap-3 text-xs">
+            <StatusBadge variant="dot" tone={status.tone} className="w-20 shrink-0">
+              {status.label}
+            </StatusBadge>
+            <span className="shrink-0 text-fg">{eventLabel(delivery.eventType)}</span>
+            {detail ? <span className="min-w-0 truncate text-fg-muted">{detail}</span> : null}
+            <RelativeTime
+              date={delivery.createdAt}
+              className="ml-auto shrink-0 text-xs text-fg-subtle"
+            />
+            {canManage && delivery.status !== "pending" ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Send again"
+                className="shrink-0"
+                onClick={() =>
+                  void client
+                    .redeliverWorkspaceWebhookDelivery(workspaceId, webhookId, delivery.id)
+                    .then(load)
+                    .catch((caught: unknown) => actionFailed("Couldn't send it again", caught))
+                }
+              >
+                <RotateCcwIcon aria-hidden="true" className="size-3.5" />
+              </Button>
+            ) : null}
+          </li>
+        );
+      })}
     </ul>
+  );
+}
+
+function AddWebhookForm({
+  onCancel,
+  onAdd,
+}: {
+  onCancel: () => void;
+  onAdd: (request: { url: string; eventTypes: WorkspaceWebhookEventType[] }) => Promise<void>;
+}) {
+  const [url, setUrl] = useState("");
+  const [eventTypes, setEventTypes] = useState<Set<WorkspaceWebhookEventType>>(
+    () => new Set(["turn.completed", "turn.failed"]),
+  );
+  const [busy, setBusy] = useState(false);
+  return (
+    <form
+      aria-label="Add webhook"
+      className="flex min-w-0 flex-col gap-5 py-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setBusy(true);
+        void onAdd({ url: url.trim(), eventTypes: [...eventTypes] }).finally(() => setBusy(false));
+      }}
+    >
+      <Field label="Endpoint URL" id="webhook-url" required>
+        <TextInput
+          type="url"
+          required
+          placeholder="https://example.com/opengeni/events"
+          value={url}
+          onChange={(event) => setUrl(event.target.value)}
+          suppressAutofill
+        />
+      </Field>
+      <fieldset className="min-w-0">
+        <legend className="mb-2 text-sm font-medium text-fg">Send these events</legend>
+        <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+          {EVENT_OPTIONS.map((option) => (
+            <CheckboxField
+              key={option.type}
+              label={option.label}
+              checked={eventTypes.has(option.type)}
+              onCheckedChange={(checked) => {
+                const next = new Set(eventTypes);
+                if (checked) next.add(option.type);
+                else next.delete(option.type);
+                setEventTypes(next);
+              }}
+            />
+          ))}
+        </div>
+      </fieldset>
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" size="sm" disabled={busy || !url.trim() || eventTypes.size === 0}>
+          {busy ? "Adding…" : "Add webhook"}
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -156,199 +288,149 @@ function WebhooksSection({
   client,
   workspaceId,
   canManage,
+  personal,
 }: {
   client: IntegrationsClient;
   workspaceId: string;
   canManage: boolean;
+  personal: boolean;
 }) {
-  const [webhooks, setWebhooks] = useState<WorkspaceWebhook[] | null>(null);
-  const [error, setError] = useState<Error | null>(null);
+  const [state, setState] = useState<Load<WorkspaceWebhook[]>>({ kind: "loading" });
   const [adding, setAdding] = useState(false);
-  const [url, setUrl] = useState("");
-  const [eventTypes, setEventTypes] = useState<Set<WorkspaceWebhookEventType>>(
-    () => new Set(["turn.completed", "turn.failed"]),
-  );
-  const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
   const [removing, setRemoving] = useState<WorkspaceWebhook | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [toggling, setToggling] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setWebhooks((await client.listWorkspaceWebhooks(workspaceId)).webhooks);
-      setError(null);
+      const response = await client.listWorkspaceWebhooks(workspaceId);
+      setState({ kind: "ready", value: response.webhooks });
     } catch (caught) {
-      setError(caught instanceof Error ? caught : new Error(errorMessage(caught)));
+      setState(loadFailure(caught));
     }
   }, [client, workspaceId]);
   useEffect(() => {
     void load();
   }, [load]);
 
-  const create = async () => {
-    setBusy(true);
+  const add = async (request: { url: string; eventTypes: WorkspaceWebhookEventType[] }) => {
     try {
-      const created = await client.createWorkspaceWebhook(workspaceId, {
-        url: url.trim(),
-        eventTypes: [...eventTypes],
-      });
+      const created = await client.createWorkspaceWebhook(workspaceId, request);
       setSecret(created.secret);
       setAdding(false);
-      setUrl("");
       await load();
     } catch (caught) {
-      toast.error(errorMessage(caught));
-    } finally {
-      setBusy(false);
+      actionFailed("Couldn't add the webhook", caught);
     }
   };
 
+  const setEnabled = (webhook: WorkspaceWebhook, enabled: boolean) => {
+    setToggling(webhook.id);
+    void client
+      .updateWorkspaceWebhook(workspaceId, webhook.id, { enabled })
+      .then(load)
+      .catch((caught: unknown) =>
+        actionFailed(
+          enabled ? "Couldn't resume the webhook" : "Couldn't pause the webhook",
+          caught,
+        ),
+      )
+      .finally(() => setToggling(null));
+  };
+
+  const webhooks = state.kind === "ready" ? state.value : [];
+  const addButton = (
+    <Button type="button" size="sm" onClick={() => setAdding(true)}>
+      <PlusIcon aria-hidden="true" />
+      Add webhook
+    </Button>
+  );
+
+  let rows: ReactNode;
+  if (state.kind === "loading") {
+    rows = <SettingRowSkeleton />;
+  } else if (state.kind === "denied") {
+    rows = personal ? (
+      <Unavailable title="Webhooks aren't available in a Personal workspace.">
+        Add them in a shared workspace, where workspace admins manage them.
+      </Unavailable>
+    ) : (
+      <Unavailable title="Only workspace admins can manage webhooks.">
+        Ask a workspace admin for access.
+      </Unavailable>
+    );
+  } else if (state.kind === "failed") {
+    rows = <LoadFailure title="Couldn't load webhooks." error={state.error} onRetry={load} />;
+  } else if (webhooks.length === 0) {
+    rows = adding ? null : (
+      <SettingRow
+        label="No webhooks yet"
+        description={
+          canManage
+            ? "Add an endpoint to hear about finished work without polling."
+            : "A workspace admin can add an endpoint that hears about finished work."
+        }
+        control={canManage ? addButton : undefined}
+      />
+    );
+  } else {
+    rows = (
+      <RowList label="Webhooks" flush>
+        {webhooks.map((webhook) => (
+          <ListRow
+            key={webhook.id}
+            leading={<LogoTile icon={<WebhookIcon />} />}
+            title={webhook.url}
+            description={webhook.eventTypes.map(eventLabel).join(" · ")}
+            indicator="expand"
+            expanded={expanded === webhook.id}
+            onOpen={() => setExpanded(expanded === webhook.id ? null : webhook.id)}
+            panel={
+              <DeliveryList
+                client={client}
+                workspaceId={workspaceId}
+                webhookId={webhook.id}
+                canManage={canManage}
+              />
+            }
+            control={
+              canManage ? (
+                <Switch
+                  size="sm"
+                  aria-label={`Send events to ${webhook.url}`}
+                  checked={webhook.enabled}
+                  pending={toggling === webhook.id}
+                  onCheckedChange={(enabled) => setEnabled(webhook, enabled)}
+                />
+              ) : undefined
+            }
+            menuLabel={`Actions for ${webhook.url}`}
+            menu={
+              canManage ? (
+                <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(webhook)}>
+                  <Trash2Icon aria-hidden="true" />
+                  Remove
+                </DropdownMenuItem>
+              ) : undefined
+            }
+          />
+        ))}
+      </RowList>
+    );
+  }
+
   return (
-    <section className="grid gap-3" aria-labelledby="workspace-webhooks-heading">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2
-            id="workspace-webhooks-heading"
-            className="flex items-center gap-2 text-sm font-medium"
-          >
-            <WebhookIcon className="size-3.5 text-brand" />
-            Webhooks
-          </h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            Get a signed request when a turn finishes or the agent needs someone.
-          </p>
-        </div>
-        {canManage && !adding ? (
-          <Button type="button" size="sm" onClick={() => setAdding(true)}>
-            <PlusIcon className="size-3.5" />
-            Add webhook
-          </Button>
-        ) : null}
-      </div>
-      {secret ? <SecretNotice label="signing secret" secret={secret} /> : null}
-      {adding ? (
-        <form
-          className="grid gap-3 rounded-lg border border-border p-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void create();
-          }}
-        >
-          <div className="grid gap-1.5">
-            <Label htmlFor="webhook-url">Endpoint URL</Label>
-            <Input
-              id="webhook-url"
-              type="url"
-              required
-              placeholder="https://example.com/opengeni/events"
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-            />
-          </div>
-          <fieldset className="grid gap-1.5">
-            <legend className="mb-1 text-xs font-medium">Send these events</legend>
-            <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-              {EVENT_OPTIONS.map((option) => (
-                <label key={option.type} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="size-4 accent-[var(--color-brand)]"
-                    checked={eventTypes.has(option.type)}
-                    onChange={(event) => {
-                      const next = new Set(eventTypes);
-                      if (event.target.checked) next.add(option.type);
-                      else next.delete(option.type);
-                      setEventTypes(next);
-                    }}
-                  />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-          </fieldset>
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={() => setAdding(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" size="sm" disabled={busy || !url.trim() || eventTypes.size === 0}>
-              {busy ? "Adding…" : "Add webhook"}
-            </Button>
-          </div>
-        </form>
-      ) : null}
-      <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
-        {error ? (
-          <div className="p-2">
-            <LoadErrorState title="Couldn't load webhooks" error={error} onRetry={load} />
-          </div>
-        ) : !webhooks ? (
-          <div className="px-3 py-2">
-            <Skeleton className="h-4 w-48" />
-          </div>
-        ) : webhooks.length === 0 ? (
-          <div className="p-2">
-            <EmptyState
-              title="No webhooks yet"
-              description="Add an endpoint to hear about finished work without polling."
-            />
-          </div>
-        ) : (
-          webhooks.map((webhook) => (
-            <div key={webhook.id} className="grid gap-2 px-3 py-2">
-              <div className="flex min-w-0 items-center gap-3">
-                <button
-                  type="button"
-                  className="min-w-0 flex-1 text-left"
-                  aria-expanded={expanded === webhook.id}
-                  onClick={() => setExpanded(expanded === webhook.id ? null : webhook.id)}
-                >
-                  <div className="truncate text-sm font-medium">{webhook.url}</div>
-                  <div className="truncate text-2xs text-fg-subtle">
-                    {webhook.enabled ? "" : "Paused · "}
-                    {webhook.eventTypes
-                      .map(
-                        (type) =>
-                          EVENT_OPTIONS.find((option) => option.type === type)?.label ?? type,
-                      )
-                      .join(" · ")}
-                  </div>
-                </button>
-                {canManage ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
-                      void client
-                        .updateWorkspaceWebhook(workspaceId, webhook.id, {
-                          enabled: !webhook.enabled,
-                        })
-                        .then(load)
-                        .catch((caught: unknown) => toast.error(errorMessage(caught)))
-                    }
-                  >
-                    {webhook.enabled ? "Pause" : "Resume"}
-                  </Button>
-                ) : null}
-                {canManage ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Remove webhook"
-                    onClick={() => setRemoving(webhook)}
-                  >
-                    <Trash2Icon className="size-3.5" />
-                  </Button>
-                ) : null}
-              </div>
-              {expanded === webhook.id ? (
-                <DeliveryList client={client} workspaceId={workspaceId} webhookId={webhook.id} />
-              ) : null}
-            </div>
-          ))
-        )}
-      </div>
+    <>
+      <Section
+        title="Webhooks"
+        description="Get a signed request when a turn finishes or the agent needs someone."
+        action={canManage && !adding && webhooks.length > 0 ? addButton : undefined}
+      >
+        {secret ? <SecretNotice label="signing secret" secret={secret} /> : null}
+        {adding ? <AddWebhookForm onCancel={() => setAdding(false)} onAdd={add} /> : null}
+        {rows}
+      </Section>
       <ConfirmDialog
         open={removing !== null}
         onOpenChange={(open) => (open ? undefined : setRemoving(null))}
@@ -362,7 +444,7 @@ function WebhooksSection({
           await load();
         }}
       />
-    </section>
+    </>
   );
 }
 
@@ -370,15 +452,16 @@ function CredentialProviderSection({
   client,
   workspaceId,
   canManage,
+  personal,
 }: {
   client: IntegrationsClient;
   workspaceId: string;
   canManage: boolean;
+  personal: boolean;
 }) {
-  const [provider, setProvider] = useState<WorkspaceCredentialProvider | null | undefined>(
-    undefined,
-  );
-  const [error, setError] = useState<Error | null>(null);
+  const [state, setState] = useState<Load<WorkspaceCredentialProvider | null>>({
+    kind: "loading",
+  });
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
@@ -387,116 +470,134 @@ function CredentialProviderSection({
   const load = useCallback(async () => {
     try {
       const response = await client.getWorkspaceCredentialProvider(workspaceId);
-      setProvider(response.provider);
+      setState({ kind: "ready", value: response.provider });
       setUrl(response.provider?.url ?? "");
-      setError(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught : new Error(errorMessage(caught)));
+      setState(loadFailure(caught));
     }
   }, [client, workspaceId]);
   useEffect(() => {
     void load();
   }, [load]);
 
-  const save = async (enabled: boolean) => {
+  const provider = state.kind === "ready" ? state.value : null;
+  const save = async (next: { url: string; enabled: boolean }) => {
     setBusy(true);
     try {
-      const response = await client.putWorkspaceCredentialProvider(workspaceId, {
-        url: url.trim(),
-        enabled,
-      });
+      const response = await client.putWorkspaceCredentialProvider(workspaceId, next);
       if (response.secret) setSecret(response.secret);
-      setProvider(response.provider);
-      toast.success("Credential provider saved");
+      setState({ kind: "ready", value: response.provider });
+      toast.success(provider ? "Credential provider saved" : "Credential provider connected");
     } catch (caught) {
-      toast.error(errorMessage(caught));
+      actionFailed("Couldn't save the credential provider", caught);
     } finally {
       setBusy(false);
     }
   };
 
-  return (
-    <section className="grid gap-3" aria-labelledby="workspace-credential-provider-heading">
-      <div>
-        <h2
-          id="workspace-credential-provider-heading"
-          className="flex items-center gap-2 text-sm font-medium"
-        >
-          <KeyRoundIcon className="size-3.5 text-brand" />
-          Credential provider
-        </h2>
-        <p className="mt-1 text-xs text-fg-muted">
-          Your service hands the agent short-lived credentials for each run. Opengeni renews them
-          before they expire.
-        </p>
-      </div>
-      {secret ? <SecretNotice label="signing secret" secret={secret} /> : null}
-      {error ? (
-        <LoadErrorState
-          title="Couldn't load the credential provider"
-          error={error}
-          onRetry={load}
-        />
-      ) : provider === undefined ? (
-        <Skeleton className="h-9 w-full" />
-      ) : (
+  let rows: ReactNode;
+  if (state.kind === "loading") {
+    rows = <SettingRowSkeleton />;
+  } else if (state.kind === "denied") {
+    rows = personal ? (
+      <Unavailable title="A credential provider isn't available in a Personal workspace.">
+        Set one up in a shared workspace, where workspace admins manage it.
+      </Unavailable>
+    ) : (
+      <Unavailable title="Only workspace admins can manage the credential provider.">
+        Ask a workspace admin for access.
+      </Unavailable>
+    );
+  } else if (state.kind === "failed") {
+    rows = (
+      <LoadFailure
+        title="Couldn't load the credential provider."
+        error={state.error}
+        onRetry={load}
+      />
+    );
+  } else {
+    const trimmed = url.trim();
+    const changed = trimmed !== (provider?.url ?? "");
+    rows = (
+      <>
         <form
-          className="grid gap-3"
+          aria-label="Credential provider endpoint"
+          className="py-4"
           onSubmit={(event) => {
             event.preventDefault();
-            void save(provider?.enabled ?? true);
+            void save({ url: trimmed, enabled: provider?.enabled ?? true });
           }}
         >
-          <div className="grid gap-1.5">
-            <Label htmlFor="credential-provider-url">Endpoint URL</Label>
-            <div className="flex gap-2">
-              <Input
-                id="credential-provider-url"
+          <Field
+            label="Endpoint URL"
+            id="credential-provider-url"
+            hint={
+              canManage
+                ? provider
+                  ? undefined
+                  : "Runs use the deployment's credentials until you connect one."
+                : "Only workspace admins can change this."
+            }
+          >
+            <div className="flex min-w-0 gap-2">
+              <TextInput
                 type="url"
                 required
                 disabled={!canManage}
                 placeholder="https://example.com/opengeni/credentials"
                 value={url}
                 onChange={(event) => setUrl(event.target.value)}
+                suppressAutofill
               />
-              {canManage ? (
+              {canManage && (!provider || changed) ? (
                 <Button
                   type="submit"
-                  size="sm"
-                  disabled={busy || !url.trim() || url.trim() === provider?.url}
+                  className="shrink-0 pointer-coarse:h-11"
+                  disabled={busy || !trimmed}
                 >
                   {provider ? "Save" : "Connect"}
                 </Button>
               ) : null}
             </div>
-          </div>
-          {provider ? (
-            <div className="flex items-center gap-3">
-              <p className="min-w-0 flex-1 text-2xs text-fg-subtle">
-                {provider.enabled
-                  ? "Runs in this workspace request credentials from this endpoint."
-                  : "Paused. Runs use the deployment's credentials."}
-              </p>
-              {canManage ? (
-                <>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => void save(!provider.enabled)}
-                  >
-                    {provider.enabled ? "Pause" : "Resume"}
-                  </Button>
-                  <Button type="button" variant="ghost" size="sm" onClick={() => setRemoving(true)}>
-                    Remove
-                  </Button>
-                </>
-              ) : null}
-            </div>
-          ) : null}
+          </Field>
         </form>
-      )}
+        {provider ? (
+          <SettingRow
+            label="Use this endpoint"
+            description="Runs in this workspace request their credentials from it. Off, they use the deployment's credentials."
+            control={
+              <Switch
+                checked={provider.enabled}
+                pending={busy}
+                disabled={!canManage}
+                disabledReason={canManage ? undefined : "Only workspace admins can change this."}
+                onCheckedChange={(enabled) => void save({ url: provider.url, enabled })}
+              />
+            }
+          />
+        ) : null}
+        {provider && canManage ? (
+          <SettingDangerRow
+            label="Remove credential provider"
+            description="Its signing secret is deleted."
+            disabled={busy}
+            onClick={() => setRemoving(true)}
+          />
+        ) : null}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Section
+        title="Credential provider"
+        description="Your service hands the agent short-lived credentials for each run. Opengeni renews them before they expire."
+      >
+        {secret ? <SecretNotice label="signing secret" secret={secret} /> : null}
+        {rows}
+      </Section>
       <ConfirmDialog
         open={removing}
         onOpenChange={setRemoving}
@@ -510,7 +611,7 @@ function CredentialProviderSection({
           await load();
         }}
       />
-    </section>
+    </>
   );
 }
 
@@ -518,16 +619,29 @@ export function WorkspaceDeveloperSettings({
   client,
   workspaceId,
   canManage,
+  personal = false,
 }: {
   client: IntegrationsClient;
   workspaceId: string;
   canManage: boolean;
+  /** A Personal workspace: nobody administers it, so say where these live instead. */
+  personal?: boolean;
 }) {
   return (
-    <div className="grid gap-8">
-      <WebhooksSection client={client} workspaceId={workspaceId} canManage={canManage} />
-      <CredentialProviderSection client={client} workspaceId={workspaceId} canManage={canManage} />
-    </div>
+    <SectionStack>
+      <WebhooksSection
+        client={client}
+        workspaceId={workspaceId}
+        canManage={canManage}
+        personal={personal}
+      />
+      <CredentialProviderSection
+        client={client}
+        workspaceId={workspaceId}
+        canManage={canManage}
+        personal={personal}
+      />
+    </SectionStack>
   );
 }
 
@@ -560,40 +674,38 @@ export function WorkspaceSandboxImageRow({
   }, [client, workspaceId]);
   if (images.length === 0) return null;
   return (
-    <div className="flex min-h-10 items-center gap-3 px-1 py-1.5">
-      <div className="min-w-0 flex-1">
-        <Label htmlFor="workspace-sandbox-image" className="text-sm font-medium">
-          Sandbox image
-        </Label>
-        <p className="truncate text-2xs text-fg-subtle">
-          The machine image new sandboxes in this workspace start from.
-        </p>
-      </div>
-      <Select
-        id="workspace-sandbox-image"
-        className="max-w-72"
-        disabled={!canManage || saving}
-        value={selected ?? ""}
-        onChange={(event) => {
-          const next = event.target.value || null;
-          setSaving(true);
-          void client
-            .updateWorkspaceSettings(workspaceId, { defaultSandboxImage: next })
-            .then(() => {
-              setSelected(next);
-              toast.success("Sandbox image saved. Existing sandboxes switch at their next run.");
-            })
-            .catch((caught: unknown) => toast.error(errorMessage(caught)))
-            .finally(() => setSaving(false));
-        }}
-      >
-        <option value="">Deployment default</option>
-        {images.map((image) => (
-          <option key={image} value={image}>
-            {image}
-          </option>
-        ))}
-      </Select>
-    </div>
+    <SettingRow
+      label="Sandbox image"
+      description="The machine image new sandboxes in this workspace start from."
+      controlWidth="select"
+      control={
+        <Select
+          id="workspace-sandbox-image"
+          aria-label="Sandbox image"
+          className="h-8 bg-surface"
+          disabled={!canManage || saving}
+          value={selected ?? ""}
+          onChange={(event) => {
+            const next = event.target.value || null;
+            setSaving(true);
+            void client
+              .updateWorkspaceSettings(workspaceId, { defaultSandboxImage: next })
+              .then(() => {
+                setSelected(next);
+                toast.success("Sandbox image saved. Existing sandboxes switch at their next run.");
+              })
+              .catch((caught: unknown) => actionFailed("Couldn't save the sandbox image", caught))
+              .finally(() => setSaving(false));
+          }}
+        >
+          <option value="">Deployment default</option>
+          {images.map((image) => (
+            <option key={image} value={image}>
+              {image}
+            </option>
+          ))}
+        </Select>
+      }
+    />
   );
 }

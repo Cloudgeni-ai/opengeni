@@ -214,6 +214,7 @@ function OperationalWorkspaceSettingsRoute({
           client={context.client}
           workspaceId={workspaceId}
           canManage={canAdministerWorkspace}
+          personal={personal}
         />
       ) : null}
     </WorkspaceSettingsContent>
