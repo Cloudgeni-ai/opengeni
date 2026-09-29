@@ -325,15 +325,44 @@ Learned on Settings > Models, 27 Sep 2026.
   then the back link is the way out.
 - **Empty lists carry their own action.** While a list is empty, its toolbar and the header's
   create action hide; the empty state holds the one action.
-- **Tiles for kinds of object, words for types.** A leading tile marks a different kind of object
-  in a list (a collection, a file). Types of the same object (Decision, Fact, Incident) are a
-  quiet word in the meta line ("Decision · updated 3 days ago"), not an icon each.
+- **Tiles for kinds of object, words for types.** Every row has a leading tile, and the tile marks
+  the kind of object (a collection, a file, an entry; a site, an image, a document). Types of the
+  same object (Decision, Fact, Incident) share that object's tile and are a quiet word first in
+  the meta line ("Decision · Staging runs on walrus-2…"), never an icon each.
 - **Nothing to pick, nothing shown.** Hide a chip, filter or picker that has only one possible
   value or none.
 - **One row per provider.** A provider with several connection modes is one row; its page lists
   the modes as outcomes ("Pay with your ChatGPT plan", "Pay per use with an API key").
 - **Toolbar pieces stay in the toolbar.** `ToolbarSearch` always sits inside a `Toolbar`. A `Select`
   in a narrow `SettingRow` gets a fixed width so the column doesn't jump between values.
+
+### Resource pages
+
+Learned on Knowledge, Schedules, Artifacts and Capabilities, 29 Sep 2026. The four read as one
+system; a new main-rail page of things follows them.
+
+- **One frame.** `PageHeader` with the rail icon, the title and a subtitle that adds something;
+  on the right the page's one primary create action ("Add knowledge", "New schedule", "New
+  artifact", "Add connection") and, when there is more, a ⋯ with the rest (Upload files, New
+  collection, Learning). Never a second button with a chevron. Places on the page are underline
+  tabs in the header; search, filters and the view toggle are a `Toolbar` 24px under them.
+  Resource lists use the standard width, catalogs the wide one.
+- **One row.** Tile, title (a scope chip only when it isn't the default), one quiet line (type
+  word first, then where it came from or the text, truncating from the end), a status only when
+  it needs attention (`status` slot), then the date as a right-aligned column and the ⋯ or
+  chevron. Lists under a page header are `flush`, so tiles line up with the title and the
+  search. What you have is resource rows; what you can add (Capabilities' Popular, Browse) is
+  the catalog.
+- **A healthy object carries no badge**, on its row or its page ("Active" is never shown).
+- **Review is a list and a page per change.** Each waiting change is a row (what it is, where it
+  came from, when); the row opens the change's own page (`?view=review&proposal=`), where the
+  proposal reads as it will be kept: new text plainly, a change as prose with added text marked
+  and removed text struck through. The page header holds the one action row: Reject and Edit as
+  outline, Approve (or "Approve and next") as the primary, and a ⋯ for Open entry and Approve all
+  from the same chat. A decision moves straight to the next change, and the last one returns to
+  the list. Edit replaces the text with the form on the same page. The learning mode is not a
+  line over the list: it lives in the page's ⋯ ("Learning · Automatic"), and an empty Review
+  says in one sentence why nothing waits, with Learning settings as its action.
 
 ### State and truth on a page
 

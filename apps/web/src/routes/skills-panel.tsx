@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { BookOpenIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { BookOpenIcon, LinkIcon, PlusIcon } from "lucide-react";
 import { ConnectionInstalled } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import type {
@@ -20,12 +20,8 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { DetailPage } from "@/components/ui/detail-page";
 import { DetailSkeleton } from "@/components/ui/detail-sheet";
 import { EmptyState } from "@/components/ui/empty-state";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { MoreMenu } from "@/components/ui/page-actions";
 import { useAppContext, type AppContextValue } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
@@ -550,28 +546,27 @@ export function SkillsPanelContent({
                 .filter(canManage)
                 .slice(0, 1)
                 .map((scope) => (
-                  <DropdownMenu key={scope}>
-                    <DropdownMenuTrigger asChild>
-                      <Button ref={newSkillRef} variant="default" disabled={busy}>
-                        <PlusIcon aria-hidden="true" />
-                        New skill
-                        <ChevronDownIcon aria-hidden="true" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
-                        Create manually
-                      </DropdownMenuItem>
-                      {onFindSkill ? (
-                        <DropdownMenuItem onSelect={onFindSkill}>Browse skills</DropdownMenuItem>
-                      ) : null}
-                      {onImportSkill ? (
+                  // One primary (write a skill), the other way in behind the ⋯:
+                  // the catalog to browse is right below.
+                  <Fragment key={scope}>
+                    <Button
+                      ref={newSkillRef}
+                      variant="default"
+                      disabled={busy}
+                      onClick={() => navigate(() => create(scope))}
+                    >
+                      <PlusIcon aria-hidden="true" />
+                      New skill
+                    </Button>
+                    {onImportSkill ? (
+                      <MoreMenu label="More ways to add a skill" disabled={busy}>
                         <DropdownMenuItem onSelect={onImportSkill}>
+                          <LinkIcon />
                           Import from URL
                         </DropdownMenuItem>
-                      ) : null}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                      </MoreMenu>
+                    ) : null}
+                  </Fragment>
                 ))}
             </div>
           }

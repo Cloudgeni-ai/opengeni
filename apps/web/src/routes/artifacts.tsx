@@ -145,7 +145,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     </Button>
   ) : null;
   return (
-    <ContentPage width="wide" className="max-w-[1200px] pt-6">
+    <ContentPage width="standard" className="pt-6">
       <LineTabs
         value={filters.kind}
         onValueChange={(kind) => setFilters({ ...filters, kind: kind as ArtifactKind | "all" })}

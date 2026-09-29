@@ -551,11 +551,22 @@ export function ListRow({
   /* The meta line: quiet facts, then the fact columns folded in on narrow lists. */
   const facts = columns.filter((column) => cells[column.id] != null);
   const metaItems = meta.filter((item) => item != null && item !== false && item !== "");
+  // On one line the facts give way from the end: a later part truncates (and
+  // then disappears) before an earlier one, so a narrow row reads "Fact ·
+  // Staging runs on walrus-2…" instead of every part cut to a few letters.
   const metaParts: ReactNode[] = [
-    // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
-    ...metaItems.map((item, index) => <MetaPart key={`meta-${index}`}>{item}</MetaPart>),
-    ...facts.map((column) => (
-      <MetaPart key={column.id} className={hasColumns ? "@[640px]/list:hidden" : undefined}>
+    ...metaItems.map((item, index) => (
+      // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
+      <MetaPart key={`meta-${index}`} order={index}>
+        {item}
+      </MetaPart>
+    )),
+    ...facts.map((column, index) => (
+      <MetaPart
+        key={column.id}
+        order={metaItems.length + index}
+        className={hasColumns ? "@[640px]/list:hidden" : undefined}
+      >
         {column.hideLabel ? null : <span className="text-fg-subtle">{column.label} </span>}
         <span className="text-fg-muted">{cells[column.id]}</span>
       </MetaPart>
@@ -567,7 +578,7 @@ export function ListRow({
   // with the facts under it.
   const singleLine = !catalog;
   const statusPart = status ? (
-    <MetaPart key="status" className="@[480px]/list:hidden">
+    <MetaPart key="status" keep className="@[480px]/list:hidden">
       {status}
     </MetaPart>
   ) : null;
@@ -575,6 +586,7 @@ export function ListRow({
     singleLine && narrowState ? (
       <MetaPart
         key="narrow-state"
+        keep
         hidden
         className={cn(
           "hidden font-medium @max-[479px]/list:flex",
@@ -952,16 +964,26 @@ function MetaPart({
   className,
   children,
   hidden = false,
+  order = 0,
+  keep = false,
 }: {
   className?: string;
   children: ReactNode;
   /** A visual copy of something already announced elsewhere. */
   hidden?: boolean;
+  /** Position on the line: later parts give way first when it runs out of room. */
+  order?: number;
+  /** Never shrinks (a status): it stays whole while the facts before it give way. */
+  keep?: boolean;
 }) {
   return (
     <span
       aria-hidden={hidden || undefined}
-      className={cn("flex max-w-full min-w-0 items-center whitespace-nowrap", className)}
+      style={{ flexShrink: keep ? 0 : 64 ** Math.min(order, 4) }}
+      className={cn(
+        "flex max-w-full min-w-0 items-center overflow-hidden whitespace-nowrap",
+        className,
+      )}
     >
       <span aria-hidden="true" className="w-4 shrink-0 text-center text-fg-subtle">
         ·

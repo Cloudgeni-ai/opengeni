@@ -30,7 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -62,7 +62,7 @@ import {
   type ArtifactView,
 } from "@/lib/artifact-library-view";
 import { cn } from "@/lib/utils";
-import { ArtifactTypeIcon } from "./artifact-page-chrome";
+import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 
 const InlineChatImage = lazy(() =>
   import("./inline-chat-image").then((module) => ({ default: module.InlineChatImage })),
@@ -241,6 +241,11 @@ function updatedMeta(item: ArtifactCatalogItem) {
   );
 }
 
+/** The date column every artifact list ends with, before the ⋯ menu. */
+const ARTIFACT_COLUMNS: RowListColumn[] = [
+  { id: "updated", label: "Updated", width: 112, align: "end", hideLabel: true },
+];
+
 export function ArtifactRow({
   workspaceId,
   item,
@@ -256,21 +261,29 @@ export function ArtifactRow({
   const archived = item.status === "archived";
   return (
     <ListRow
-      // Types are words; only an image shows its own pixels.
-      leading={item.kind === "image" ? <ImageTile workspaceId={workspaceId} item={item} /> : null}
+      // A tile for the kind of artifact; an image shows its own pixels.
+      leading={
+        item.kind === "image" ? (
+          <ImageTile workspaceId={workspaceId} item={item} />
+        ) : (
+          <ArtifactKindTile kind={item.kind} />
+        )
+      }
       title={item.title}
       meta={[
         artifactKindLabel[item.kind],
-        updatedMeta(item),
         item.kind === "file" && item.filename && item.filename !== item.title
           ? item.filename
           : null,
+      ].filter((part): part is string => Boolean(part))}
+      status={
         archived ? (
-          <StatusBadge key="status" variant="dot" tone="neutral">
+          <StatusBadge variant="dot" tone="neutral">
             Archived
           </StatusBadge>
-        ) : null,
-      ].filter(Boolean)}
+        ) : undefined
+      }
+      cells={{ updated: <RelativeTime date={item.updatedAt} /> }}
       {...(link ? { href: link.href, onOpen: link.onClick } : { onOpen: open })}
       menu={menu}
       menuLabel={`More actions for ${item.title}`}
@@ -609,7 +622,7 @@ export function ArtifactLibrary({
         {view === "gallery" ? (
           <GallerySkeleton />
         ) : (
-          <RowList label="Artifacts" busy>
+          <RowList label="Artifacts" columns={ARTIFACT_COLUMNS} flush={!compact} busy>
             <ListRowSkeleton count={4} />
           </RowList>
         )}
@@ -678,7 +691,12 @@ export function ArtifactLibrary({
             ))}
           </ul>
         ) : (
-          <RowList label={searching ? "Search results" : "Artifacts"} busy={loading}>
+          <RowList
+            label={searching ? "Search results" : "Artifacts"}
+            columns={ARTIFACT_COLUMNS}
+            flush={!compact}
+            busy={loading}
+          >
             {items.map((item) => (
               <ArtifactRow
                 key={artifactKey(item)}
