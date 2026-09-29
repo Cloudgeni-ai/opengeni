@@ -246,6 +246,61 @@ One option on the proxy, chat handler, and session create:
 - Our web app uses the same concepts: organization = customer, workspace = team,
   "Only me" = `private`.
 
+## Nuances that shape the implementation
+
+- **Runtime tools are not capabilities.** Base behavior and runtime mechanics
+  depend on first-party tools: `wait_for_input` (resume after background work),
+  `command_read`/`command_wait` (yielded commands), and session titling. The
+  `opengeni` server therefore stays attached, but with only this runtime set when
+  no first-party capability is on. Titling becomes a runtime mechanic (parallel
+  title generation already exists), so minimal sessions stop being stuck on
+  "New conversation".
+- **Tools may change mid-session; prompt modules follow.** Today the tool-policy
+  PUT and capability attach change MCP servers and `firstPartyMcpTools` on a
+  running session (versioned). Connectors carry no prompt module, so they keep
+  changing freely behind tool search without touching the prompt prefix. Toggling a
+  platform capability (goals, subagents, knowledge, artifacts) changes the system
+  prompt from the next turn: an explicit, rare, user-initiated cache break.
+- **Readers before writers.** A narrowed `agent_config` changes execution
+  authority. During a rolling deploy an old worker would ignore it and run the
+  full tool set. Workers that understand `agent_config` ship first; the API admits
+  new `agent` values behind a default-off switch turned on after the old
+  generation is gone (the AGENTS.md rule for authority-changing fields).
+- **Every session creator maps onto the same resolution:** public API and SDK,
+  the session proxy, agent-created children (`session_create`), Slack task
+  defaults, automation templates, scheduled tasks (`agentConfig`, including the
+  execution digest and access-drift report), composer drafts
+  (`new_session_drafts`), site-auth maintenance sessions, and browser sessions.
+  Their stored legacy fields keep working.
+- **Goals imply the goals capability.** A goal-bearing session today requires the
+  goal tools; with capabilities, setting a goal enables `goals`, and a request
+  that disables `goals` while setting a goal is a 422.
+- **Preview has two levels.** Before a session runs, preview can resolve
+  capabilities, our own tools, tool families per MCP server, and the composed
+  prompt (pure composition from `packages/runtime`). The exact tool list of an
+  external MCP server exists only after connecting; that stays in the post-run
+  model-context inspector (`GET .../sessions/:id/model-context`), whose section
+  splitter must learn the module ids.
+- **Codemode needs no separate rule.** It executes only the attempt's frozen tool
+  catalog, so filtering the catalog also filters Codemode.
+- **Workspace-managed Skills and governance are tenant-level.** Admin-installed
+  workspace Skills and policies appear in every session of that workspace. That is
+  correct for a per-tenant workspace and is documented as part of the boundary.
+- **Knowledge scope already follows privacy.** Private tasks author personal
+  Knowledge and shared tasks author workspace Knowledge (CORE text and the
+  learning-scope derivation in `packages/core/src/domain/sessions.ts`), so
+  `memoryScope` adds nothing and is retired as a derived value.
+- **Existing white-label templates.** Workspaces whose `agentInstructions`
+  replaced the whole default template (including its `{{core}}` marker) are read
+  as identity; the marker is ignored. They regain repository and attachment
+  guidance, which the replaced template used to drop.
+- **Hosted tools are provider-specific.** Disabling web search must remove the
+  hosted tool from the Responses request and from the SuperGrok request body
+  (`xai-subscription` appends `web_search`/`x_search` itself).
+- **There is no prompt-quality eval today.** `operational-instructions.test.ts`
+  asserts content, not behavior. A behavior eval (fixed scenarios scored before
+  and after) is a prerequisite for changing the default web-app prompt.
+
 ## Core changes
 
 | Area | Change | Size | Migration |
@@ -271,8 +326,10 @@ the `workspace-agent` preset switches to the modular composer.
 
 ## Phases
 
+0. **Behavior eval** for the current prompt (baseline scores on fixed scenarios).
 1. **Capabilities for tools** (registry, `agent.capabilities`, resolution, worker
-   filtering, preview, `session.agent`). Ships the exact tool set and visibility.
+   filtering, preview, `session.agent`), workers first, API admission behind a
+   switch. Ships the exact tool set and visibility.
 2. **Modular prompt** behind the same resolution; `assistant` preset first,
    `workspace-agent` after eval parity.
 3. **Identity tier and boundary presets** (session identity, governance fix, `chats`
