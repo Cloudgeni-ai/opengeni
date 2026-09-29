@@ -19,6 +19,10 @@ checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append
 cursor; database position conflicts succeed only for the same turn and exact
 canonical item. Provider dispatch and successful settlement require this check.
+Provider-loop and stream-consumer checkpoints serialize through the same sink:
+each reads history and its watermark only after the preceding checkpoint settles.
+They retain their individual durability requirements and errors; a failed save
+does not prevent the next caller from attempting persistence.
 Fresh history inserts verify their persisted representation through `RETURNING`;
 only conflicting positions require a separate read. This keeps numeric-position
 RLS scans out of the ordinary append path without weakening retry verification

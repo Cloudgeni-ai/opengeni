@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { MessageTimeline } from "@opengeni/react/session-ui";
+import { MessageTimeline, SessionConversation } from "@opengeni/react/session-ui";
+import { latestQuestionClient } from "../test/fixtures/latest-question-client";
+import { SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
 import type { SessionEvent } from "@opengeni/sdk";
 import recordedAnswerExchange from "../test/fixtures/exchange-answer-before-machine-turns.json";
 import "./styles.css";
 
 /*
- * Exchange fold studio: scripted exchanges replayed through the production
- * MessageTimeline. Compare the compact presentation (one status row per
- * exchange, answer below a "Worked for" separator) with the classic grouping,
+ * Readable timeline studio: scripted turns replayed through the production
+ * MessageTimeline. Compare the readable per-turn presentation with classic grouping,
  * in both themes, at any viewport width. `?scenario=` picks the script:
  * `delegated` (default), `follow-up`, `notes`, `history`, or
  * `machine-follow-up`. `follow-up`, `notes`, and `history` stream messages the
@@ -134,6 +135,57 @@ function notesScenario(): Draft[] {
   const reply = "Docs 99, pricing 41, referral 31: 171 in total, matching the raw count.";
   stream("answer", reply, "turn-1");
   settle(reply, "turn-1");
+  return drafts;
+}
+
+/** Long real work details plus following prose exercise section-scoped sticky headers. */
+function stickyScenario(): Draft[] {
+  const { drafts, add, tool, stream, settle } = script();
+  add(
+    "user.message",
+    { text: "Verify the signup analysis and have two agents check the results." },
+    null,
+  );
+  add("turn.started", {}, "turn-sticky");
+  for (let worker = 0; worker < 2; worker++) {
+    tool(
+      `worker-${worker}`,
+      "opengeni__session_create",
+      { initialMessage: "Verify signup totals." },
+      { sessionId: worker === 0 ? WORKER : "6f0c1a2e-7b3d-4c8e-9a61-2d4e6f8a0b1c" },
+      "turn-sticky",
+    );
+  }
+  for (let step = 0; step < 40; step++) {
+    if (step % 12 === 0)
+      stream(
+        `progress-${step}`,
+        `Checking batch ${step / 12 + 1}: **reconcile** source totals and verification counts.`,
+        "turn-sticky",
+      );
+    tool(
+      `verify-${step}`,
+      "exec_command",
+      { cmd: `psql -f signup-check-${step + 1}.sql` },
+      "Counts match the source ledger.",
+      "turn-sticky",
+    );
+  }
+  add(
+    "session.wait.started",
+    { actor: "agent", reason: "Waiting for both signup checks.", waitTurnId: "turn-sticky" },
+    "turn-sticky",
+  );
+  add("turn.completed", { output: "" }, "turn-sticky");
+  add("user.message", { text: "Show the verified breakdown." }, null, 20);
+  add("turn.started", {}, "turn-answer");
+  const answer = Array.from(
+    { length: 16 },
+    (_, index) =>
+      `### Verified batch ${index + 1}\n\nThe source totals match. All verification counts reconcile against the signup ledger; no duplicate records were found.`,
+  ).join("\n\n");
+  stream("sticky-answer", answer, "turn-answer");
+  settle(answer, "turn-answer");
   return drafts;
 }
 
@@ -281,6 +333,49 @@ const SCENARIOS: Record<string, () => Draft[]> = {
   "follow-up": followUpScenario,
   notes: notesScenario,
   history: historyScenario,
+  sticky: stickyScenario,
+  "review-maintenance": () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Check the signup totals." }, null);
+    add(
+      "agent.message.completed",
+      { text: "The signup totals reconcile.", phase: "final_answer" },
+      "turn-1",
+    );
+    add("turn.started", {}, "maintenance");
+    add("session.context.compaction.started", { trigger: "operator" }, "maintenance");
+    add(
+      "session.context.compacted",
+      { trigger: "operator", estimatedTokensBefore: 240000, estimatedTokensAfter: 40000 },
+      "maintenance",
+    );
+    add("turn.completed", { maintenance: "context_compaction" }, "maintenance");
+    add("session.status.changed", { status: "idle" }, "maintenance");
+    return drafts;
+  },
+  "review-approval": () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Verify the signup totals with the approved query." }, null);
+    add("turn.started", {}, "turn-1");
+    add(
+      "agent.toolCall.created",
+      { id: "same", name: "exec_command", arguments: { cmd: "psql -f signup-totals.sql" } },
+      "turn-1",
+    );
+    add("session.requiresAction", {}, "turn-1");
+    add("session.status.changed", { status: "requires_action" }, null);
+    add("session.status.changed", { status: "running" }, null);
+    add("agent.toolCall.output", { id: "same", output: "Approved query: 312 signups." }, "turn-1");
+    add(
+      "agent.message.delta",
+      {
+        text: "The approved query completed. I’m **reconciling the source breakdown** now.",
+        phase: "commentary",
+      },
+      "turn-1",
+    );
+    return drafts;
+  },
   "machine-follow-up": machineFollowUpScenario,
 };
 
@@ -298,9 +393,26 @@ const BUTTON =
 
 function App() {
   const scenarioName = new URLSearchParams(window.location.search).get("scenario") ?? "delegated";
+  const questionMode =
+    scenarioName === "question-pending"
+      ? "pending"
+      : scenarioName === "question-started"
+        ? "started"
+        : scenarioName === "question-withdrawn"
+          ? "withdrawn"
+          : scenarioName === "question-legacy-running"
+            ? "legacy-running"
+            : scenarioName === "question-legacy-settled"
+              ? "legacy-settled"
+              : null;
+  const questionClient = useMemo(
+    () => (questionMode ? latestQuestionClient(questionMode).client : null),
+    [questionMode],
+  );
   const drafts = useMemo(() => (SCENARIOS[scenarioName] ?? delegatedScenario)(), [scenarioName]);
   const [count, setCount] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
+  const [historyMode, setHistoryMode] = useState(false);
   // The regression suite delivers older history on demand, so it can measure
   // the reader's position right before the prepend lands.
   const deferOlder = useRef(false);
@@ -316,11 +428,13 @@ function App() {
     window.exchangeFoldHarness = {
       total: drafts.length,
       show: (value) => {
+        setHistoryMode(false);
         setPlaying(false);
         setWindowStart(0);
         setCount(value);
       },
       showWindow: (start, value) => {
+        setHistoryMode(true);
         setPlaying(false);
         deferOlder.current = true;
         olderRequested.current = false;
@@ -368,7 +482,7 @@ function App() {
   // Timestamps end "now", so live clocks read like a real exchange.
   const events = useMemo<SessionEvent[]>(() => {
     const shown = drafts.slice(0, count);
-    const last = shown.at(-1)?.at ?? 0;
+    const last = drafts.at(-1)?.at ?? 0;
     return shown.slice(windowStart).map((draft, offset) => ({
       id: `exchange-${windowStart + offset + 1}`,
       workspaceId: "demo",
@@ -383,7 +497,7 @@ function App() {
   return (
     <div className="mx-auto flex h-screen max-w-4xl flex-col px-4 py-4 sm:px-8">
       <header className="flex flex-wrap items-center gap-2 border-b border-og-border pb-3">
-        <span className="mr-2 text-og-sm font-medium">Exchange fold</span>
+        <span className="mr-2 text-og-sm font-medium">Readable turns</span>
         {(scenarioName === "delegated" ? STAGES : []).map((stage, index) => (
           <button
             key={stage.label}
@@ -410,7 +524,7 @@ function App() {
         </button>
         <span className="ml-auto flex gap-2">
           <button className={BUTTON} aria-pressed={!compact} onClick={() => setCompact(!compact)}>
-            {compact ? "Compact" : "Classic"}
+            {compact ? "Readable" : "Classic"}
           </button>
           <button className={BUTTON} onClick={() => setDark(!dark)}>
             {dark ? "Dark" : "Light"}
@@ -418,18 +532,40 @@ function App() {
         </span>
       </header>
       <section aria-label="Conversation" className="min-h-0 flex-1">
-        <MessageTimeline
-          key={compact ? "compact" : "classic"}
-          className="h-full"
-          events={events}
-          turnSummary={{ rolling: compact }}
-          hasOlder={windowStart > 0}
-          onLoadOlder={() => {
-            olderRequested.current = true;
-            if (!deferOlder.current) setWindowStart(0);
-          }}
-          onOpenSession={() => undefined}
-        />
+        {questionClient ? (
+          <SessionConversation
+            client={questionClient}
+            workspaceId={WORKSPACE_ID}
+            sessionId={SESSION_ID}
+          />
+        ) : (
+          <MessageTimeline
+            key={compact ? "compact" : "classic"}
+            className="h-full"
+            events={events}
+            turnSummary={{ rolling: compact }}
+            hasOlder={windowStart > 0}
+            hasNewer={historyMode && count < drafts.length}
+            onJumpToStart={() => setWindowStart(0)}
+            onJumpToLatestQuestion={async () => {
+              const end = historyMode ? drafts.length : count;
+              const target =
+                drafts
+                  .slice(0, end)
+                  .flatMap((draft, index) => (draft.type === "user.message" ? [index] : []))
+                  .at(-1) ?? -1;
+              if (target < 0) return null;
+              setWindowStart(Math.max(0, target - 2));
+              setCount(end);
+              return target + 1;
+            }}
+            onLoadOlder={() => {
+              olderRequested.current = true;
+              if (!deferOlder.current) setWindowStart(0);
+            }}
+            onOpenSession={() => undefined}
+          />
+        )}
       </section>
     </div>
   );

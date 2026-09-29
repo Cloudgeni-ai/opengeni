@@ -1,7 +1,12 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { GetSessionOptions, SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
+import type {
+  GetSessionOptions,
+  SessionEvent,
+  SessionEventPayloadMode,
+  SessionQueueSnapshot,
+} from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
-import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
   SESSION_EVENT_BROWSER_MAX_BYTES,
   SESSION_EVENT_BROWSER_MAX_COUNT,
@@ -13,6 +18,9 @@ import {
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
+import { timelineQuestionPlacement } from "../src/timeline/projection";
+import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
+import { SESSION_EVENT_TYPES } from "@opengeni/sdk";
 import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
@@ -26,7 +34,10 @@ const SESSION_HISTORY_PAGE_SIZE = 1000;
 function event(
   sequence: number,
   type: SessionEvent["type"] = "user.message",
-  payload: unknown = { text: `m-${sequence}` },
+  payload: unknown = {
+    text: `m-${sequence}`,
+    routing: "accepted_for_execution",
+  },
 ): SessionEvent {
   const coalescedUntil = Number(
     payload && typeof payload === "object"
@@ -50,34 +61,40 @@ function event(
 }
 
 type ListOptions = {
+  includeTypes?: string[];
   after?: number;
   before?: number;
   limit?: number;
   compact?: boolean;
   direction?: "after" | "before";
   payloadMode?: SessionEventPayloadMode;
+  mode?: "forensic" | "monitoring";
 };
 
 function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEvent[] {
   const after = options.after ?? 0;
   const limit = options.limit ?? 500;
   let candidates = store.filter((item) => item.sequence > after);
+  if (options.includeTypes)
+    candidates = candidates.filter((item) => options.includeTypes!.includes(item.type));
   if (options.before !== undefined) {
     const before = options.before;
     candidates = candidates.filter((item) => item.sequence < before);
     return candidates.slice(-limit);
   }
-  return candidates.slice(0, limit);
+  return options.direction === "before" ? candidates.slice(-limit) : candidates.slice(0, limit);
 }
 
 function scriptedClient(input: {
   store: SessionEvent[];
   streamEvents?: SessionEvent[];
   listEvents?: (options: ListOptions) => Promise<SessionEvent[]>;
+  getQueue?: () => Promise<SessionQueueSnapshot>;
 }) {
   const listCalls: ListOptions[] = [];
   const streamCalls: number[] = [];
   const client = fakeClient({
+    getQueue: input.getQueue ?? (async () => ({ items: [] }) as unknown as SessionQueueSnapshot),
     listEvents: async (_workspaceId, _sessionId, options = {}) => {
       listCalls.push(options);
       return input.listEvents ? await input.listEvents(options) : listPage(input.store, options);
@@ -100,6 +117,589 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  for (const target of ["sequence", "latest", "oldest"] as const) {
+    test(`Latest question cancelled by ${target} while importing does not start a lookup`, async () => {
+      const { client, listCalls } = scriptedClient({
+        store: Array.from({ length: 2000 }, (_, index) => event(index + 1)),
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        expect(listCalls.some((call) => call.includeTypes)).toBe(false);
+        const onQueuedQuestion = jest.fn();
+        await actRun(async () => {
+          const lookup = hook.result.current.jumpToLatestQuestion({ onQueuedQuestion });
+          // No await: supersede while even a cached dynamic import is pending.
+          const navigation =
+            target === "sequence"
+              ? hook.result.current.jumpToSequence(1)
+              : target === "latest"
+                ? hook.result.current.jumpToLatest()
+                : hook.result.current.loadOldest();
+          expect(await lookup).toBeNull();
+          await navigation;
+        });
+        expect(listCalls.some((call) => call.includeTypes)).toBe(false);
+        expect(onQueuedQuestion).not.toHaveBeenCalled();
+        // Cancellation does not poison the optional resolver for a later click.
+        await actRun(async () =>
+          expect(await hook.result.current.jumpToLatestQuestion()).toBe(2000),
+        );
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  test("navigation evidence includes every registry type accepted by canonical queued-turn projection", () => {
+    const question = event(1, "user.message", { text: "queued" });
+    const queued = {
+      ...event(2, "turn.queued", { triggerEventId: question.id, turnId: "turn" }),
+      turnId: "turn",
+    };
+    const expected = SESSION_EVENT_TYPES.filter((type) => {
+      const placement = timelineQuestionPlacement(question, [
+        queued,
+        { ...event(3, type, {}), turnId: "turn" },
+      ]);
+      return placement.kind === "visible" && placement.sequence === 3;
+    });
+    expect(expected).toContain("agent.toolCall.created");
+    expect(expected).toContain("turn.capacity_waiting");
+    expect(expected.every((type) => TIMELINE_TURN_ANCHOR_EVENT_TYPES.includes(type))).toBe(true);
+    expect(TIMELINE_TURN_ANCHOR_EVENT_TYPES.length).toBeLessThanOrEqual(100);
+  });
+
+  for (const executionType of [
+    "agent.toolCall.created",
+    "agent.toolCall.output",
+    "agent.message.delta",
+    "sandbox.operation.started",
+    "turn.startup.phase.started",
+    "rig.setup.started",
+    "turn.recovery.requested",
+    "turn.capacity_waiting",
+    "codex.capacity.waiting",
+    "turn.completed",
+  ] as const) {
+    test(`Latest question uses canonical ${executionType} fallback without turn.started`, async () => {
+      const store = [
+        event(1, "user.message", { text: "Legacy queued prompt" }),
+        { ...event(2, "turn.queued", { triggerEventId: "evt-1", turnId: "turn" }), turnId: "turn" },
+        {
+          ...event(3, executionType, {
+            id: "tool",
+            name: "exec_command",
+            arguments: {},
+            text: "Running",
+            output: "Done",
+          }),
+          turnId: "turn",
+        },
+      ];
+      expect(
+        buildTimeline(store).some((item) => item.kind === "user-message" && item.id === "evt-1"),
+      ).toBe(true);
+      const { client, listCalls } = scriptedClient({ store });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+        expect(
+          hook.result.current.timeline.some(
+            (item) => item.kind === "user-message" && item.id === "evt-1",
+          ),
+        ).toBe(true);
+        expect(
+          listCalls.some((call) => call.compact && call.includeTypes?.includes(executionType)),
+        ).toBe(true);
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  for (const target of ["sequence", "latest"] as const) {
+    test(`queued callback guard revokes focus permission during host refresh when navigating to ${target}`, async () => {
+      const turn = fakeTurn({ triggerEventId: "evt-2" });
+      let release!: () => void;
+      const refresh = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { client } = scriptedClient({
+        store: [event(1), event(2)],
+        getQueue: async () => ({ items: [turn] }) as unknown as SessionQueueSnapshot,
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        let focus = false;
+        let navigation: { isCurrent: () => boolean } | undefined;
+        const lookup = hook.result.current.jumpToLatestQuestion({
+          onQueuedQuestion: async (_turn, guard) => {
+            navigation = guard;
+            await refresh;
+            if (guard.isCurrent()) focus = true;
+          },
+        });
+        await flush(20);
+        expect(navigation?.isCurrent()).toBe(true);
+        await actRun(async () => {
+          if (target === "sequence") await hook.result.current.jumpToSequence(1);
+          else await hook.result.current.jumpToLatest();
+        });
+        expect(navigation?.isCurrent()).toBe(false);
+        release();
+        await actRun(async () => expect(await lookup).toBeNull());
+        expect(focus).toBe(false);
+      } finally {
+        release();
+        await hook.unmount();
+      }
+    });
+  }
+
+  test("canonical evidence paging advances through compact delta coverage", async () => {
+    const store = [
+      event(1, "user.message", { text: "queued" }),
+      { ...event(2, "turn.queued", { triggerEventId: "evt-1", turnId: "turn" }), turnId: "turn" },
+      {
+        ...event(3, "agent.reasoning.delta", { text: "Other turn", coalescedUntil: 9000 }),
+        turnId: "other",
+      },
+      {
+        ...event(9001, "agent.toolCall.created", {
+          id: "tool",
+          name: "exec_command",
+          arguments: {},
+        }),
+        turnId: "turn",
+      },
+    ];
+    const { client, listCalls } = scriptedClient({
+      store,
+      listEvents: async (options) =>
+        options.includeTypes?.includes("turn.queued")
+          ? listPage(store, { ...options, limit: 1 })
+          : listPage(store, options),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+      expect(
+        listCalls
+          .filter((call) => call.includeTypes?.includes("turn.queued"))
+          .map((call) => call.after),
+      ).toEqual([1, 2, 9000]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question resolves durable newest user input beyond both old and live-tail windows", async () => {
+    const store = Array.from({ length: 12000 }, (_, index) => {
+      const sequence = index + 1;
+      return sequence === 1 || sequence === 3000 || sequence === 9000
+        ? event(sequence)
+        : event(sequence, "agent.reasoning.delta", {
+            text: "Thinking",
+            itemId: `reason-${sequence}`,
+          });
+    });
+    const { client, listCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(30);
+      expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(false);
+      await actRun(async () => expect(await hook.result.current.jumpToSequence(3000)).toBe(true));
+      await flush(20);
+      expect(hook.result.current.hasNewer).toBe(true);
+      const reads = listCalls.length;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(9000));
+      await flush(20);
+      expect(listCalls.slice(reads)).toEqual([
+        {
+          direction: "before",
+          includeTypes: ["user.message"],
+          limit: 1,
+          payloadMode: "full",
+          mode: "forensic",
+        },
+        { before: 9001, limit: 128, compact: true, payloadMode: "full" },
+        { after: 9000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+      ]);
+      expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(true);
+      expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question already loaded needs only one lookup; empty sessions have no target", async () => {
+    const { client, listCalls } = scriptedClient({ store: [event(1), event(2)] });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      const reads = listCalls.length;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+      expect(listCalls.length - reads).toBe(1);
+    } finally {
+      await hook.unmount();
+    }
+    const empty = scriptedClient({ store: [] });
+    const emptyHook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client: empty.client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () =>
+        expect(await emptyHook.result.current.jumpToLatestQuestion()).toBeNull(),
+      );
+    } finally {
+      await emptyHook.unmount();
+    }
+  });
+
+  test("Latest question pages past legacy worker completions without scanning activity", async () => {
+    const worker = (sequence: number) =>
+      event(sequence, "user.message", {
+        text: "Worker finished",
+        childCompletion: { childSessionId: SECOND_SESSION_ID, status: "idle" },
+      });
+    const store = [event(1), event(2), ...Array.from({ length: 130 }, (_, i) => worker(i + 3))];
+    const { client, listCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      const reads = listCalls.length;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+      expect(listCalls.slice(reads).map(({ before, limit }) => ({ before, limit }))).toEqual([
+        { before: undefined, limit: 1 },
+        { before: 132, limit: 64 },
+        { before: 68, limit: 64 },
+        { before: 4, limit: 64 },
+      ]);
+      expect(
+        listCalls
+          .slice(reads)
+          .every((call) => call.mode === "forensic" && call.includeTypes?.[0] === "user.message"),
+      ).toBe(true);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question retains malformed legacy payloads as ordinary visible messages", async () => {
+    const { client } = scriptedClient({
+      store: [
+        event(1),
+        event(2, "user.message", {
+          text: "Still readable",
+          childCompletion: { childSessionId: SECOND_SESSION_ID },
+        }),
+      ],
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question directs pending human input to the queue, not an invisible sequence", async () => {
+    const turn = fakeTurn({ triggerEventId: "evt-2" });
+    const { client } = scriptedClient({
+      getQueue: async () => ({ items: [turn] }) as unknown as SessionQueueSnapshot,
+      store: [
+        event(1),
+        event(2, "user.message", {
+          text: "Newest human request",
+          routing: "queued_for_execution",
+        }),
+      ],
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(
+        hook.result.current.timeline.filter((item) => item.kind === "user-message"),
+      ).toHaveLength(1);
+      await actRun(async () => {
+        await expect(hook.result.current.jumpToLatestQuestion()).rejects.toMatchObject({
+          name: "LatestQuestionQueuedError",
+        });
+      });
+      const focused: string[] = [];
+      await actRun(async () =>
+        expect(
+          await hook.result.current.jumpToLatestQuestion({
+            onQueuedQuestion: (queued) => {
+              focused.push(queued.id);
+            },
+          }),
+        ).toBeNull(),
+      );
+      expect(focused).toEqual([turn.id]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a queue claim during host focus resolves the actual started question rather than a vanished queue row", async () => {
+    const turn = fakeTurn({ triggerEventId: "evt-2" });
+    let pending = true;
+    const store = [
+      event(1),
+      event(2, "user.message", { text: "Claimed during focus", routing: "queued_for_execution" }),
+      {
+        ...event(3, "turn.queued", { triggerEventId: turn.triggerEventId, turnId: turn.id }),
+        turnId: turn.id,
+      },
+    ];
+    const { client } = scriptedClient({
+      store,
+      getQueue: async () => ({ items: pending ? [turn] : [] }) as unknown as SessionQueueSnapshot,
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () =>
+        expect(
+          await hook.result.current.jumpToLatestQuestion({
+            onQueuedQuestion: () => {
+              pending = false;
+              store.push({
+                ...event(4, "turn.started", { triggerEventId: turn.triggerEventId }),
+                turnId: turn.id,
+              });
+            },
+          }),
+        ).toBe(2),
+      );
+      await flush(20);
+      expect(
+        hook.result.current.timeline.some(
+          (item) => item.kind === "user-message" && item.id === "evt-2",
+        ),
+      ).toBe(true);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("unstarted admission missing from the queue is retryable, never replaced with an older human question", async () => {
+    const { client } = scriptedClient({
+      store: [
+        event(1),
+        event(2, "user.message", { text: "Admission in flight", routing: "queued_for_execution" }),
+      ],
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => {
+        await expect(hook.result.current.jumpToLatestQuestion()).rejects.toThrow(
+          "changing queue state",
+        );
+      });
+      expect(
+        hook.result.current.timeline
+          .filter((item) => item.kind === "user-message")
+          .map((item) => item.id),
+      ).toEqual(["evt-1"]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  for (const routing of [undefined, "queued_for_execution"]) {
+    test(`Latest question restores a distant started queued prompt at its turn boundary (${routing ?? "legacy"})`, async () => {
+      const question = event(2, "user.message", {
+        text: "Started queued request",
+        ...(routing ? { routing } : {}),
+      });
+      const turnId = "queued-turn";
+      const store = [
+        event(1),
+        question,
+        { ...event(3, "turn.queued", { triggerEventId: question.id, turnId }), turnId },
+        ...Array.from({ length: 1197 }, (_, index) =>
+          event(index + 4, "agent.reasoning.delta", { text: "unrelated", itemId: "old" }),
+        ),
+        { ...event(1201, "turn.started", { triggerEventId: question.id }), turnId },
+        {
+          ...event(1202, "agent.message.completed", { text: "Response", messageId: "answer" }),
+          turnId,
+        },
+      ];
+      const { client, listCalls } = scriptedClient({ store });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        await actRun(async () => {
+          await hook.result.current.jumpToSequence(1);
+        });
+        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+        await flush(20);
+        expect(hook.result.current.events.some((item) => item.id === question.id)).toBe(false);
+        expect(hook.result.current.events.some((item) => item.sequence === 1201)).toBe(true);
+        expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
+        const projected = hook.result.current.timeline.find(
+          (item) => item.kind === "user-message" && item.id === question.id,
+        );
+        expect(projected).toBeDefined();
+        expect(projected?.sourceEvents?.some((source) => source.sequence === 2)).toBe(true);
+        expect(listCalls.some((call) => call.includeTypes?.includes("turn.started"))).toBe(true);
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  for (const withdrawal of ["delete", "edit", "cancel"] as const) {
+    test(`Latest question skips ${withdrawal} before start and finds the previous durable question outside loaded history`, async () => {
+      const turnId = "withdrawn-turn";
+      const store = [
+        event(1),
+        event(2),
+        event(3, "user.message", { text: "Withdrawn", routing: "queued_for_execution" }),
+        { ...event(4, "turn.queued", { triggerEventId: "evt-3", turnId }), turnId },
+        {
+          ...event(5, withdrawal === "cancel" ? "turn.cancelled" : "session.queue.changed", {
+            operation: withdrawal,
+            turnId,
+          }),
+          turnId,
+        },
+        ...Array.from({ length: 2000 }, (_, index) =>
+          event(index + 6, "agent.reasoning.delta", { text: "thinking", itemId: "old" }),
+        ),
+      ];
+      const { client } = scriptedClient({ store });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        expect(hook.result.current.events.some((item) => item.sequence === 2)).toBe(false);
+        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+        await flush(20);
+        expect(
+          hook.result.current.timeline.some(
+            (item) => item.kind === "user-message" && item.id === "evt-2",
+          ),
+        ).toBe(true);
+        expect(
+          hook.result.current.timeline.some(
+            (item) => item.kind === "user-message" && item.id === "evt-3",
+          ),
+        ).toBe(false);
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  test("a delayed queue lookup cannot focus a prompt after explicit history navigation", async () => {
+    let release!: (snapshot: SessionQueueSnapshot) => void;
+    const pending = new Promise<SessionQueueSnapshot>((resolve) => {
+      release = resolve;
+    });
+    const { client } = scriptedClient({ store: [event(1), event(2)], getQueue: () => pending });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      let focused = false;
+      const lookup = hook.result.current.jumpToLatestQuestion({
+        onQueuedQuestion: () => {
+          focused = true;
+        },
+      });
+      await flush(10);
+      await actRun(async () => {
+        await hook.result.current.jumpToSequence(1);
+      });
+      release({ items: [fakeTurn({ triggerEventId: "evt-2" })] } as SessionQueueSnapshot);
+      await actRun(async () => expect(await lookup).toBeNull());
+      expect(focused).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a stale Latest question lookup cannot replace a newer explicit history target", async () => {
+    let release!: (events: SessionEvent[]) => void;
+    const pending = new Promise<SessionEvent[]>((resolve) => {
+      release = resolve;
+    });
+    const store = Array.from({ length: 2000 }, (_, index) => event(index + 1));
+    const { client } = scriptedClient({
+      store,
+      listEvents: (options) =>
+        options.includeTypes ? pending : Promise.resolve(listPage(store, options)),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      const lookup = hook.result.current.jumpToLatestQuestion();
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToSequence(100)).toBe(true));
+      release([event(2000)]);
+      await actRun(async () => expect(await lookup).toBeNull());
+      expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(true);
+      expect(hook.result.current.events.some((item) => item.sequence === 2000)).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("an exact target supersedes the initial tail even when the client ignores abort", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -118,14 +718,99 @@ describe("useSessionEvents", () => {
       undefined,
     );
     expect(hook.result.current.initialLoading).toBe(true);
+    expect(hook.result.current.initialHistoryReady).toBe(false);
     await actRun(async () => expect(await hook.result.current.jumpToSequence(50)).toBe(true));
     release();
     await flush(30);
     expect(hook.result.current.events.some((item) => item.sequence === 50)).toBe(true);
     expect(hook.result.current.events.at(-1)?.sequence).toBeLessThan(3000);
     expect(hook.result.current.initialLoading).toBe(false);
+    expect(hook.result.current.initialHistoryReady).toBe(true);
     expect(hook.result.current.loadingTarget).toBe(false);
     await hook.unmount();
+  });
+
+  test.each(["resolve", "reject"] as const)(
+    "a Latest question lookup cannot %s into a replacement session",
+    async (outcome) => {
+      let resolve!: (events: SessionEvent[]) => void;
+      let reject!: (reason: Error) => void;
+      const pending = new Promise<SessionEvent[]>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      const secondEvent = { ...event(2), sessionId: SECOND_SESSION_ID };
+      const client = fakeClient({
+        listEvents: async (_workspace, sessionId, options) =>
+          options?.includeTypes ? pending : sessionId === SESSION_ID ? [event(1)] : [secondEvent],
+        streamEvents: async function* () {},
+      });
+      const hook = await renderHook(
+        ({ sessionId }) => useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
+        { sessionId: SESSION_ID },
+      );
+      try {
+        await flush(20);
+        const lookup = hook.result.current.jumpToLatestQuestion();
+        // Let the lazy module start its read; this case fences a late network
+        // success/failure, separately from cancellation at the import boundary.
+        await flush(20);
+        await hook.rerender({ sessionId: SECOND_SESSION_ID });
+        await flush(20);
+        if (outcome === "resolve") resolve([event(1000)]);
+        else reject(new Error("old session unavailable"));
+        await actRun(async () => expect(await lookup).toBeNull());
+        expect(hook.result.current.events).toEqual([secondEvent]);
+        expect(hook.result.current.error).toBeNull();
+      } finally {
+        await hook.unmount();
+      }
+    },
+  );
+
+  test("Latest question propagates current lookup errors and permits retry", async () => {
+    const failure = new Error("lookup unavailable");
+    let fail = true;
+    const { client } = scriptedClient({
+      store: [event(1)],
+      listEvents: async (options) => {
+        if (options.includeTypes && fail) throw failure;
+        return [event(1)];
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () =>
+        expect(hook.result.current.jumpToLatestQuestion()).rejects.toBe(failure),
+      );
+      fail = false;
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+      expect(hook.result.current.events).toEqual([event(1)]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("Latest question returns null when its resolved event is missing from exact context", async () => {
+    const { client } = scriptedClient({
+      store: [event(1)],
+      listEvents: async (options) => (options.includeTypes ? [event(9000)] : [event(1)]),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBeNull());
+      expect(hook.result.current.events).toEqual([event(1)]);
+    } finally {
+      await hook.unmount();
+    }
   });
 
   test("client replacement fences a pending target rejection without a session change", async () => {
@@ -238,9 +923,11 @@ describe("useSessionEvents", () => {
     const controller = new AbortController();
     controller.abort();
     await actRun(async () =>
-      expect(await hook.result.current.jumpToSequence(50, { signal: controller.signal })).toBe(
-        false,
-      ),
+      expect(
+        await hook.result.current.jumpToSequence(50, {
+          signal: controller.signal,
+        }),
+      ).toBe(false),
     );
     await flush(10);
     expect(listCalls.length).toBe(reads);
@@ -456,8 +1143,173 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.initialLoading).toBe(false);
     expect(hook.result.current.connectionState).toBe("error");
     expect(hook.result.current.error?.message).toBe("tail unavailable");
+    expect(hook.result.current.initialHistoryReady).toBe(false);
 
     await hook.unmount();
+  });
+
+  test("an empty successful initial retry clears its stale error and publishes readiness", async () => {
+    let release!: (events: SessionEvent[]) => void;
+    const retry = new Promise<SessionEvent[]>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const client = fakeClient({
+      listEvents: async () => {
+        if (++calls === 1) throw new Error("tail unavailable");
+        return retry;
+      },
+      streamEvents: async function* () {},
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.error?.message).toBe("tail unavailable");
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+      await actRun(() => hook.result.current.jumpToLatest());
+      expect(hook.result.current.initialLoading).toBe(true);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+      release([]);
+      await flush(20);
+      expect(hook.result.current.events).toEqual([]);
+      expect(hook.result.current.initialLoading).toBe(false);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      expect(hook.result.current.error).toBeNull();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("history readiness stays true through an SSE error and a pending later reload", async () => {
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    let releaseReload!: (events: SessionEvent[]) => void;
+    const reload = new Promise<SessionEvent[]>((resolve) => {
+      releaseReload = resolve;
+    });
+    let calls = 0;
+    const client = fakeClient({
+      listEvents: async () => (++calls === 1 ? [] : reload),
+      streamEvents: async function* () {
+        yield* [];
+        await streamGate;
+        throw new Error("stream unavailable");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      releaseStream();
+      await flush(20);
+      expect(hook.result.current.error?.message).toBe("stream unavailable");
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      await actRun(() => hook.result.current.jumpToLatest());
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      expect(hook.result.current.initialLoading).toBe(true);
+      releaseReload([]);
+      await flush(20);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test.each(["resolve", "reject"] as const)(
+    "a superseded initial tail cannot %s into a successful retry",
+    async (outcome) => {
+      let resolve!: (events: SessionEvent[]) => void;
+      let reject!: (reason: Error) => void;
+      const oldTail = new Promise<SessionEvent[]>((yes, no) => {
+        resolve = yes;
+        reject = no;
+      });
+      let calls = 0;
+      const client = fakeClient({
+        listEvents: async () => (++calls === 1 ? oldTail : []),
+        streamEvents: async function* () {},
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        expect(hook.result.current.initialHistoryReady).toBe(false);
+        await actRun(() => hook.result.current.jumpToLatest());
+        await flush(20);
+        expect(hook.result.current.initialHistoryReady).toBe(true);
+        if (outcome === "resolve") resolve([event(99)]);
+        else reject(new Error("old tail failed"));
+        await flush(20);
+        expect(hook.result.current.initialHistoryReady).toBe(true);
+        expect(hook.result.current.error).toBeNull();
+        expect(hook.result.current.events).toEqual([]);
+      } finally {
+        await hook.unmount();
+      }
+    },
+  );
+
+  test("new-session renders hide prior readiness and stale retry closures cannot clear its error", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      listEvents: async (_workspace, sessionId) => {
+        calls.push(sessionId);
+        if (sessionId === SECOND_SESSION_ID) throw new Error("new tail failed");
+        return [];
+      },
+      streamEvents: async function* () {},
+    });
+    const seen: Array<{ sessionId: string; ready: boolean }> = [];
+    const hook = await renderHook(
+      ({ sessionId }) => {
+        const result = useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID });
+        seen.push({ sessionId, ready: result.initialHistoryReady });
+        return result;
+      },
+      { sessionId: SESSION_ID },
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.initialHistoryReady).toBe(true);
+      const staleRetry = hook.result.current.jumpToLatest;
+      await hook.rerender({ sessionId: SECOND_SESSION_ID });
+      await flush(20);
+      expect(
+        seen.filter((row) => row.sessionId === SECOND_SESSION_ID).every((row) => !row.ready),
+      ).toBe(true);
+      const readCount = calls.length;
+      await actRun(() => staleRetry());
+      expect(calls).toHaveLength(readCount);
+      expect(hook.result.current.error?.message).toBe("new tail failed");
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("full replay does not claim a history snapshot completed merely because SSE yielded", async () => {
+    const { client } = scriptedClient({ store: [], streamEvents: [event(1)] });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID, replay: "full" }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.events).toEqual([event(1)]);
+      expect(hook.result.current.initialHistoryReady).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
   });
 
   test("initial windowed load uses compact tail pages and opens the stream after the newest event", async () => {

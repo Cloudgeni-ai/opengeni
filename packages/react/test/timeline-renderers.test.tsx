@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
-import { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } from "../src/timeline";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -13,8 +12,6 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
-import { MessageTimeline } from "../src";
-import { TimelineRow } from "../src/components/message-timeline";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -26,6 +23,14 @@ import { TimelineRow } from "../src/components/message-timeline";
    -------------------------------------------------------------------------- */
 
 registerDom();
+
+// Radix chooses its layout-effect implementation at import time. Load the real
+// renderers only after the DOM exists so close/open assertions test browser
+// behavior, not the server no-op that leaves initially open content mounted.
+const { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } =
+  await import("../src/timeline");
+const { MessageTimeline } = await import("../src");
+const { TimelineRow } = await import("../src/components/message-timeline");
 
 test("account-qualified native and Codemode calls render persisted labels after replay", async () => {
   for (const origin of ["native", "codemode"]) {
@@ -748,7 +753,7 @@ describe("published file presentation", () => {
         await r.rerender(timeline([...narrated, timelineEvent("turn.completed", {})], "idle"));
         await flush();
         expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
-        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+        expect(r.container.querySelector('img[alt="implementation.png"]') === null).toBe(true);
       } finally {
         await r.unmount();
       }
@@ -756,8 +761,8 @@ describe("published file presentation", () => {
     10_000,
   );
 
-  // The compact presentation folds narration into the cluster, so it has no
-  // multi-cluster wrap; its single-cluster variant follows this test.
+  // Readable turns have one stable work row; classic grouping retains its
+  // multi-cluster turn wrap. The readable variant follows this test.
   test.each([false])(
     "explicit image collapse survives a multi-cluster turn wrap (rolling=%p)",
     async (rolling) => {
@@ -858,7 +863,7 @@ describe("published file presentation", () => {
     10_000,
   );
 
-  test("compact presentation keeps an explicit image collapse once narration folds in", async () => {
+  test("readable turns keep an explicit image collapse while narration stays visible", async () => {
     resetTimelineEvents();
     const prepared = [
       timelineEvent("user.message", { text: "Show the implementation" }),
@@ -887,9 +892,9 @@ describe("published file presentation", () => {
     const r = await renderComponent(timeline(prepared));
     try {
       await flush();
-      // Phase-less narration of the running turn is its live note.
+      // Phase-less narration is always an ordinary visible message.
       expect(turnSummaryTrigger(r.container)?.textContent).toMatch(/^Working · /);
-      expect(r.container.querySelector("[data-og-exchange-note]")?.textContent).toBe(
+      expect(r.container.querySelector("[data-og-wide-table-message]")?.textContent).toBe(
         "The project is ready.",
       );
       const published = [
@@ -903,14 +908,14 @@ describe("published file presentation", () => {
       ];
       await r.rerender(timeline(published));
       await flush();
-      // The narration is now commentary inside the one cluster, which opens
-      // because it presents an image.
+      // The work disclosure opens for its primary image; narration stays outside.
       const live = turnSummaryTriggers(r.container);
       expect(live.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual(["true"]);
       expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
-      expect(r.container.querySelector("[data-og-activity-note]")?.textContent).toContain(
+      expect(r.container.querySelector("[data-og-wide-table-message]")?.textContent).toContain(
         "The project is ready.",
       );
+      expect(r.container.querySelector("[data-og-activity-note]")).toBeNull();
       await act(async () => live[0]?.click());
       expect(live[0]?.getAttribute("aria-expanded")).toBe("false");
 
@@ -925,7 +930,7 @@ describe("published file presentation", () => {
       expect(settledTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
         "false",
       ]);
-      expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+      expect(r.container.querySelector('img[alt="implementation.png"]') === null).toBe(true);
       // The remembered choice is not a lock.
       await act(async () => settledTriggers[0]?.click());
       await flush();

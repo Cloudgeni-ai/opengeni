@@ -31,6 +31,7 @@ import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { sessionInputWait } from "@/lib/session-rail";
+import { useSessionStartup } from "@/lib/session-startup";
 import { displayModel } from "@/lib/format";
 import { isCodexProductModel } from "@/lib/session-model";
 import {
@@ -115,6 +116,13 @@ export function SessionHeader({
   policyLoading?: boolean;
 }) {
   const waiting = sessionInputWait({ ...session, status });
+  const startup = useSessionStartup({ ...session, status });
+  const startupLabel =
+    startup === "starting"
+      ? "Starting"
+      : startup === "delayed" || startup === "retrying"
+        ? "Waiting to start"
+        : undefined;
   const modelId = lastStartedModel?.trim() || session.model;
   const resolvedBilling: BillingClass =
     billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
@@ -220,7 +228,7 @@ export function SessionHeader({
                 Waiting
               </span>
             ) : (
-              <SessionStatusBadge status={status} />
+              <SessionStatusBadge status={status} label={startupLabel} />
             )
           ) : (
             <WorkstreamControlIndicator session={session} />
@@ -232,6 +240,7 @@ export function SessionHeader({
           paused={session.effectiveControl.state !== "active"}
           waiting={Boolean(waiting)}
           status={status}
+          label={startupLabel}
         />
         <span className="sr-only md:hidden">Connection {connectionState}.</span>
         {keyAuthRequired ? (
@@ -271,10 +280,12 @@ function CompactSessionStatus({
   paused,
   waiting,
   status,
+  label,
 }: {
   paused: boolean;
   waiting: boolean;
   status: Session["status"];
+  label?: string;
 }) {
   if (paused) {
     return (
@@ -303,6 +314,7 @@ function CompactSessionStatus({
       <SessionStatusBadge
         status={status}
         size="sm"
+        label={label}
         {...(status === "waiting_capacity" ? { label: "Waiting" } : {})}
       />
     </span>

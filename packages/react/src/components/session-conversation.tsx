@@ -71,6 +71,8 @@ function Conversation({
 }: SessionConversationProps) {
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
+  const scopeRef = useRef(context);
+  scopeRef.current = context;
   const config = useClientConfigFlags(context.client);
   const showModelPicker = modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({
@@ -82,6 +84,10 @@ function Conversation({
   const options = { ...scope, events: feed.events };
   const detail = useSession(sessionId, options);
   const queue = useTurnQueue(sessionId, options);
+  const [queueFocusTarget, setQueueFocusTarget] = useState<{
+    turnId: string;
+    requestId: number;
+  }>();
   const human = useHumanInputRequests(sessionId, options);
   const control = useSessionControl(sessionId, scope);
   const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
@@ -126,7 +132,9 @@ function Conversation({
         userMessageDisclosureLabels={userMessageDisclosureLabels}
         className="min-h-0 flex-1"
         {...(toolRegistry ? { toolRegistry } : {})}
+        events={feed.events}
         items={conversationTimeline(feed.timeline, queue, composer)}
+        turnSummary={{ rolling: true }}
         status={status}
         hasOlder={feed.hasOlder}
         loadingOlder={feed.loadingOlder}
@@ -139,6 +147,23 @@ function Conversation({
         }}
         loadingOldest={feed.loadingOldest}
         onJumpToLatest={feed.jumpToLatest}
+        onJumpToLatestQuestion={() =>
+          feed.jumpToLatestQuestion({
+            onQueuedQuestion: async (turn, navigation) => {
+              await queue.refresh();
+              if (
+                !navigation.isCurrent() ||
+                scopeRef.current.client !== context.client ||
+                scopeRef.current.workspaceId !== context.workspaceId
+              )
+                return;
+              setQueueFocusTarget((previous) => ({
+                turnId: turn.id,
+                requestId: (previous?.requestId ?? 0) + 1,
+              }));
+            },
+          })
+        }
         onAnnotate={composer.addAnnotation}
       />
       <div className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto" data-og-conversation-inputs="">
@@ -166,10 +191,16 @@ function Conversation({
           autoFocus={false}
         />
         {terminal ? (
-          <SessionChrome queue={queue} sessionStatus={status} readOnly />
+          <SessionChrome
+            queue={queue}
+            queueFocusTarget={queueFocusTarget}
+            sessionStatus={status}
+            readOnly
+          />
         ) : (
           <SessionChrome
             queue={queue}
+            queueFocusTarget={queueFocusTarget}
             composer={composer}
             sessionStatus={status}
             onComposerFocus={() =>
