@@ -607,6 +607,11 @@ export type RigSeed = {
   variableSets?: string[];
   /** A later version, to show version history. */
   nextVersion?: { setupScript: string; changelog: string };
+  /**
+   * Result of the latest check run on the active version. Without a sandbox
+   * backend the real verifier always fails, so the seed records a newer run.
+   */
+  health: { passed: true } | { passed: false; failing: string; output: string };
 };
 
 /**
@@ -631,6 +636,7 @@ export const RIGS: Record<string, RigSeed[]> = {
         { name: "pnpm available", command: "pnpm --version" },
       ],
       variableSets: ["GitHub automation"],
+      health: { passed: true },
       nextVersion: {
         setupScript: [
           "corepack enable",
@@ -655,6 +661,7 @@ export const RIGS: Record<string, RigSeed[]> = {
       ],
       credentialHooks: ["aws-sso-login"],
       variableSets: ["AWS production", "Terraform state"],
+      health: { passed: true },
     },
     {
       name: "Python analytics",
@@ -662,6 +669,15 @@ export const RIGS: Record<string, RigSeed[]> = {
       setupScript: "pip install --quiet polars==1.9.0 duckdb==1.1.1 jupyterlab==4.2.5",
       checks: [{ name: "Imports", command: "python -c 'import polars, duckdb'" }],
       variableSets: ["Datadog"],
+      health: {
+        passed: false,
+        failing: "Imports",
+        output: [
+          "Traceback (most recent call last):",
+          '  File "<string>", line 1, in <module>',
+          "ModuleNotFoundError: No module named 'duckdb'",
+        ].join("\n"),
+      },
     },
     {
       name: "Acme base: security tools",
@@ -673,6 +689,7 @@ export const RIGS: Record<string, RigSeed[]> = {
         { name: "Semgrep", command: "semgrep --version" },
         { name: "Trivy", command: "trivy --version" },
       ],
+      health: { passed: true },
     },
   ],
 };

@@ -2749,6 +2749,69 @@ async function seedRigs() {
     }
   }
   if (created) log(`Created ${created} sandbox environments`);
+  await seedRigHealth();
+}
+
+/**
+ * The list and overview read health from the newest verification audit row
+ * for the active version. With no sandbox backend the real verifier refuses,
+ * so record one newer check run per environment, marked `seed`.
+ */
+async function seedRigHealth() {
+  if (!migrationsUrl) return;
+  const db = new SQL(migrationsUrl);
+  let recorded = 0;
+  try {
+    for (const [name, rigs] of Object.entries(RIGS)) {
+      const ws = workspaceIdByName[name];
+      if (!ws) continue;
+      const accountId = conversationPlan.find((plan) => plan.workspaceId === ws)!.accountId;
+      const existing = await owner.get<any>(`/v1/workspaces/${ws}/rigs`);
+      const list: any[] = Array.isArray(existing) ? existing : (existing.rigs ?? []);
+      for (const seed of rigs) {
+        const rig = list.find((candidate) => candidate.name === seed.name);
+        const versionId: string | undefined = rig?.activeVersion?.id;
+        if (!rig || !versionId) continue;
+        const [done] = await db`select 1 from audit_events
+          where target_type = 'rig' and target_id = ${rig.id}
+            and metadata->>'versionId' = ${versionId} and metadata->>'seed' = 'design-preview'
+          limit 1`;
+        if (done) continue;
+        const finishedAt = new Date(Date.now() - 2 * 60_000);
+        const startedAt = new Date(finishedAt.getTime() - 94_000);
+        const checks = (rig.activeVersion.checks ?? seed.checks) as { name: string; command: string }[];
+        const checkResults = checks.map((check) => {
+          const failed = !seed.health.passed && check.name === seed.health.failing;
+          return {
+            name: check.name,
+            command: check.command,
+            exitCode: failed ? 1 : 0,
+            output: failed && !seed.health.passed ? seed.health.output : "",
+          };
+        });
+        const metadata = {
+          rigId: rig.id,
+          versionId,
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          passed: seed.health.passed,
+          platformCheckResults: [],
+          checkResults,
+          providerImage: null,
+          seed: "design-preview",
+        };
+        await db`insert into audit_events (account_id, workspace_id, subject_id, action,
+            target_type, target_id, metadata, metadata_codec_version, occurred_at)
+          values (${accountId}, ${ws}, 'system:rig-verification',
+            ${seed.health.passed ? "rig.verification.passed" : "rig.verification.failed"},
+            'rig', ${rig.id}, ${metadata}, 1, ${finishedAt})`;
+        recorded++;
+      }
+    }
+  } finally {
+    await db.close();
+  }
+  if (recorded) log(`Recorded ${recorded} sandbox environment check runs`);
 }
 
 async function seedAgentLearning() {
