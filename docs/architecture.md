@@ -818,7 +818,7 @@ These producers all converge on the ordinary session/turn runtime:
 Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
 Schedules API filtering uses `sessionId`.
 
-Connection-account refusals retain immutable [diagnostic-only run receipts](scheduled-admission-diagnostics.md), never execution authority.
+Connection-account and schedule-authority refusals retain immutable [diagnostic-only run receipts](scheduled-admission-diagnostics.md), never execution authority. API-key and other machine-principal schedules are ownerless service schedules ([owners](scheduled-task-access.md)).
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;
 `tools: []` remains an empty override. Standalone scheduler-owned turns use a

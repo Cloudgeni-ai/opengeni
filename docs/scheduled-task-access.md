@@ -17,6 +17,22 @@ tools are absent, or the account it chose was disconnected. This page describes
 how OpenGeni shows that, how the owner refreshes it, and how the owner learns
 that a run could not use a connector.
 
+## Who owns a schedule
+
+A schedule's owner is the person who saved it: a managed human (or a verified
+external owning user) whose own accounts its runs resolve. A machine principal
+is never an owner. Schedules created by an organization or workspace API key,
+the deployment's configured key, a delegated service, or a delegated bearer
+are ownerless: the key stays the audited creator (`createdBy` with
+`kind: "service"`), runs use service authority with workspace accounts only,
+and anyone holding `scheduled_tasks:manage` (including the key) may change or
+run them. Before this rule, a schedule created by an API key froze the key's
+own subject as its immutable owner; such a schedule has no human revision
+authority and every occurrence is refused as a visible failed run
+(`scheduled_authority_unavailable`, see
+[`scheduled-admission-diagnostics.md`](scheduled-admission-diagnostics.md)).
+The same key may still pause, edit, or delete it; recreate it to run it.
+
 Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 `packages/db/src/scheduled-task-access.ts`, the routes in
 `apps/api/src/routes/scheduled-tasks.ts`, and the Schedules pages
