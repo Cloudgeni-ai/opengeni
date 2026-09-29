@@ -3,19 +3,29 @@ import type {
   OrganizationUsageSummary,
   OrganizationUsageWorkspacePage,
 } from "@opengeni/contracts";
+import { useNavigate } from "@tanstack/react-router";
+import { UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
 import { AreaChart } from "@/components/insights/charts";
+import { useOptionalOrganizationDirectory } from "@/components/organization/organization-directory";
+import { memberName } from "@/components/organization/organization-people-model";
 import { RowButton } from "@/components/ui/page-actions";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { formatDate } from "@/components/ui/relative-time";
-import { Section } from "@/components/ui/section";
+import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { inAppClick } from "@/lib/in-app-click";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
+import { workspaceInsightsPath } from "@/lib/routes";
 import { usageMetricLabel, usageUnitLabel } from "@/lib/usage-metric";
+import type { AccessContext } from "@/types";
 
 type Total = OrganizationUsageSummary["totals"][number];
 const periods: Array<{ value: OrganizationUsagePeriod; label: string }> = [
@@ -68,11 +78,95 @@ export function organizationUsageChart(summary: OrganizationUsageSummary, select
   }
   return { labels, values };
 }
+/** One row of "By workspace": a shared workspace, or a member's Personal workspace. */
+export interface OrganizationUsageRow {
+  key: string;
+  kind: "shared" | "personal";
+  /** The workspace name, or the Personal workspace owner's name. */
+  title: string;
+  quantity: string;
+  /** Your own Personal workspace. */
+  you: boolean;
+  /** Set when you can open the workspace's Insights. Never set for Personal rows. */
+  insightsWorkspaceId: string | null;
+}
+
+type Member = { id: string; name: string | null; email: string | null };
+
+/**
+ * Shared workspaces and members' Personal workspaces as one list, largest
+ * first for the selected metric. A Personal row never links anywhere: its
+ * owner's chats are private, and billing readers see its amounts only.
+ */
+export function organizationUsageRows(input: {
+  shared: OrganizationUsageSummary["workspaces"];
+  personal: OrganizationUsageSummary["personalWorkspaces"];
+  selected: Pick<Total, "eventType" | "unit">;
+  members: readonly Member[];
+  youMembershipId: string | null;
+  accessContext: AccessContext | null;
+}): OrganizationUsageRow[] {
+  const amount = (totals: readonly Total[]) =>
+    totals.find((total) => metricKey(total) === metricKey(input.selected))?.quantity ?? "0";
+  const members = new Map(input.members.map((member) => [member.id, member]));
+  const rows: OrganizationUsageRow[] = [
+    ...input.shared.map((workspace) => ({
+      key: `workspace:${workspace.workspaceId}`,
+      kind: "shared" as const,
+      title: workspace.name ?? "Workspace",
+      quantity: amount(workspace.totals),
+      you: false,
+      insightsWorkspaceId: hasWorkspacePermission(
+        input.accessContext,
+        workspace.workspaceId,
+        "workspace:admin",
+      )
+        ? workspace.workspaceId
+        : null,
+    })),
+    ...input.personal.map((workspace) => {
+      const member = members.get(workspace.membershipId);
+      return {
+        key: `personal:${workspace.membershipId}`,
+        kind: "personal" as const,
+        // Named as on the People page; a row the roster can't name stays generic.
+        title: member ? memberName(member) : "Organization member",
+        quantity: amount(workspace.totals),
+        you: workspace.membershipId === input.youMembershipId,
+        insightsWorkspaceId: null,
+      };
+    }),
+  ];
+  return rows.sort((a, b) => {
+    const difference = BigInt(b.quantity) - BigInt(a.quantity);
+    if (difference !== 0n) return difference > 0n ? 1 : -1;
+    return a.title.localeCompare(b.title);
+  });
+}
+
+/** Says only what the rows can back: a link hint when one opens, the Personal rule when one shows. */
+function breakdownDescription(rows: readonly OrganizationUsageRow[]): string | undefined {
+  const parts = [
+    rows.some((row) => row.insightsWorkspaceId) ? "Open a workspace to see its Insights." : null,
+    rows.some((row) => row.kind === "personal")
+      ? "Personal workspaces show amounts only, never their chats."
+      : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+type MorePages = {
+  key: string;
+  pages: OrganizationUsageWorkspacePage[];
+  loading: boolean;
+  error?: Error;
+};
 
 export function OrganizationUsageDashboard(props: { accountId: string; enabled: boolean }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
+  const directory = useOptionalOrganizationDirectory();
+  const navigate = useNavigate();
   const [period, setPeriod] = useState<OrganizationUsagePeriod>("month");
-  const [cursor, setCursor] = useState<string | undefined>();
   const [revision, setRevision] = useState(0);
   const [metric, setMetric] = useState("");
   const [state, setState] = useState<{
@@ -80,11 +174,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
     data?: OrganizationUsageSummary;
     error?: Error;
   }>({ key: "" });
-  const [pageState, setPageState] = useState<{
-    key: string;
-    data?: OrganizationUsageWorkspacePage;
-    error?: Error;
-  }>({ key: "" });
+  const [more, setMore] = useState<MorePages>({ key: "", pages: [], loading: false });
   const key = JSON.stringify([props.accountId, props.enabled, period, revision]);
   useEffect(() => {
     if (!props.enabled) return;
@@ -111,40 +201,43 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
   }, [client, key, props.accountId, props.enabled, period]);
   const data = state.key === key ? state.data : undefined;
   const error = state.key === key ? state.error : undefined;
-  const pageKey = JSON.stringify([key, data?.until, cursor]);
-  useEffect(() => {
-    if (!props.enabled || !data || !cursor) return;
-    let active = true;
-    const controller = new AbortController();
-    setPageState({ key: pageKey });
-    void (async () => {
-      try {
-        const page = await client.getOrganizationUsageWorkspacePage(
-          {
-            accountId: props.accountId,
-            period,
-            until: data.until,
-            afterWorkspaceId: cursor,
-          },
-          { signal: controller.signal },
-        );
-        if (active) setPageState({ key: pageKey, data: page });
-      } catch (pageLoadError) {
-        if (active)
-          setPageState({
-            key: pageKey,
-            error:
-              pageLoadError instanceof Error ? pageLoadError : new Error(String(pageLoadError)),
-          });
-      }
-    })();
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [client, props.enabled, props.accountId, data, period, cursor, pageKey]);
-  const page = cursor ? (pageState.key === pageKey ? pageState.data : undefined) : data;
-  const pageError = cursor && pageState.key === pageKey ? pageState.error : undefined;
+  // Further pages of shared workspaces belong to this exact summary.
+  const moreKey = JSON.stringify([key, data?.until]);
+  const pages = more.key === moreKey ? more.pages : [];
+  const loadingMore = more.key === moreKey && more.loading;
+  const moreError = more.key === moreKey ? more.error : undefined;
+  const nextCursor =
+    pages.length > 0 ? pages.at(-1)!.nextWorkspaceCursor : data?.nextWorkspaceCursor;
+  async function loadMoreWorkspaces() {
+    if (!data || !nextCursor || loadingMore) return;
+    const pagesSoFar = pages;
+    setMore({ key: moreKey, pages: pagesSoFar, loading: true });
+    try {
+      const page = await client.getOrganizationUsageWorkspacePage({
+        accountId: props.accountId,
+        period,
+        until: data.until,
+        afterWorkspaceId: nextCursor,
+      });
+      setMore((current) =>
+        current.key === moreKey
+          ? { key: moreKey, pages: [...pagesSoFar, page], loading: false }
+          : current,
+      );
+    } catch (pageLoadError) {
+      setMore((current) =>
+        current.key === moreKey
+          ? {
+              key: moreKey,
+              pages: pagesSoFar,
+              loading: false,
+              error:
+                pageLoadError instanceof Error ? pageLoadError : new Error(String(pageLoadError)),
+            }
+          : current,
+      );
+    }
+  }
   const selected =
     data?.totals.find((total) => metricKey(total) === metric) ??
     data?.totals.find((total) => total.eventType === "model.cost") ??
@@ -154,192 +247,224 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
   const range = data
     ? `${formatDate(data.since, { utc: true })} - ${formatDate(data.until, { utc: true })}, UTC`
     : null;
+  const rows =
+    data && selected
+      ? organizationUsageRows({
+          shared: [...data.workspaces, ...pages.flatMap((page) => page.workspaces)],
+          personal: data.personalWorkspaces,
+          selected,
+          members: directory?.members.value ?? [],
+          youMembershipId: directory?.you?.id ?? null,
+          accessContext,
+        })
+      : [];
+  const unlistedPersonal = data ? data.personalWorkspaceCount - data.personalWorkspaces.length : 0;
+  const openInsights = (workspaceId: string) => {
+    const back = currentPageReturnTo("Billing & usage");
+    void navigate({
+      to: "/workspaces/$workspaceId/insights",
+      params: { workspaceId },
+      search: returnToSearch(back),
+    });
+  };
+  const insightsHref = (workspaceId: string) => {
+    const back = returnToSearch(currentPageReturnTo("Billing & usage"));
+    const query = new URLSearchParams(back as Record<string, string>).toString();
+    return `${workspaceInsightsPath(workspaceId)}${query ? `?${query}` : ""}`;
+  };
   return (
     <section aria-label="Organization usage dashboard" className="min-w-0">
-      <Section
-        title="Usage"
-        description="Usage you can see in this organization. Not an invoice."
-        action={
-          <SegmentedControl<OrganizationUsagePeriod>
-            size="sm"
-            aria-label="Usage period"
-            disabled={!props.enabled}
-            value={period}
-            onValueChange={(value) => {
-              setPeriod(value);
-              setCursor(undefined);
-            }}
-            options={periods}
-          />
-        }
-      >
-        <div className="mt-3 flex min-w-0 flex-col gap-4">
-          {!props.enabled ? (
-            <p className="text-xs leading-[18px] text-fg-muted">
-              You don't have permission to view usage. Ask an organization owner.
-            </p>
-          ) : error ? (
-            <ErrorMessage
-              variant="block"
-              title="Couldn't load period usage"
-              announce
-              action={
-                <RowButton onClick={() => setRevision((value) => value + 1)}>Try again</RowButton>
-              }
-            >
-              {error.message}
-            </ErrorMessage>
-          ) : !data ? (
-            <p role="status" className="text-xs leading-[18px] text-fg-muted">
-              Loading period usage
-            </p>
-          ) : data.totals.length === 0 ? (
-            <EmptyState
-              variant="inline"
-              title="No visible usage recorded in this period."
-              description={range ?? undefined}
+      <SectionStack>
+        <Section
+          title="Usage"
+          description="Every workspace, Personal workspaces included. Not an invoice."
+          action={
+            <SegmentedControl<OrganizationUsagePeriod>
+              size="sm"
+              aria-label="Usage period"
+              disabled={!props.enabled}
+              value={period}
+              onValueChange={setPeriod}
+              options={periods}
             />
-          ) : (
-            <>
-              <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
-                <div className="min-w-0">
-                  {selected ? (
-                    <p
-                      className="text-xl leading-7 font-semibold tracking-[-0.5px] text-fg tabular-nums"
-                      title={formatExactUsage(selected.quantity, selected.unit)}
-                    >
-                      {formatUsageAmount(selected.quantity, selected.unit)}
-                    </p>
+          }
+        >
+          <div className="mt-3 flex min-w-0 flex-col gap-4">
+            {!props.enabled ? (
+              <p className="text-xs leading-[18px] text-fg-muted">
+                You don't have permission to view usage. Ask an organization owner.
+              </p>
+            ) : error ? (
+              <ErrorMessage
+                variant="block"
+                title="Couldn't load period usage"
+                announce
+                action={
+                  <RowButton onClick={() => setRevision((value) => value + 1)}>Try again</RowButton>
+                }
+              >
+                {error.message}
+              </ErrorMessage>
+            ) : !data ? (
+              <p role="status" className="text-xs leading-[18px] text-fg-muted">
+                Loading period usage
+              </p>
+            ) : data.totals.length === 0 ? (
+              <EmptyState
+                variant="inline"
+                title="No usage recorded in this period."
+                description={range ?? undefined}
+              />
+            ) : (
+              <>
+                <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
+                  <div className="min-w-0">
+                    {selected ? (
+                      <p
+                        className="text-xl leading-7 font-semibold tracking-[-0.5px] text-fg tabular-nums"
+                        title={formatExactUsage(selected.quantity, selected.unit)}
+                      >
+                        {formatUsageAmount(selected.quantity, selected.unit)}
+                      </p>
+                    ) : null}
+                    <p className="text-xs leading-[18px] text-fg-muted">{range}</p>
+                  </div>
+                  {data.totals.length > 1 ? (
+                    <SelectMenu
+                      size="sm"
+                      aria-label="Usage metric"
+                      value={selected ? metricKey(selected) : null}
+                      onValueChange={setMetric}
+                      options={data.totals.map((total) => ({
+                        value: metricKey(total),
+                        label: usageMetricLabel(total.eventType),
+                        meta: usageUnitLabel(total.unit),
+                      }))}
+                      className="w-60 max-w-full"
+                    />
                   ) : null}
-                  <p className="text-xs leading-[18px] text-fg-muted">{range}</p>
                 </div>
-                {data.totals.length > 1 ? (
-                  <SelectMenu
-                    size="sm"
-                    aria-label="Usage metric"
-                    value={selected ? metricKey(selected) : null}
-                    onValueChange={setMetric}
-                    options={data.totals.map((total) => ({
-                      value: metricKey(total),
-                      label: usageMetricLabel(total.eventType),
-                      meta: usageUnitLabel(total.unit),
-                    }))}
-                    className="w-60 max-w-full"
+                {chart && selected && (
+                  <AreaChart
+                    labels={chart.labels.map((bucket) =>
+                      data.granularity === "hour"
+                        ? `${bucket.slice(11, 16)} UTC`
+                        : formatDate(`${bucket}T00:00:00.000Z`, { utc: true }),
+                    )}
+                    series={[
+                      {
+                        id: "usage",
+                        label: usageMetricLabel(selected.eventType),
+                        values: chart.values.map((value) => Math.max(0, value)),
+                        className: "text-brand",
+                      },
+                      ...(hasCorrections
+                        ? [
+                            {
+                              id: "corrections",
+                              label: "Negative adjustment magnitude",
+                              values: chart.values.map((value) => Math.max(0, -value)),
+                              className: "text-status-waiting",
+                            },
+                          ]
+                        : []),
+                    ]}
+                    valuePrefix={selected.unit === "usd_micros" ? "$" : ""}
+                    valueSuffix={selected.unit === "usd_micros" ? "" : ` ${selected.unit}`}
                   />
-                ) : null}
-              </div>
-              {chart && selected && (
-                <AreaChart
-                  labels={chart.labels.map((bucket) =>
-                    data.granularity === "hour"
-                      ? `${bucket.slice(11, 16)} UTC`
-                      : formatDate(`${bucket}T00:00:00.000Z`, { utc: true }),
-                  )}
-                  series={[
-                    {
-                      id: "usage",
-                      label: usageMetricLabel(selected.eventType),
-                      values: chart.values.map((value) => Math.max(0, value)),
-                      className: "text-brand",
-                    },
-                    ...(hasCorrections
-                      ? [
-                          {
-                            id: "corrections",
-                            label: "Negative adjustment magnitude",
-                            values: chart.values.map((value) => Math.max(0, -value)),
-                            className: "text-status-waiting",
-                          },
-                        ]
-                      : []),
-                  ]}
-                  valuePrefix={selected.unit === "usd_micros" ? "$" : ""}
-                  valueSuffix={selected.unit === "usd_micros" ? "" : ` ${selected.unit}`}
-                />
-              )}
-              {hasCorrections && (
-                <p className="text-xs leading-[18px] text-fg-muted">
-                  Negative adjustments show as a separate line. The total includes them.
-                </p>
-              )}
-            </>
-          )}
-        </div>
-      </Section>
-      {props.enabled && data && data.totals.length > 0 ? (
-        <div className="mt-6 border-t border-border pt-6">
-          <Section
-            title="By shared workspace"
-            description="Personal workspaces aren't listed, so rows may not add up to the total."
-          >
-            <div className="flex min-w-0 flex-col gap-3">
-              {pageError ? (
-                <ErrorMessage
-                  variant="inline"
-                  title="Couldn't load workspace totals"
-                  announce
-                  action={<RowButton onClick={() => setCursor(undefined)}>Try again</RowButton>}
-                >
-                  {pageError.message}
-                </ErrorMessage>
-              ) : null}
-              {cursor && !page && !pageError ? (
-                <RowList label="Usage by shared workspace" columns={WORKSPACE_COLUMNS} busy flush>
-                  <ListRowSkeleton count={3} />
-                </RowList>
-              ) : (page?.workspaces ?? []).length === 0 ? (
-                <p className="text-xs leading-[18px] text-fg-muted">
-                  No shared workspace used anything in this period.
-                </p>
-              ) : (
-                <RowList
-                  label="Usage by shared workspace"
-                  columns={WORKSPACE_COLUMNS}
-                  nameLabel="Workspace"
-                  flush
-                >
-                  {(page?.workspaces ?? []).map((workspace) => {
-                    const total = workspace.totals.find(
-                      (item) => selected && metricKey(item) === metricKey(selected),
-                    );
-                    const quantity = total?.quantity ?? "0";
-                    const unit = selected?.unit ?? "";
+                )}
+                {hasCorrections && (
+                  <p className="text-xs leading-[18px] text-fg-muted">
+                    Negative adjustments show as a separate line. The total includes them.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </Section>
+        {props.enabled && data && data.totals.length > 0 && selected ? (
+          <div className="flex min-w-0 flex-col gap-3">
+            <Section title="By workspace" description={breakdownDescription(rows)}>
+              <RowList
+                label="Usage by workspace"
+                columns={WORKSPACE_COLUMNS}
+                nameLabel="Workspace"
+                flush
+              >
+                {rows.map((row) => {
+                  const cells = {
+                    total: (
+                      <span
+                        className="text-fg tabular-nums"
+                        title={formatExactUsage(row.quantity, selected.unit)}
+                      >
+                        {formatUsageAmount(row.quantity, selected.unit)}
+                      </span>
+                    ),
+                  };
+                  if (row.kind === "personal") {
                     return (
                       <ListRow
-                        key={workspace.workspaceId}
-                        leading={<LogoTile name={workspace.name ?? "Workspace"} />}
-                        title={workspace.name ?? "Workspace"}
-                        cells={{
-                          total: (
-                            <span
-                              className="text-fg tabular-nums"
-                              title={formatExactUsage(quantity, unit)}
-                            >
-                              {formatUsageAmount(quantity, unit)}
-                            </span>
-                          ),
-                        }}
+                        key={row.key}
+                        leading={<LogoTile icon={<UserIcon />} name={row.title} />}
+                        title={row.title}
+                        titleAddon={
+                          row.you ? <MetaChip variant="outline">You</MetaChip> : undefined
+                        }
+                        meta={["Personal workspace"]}
+                        cells={cells}
                       />
                     );
-                  })}
-                </RowList>
-              )}
-              {(cursor || page?.nextWorkspaceCursor) && (
-                <div className="flex gap-2">
-                  {cursor && (
-                    <RowButton onClick={() => setCursor(undefined)}>First workspaces</RowButton>
-                  )}
-                  {page?.nextWorkspaceCursor && (
-                    <RowButton onClick={() => setCursor(page.nextWorkspaceCursor!)}>
-                      Next workspaces
-                    </RowButton>
-                  )}
-                </div>
-              )}
-            </div>
-          </Section>
-        </div>
-      ) : null}
+                  }
+                  const workspaceId = row.insightsWorkspaceId;
+                  return (
+                    <ListRow
+                      key={row.key}
+                      leading={<LogoTile name={row.title} />}
+                      title={row.title}
+                      meta={workspaceId ? undefined : ["Only its admins can open Insights"]}
+                      cells={cells}
+                      {...(workspaceId
+                        ? {
+                            indicator: "open" as const,
+                            href: insightsHref(workspaceId),
+                            linkProps: { onClick: inAppClick(() => openInsights(workspaceId)) },
+                          }
+                        : {})}
+                    />
+                  );
+                })}
+              </RowList>
+            </Section>
+            {moreError ? (
+              <ErrorMessage
+                variant="inline"
+                title="Couldn't load more workspaces"
+                announce
+                action={<RowButton onClick={() => void loadMoreWorkspaces()}>Try again</RowButton>}
+              >
+                {moreError.message}
+              </ErrorMessage>
+            ) : null}
+            {nextCursor && !moreError ? (
+              <div>
+                <RowButton disabled={loadingMore} onClick={() => void loadMoreWorkspaces()}>
+                  {loadingMore ? "Loading workspaces…" : "Show more workspaces"}
+                </RowButton>
+              </div>
+            ) : null}
+            {unlistedPersonal > 0 ? (
+              <p className="text-xs leading-[18px] text-fg-muted">
+                {data.personalWorkspaceCount} Personal workspaces had usage. This lists the{" "}
+                {data.personalWorkspaces.length} that spent the most.
+              </p>
+            ) : null}
+            <p className="text-xs leading-[18px] text-fg-muted">
+              Usage from other people's Only me chats isn't included.
+            </p>
+          </div>
+        ) : null}
+      </SectionStack>
     </section>
   );
 }

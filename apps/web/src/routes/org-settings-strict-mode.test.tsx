@@ -48,6 +48,8 @@ const getOrganizationUsageSummary = mock(
     buckets: [],
     workspaces: [],
     nextWorkspaceCursor: null,
+    personalWorkspaces: [],
+    personalWorkspaceCount: 0,
   }),
 );
 const getOrganizationUsageWorkspacePage = mock(
@@ -355,7 +357,7 @@ describe("organization billing StrictMode ownership", () => {
       period: "month",
       afterWorkspaceId: undefined,
     });
-    expect(container.textContent).toContain("No visible usage recorded in this period.");
+    expect(container.textContent).toContain("No usage recorded in this period.");
     expect(useBillingUsage).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Invoices and payment details");
     expect(container.textContent).not.toContain("OG-0042");
@@ -382,7 +384,7 @@ describe("organization billing StrictMode ownership", () => {
     await act(async () => period("This month").click());
     await flush();
     expect(usageSection.textContent).toContain("Couldn't load period usage");
-    expect(usageSection.textContent).not.toContain("No visible usage recorded");
+    expect(usageSection.textContent).not.toContain("No usage recorded");
 
     await act(async () => button(container, "Add credits").click());
     await flush();
@@ -422,6 +424,8 @@ describe("organization billing StrictMode ownership", () => {
       buckets: [],
       workspaces: [{ workspaceId, name: "First page workspace", totals: [total] }],
       nextWorkspaceCursor: workspaceId,
+      personalWorkspaces: [],
+      personalWorkspaceCount: 0,
     }));
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -431,7 +435,7 @@ describe("organization billing StrictMode ownership", () => {
     );
     await flush();
     expect(container.textContent).toContain("First page workspace");
-    await act(async () => button(container, "Next workspaces").click());
+    await act(async () => button(container, "Show more workspaces").click());
     await flush();
     expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
     expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
@@ -441,12 +445,13 @@ describe("organization billing StrictMode ownership", () => {
       until: timestamp,
       afterWorkspaceId: workspaceId,
     });
+    // More workspaces add to the list; the first page stays.
     expect(container.textContent).toContain("Second page workspace");
+    expect(container.textContent).toContain("First page workspace");
     // Amounts read in cents; a sliver under a cent says so instead of $0.00.
     expect(container.textContent).toContain("< $0.01");
     expect(container.textContent).not.toContain("$0.000100");
-    await act(async () => button(container, "First workspaces").click());
-    expect(container.textContent).toContain("First page workspace");
+    expect(container.textContent).not.toContain("Show more workspaces");
     expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
     expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
     await act(async () => root.unmount());

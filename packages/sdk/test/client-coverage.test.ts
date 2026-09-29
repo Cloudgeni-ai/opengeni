@@ -2327,6 +2327,8 @@ describe("OpenGeniClient billing", () => {
       buckets: [],
       workspaces: [],
       nextWorkspaceCursor: null,
+      personalWorkspaces: [],
+      personalWorkspaceCount: 0,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(

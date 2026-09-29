@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { XIcon } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, DonutChart, UsageMeter, donutTone } from "@/components/insights/charts";
@@ -27,6 +28,7 @@ import {
   type TraceTarget,
 } from "@/components/insights/mock-data";
 import { Button } from "@/components/ui/button";
+import { BackLink } from "@/components/ui/detail-page";
 import { ContentPage, DataScroller } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -34,6 +36,7 @@ import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import type { ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
 
 function inputSeriesHeading(seriesLabel: string, subject: string): string {
@@ -61,8 +64,16 @@ const EMPTY_PROMPT_CONTRIBUTIONS: WorkspaceInsightsSnapshot["promptContributions
 /**
  * Workspace Insights — live rollups from usage_events + model_call_facts.
  */
-export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
+export function InsightsRoute({
+  workspaceId,
+  returnTo,
+}: {
+  workspaceId: string;
+  /** Where a cross-scope link came from ("Billing & usage"); the back link returns there. */
+  returnTo?: ReturnTo | undefined;
+}) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const workspace = context.workspaces.find((w) => w.id === workspaceId);
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
   const reduceMotion = useReducedMotion();
@@ -177,10 +188,17 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
     return true;
   });
   const heading = (
-    <PageHeader
-      title="Insights"
-      description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
-    />
+    <div className="min-w-0">
+      {returnTo ? (
+        <BackLink
+          back={{ label: returnTo.label, onClick: () => void navigate({ href: returnTo.path }) }}
+        />
+      ) : null}
+      <PageHeader
+        title="Insights"
+        description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
+      />
+    </div>
   );
 
   if (!canRead || (loadError && !snapshot)) {

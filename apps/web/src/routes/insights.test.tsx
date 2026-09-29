@@ -38,6 +38,9 @@ mock.module("@/components/insights/count-up", () => ({
   CountUp: ({ value }: { value: number }) => <span>{value}</span>,
 }));
 mock.module("@/components/insights/causal-sheet", () => ({ CausalSheet: () => null }));
+const navigate = mock(async (_options: unknown) => undefined);
+const RouterPackage = await import("@tanstack/react-router");
+mock.module("@tanstack/react-router", () => ({ ...RouterPackage, useNavigate: () => navigate }));
 
 function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): WorkspaceInsightsSnapshot {
   return {
@@ -159,12 +162,12 @@ beforeEach(() => {
 
 const { InsightsRoute } = await import("./insights");
 
-async function renderRoute() {
+async function renderRoute(returnTo?: { path: string; label: string }) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<InsightsRoute workspaceId={workspaceId} />);
+    root.render(<InsightsRoute workspaceId={workspaceId} returnTo={returnTo} />);
   });
   return {
     container,
@@ -196,6 +199,28 @@ describe("Insights route presentation", () => {
       expect(getWorkspaceInsights).toHaveBeenCalledTimes(1);
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("opened from Billing & usage, the back link returns there", async () => {
+    const rendered = await renderRoute({
+      path: "/workspaces/w/organization?section=billing",
+      label: "Billing & usage",
+    });
+    try {
+      const back = Array.from(rendered.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Billing & usage",
+      );
+      await click(back ?? null);
+      expect(navigate).toHaveBeenCalledWith({ href: "/workspaces/w/organization?section=billing" });
+    } finally {
+      await rendered.unmount();
+    }
+    const plain = await renderRoute();
+    try {
+      expect(plain.container.textContent).not.toContain("Billing & usage");
+    } finally {
+      await plain.unmount();
     }
   });
 
