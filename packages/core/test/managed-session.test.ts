@@ -6,6 +6,7 @@ import {
   getManagedAuthRequestActorAdmissionStamp,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  configureManagedUserAdmission,
   installManagedAuthActorLeaseRuntimeForTest,
   ManagedAuthActorLeaseOutcomeUnknownError,
   markManagedAuthRequestActorTransitionApplied,
@@ -496,4 +497,33 @@ describe("getManagedSession", () => {
     }
     expect(sequence.remaining).toHaveLength(0);
   });
+});
+
+describe("managed deployment admission", () => {
+  for (const [email, verified, expected] of [
+    ["staff@example.com", true, 200],
+    ["STAFF@example.com", true, 200],
+    ["outsider@example.com", true, 403],
+    ["staff@example.com", false, 403],
+  ] as const) {
+    test(`existing session ${email}, verified=${verified}: ${expected}`, async () => {
+      const auth = {
+        api: {
+          getSession: async () => ({
+            headers: new Headers(),
+            response: {
+              session: { id: "existing" },
+              user: { id: "user", email, emailVerified: verified },
+            },
+          }),
+        },
+      };
+      configureManagedUserAdmission(auth as never, ["staff@example.com"]);
+      const app = new Hono().get("/", async (c) => {
+        await getManagedSession(c, auth as never);
+        return c.text("ok");
+      });
+      expect((await app.request("/")).status).toBe(expected);
+    });
+  }
 });

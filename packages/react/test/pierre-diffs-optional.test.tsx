@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { GitFileDiff } from "@opengeni/sdk";
 import { PierreDiff } from "../src/components/pierre-diff";
 import { registerPierreDiffs } from "../src/lib/pierre-diffs-loader";
+import { act } from "react";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -60,5 +61,21 @@ describe("optional @pierre/diffs peer", () => {
     expect(view.container.querySelector("[data-opengeni-plain-diff]")).toBeNull();
     expect(view.container.querySelector("[data-opengeni-pierre-diff]")).not.toBeNull();
     await view.unmount();
+  });
+
+  test("a view already showing plain text upgrades when a host registers the peer later", async () => {
+    const view = await renderComponent(<PierreDiff diff={diff} />);
+    try {
+      await flush(50);
+      expect(view.container.querySelector("[data-opengeni-plain-diff]")).not.toBeNull();
+      await act(async () => {
+        registerPierreDiffs(async () => ({ PatchDiff: () => <div data-test-late-diff /> }));
+      });
+      await flush(50);
+      expect(view.container.querySelector("[data-opengeni-plain-diff]")).toBeNull();
+      expect(view.container.querySelector("[data-opengeni-pierre-diff]")).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
   });
 });

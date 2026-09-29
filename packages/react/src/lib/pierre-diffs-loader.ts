@@ -10,11 +10,30 @@ export type PierreDiffsLoader = () => Promise<unknown>;
 
 let loader: PierreDiffsLoader | null = null;
 let loaded: Promise<unknown> | null = null;
+let revision = 0;
+const listeners = new Set<() => void>();
 
-/** Register (or clear with `null`) the loader for `@pierre/diffs/react`. */
+/**
+ * Register (or clear with `null`) the loader for `@pierre/diffs/react`.
+ * Views already on screen retry with the new loader, so a host may register
+ * lazily (for example from the route that renders diffs).
+ */
 export function registerPierreDiffs(next: PierreDiffsLoader | null): void {
+  if (next === loader) return;
   loader = next;
   loaded = null;
+  revision += 1;
+  for (const listener of listeners) listener();
+}
+
+/** Changes whenever the registered loader changes (for `useSyncExternalStore`). */
+export function pierreDiffsRevision(): number {
+  return revision;
+}
+
+export function subscribePierreDiffs(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 /** Resolve the registered `@pierre/diffs/react` module; rejects when none is registered. */

@@ -9,5 +9,8 @@ export { registerPierreDiffs, type PierreDiffsLoader } from "./lib/pierre-diffs-
  * skip it build without `@pierre/diffs` and render plain-text diffs.
  */
 export function enablePierreDiffs(): void {
-  registerPierreDiffs(() => import("@pierre/diffs/react"));
+  registerPierreDiffs(loadPierreDiffsModule);
 }
+
+// One stable loader identity, so repeated enable calls are no-ops.
+const loadPierreDiffsModule = () => import("@pierre/diffs/react");

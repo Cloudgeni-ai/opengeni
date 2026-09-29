@@ -1,3 +1,4 @@
+import { assertManagedUserAdmission, getManagedSession } from "@opengeni/core";
 import { randomUUID } from "node:crypto";
 import {
   BeginManagedAuthLoginTransactionRequest,
@@ -100,6 +101,11 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   app.get("/v1/auth/get-session", async (context) => {
     if (deps.settings.managedAuthSessionSetMode === "legacy") {
       if (!deps.managedAuth) throw new HTTPException(404);
+      if (deps.settings.allowedUserEmails !== undefined) {
+        const session = await getManagedSession(context, deps.managedAuth, { db: deps.db });
+        context.header("cache-control", "no-store");
+        return context.json(session ? safeBetterAuthSession(session) : null);
+      }
       return await deps.managedAuth.handler(context.req.raw);
     }
     context.header("cache-control", "no-store");
@@ -195,6 +201,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
       headers: context.req.raw.headers,
       returnHeaders: true,
     });
+    assertManagedUserAdmission(deps.managedAuth!, ambient.response?.user);
     const authSessionId = ambient.response?.session?.id;
     if (typeof authSessionId !== "string") {
       throw managedAuthApiError(401, "managed_authentication_required");

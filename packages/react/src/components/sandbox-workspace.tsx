@@ -63,10 +63,25 @@ import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 
-const LazySandboxFiles = lazy(async () => {
-  const { SandboxFiles } = await import("./sandbox-files");
-  return { default: SandboxFiles };
-});
+const LazySandboxFiles = lazy(() =>
+  import("./sandbox-files")
+    .then(({ SandboxFiles }) => ({ default: SandboxFiles }))
+    // A host may already have attempted stale-deployment recovery. Keep an
+    // optional chunk failure inside Files rather than unmounting the chat.
+    .catch(() => ({ default: FilesLoadFailed })),
+);
+
+function FilesLoadFailed() {
+  return (
+    <CenteredState tone="danger" icon={<TriangleAlertIcon className="size-5" aria-hidden />}>
+      <p className="text-og-sm font-medium text-og-fg">Files could not be loaded.</p>
+      <DockActionButton onClick={() => window.location.reload()}>
+        <RefreshCwIcon className="size-3" aria-hidden />
+        Reload
+      </DockActionButton>
+    </CenteredState>
+  );
+}
 
 function FilesTabBody(props: SandboxFilesProps) {
   return (

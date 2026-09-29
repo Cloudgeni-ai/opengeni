@@ -4,7 +4,7 @@ import type {
 } from "@opengeni/core/managed-auth-session-sets";
 import { sql } from "drizzle-orm";
 import type { Database } from "@opengeni/db";
-import type { ManagedAuth } from "@opengeni/core";
+import { assertManagedUserAdmission, type ManagedAuth } from "@opengeni/core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { runManagedAuthAttempt } from "./managed-auth-attempt-context";
 
@@ -55,7 +55,9 @@ export function createBetterAuthSessionAdapter(
 
     async resolveSelectedSession(input): Promise<ManagedAuthResolvedSession | null> {
       const resolved = await (await auth.$context).internalAdapter.findSession(input.token);
-      return liveResolvedSession(resolved);
+      const session = liveResolvedSession(resolved);
+      assertManagedUserAdmission(auth, session?.user);
+      return session;
     },
 
     async resolveAmbientSession(headers): Promise<ManagedAuthResolvedSession | null> {
@@ -64,7 +66,9 @@ export function createBetterAuthSessionAdapter(
       const token = signed ? verifiedSignedCookieValue(signed, context.secret) : null;
       if (!token) return null;
       const resolved = await context.internalAdapter.findSession(token);
-      return liveResolvedSession(resolved);
+      const session = liveResolvedSession(resolved);
+      assertManagedUserAdmission(auth, session?.user);
+      return session;
     },
 
     async refreshSelectedSession(input): Promise<ManagedAuthResolvedSession | null> {
@@ -75,6 +79,7 @@ export function createBetterAuthSessionAdapter(
       });
       const resolved = await auth.api.getSession({ headers, returnHeaders: true });
       if (!resolved.response) return null;
+      assertManagedUserAdmission(auth, resolved.response.user);
       // The provider may renew its durable expiry and emit token/cache cookies;
       // this server-side selected-slot resolution intentionally discards them.
       return resolved.response as ManagedAuthResolvedSession;
