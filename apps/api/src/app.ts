@@ -83,6 +83,7 @@ import {
   requestBodyValidationHttpError,
   tagRequestJsonParseErrors,
 } from "./http/request-body";
+import { invalidPathIdentifierHttpError } from "./http/path-identifier";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
 import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -1517,6 +1518,7 @@ export function createAppComposition(deps: AppDependencies): {
         ? new HTTPException(403, { message: rawError.message })
         : (workspaceControlBusyHttpError(rawError) ??
           requestBodyValidationHttpError(rawError) ??
+          invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;

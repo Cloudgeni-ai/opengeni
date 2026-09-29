@@ -3,6 +3,7 @@ import { CreateScheduledTaskRequest, type AccessGrant, type Permission } from "@
 import {
   assertScheduledTaskMutationOwner,
   createValidatedScheduledTask,
+  listScheduledTaskAccessAttention,
   scheduledTaskAttentionScope,
 } from "@opengeni/core";
 import {
@@ -177,6 +178,17 @@ describe("organization API key scheduled tasks", () => {
     expect(scheduledTaskAttentionScope(key)).toMatchObject({
       includeOwnerless: true,
     });
+    // The SDK's listScheduledTaskAccessAttention for that key succeeds.
+    const errors: unknown[] = [];
+    expect(
+      await listScheduledTaskAccessAttention({
+        db: client.db,
+        settings: settings(),
+        grant: key,
+        onError: (error) => errors.push(error),
+      }),
+    ).toEqual([]);
+    expect(errors).toEqual([]);
   }, 180_000);
 
   test("a legacy schedule owned by a key is refused as a visible terminal run", async () => {
