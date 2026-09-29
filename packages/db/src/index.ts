@@ -791,7 +791,11 @@ export {
 } from "./database";
 export { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
-export { normalizedCredentialHeaders } from "./connection-token-resolver";
+export {
+  BROKERED_CREDENTIAL_SHAPE_HINT,
+  brokeredCredentialBundleProblem,
+  normalizedCredentialHeaders,
+} from "./connection-token-resolver";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,

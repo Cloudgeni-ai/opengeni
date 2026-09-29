@@ -165,6 +165,7 @@ beforeAll(async () => {
       settings: testSettings({
         productAccessMode: "managed",
         delegationSecret,
+        environmentsEncryptionKey: Buffer.from(environmentsEncryptionKey).toString("base64"),
       }),
     } as ApiRouteDeps,
     {
@@ -817,6 +818,39 @@ describe("API Integration routes", () => {
       }),
     });
     expect(removed.status).toBe(200);
+  }, 60_000);
+
+  test("warns when the selected Connection does not place the credential the description declares", async () => {
+    if (!available || !client) return;
+    const source = { kind: "openapi", url: "https://127.0.0.1/secured-openapi.json" };
+    const preview = async (credential: Record<string, unknown>) => {
+      const connection = await createConnection(client!.db, {
+        accountId,
+        workspaceId,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: encryptEnvironmentValue(
+          environmentsEncryptionKey,
+          JSON.stringify(credential),
+        ),
+        createdBySubjectId: subjectId,
+      });
+      const response = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source, connectionId: connection.id }),
+      });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { warnings: string[] }).warnings;
+    };
+
+    const header = await preview({ headers: { Authorization: "Token synthetic" } });
+    expect(header.join("\n")).toContain('expects the credential in query "api_key"');
+    expect(header.join("\n")).not.toContain("synthetic");
+    expect(
+      await preview({ placements: [{ carrier: "query", name: "api_key", value: "synthetic" }] }),
+    ).toEqual([]);
+    const legacy = await preview({ apiKey: "synthetic" });
+    expect(legacy.join("\n")).toContain("stores no usable credential");
   }, 60_000);
 
   test("controls generic Integration facets through the public lifecycle", async () => {

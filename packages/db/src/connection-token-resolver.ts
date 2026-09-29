@@ -139,6 +139,13 @@ export type ResolveConnectionCredentialResult =
       resource?: string;
       selectedResources?: McpConnectionResourceScope[];
       authorizationUrl?: string;
+      /**
+       * Internal diagnosis only; never published on the wire. Set when an
+       * active non-OAuth Connection exists but its stored bundle carries no
+       * usable `headers`/`placements`, so "refresh" or "connect an account"
+       * would mislead the caller about the actual fix.
+       */
+      detail?: "invalid_credential";
     };
 type AuthNeededReason = Extract<
   ResolveConnectionCredentialResult,
@@ -257,6 +264,57 @@ export function normalizedCredentialHeaders(
     normalized[name] = value;
   }
   return normalized;
+}
+
+export const BROKERED_CREDENTIAL_SHAPE_HINT =
+  'store { headers: { "<Header-Name>": "<value>" } } or { placements: [{ carrier: "header" | "query" | "cookie", name, value, prefix? }] }';
+
+/**
+ * Why a non-OAuth credential bundle cannot be placed on a brokered request,
+ * or null when the runtime broker can use it. Mirrors
+ * `credentialMaterialForConnection` exactly so create-time validation and
+ * execution never disagree.
+ */
+export function brokeredCredentialBundleProblem(
+  credential: Record<string, unknown>,
+): string | null {
+  if (credential.placements !== undefined) {
+    try {
+      normalizedCredentialPlacements(credential.placements);
+      return null;
+    } catch (error) {
+      return `invalid credential placements (${credentialProblemDetail(error)}); ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+    }
+  }
+  if (credential.headers !== undefined) {
+    const headers = stringRecord(credential.headers);
+    if (!headers) {
+      return `credential.headers must map header names to string values; ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+    }
+    try {
+      normalizedCredentialHeaders(headers);
+      return null;
+    } catch (error) {
+      return `invalid credential headers (${credentialProblemDetail(error)}); ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+    }
+  }
+  const unplaced = Object.keys(credential).filter(
+    (key) => key !== "headers" && key !== "placements",
+  );
+  return `an api_key credential must say where the secret goes on each request${
+    unplaced.length > 0
+      ? ` (fields such as ${unplaced
+          .slice(0, 3)
+          .map((key) => JSON.stringify(key.slice(0, 64)))
+          .join(", ")} are never sent)`
+      : ""
+  }; ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+}
+
+function credentialProblemDetail(error: unknown): string {
+  return error instanceof Error
+    ? error.message.replace(/^connection credential returned /, "")
+    : "invalid value";
 }
 
 function normalizedCredentialPlacements(value: unknown): ConnectionCredentialPlacement[] {
@@ -490,6 +548,9 @@ export function buildConnectionTokenResolver(
       return {
         status: "auth_needed",
         reason: material.status === "unsupported" ? "unsupported_auth" : "refresh_failed",
+        ...(material.status === "invalid" && cred.kind !== "oauth2"
+          ? { detail: "invalid_credential" as const }
+          : {}),
         providerDomain: ref.providerDomain,
         ...(ref.provider ? { provider: ref.provider } : {}),
         connectionId: cred.id,

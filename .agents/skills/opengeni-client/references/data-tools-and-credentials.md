@@ -37,7 +37,7 @@ inventing results or exposing unrestricted database access.
 The normal workspace-scoped API Integration flow is deterministic control-plane work, not a model repeatedly reading and approving documentation:
 
 1. Host the API description and provider endpoint where the OpenGeni control plane can reach them under the deployment's network policy.
-2. Create or resolve the appropriate encrypted Connection when authentication is required.
+2. Create or resolve the appropriate encrypted Connection when authentication is required. An `api_key` Connection must say where the secret goes: `credential: { headers: { Authorization: "Token ..." } }`, or `credential: { placements: [{ carrier: "header" | "query" | "cookie", name, value, prefix? }] }` (query and cookie placements work for API Integrations only). Match `preview.auth.carrier`/`name` from step 3; a bare `{ apiKey }` is rejected with 422, and preview adds a warning when the Connection's placement differs from the description.
 3. Call previewApiIntegration with the source and, when needed, the Connection.
 4. Apply the customer's policy to the compiled operation list, safety classification, warnings, and approval modes. Select only intended operations.
 5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations.

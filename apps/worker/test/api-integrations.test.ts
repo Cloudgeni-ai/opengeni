@@ -452,6 +452,59 @@ describe("installed API Integration worker adapters", () => {
     }
   });
 
+  test("names the credential repair when an api_key Connection stores no usable shape", async () => {
+    const item = integration();
+    const authNeeded: unknown[] = [];
+    let providerCalls = 0;
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: item.serverId,
+          name: item.name,
+          url: item.baseUrl,
+          allowedTools: item.allowedTools,
+          connectionRef: item.connectionRef!,
+        },
+      ],
+    });
+    const localMcpServers = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+        status: "auth_needed",
+        reason: "refresh_failed",
+        detail: "invalid_credential",
+        providerDomain: item.providerDomain,
+        connectionId: item.connectionRef!.connectionId,
+      }),
+      onAuthNeeded: (payload) => {
+        authNeeded.push(payload);
+      },
+      fetchImpl: async () => {
+        providerCalls += 1;
+        return new Response(null, { status: 500 });
+      },
+    });
+    const prepared = await prepareAgentTools(
+      settings,
+      [{ kind: "mcp", id: item.serverId, optional: true }],
+      { localMcpServers },
+    );
+    try {
+      const result = await prepared.mcpServers[0]!.callToolResult!("inventory_api__list_items", {});
+      expect(result).toMatchObject({ isError: true });
+      expect(JSON.stringify(result)).toContain("stores no usable credential");
+      expect(JSON.stringify(result)).not.toContain("needs a connected account");
+      expect(providerCalls).toBe(0);
+      // The wire notice keeps its established reason; the internal detail never leaks.
+      expect(authNeeded).toEqual([expect.objectContaining({ reason: "refresh_failed" })]);
+      expect(JSON.stringify(authNeeded)).not.toContain("invalid_credential");
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("routes two instances of one definition through distinct tool namespaces and Connections", async () => {
     const finance = integration();
     const sales: ApiIntegrationRuntime = {
