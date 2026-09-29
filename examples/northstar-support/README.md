@@ -8,24 +8,22 @@ integration as a clear before/after:
    signals, change fields, add internal notes, and reply.
 2. Turn on the frontend-only **OpenGeni** switch to embed the agent workspace in
    the same product.
-3. The product backend creates OpenGeni sessions and proxies workspace-scoped
-   API/SSE traffic, keeping the organization API key server-side.
+3. The product backend onboards the demo operator as an external workspace
+   member, creates each OpenGeni session as that user with an explicit tool
+   selection and a stable idempotency key, and mounts the SDK's packaged
+   `createSessionProxyHandler` at `/api/opengeni/*`. The organization API key
+   stays server-side, and the browser can reach only the conversation routes.
 4. OpenGeni calls the product's authenticated Streamable HTTP MCP server.
 5. MCP tools read and mutate the same ticket data used by the human workflow.
 6. Product SSE updates the ticket immediately while OpenGeni SSE updates the
    agent timeline independently.
-7. The composer uses the SDK workspace model catalog and `ModelPolicyPicker`,
-   starts with Codex Luna, and opens directly to compact Codex model names (no
-   provider-selection detour). The operator can switch among the available
-   Codex models plus reasoning/latency options for follow-up turns without a
-   backend model constant.
-8. The session composer also includes the provider-neutral realtime voice control
-   from `@opengeni/react/realtime`; this workspace exposes Codex Live as the
-   available voice model.
-9. The panel uses the SDK's `data-og-density="compact"` preset. Typography,
-   composer sizing, picker geometry, and the portalled picker/voice menus all
-   come from public `--og-*` tokens; the demo only supplies Northstar colors and
-   product-specific layout.
+7. The panel is the default embed: `<OpenGeniProvider>` plus
+   `<SessionConversation>`, with Northstar tool renderers and Markdown. Runs use
+   the deployment's default model; the composer's model picker changes it per
+   turn.
+8. The panel uses the SDK's `data-og-density="compact"` preset. Typography and
+   composer sizing come from public `--og-*` tokens; the demo only supplies
+   Northstar colors and product-specific layout.
 
 The demo deliberately exposes four tools over the selected ticket: `get_ticket`,
 `get_customer`, `update_ticket`, and `add_internal_note`. Mutations are
@@ -42,7 +40,9 @@ organization workspace, and a public HTTPS tunnel for the MCP endpoint.
 
 The built-in organization API-key scope includes `workspace:admin`, which
 implies the ordinary workspace capabilities this example uses, including
-sessions, files, and MCP attachment. It still does not imply the literal
+external-member onboarding (`members:manage`), sessions, files, and MCP
+attachment. The server grants the fixed demo operator (`maya.chen`, source
+`northstar-demo`) only `workspace:read`, `sessions:*`, and `files:*` access. It still does not imply the literal
 `secrets:read` permission. These are workspace capabilities, not browser-origin
 registrations; file bytes still travel through short-lived signed storage URLs.
 
@@ -71,27 +71,17 @@ Open <http://127.0.0.1:3101>. If not using ngrok, set
 
 ## What to inspect
 
-- `src/server.ts`: backend session creation, scoped API proxy, MCP tools, dummy
-  domain state, and product SSE.
-- `src/support-agent-panel.tsx`: OpenGeni React timeline, status, the SDK
-  policy-aware model picker in the composer, and realtime voice control.
+- `src/server.ts`: explicit onboarding, server-side session creation, the
+  packaged session proxy, MCP tools, dummy domain state, and product SSE.
+- `src/support-agent-panel.tsx`: `OpenGeniProvider` + `SessionConversation`.
 - `src/support-tool-renderers.tsx`: product-specific rendering of MCP activity.
 - `src/use-support-demo.ts`: product SSE plus missed-event reconciliation.
 
-This is a local integration example, not a production auth template. A real
-SaaS should authenticate its users, authorize each product resource and
+This is a local integration example, not a production auth template: its proxy
+`resolve` hook returns one fixed operator. A real SaaS should authenticate its
+users in `resolve`, pass its CSRF check as `authorizeMutation`, authorize each product resource and
 OpenGeni workspace mapping, deploy MCP on its backend, store secrets in a secret
 manager, and rate-limit both its session and tool endpoints. See
 [`docs/product-integration.md`](../../docs/product-integration.md),
 [`docs/session-mcp-servers.md`](../../docs/session-mcp-servers.md), and
 [`packages/sdk/README.md`](../../packages/sdk/README.md).
-
-The sidebar's **Connections** button opens `ConnectPanel` from
-`@opengeni/react/connect` with `presentation="catalog"`. Its host wrapper owns
-only the dialog, controller lifetime, and authorization navigation; provider
-readiness and setup come through the existing workspace API proxy.
-
-For custom layouts, `ConnectionCatalog` accepts `grouped={false}` to display
-capabilities individually. `ConnectionServiceRow` and `ConnectionOptionRow` are
-also exported separately; grouping changes presentation only, not connection
-identity, permissions, or setup callbacks.

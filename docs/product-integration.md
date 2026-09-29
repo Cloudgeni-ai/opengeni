@@ -656,12 +656,13 @@ In a custom route, `proxySessionEventStream` re-streams SSE with the SDK's
 reconnect, replay-by-sequence, gap backfill, and deduplication. Unknown
 additive event types must not crash the product UI.
 
-The runnable [Northstar support example](../examples/northstar-support) shows
-authenticated product MCP and React composition, but its `/api/opengeni`
-route is a raw demo passthrough that forwards any path in one preselected
-workspace with the organization key's service authority and no user identity.
-Do not copy it; use `createSessionProxyHandler` and the organization-key
-`ensureWorkspace` flow above.
+The runnable [Northstar support example](../examples/northstar-support) is the
+default path end to end: explicit external-member onboarding, server-side
+session creation with an explicit tool selection and stable idempotency key,
+`createSessionProxyHandler`, `<OpenGeniProvider>` + `<SessionConversation>`,
+and an authenticated product MCP server. It uses one preselected workspace and
+a fixed demo operator; use the organization-key `ensureWorkspace` flow above
+and your own authentication for production tenants.
 
 The product controls whether it renders final answers only, assistant progress,
 selected tool calls, or a full operational timeline. Presentation filtering

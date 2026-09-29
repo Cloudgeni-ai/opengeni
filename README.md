@@ -103,7 +103,7 @@ const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
 Your server maps tenants with `ensureWorkspace`, onboards users with `addExternalWorkspaceMember`, and creates sessions with explicit tools. If your product already has a Vercel `useChat` or OpenAI-shaped chat UI, `createChatHandler` from `@opengeni/sdk/chat` is a text-only fallback backend for it.
 
-Start with the [product integration guide](docs/product-integration.md), then the [TypeScript SDK](packages/sdk/README.md) and [React components](packages/react/README.md). The [chat quickstart](examples/chat-quickstart) is a runnable server example of the chat fallback, and [Northstar support](examples/northstar-support) is a demo SaaS embed whose raw API passthrough is not a production pattern.
+Start with the [product integration guide](docs/product-integration.md), then the [TypeScript SDK](packages/sdk/README.md) and [React components](packages/react/README.md). The [chat quickstart](examples/chat-quickstart) is a runnable server example of the chat fallback, and [Northstar support](examples/northstar-support) is a runnable SaaS embed of the default path with a product MCP server.
 
 ## How it works
 

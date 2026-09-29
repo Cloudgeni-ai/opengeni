@@ -117,7 +117,7 @@ export const handleOpenGeni = createSessionProxyHandler(og, {
 | `files`             | `false` disables attachment routes                                                                                                |
 | `maxBodyBytes`      | Request body limit; defaults to 1 MiB                                                                                             |
 
-Browsers cannot choose tools, MCP servers, Skills, instructions, or model policy for a new session, rotate MCP credentials, or attach anything but files. Do not replace this handler with a raw passthrough that forwards arbitrary paths under the organization key, as the Northstar demo does.
+Browsers cannot choose tools, MCP servers, Skills, instructions, or model policy for a new session, rotate MCP credentials, or attach anything but files. Do not replace this handler with a raw passthrough that forwards arbitrary paths under the organization key. The [Northstar support example](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/northstar-support) shows the whole default path with a product MCP server.
 
 ## Render the conversation
 
