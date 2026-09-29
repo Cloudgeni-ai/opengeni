@@ -153,6 +153,7 @@ import {
   selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
+  workspaceDefaultRigOptionLabel,
   type ConnectedMachineTarget,
   type SessionDraft,
 } from "@/lib/session-create";
@@ -1767,6 +1768,7 @@ function SessionsIndexRouteContent({
             machines={machines}
             variableSets={selectableVariableSets}
             rigs={selectableRigs}
+            workspaceDefaultRigId={workspace?.defaultRigId ?? null}
             catalogRecovery={{
               error: fixedResourceCatalogError,
               refreshing: personalResourceCatalogRefreshPending,
@@ -2297,6 +2299,7 @@ function ComputeTargetControl(props: {
   machines: MachineView[];
   variableSets: VariableSet[];
   rigs: Rig[];
+  workspaceDefaultRigId: string | null;
   catalogRecovery: FixedResourceCatalogRecovery;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
@@ -2481,6 +2484,7 @@ function ComputeTargetControl(props: {
             personalResourceAccess={props.personalResourceAccess}
             variableSets={props.variableSets}
             rigs={props.rigs}
+            workspaceDefaultRigId={props.workspaceDefaultRigId}
             catalogRecovery={props.catalogRecovery}
           />
           <FleetErrorNotice onRetry={() => void fleet.refresh()} />
@@ -2495,6 +2499,7 @@ function ComputeTargetControl(props: {
         personalResourceAccess={props.personalResourceAccess}
         variableSets={props.variableSets}
         rigs={props.rigs}
+        workspaceDefaultRigId={props.workspaceDefaultRigId}
         catalogRecovery={props.catalogRecovery}
       />
     );
@@ -2542,6 +2547,7 @@ function ComputeTargetControl(props: {
           personalResourceAccess={props.personalResourceAccess}
           variableSets={props.variableSets}
           rigs={props.rigs}
+          workspaceDefaultRigId={props.workspaceDefaultRigId}
           catalogRecovery={props.catalogRecovery}
         />
       ) : (
@@ -2629,6 +2635,7 @@ function ManagedSandboxFields(props: {
   personalResourceAccess: NewSessionPersonalResourceAccess;
   variableSets: VariableSet[];
   rigs: Rig[];
+  workspaceDefaultRigId?: string | null;
   catalogRecovery: FixedResourceCatalogRecovery;
 }) {
   const { draft, onChange } = props;
@@ -2684,7 +2691,7 @@ function ManagedSandboxFields(props: {
       {/* Rig picker — offered only when the workspace has at least one rig.
           Picking a rig preselects its default variable sets in the control
           below (still user-overridable). Empty ⇒ the workspace default rig,
-          resolved server-side. */}
+          resolved server-side; its option names that default. */}
       {showRigs ? (
         <div className="flex items-center justify-between gap-3 px-3 py-2">
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
@@ -2703,7 +2710,9 @@ function ManagedSandboxFields(props: {
             }}
             className="h-8 w-auto max-w-56 text-xs"
           >
-            <option value="">Workspace default</option>
+            <option value="">
+              {workspaceDefaultRigOptionLabel(props.workspaceDefaultRigId, props.rigs)}
+            </option>
             {workspaceRigs.map((rig) => (
               <option key={rig.id} value={rig.id}>
                 {rig.name}

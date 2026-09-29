@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import type { BundledSkillId } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   bootstrapWorkspace,
@@ -130,5 +131,42 @@ describe("bundled Skill selection real PostgreSQL create identity", () => {
           createSessionWithIdempotencyKeyResult(client.db, { ...request, bundledSkillIds: [] }),
         ).rejects.toThrow("Session create idempotency key was reused with a different request");
     }
+  });
+
+  test("a stored id this build does not know is dropped instead of breaking the session read", async () => {
+    if (!client) return;
+    // A newer release (or one rolled back from) may have stored an id this build
+    // lacks. Reading it must narrow the selection, never fail the row mapping.
+    const request = {
+      ...(await input()),
+      bundledSkillIds: ["builtin:opengeni-sites" as const, "builtin:opengeni-documents" as const],
+    };
+    const known: BundledSkillId[] = ["builtin:opengeni-documents", "builtin:opengeni-sites"];
+    const created = await createSessionWithIdempotencyKeyResult(client.db, request);
+    if (created.denied) throw new Error("Unexpected admission denial");
+    const sessionId = created.session.id;
+    // An unchanged stored selection replays against the same unsorted request.
+    const replay = await createSessionWithIdempotencyKeyResult(client.db, request);
+    if (replay.denied) throw new Error("Unexpected retry denial");
+    expect(replay.created).toBe(false);
+    expect(replay.session.bundledSkillIds).toEqual(known);
+    await shared!.admin`UPDATE sessions
+      SET metadata = jsonb_set(metadata, ${[reservedKey]}::text[],
+        '["builtin:not-in-this-build", "builtin:opengeni-documents", "builtin:opengeni-sites"]'::jsonb)
+      WHERE id=${sessionId}`;
+    const session = await getSession(client.db, request.workspaceId, sessionId);
+    expect(session!.bundledSkillIds).toEqual(known);
+    // Replay identity compares the exact stored value, not the narrowed read. A
+    // retry naming only the known id is a different request; replaying it would
+    // hand back a session that a build knowing the other id reads as wider.
+    await expect(createSessionWithIdempotencyKeyResult(client.db, request)).rejects.toThrow(
+      "Session create idempotency key was reused with a different request",
+    );
+    await shared!.admin`UPDATE sessions
+      SET metadata = jsonb_set(metadata, ${[reservedKey]}::text[], '["builtin:not-in-this-build"]'::jsonb)
+      WHERE id=${sessionId}`;
+    expect((await getSession(client.db, request.workspaceId, sessionId))!.bundledSkillIds).toEqual(
+      [],
+    );
   });
 });

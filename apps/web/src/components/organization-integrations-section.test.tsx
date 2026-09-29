@@ -80,9 +80,11 @@ test("explicit save, labeled custom choices, and deny-all are distinct from filt
   expect(host.textContent).toContain("Custom MCP");
   expect(host.textContent).toContain("Custom OpenAPI");
   expect(host.textContent).toContain("Custom GraphQL");
-  const checkbox = host.querySelector("input[type=checkbox]") as HTMLInputElement;
-  expect(checkbox.closest("label")?.textContent).toContain("Slack");
-  await click(checkbox);
+  const toggle = host.querySelector('[role="switch"]') as HTMLButtonElement;
+  expect(toggle.getAttribute("aria-label")).toBe("Allow Slack");
+  // Stable keys stay out of the rows.
+  expect(host.textContent).not.toContain("custom:mcp");
+  await click(toggle);
   expect(host.textContent).toContain("1 selected");
   expect(calls.filter((call) => call.method === "PUT")).toHaveLength(0);
   await click(button("Save changes"));
@@ -99,10 +101,10 @@ test("uncertain saves lock edits and retry the exact operation and request", asy
     if (++attempts === 1) throw new Error("offline");
     return { mode: "restricted", allowedIntegrationKeys: ["slack"], revision: 2 };
   });
-  await click(host.querySelector("input[type=checkbox]")!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
   await click(button("Save changes"));
   expect(host.textContent).toContain("1 selected");
-  expect((host.querySelector("select") as HTMLSelectElement).disabled).toBe(true);
+  expect(button("All integrations").disabled).toBe(true);
   await click(button("Retry same save"));
   const writes = calls.filter((call) => call.method === "PUT");
   expect(writes).toHaveLength(2);
@@ -112,12 +114,9 @@ test("uncertain saves lock edits and retry the exact operation and request", asy
 
 test("switching from unrestricted to no selections explicitly saves deny-all", async () => {
   const { calls } = await mount(undefined, "unrestricted");
-  const select = host.querySelector("select")!;
-  expect((host.querySelector("input[type=checkbox]") as HTMLInputElement).disabled).toBe(true);
-  await act(async () => {
-    select.value = "restricted";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+  // Everything is allowed, so there is nothing to pick.
+  expect(host.querySelector('[role="switch"]')).toBeNull();
+  await click(button("Only selected"));
   expect(host.textContent).toContain("Saving will block all new integration connections");
   await click(button("Save changes"));
   expect(calls.find((call) => call.method === "PUT")?.body).toMatchObject({
@@ -131,7 +130,7 @@ test("revision conflict preserves draft and requires explicit refresh", async ()
   await mount(async () => {
     throw { status: 409 };
   });
-  await click(host.querySelector("input[type=checkbox]")!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
   await click(button("Save changes"));
   expect(host.textContent).toContain("1 selected");
   expect(button("Save changes").disabled).toBe(true);
@@ -143,11 +142,11 @@ test("a definite permission refusal is not presented as an uncertain save", asyn
   const { calls } = await mount(async () => {
     throw { status: 403 };
   });
-  await click(host.querySelector("input[type=checkbox]")!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
   await click(button("Save changes"));
   expect(host.textContent).toContain("no longer have permission");
   expect(host.textContent).not.toContain("Retry same save");
-  expect((host.querySelector("select") as HTMLSelectElement).disabled).toBe(true);
+  expect(button("All integrations").disabled).toBe(true);
   expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
 });
 
@@ -159,7 +158,7 @@ test("actor change ignores late save callbacks and non-admin sessions cannot rea
         resolve = done;
       }),
   );
-  await click(host.querySelector("input[type=checkbox]")!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
   await click(button("Save changes"));
   await render({ identity: { ...identity, subjectId: "other", principalGeneration: 2 } });
   await act(async () =>
@@ -170,7 +169,7 @@ test("actor change ignores late save callbacks and non-admin sessions cannot rea
   const count = calls.length;
   await render({ managedSession: false });
   expect(calls).toHaveLength(count);
-  expect(host.querySelector("select")).toBeNull();
+  expect(host.querySelector("[data-slot=segmented-control]")).toBeNull();
 });
 
 test("StrictMode replay cannot let a stale initial read overwrite the current draft", async () => {
@@ -201,7 +200,7 @@ test("StrictMode replay cannot let a stale initial read overwrite the current dr
       </StrictMode>,
     ),
   );
-  await click(host.querySelector("input[type=checkbox]")!);
+  await click(host.querySelector<HTMLButtonElement>('[role="switch"]')!);
   await act(async () =>
     resolveFirst({ mode: "unrestricted", allowedIntegrationKeys: [], revision: 1 }),
   );

@@ -19,6 +19,14 @@ checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append
 cursor; database position conflicts succeed only for the same turn and exact
 canonical item. Provider dispatch and successful settlement require this check.
+Provider-loop and stream-consumer checkpoints serialize through the same sink:
+each reads history and its watermark only after the preceding checkpoint settles.
+They retain their individual durability requirements and errors; a failed save
+does not prevent the next caller from attempting persistence.
+Fresh history inserts verify their persisted representation through `RETURNING`;
+only conflicting positions require a separate read. This keeps numeric-position
+RLS scans out of the ordinary append path without weakening retry verification
+or the exact-attempt write fence.
 
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
@@ -40,6 +48,21 @@ and is neither a queue row nor an internal update. One execution attempt runs as
 one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
+
+Each accepted turn also freezes a content-free **surface**
+(`session_turns.surface`, `SessionTurnSurface` in
+`packages/contracts/src/product-analytics.ts`): the product surface its request
+entered through (`web`, `slack`, `api_key`, `embedded`, `scheduled`, `agent`,
+`voice`, `site`, `automation`, `mcp`, or `system`). It is an analytics label,
+never authority, and is immutable after admission (migration 0533). Entry points
+that know their surface pass it explicitly (Slack, realtime voice, automations,
+maintenance); core derives the rest once from the verified access path in
+`packages/core/src/turn-surface.ts`. A scheduled occurrence claims `scheduled`
+and another agent's message or Steer claims `agent`; every other internal turn
+(goal continuation, child results, command results, wait timeouts, compaction)
+inherits the surface of the session's latest started turn. `origin`
+(`session_turns.source`) keeps its existing meaning, so a scheduled turn still
+has origin `system`.
 
 After execution ends, every physical finalization stage has a five-minute
 containment deadline, including normally completed turns. This is not a
@@ -1014,7 +1037,66 @@ explicitly provide a durable catalog through skillCatalogInHistory.
 Workspace-managed Skill reads return current authorized content, so a read can
 observe a saved revision newer than its initial descriptor. Bundled/session Skill
 reads use the selected attempt's artifacts. Read outputs enter ordinary tool-call
-history.
+history. A repeated default `SKILL.md` read by the model returns a short
+`alreadyInContext` receipt with the current revision identity instead of the text
+when an active, call-paired `skill_read` result in this session already holds the
+same identity and exact text. The check judges each result as the current model
+receives it, after this turn's tool-output bound, so a result truncated when stored,
+truncated by a lower bound of the current model, or spilled never counts. Compaction
+marks those rows inactive, so the next read after compaction returns full text. The
+lookup only saves tokens: when it fails, the read returns full text.
+Explicit `paths` (the fresh-copy request, including `["SKILL.md"]`), `listFiles`,
+and Codemode callers always receive content. The check reads only the acting
+session's active history and leaves the tool schema, instructions, and Skill index
+unchanged, so it does not move the cached prompt prefix.
+An identifier that resolves to no configured Skill fails with the available
+Skills listed by id and name only, the same set the index and `skill_search`
+show. Entries resembling the requested identifier come first, the list stops at
+25 entries or 4 KiB with a count that points to `skill_search`, and the requested
+identifier is not echoed. `skill_checkout` resolves through the same reader and
+fails the same way before starting a sandbox.
+Every `skill_read` increments `opengeni_skill_reads_total{source, skill, kind, caller}`.
+`source` is `builtin`, `session`, `workspace`, `organization`, `personal`, or
+`unknown` for a read refused before a Skill resolved; `skill` is the built-in id,
+or `custom` for every other Skill, so tenant ids, names, and requested identifiers
+never become labels; `kind` is `full` (default SKILL.md read), `already_in_context`,
+`files` (explicit paths), `list`, or `refused` (the read returned an error instead
+of Skill text); `caller` is `model` or `codemode`. A successful model read also
+carries a content-free `SkillUse` fact under MCP `_meta["opengeni/skillUse"]`:
+the resolved id and source, a ledger `revisionId` or, for a built-in or session
+artifact, the whole-artifact `contentSha256`, the kind, the UTF-8 `bytes` of the
+text returned, `inIndex` (listed in this turn's frozen, model-visible Skill
+index), and `searchedThisTurn` (returned by `skill_search` earlier in the same
+attempt). The model output is the text part alone, so `_meta` never reaches the
+model or model history; only the `agent.toolCall.output` event projection keeps
+it. It holds no Skill text, user text, or Skill title, and it is dropped rather
+than let a result cross the 1 MiB model-visible cap. Codemode results never carry
+it. The writer's `SkillUse` schema is closed; `skillUseFromToolOutput` reads a
+stored event and drops fields a newer worker added instead of the whole fact.
+The default `skill_read` (no `paths`) also returns a bounded `scripts` index:
+each runnable file's path and first usage line (a shebang or script extension, or
+any file under `scripts/` or `bin/` that is not a document or data file such as
+JSON or YAML; at most 32 entries and 4 KiB,
+with `scriptsOmitted` for the rest), so the agent sees the commands without a
+checkout. Explicit `paths`, `listFiles`, and the tool schema are unchanged.
+`skill_checkout` writes the selected files through one Channel-A
+`fsWriteFiles` batch: normally one sandbox command, so one workspace mutation
+admission and one `fs.changed` event, instead of several commands per file. It
+never overwrites. A file already holding the same bytes is kept and reported
+`unchanged`; any other existing entry, a symbolic link on the directory path, or
+a path resolving outside the workspace fails before anything is written. A
+request too large for one command (about 88 KiB of encoded content) runs
+read-only checks first, then writes only missing files in batches, and reports a
+later-batch failure as a partial mutation; repeating the same checkout finishes
+it. A path whose directory chain alone cannot fit one check command is refused
+as invalid rather than skipped. Optional `paths` copies exactly those files, for example one script to run.
+Only a complete checkout that created its directory returns `revisionId` and
+`scopeVersion` as a `skill_publish` base; any other result says
+`publishable: false`, because a reused directory may hold files outside the
+revision. Each call records `opengeni_skill_checkouts_total{outcome, selection}`,
+`opengeni_skill_checkout_duration_seconds{phase, outcome}` (`resolve`,
+`sandbox`, `write`, `total`; lazy box start falls in `sandbox` when checkout is
+the turn's first sandbox use) and `opengeni_skill_checkout_files_total{result}`.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
@@ -1295,6 +1377,17 @@ prefix (the parent session row is locked with the child) and the worker delivers
 the row right after the producing commit; the reaper covers crashes. See
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
+Normal idle completion performs goal evaluation, a final durable peek, and the
+transactional `markSessionIdle` boundary without an unconditional five-second
+grace period. The transaction rejects stale active/queued work and pending
+runnable machine input before producing an episode-deduplicated parent result.
+A signal accepted during the close chain causes another peek; later input
+retains its durable wake and may start a new
+workflow run of the same session, rather than coalescing into the prior idle
+episode. The `session-normal-idle-no-grace-v1` patch preserves old recorded
+timer commands for replay. Held input-wait, goal backoff, cancellation,
+quiescence, and capacity timers are unchanged.
+
 A workflow run closing during a current input wait or an active goal is parked,
 not completed work. Idle settlement preserves that projection and durable wake
 without creating a child terminal result. Goal completion, explicit goal pause,
@@ -1314,13 +1407,29 @@ by itself. A result arriving while the parent turn is live remains available to
 that turn's ordinary loop.
 The provider-neutral coordination contract creates a child only for concrete,
 bounded, independently useful work with a defined integration point. Parent
-work must stay disjoint from the delegated scope. A parent joining a child uses
-`session_wait` with `waitFor: "completion"` before committing or publishing
-dependent work. `goal.completed` is a durable goal fact, not proof that the
+work must stay disjoint from the delegated implementation. Independent review
+or comparison can examine the same subject with a distinct deliverable.
+Delegation has setup and coordination overhead, so the default prefers a direct
+answer for small work and a `session_send_message` follow-up to an existing child
+over another spawn. Explicit user requests and applicable Skill guidance for
+delegation, independent review, or fresh workers override that default within
+existing authority. For
+multi-minute work with nothing else to advance, the parent calls `wait_for_input`
+right after spawning; the child's terminal result wakes it and carries the
+bounded final answer (`payload.finalAnswer`), which the parent uses directly,
+reading the child's results when that copy is absent, truncated, or lacks needed
+detail. No short execution wait or preliminary status recheck is required. The
+out-of-turn deadline can span hours or days within the tool's limits, selected
+for the dependency or meaningful monitoring rather than unchanged reassurance;
+explicit user/task/Skill check or update cadences remain supported. A
+`session_get` snapshot between waits is not new evidence. A parent joining a
+short child inside its turn uses `session_wait` with `waitFor: "completion"`
+before committing or publishing dependent work. `goal.completed` is a durable goal fact, not proof that the
 child has emitted its final result. Completed commentary messages, maintenance
 turns, and continuation segment settlements are also ignored until an ordinary
 result-bearing turn settles. The ordinary `waitFor: "change"` mode remains
-available for progress monitoring.
+available for monitoring settled changes; it does not wake on streamed
+commentary or on a final message before its turn settles.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -1598,6 +1707,8 @@ The managed browser exposes a separate public contract at
 GET is a bounded, provider-free projection. POST requires the canonical managed
 human cookie, current session-control authority, an operation UUID, explicit
 historical-checkpoint acceptance, and the exact selection returned by GET.
+The exact built-in local human may read GET to see the system-selected Retry
+route; local mode cannot submit POST consent.
 Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
 routes, legacy/unregistered archives, and `archive.previous` are unsupported.
 
@@ -1652,6 +1763,16 @@ not claim restore success. Failed/stale public restores and a later loss after
 verified recovery remain explicit blockers requiring operator review; this slice
 does not introduce an abandon/reset or automatic re-consent operation.
 
+A fresh exact operator historical-checkpoint authorization may supersede a
+`verified` public recovery after a later loss. Under the existing quiescence,
+epoch, generation and revision fences, its audit receipt retains the complete
+superseded public projection before atomically clearing that projection and
+installing the new authorization marker. Permanent public consent receipts and
+their warnings remain unchanged; accepted and failed public recoveries are not
+superseded. Automatic selection still rejects every non-null public recovery.
+Operators must accept the new checkpoint gap explicitly; a previous completed
+consent is not authority for a later loss.
+
 Migration `0495_consented_sandbox_recovery.sql` is additive with DB-default-off
 consent. Activation is owner-only and follows verified immutable API/control/turn
 images and worker templates; see [deployment](deployment.md). Disabling new consent
@@ -1666,10 +1787,73 @@ compatible workers. Pause/Cancel and settlement remain available. This public ga
 does not retrofit operator historical recovery that has no public consent receipt.
 No cancellation/reaper protocol changes are included.
 
+### Automatic continuity after a missing managed provider
+
+This is separate from human consent. Before agent construction (including
+on-demand sandbox turns), an exact live attempt may select the singleton
+session's registered CURRENT native Modal checkpoint only when the provider is
+definitively missing, the cold lease has an archive-generation mismatch, and
+no other holders, processes, mutations, pending tools or competing attempts
+remain. It records a distinct system-attributed audit and immutable per-session
+receipt before a replacement can be elected. The same attempt reuses that
+selection; stale attempts cannot change it. Retry may admit this narrowly
+recoverable route, but does not itself restore files or replay unknown effects.
+The lease pins group membership, route and CURRENT archive while selection is
+pending; restore admission recounts all group members, including private
+siblings. Only verified warm publication releases that pin.
+
+The existing cold election and native provider/artifact checks still decide
+whether a replacement becomes usable. No archive, uncertain provider, corrupt
+checkpoint, active writer or shared group remains blocked. Newer filesystem
+changes can be unavailable while conversation and external effects remain.
+Provider loss and fallback selection are also committed as audit facts before
+process-local counters; the reaper rebuilds a fresh, release-scoped alert
+inventory from those receipts if a worker exits after the transaction.
+Every agent reconstruction appends the same checkpoint-specific discontinuity
+warning to session instructions, after the stable workspace prompt prefix.
+Maintenance migration 0526 requires warning protocol v2 at attempt claim for
+every session with an automatic receipt, including after failed restoration or
+lease churn; old workers fail closed. Human-consented recovery keeps its
+independent v1 gate.
+
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
-their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
+their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+Filesystem snapshot recovery boots the exact selected immutable Image directly,
+attributes that single destination before verification, and rejects a missing
+snapshot without falling back to the base image or an older checkpoint. It does
+not create a temporary box and ask SDK hydration to replace it. Directory and tar
+archives still hydrate the elected destination. This removes the hidden second
+create. Migration 0523 adds a durable Modal creation receipt immediately before
+the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
+creation and retains the pinned SDK's public session implementation; its
+`modal-create-boundary.ts` hook runs after image/secret preparation and before
+provider dispatch. The receipt binds the lease epoch, authenticated provider
+namespace, actual app and image IDs, selected archive revision, operation name,
+and request digest. SDK retries are disabled for that mutation. Only the matching creator can
+attribute an exact returned instance. Until then, failure rollback and both
+lease reapers preserve the operation, epoch, and checkpoint; a database trigger
+also rejects erasure by older transition paths. Orphan deletion is postponed
+while any warming Modal lease lacks a provider identity. The operation name and
+tag are created atomically with the provider box; absence from the running-box
+inventory cannot prove that creation never happened. A returned instance is
+attributed before manifest setup, including after cancellation.
+
+This receipt is a fence, not a provider idempotency or replay guarantee. Losing
+the creator and its reply can leave the lease blocked; time, a missing named
+running sandbox, and termination of some other sandbox do not unblock it.
+Logical-image fallback is allowed after a missing-image preparation failure,
+before admission starts, and refused after admission starts. The maintenance
+sweep discovers expired unknown operations in bounded batches, including
+finished provider instances. It requires the same authenticated namespace and
+one exact app, image, operation name and tag match. An atomic tenant/epoch/receipt
+comparison attributes that instance without renewing the lease or publishing
+the workspace; ordinary holder-fenced draining then owns cleanup. Discovery
+absence, ambiguity or provider failure leaves the receipt unresolved. Never
+clear it or silently create another sandbox. Cleanup rechecks the persisted
+provider namespace before interpreting a missing instance or issuing a stop.
+Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
@@ -1733,6 +1917,19 @@ provider-deadline/operator rotation is retained by the DB release operation.
 Every fresh claim gets a new provider request ID; replacement attempts of an
 uninterrupted claim retain its stored ID. A workflow retry after release and
 intervening writes therefore cannot adopt an older snapshot as a newer generation.
+
+Re-arming a draining lease preserves its recorded workspace readiness. A provider
+address published during creation does not prove that workspace setup or restore
+verification completed. Both holder admission and explicit re-arm keep such a
+lease fenced until recovery settles it; they cannot promote recorded `not_ready`
+state to warm. Legacy envelopes without a recovery record retain the existing
+exact-provider-identity checks.
+
+Modal cleanup waits for the provider's terminal exit result. A stop request
+acknowledgement alone cannot settle SDK shutdown, by-ID rescue, or an orphan
+sweep. Failed or unavailable exit confirmation propagates to recovery (and is
+not reported as an orphan termination); borrowed SDK handles still leave their
+provider running. This does not establish the outcome of an unattributed create.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
@@ -2076,6 +2273,24 @@ or accepted waits are retained across the retry. Durable input/deadline
 arbitration remains in the existing session wait transaction and workflow;
 this does not resume a paused session.
 
+A yielded turn settles with an empty `turn.completed.output`: the wait, not an
+answer, ended it. When a human or API message started the turn (`source` `user`
+or `api`), settlement also records the turn's latest completed assistant
+message as `turn.completed.payload.reply`, for example a status answer given
+before waiting again on work in flight. That answer shares its model response
+with the `wait_for_input` call, so it streams as commentary; the recorded reply
+makes it unread-worthy and lets Slack post it without relabelling the stored
+history item or its provider-declared `phase`. A reply is not a result: child
+result joins still read `output`. The source alone does not decide it, because
+every session's first turn is `user`. Turns that machine input started record
+none, and neither does a turn whose initiator context carries agent provenance
+(`via`: a child an agent spawned, or an agent's API call) or the first turn of
+a session a worker-owned producer created (the `scheduler`, an
+`automation:<trigger>` or `site-auth-maintenance` service). The message the
+settling activity completed last is the reply; an activity that resumed the
+turn after an approval, a human-input answer or a recovery and completed none
+reads the turn's newest current durable `agent.message.completed` instead.
+
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace
 deletion takes a separate transaction-scoped background-command advisory prefix
@@ -2151,6 +2366,16 @@ completed model/tool truth, closes only the unresolved tool suffix, records
 from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
+
+A sandboxless attempt uses a plain Agent whose native capabilities cannot be
+added in place. If an authorized attachment commits an active machine pointer,
+the next provider-dispatch barrier first persists the complete preceding tool
+batch, then emits `native_capabilities_changed_this_attempt`. The same route
+recovery boundary rebuilds the agent from the committed route in a fresh attempt
+of the existing logical turn. Completed attachment and peer-tool receipts are
+not replayed; normal attempt authority and machine establishment checks still
+apply. Native-capable attempts and deployments with routing disabled do not
+perform this additional pointer check.
 
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with
@@ -2267,6 +2492,13 @@ wording. Retry stays hidden only for rejected credentials, and only while the
 same model is selected: it stays hidden for that failure on that model even
 after the key is fixed, when a new message re-runs the work. Billing, access,
 daily-limit and quota failures keep Retry, because each condition can clear.
+When the failed turn's model is the deployment's free model (catalog
+`cost: "free"`), the daily-limit copy names the free model instead and lists
+only the remedies the viewer can use: buying OpenGeni credits, connecting a
+model, or picking another model, with matching links. The connect remedy names
+ChatGPT or SuperGrok only when the deployment enables that subscription, and
+otherwise reads "connect a model provider". Every other model keeps the generic
+daily-limit wording.
 Failures with any other worker code keep their authored wording.
 
 A genuinely new `user.message` can still transition failed → queued and start a
@@ -2279,7 +2511,11 @@ session's durable wake revision. An active goal has a second, goal-owned
 monotonic wake/observed pair: terminal settlement advances it in the same
 transaction as the workflow wake, and continuation materialization observes it
 only alongside the typed update, event pair, usage fact, session transition,
-and successor workflow wake. Single-target producers signal directly;
+and successor workflow wake. Single-target producers signal directly, including
+an internal update that coalesces into a still-undelivered, often future-dated
+revision such as a `wait_for_input` deadline, so it does not wait for the
+10-second dispatcher tick (except terminal background-command settlement, which
+the dispatcher delivers);
 recursive controls trigger the bounded dispatcher once without loading the
 affected tree into API memory. Successful delivery acknowledges the exact
 revision, and the dispatcher retries only due unacknowledged rows.
@@ -2335,6 +2571,15 @@ Because the newest message carries the changing bytes, persistent
 `Agent.instructions` and earlier history remain prompt-cache stable. Public
 turn/queue projections and the standard timeline omit the field; full event and
 audit reads may return it, so it is never a secret boundary.
+
+The current time follows the same rule. Claim renders every accepted user-role
+message (human/API Send, Steer, realtime entries, goal continuations) with a
+separate `[Message sent Saturday 2026-09-26 07:51 UTC]` part taken from the
+turn's durable `created_at`, the acceptance time rather than the claim time, and
+persists it with the message. Delivered machine-input batches state their
+`deliveredAt` and each member's `createdAt` the same way. The model therefore
+knows the date without a tool call, nothing is computed at inference time, and
+recovery replays the stored bytes. The instructions never contain a clock.
 
 1. **`session_history_items` — conversation truth (the model-facing store).**
    Ordered, protocol-preserving SDK `AgentInputItem` JSON, exact for accepted
@@ -2441,6 +2686,25 @@ audit reads may return it, so it is never a secret boundary.
    reconstruct the target session's model conversation. A manager can inspect an
    independently bounded cross-session monitoring projection as ordinary tool
    output; that does not turn audit events into conversation truth.
+   `packages/runtime/src/run-events.ts` emits one `agent.message.completed` per
+   provider message, with its `messageId` (when the provider sent one) and
+   `phase`: `commentary` or `final_answer` as a Responses provider declares it
+   (deltas carry the phase declared in `response.output_item.added`), or else
+   the SDK's own rule: `commentary` when the same response asks for client tool
+   work or ends with a later message, since the SDK never returns such a message
+   as the final output, and `final_answer` for the message it returns. A
+   Responses message completes at its own `response.output_item.done`, before
+   the next message streams, rather than with the SDK's run items after the
+   whole response; an undeclared one waits only until its phase is known. The
+   worker publishes the phase-less settlement copy with `turn.completed` only
+   when the stream did not already complete the final text. Commentary is activity, not an answer: it creates no unread
+   attention, never wakes `session_wait` change mode or becomes a Slack post, and
+   stays out of the SDK chat reply. The exception is the reply a human's message
+   received before its turn waited for input, which settlement records on
+   `turn.completed` (see the `wait_for_input` boundary above).
+   `assistantMessagePhase`, `isStreamedAssistantMessageCompletion` and
+   `turnCompletedReply` in `@opengeni/contracts` are the shared classifiers;
+   `phase` stays optional for older events.
 
 Retained screenshots have a separate database/object lifecycle, not a fourth
 conversation store. Preparation creates a deterministic pending file/artifact

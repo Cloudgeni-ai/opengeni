@@ -30,7 +30,11 @@ export {
   type McpObservationReceipt,
 } from "./mcp-operation-observation";
 import { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
-export { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
+export {
+  formatSkillCatalog,
+  skillCatalogEntryIds,
+  type SkillCatalogDescriptor,
+} from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
@@ -56,6 +60,7 @@ import {
   type AttemptToolScope,
 } from "@opengeni/codemode";
 import {
+  ToolGatewayInputValidationError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -70,6 +75,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
+  FIRST_PARTY_MCP_CALLER_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -110,6 +116,10 @@ import {
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
+  IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS,
+  firstPartyToolFamily,
+  integrationToolFamily,
+  type ToolFamily,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
@@ -153,6 +163,7 @@ import {
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
+  modelToolResultFits,
   modelToolResultOverflowError,
   projectAttemptToolResultForCaller,
   spilledModelToolResult,
@@ -529,6 +540,7 @@ export {
 } from "./model-input";
 export type { ContextRobustnessFilterOptions, ModelInputProjectionPolicy } from "./model-input";
 export {
+  AssistantMessagePhaseTracker,
   HUMAN_INPUT_TOOL_NAME,
   modelResponseServiceTierFromSdkEvent,
   modelResponseUsageFromResponse,
@@ -1975,6 +1987,14 @@ export type BuildAgentOptions = {
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
   serviceTier?: "fast" | "priority";
+  /**
+   * Responses `text.verbosity`, set only for routes and models that accept it.
+   * Hosts must keep it constant for a session: like reasoning effort, a
+   * provider may treat it as part of the cached prompt prefix, so a
+   * per-message value could defeat prompt caching.
+   * Omitted sends no `text` settings, byte-identical to earlier requests.
+   */
+  textVerbosity?: "low" | "medium" | "high";
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
   // global-client callers (no model resolution) are byte-for-byte unchanged.
@@ -2275,7 +2295,7 @@ export function coreInstructions(
   rig?: RigInstructionsContext,
 ): string[] {
   return [
-    "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+    "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
     'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
     "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
@@ -2540,21 +2560,32 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * `isError`, cross the SDK through `callToolResult` plus
  * `McpResultCustomDataBridge`; their complete exact result is retained
  * separately from this compatibility fallback.
+ *
+ * A gateway argument-validation rejection is not a transient failure: the
+ * identical call would be rejected again. It names the missing or mistyped
+ * properties and asks the model to correct them instead of "Please try again".
  */
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = exactErrorMessage(error);
-  return {
-    isError: true,
-    content: [
-      {
-        type: "text",
-        text: `An error occurred while running the tool. Please try again. Error: ${details}`,
-      },
-    ],
-  };
+  const text =
+    invalidToolArgumentsText(error) ??
+    `An error occurred while running the tool. Please try again. Error: ${exactErrorMessage(error)}`;
+  return { isError: true, content: [{ type: "text", text }] };
+}
+
+function invalidToolArgumentsText(error: unknown): string | null {
+  try {
+    if (!(error instanceof ToolGatewayInputValidationError)) return null;
+    // The gateway rejects before authorization or execution, so nothing ran.
+    const summary = error.summary;
+    return summary
+      ? `The tool was not called because its arguments do not match the tool's input schema: ${summary}. Correct the named properties and call the tool again.`
+      : "The tool was not called because its arguments do not match the tool's input schema. Correct the arguments to match the schema and call the tool again.";
+  } catch {
+    return null;
+  }
 }
 
 // Applied to EVERY MCP server via the agent's `mcpConfig.errorFunction`
@@ -2840,6 +2871,7 @@ export function buildOpenGeniAgent(
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
         summary: "detailed",
       },
+      ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
@@ -3954,6 +3986,9 @@ export type PrepareToolsOptions = {
   // Immutable human authority used only for subject-owned connection lookup.
   // This is intentionally separate from the worker's first-party MCP identity.
   credentialSubjectId?: string;
+  // The turn's frozen causal human, advertised to MCP servers in the
+  // `_meta.opengeni` identity of every tools/call. Informational, never authority.
+  initiatingHumanSubjectId?: string | null;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
@@ -4876,7 +4911,13 @@ async function prepareAttemptToolEnvironment(
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
-  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
+  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry, {
+    workspaceId: scope.workspaceId,
+    sessionId: scope.sessionId,
+    turnId: scope.turnId,
+    attemptId: scope.attemptId,
+    initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
+  });
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
       ...prepared.definitions.map((definition) => ({
@@ -5115,9 +5156,25 @@ async function prepareWorkspaceToolGatewayEnvironment(
   });
 }
 
+/**
+ * Identity OpenGeni advertises to MCP servers as `_meta.opengeni` on every
+ * tools/call, so a server can correlate the call with a workspace, session,
+ * turn, and causal human. It is trusted worker scope, set after caller
+ * transport metadata so a caller cannot replace it, and it is informational:
+ * a server must still authorize with the connection's own credential.
+ */
+export type McpCallIdentity = {
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  initiatingHumanSubjectId: string | null;
+};
+
 async function prepareToolGatewayDefinitionsFromServers(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+  callIdentity?: McpCallIdentity,
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: ToolGatewayDefinition[];
@@ -5176,10 +5233,7 @@ async function prepareToolGatewayDefinitionsFromServers(
               await server.executeCatalogTool(
                 toolName,
                 args,
-                {
-                  ...(context.transportMeta ?? {}),
-                  opengeniOperationId: context.operationId,
-                },
+                attemptToolCallMeta(server.registryId, context, callIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                 },
@@ -5212,6 +5266,32 @@ async function prepareToolGatewayDefinitionsFromServers(
     },
   );
   return { servers: preparedServers, definitions: perServerDefinitions.flat() };
+}
+
+/**
+ * MCP `_meta` for one gateway call. The first-party server also learns which
+ * attempt surface issued it, so it can tell a read whose output reached the
+ * model from one a Codemode script kept to itself. Set last, so transport
+ * metadata can never claim another caller. Third-party servers never see it.
+ */
+export function attemptToolCallMeta(
+  serverId: string,
+  context: {
+    operationId: string;
+    caller: Pick<ToolGatewayCaller, "kind">;
+    transportMeta?: Record<string, unknown> | null;
+  },
+  callIdentity?: McpCallIdentity,
+): Record<string, unknown> {
+  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
+    context.transportMeta ?? {};
+  return {
+    ...transportMeta,
+    opengeniOperationId: context.operationId,
+    ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
+    // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
+    ...(callIdentity ? { opengeni: { ...callIdentity } } : {}),
+  };
 }
 
 function attemptToolCodemodePath(serverId: string, toolName: string): readonly string[] {
@@ -6757,6 +6837,122 @@ export function withMcpToolDisplayMetadata(
   return display ? { ...item, display } : payload;
 }
 
+/** Catalog identity and source of one tool, as the analytics classifier reads it. */
+export type ToolCallCatalogIdentity = Pick<ToolGatewayCatalogEntry, "identity" | "source">;
+
+/** The registry fields the analytics classifier reads; never URLs in output. */
+export type ToolFamilyRegistryEntry = Pick<
+  Settings["mcpServers"][number],
+  "id" | "url" | "connectionRef"
+>;
+
+function mcpServerHost(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function registryServerToolFamily(
+  serverId: string,
+  toolName: string | undefined,
+  registry: readonly ToolFamilyRegistryEntry[],
+): ToolFamily | null {
+  if (serverId === "opengeni" || serverId === "files" || serverId === "docs") {
+    return firstPartyToolFamily(toolName);
+  }
+  if (serverId === CODEX_APPS_MCP_SERVER_ID) return integrationToolFamily(["chatgpt.com"]);
+  const inProcessDomain = Object.hasOwn(IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS, serverId)
+    ? IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS[serverId]
+    : undefined;
+  if (inProcessDomain) return integrationToolFamily([inProcessDomain]);
+  const config = registry.find((candidate) => candidate.id === serverId);
+  if (!config) return null;
+  return integrationToolFamily([config.connectionRef?.providerDomain, mcpServerHost(config.url)]);
+}
+
+/**
+ * Content-free analytics family for one catalog identity: the first-party
+ * tool name, `integration:<reviewed domain>`, or `custom`. Null when the
+ * identity cannot be placed; a guess is never exported.
+ */
+export function toolFamilyForCatalogIdentity(
+  entry: ToolCallCatalogIdentity,
+  registry: readonly ToolFamilyRegistryEntry[],
+): ToolFamily | null {
+  switch (entry.source) {
+    case "opengeni":
+    case "files":
+    case "docs":
+    case "interaction":
+      return firstPartyToolFamily(entry.identity.toolName);
+    case "codex_apps":
+      return integrationToolFamily(["chatgpt.com"]);
+    case "mcp":
+      return registryServerToolFamily(entry.identity.serverId, entry.identity.toolName, registry);
+  }
+}
+
+function preparedServerHasModelToolName(
+  server: PrefixedMcpServer | DeferredPreparedMcpServer,
+  name: string,
+): boolean {
+  for (const candidate of server.modelToolNames()) {
+    if (candidate === name) return true;
+  }
+  return false;
+}
+
+/**
+ * Content-free analytics family for one model-visible tool-call name. Reads
+ * only already-prepared server facts, like display metadata, and never
+ * triggers a deferred connection.
+ */
+export function toolCallFamily(
+  servers: readonly MCPServer[],
+  registry: readonly ToolFamilyRegistryEntry[],
+  name: string,
+): ToolFamily | null {
+  for (const server of servers) {
+    if (server instanceof AttemptDefinitionMcpServer) {
+      const identity = server.toolCatalogIdentity(name);
+      if (identity) return toolFamilyForCatalogIdentity(identity, registry);
+      continue;
+    }
+    if (
+      (server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer) &&
+      preparedServerHasModelToolName(server, name)
+    ) {
+      const toolName =
+        server instanceof PrefixedMcpServer
+          ? server.unprefixedToolName(name)
+          : server.toolDisplayMetadata(name)?.toolName;
+      return registryServerToolFamily(server.registryId, toolName, registry);
+    }
+  }
+  // Not served by any MCP server: a base runtime, router, media, or hosted tool.
+  return firstPartyToolFamily(name);
+}
+
+/** Stamp the analytics family on an event copy; never rename the executable call. */
+export function withToolCallFamily(
+  servers: readonly MCPServer[],
+  registry: readonly ToolFamilyRegistryEntry[],
+  payload: unknown,
+): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const item = payload as Record<string, unknown>;
+  const raw =
+    item.rawItem && typeof item.rawItem === "object"
+      ? (item.rawItem as Record<string, unknown>)
+      : {};
+  const name = item.name ?? item.toolName ?? raw.name;
+  if (typeof name !== "string") return payload;
+  const toolFamily = toolCallFamily(servers, registry, name);
+  return toolFamily ? { ...item, toolFamily } : payload;
+}
+
 const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
 
 type McpLifecycleFailure = {
@@ -6827,6 +7023,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
   readonly toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
   readonly name = "opengeni-attempt-local-tools";
   private readonly tools: RuntimeMcpTool[];
+  private readonly catalogIdentities = new Map<string, ToolCallCatalogIdentity>();
   private environment: AttemptToolEnvironment | null = null;
   private environmentProvider: (() => Promise<AttemptToolEnvironment>) | null = null;
   private closed = false;
@@ -6836,6 +7033,12 @@ class AttemptDefinitionMcpServer implements MCPServer {
     private readonly aggregateToolBudget: McpAggregateToolListBudget,
     private readonly subjectId: string,
   ) {
+    for (const definition of definitions) {
+      this.catalogIdentities.set(definition.modelName, {
+        identity: definition.identity,
+        source: definition.source,
+      });
+    }
     const descriptors = definitions.map(
       (definition) =>
         ({
@@ -6851,6 +7054,11 @@ class AttemptDefinitionMcpServer implements MCPServer {
     this.tools = [
       ...(this.aggregateToolBudget.replace(this.name, descriptors) as RuntimeMcpTool[]),
     ];
+  }
+
+  /** Canonical identity behind one model-visible name, for analytics only. */
+  toolCatalogIdentity(modelName: string): ToolCallCatalogIdentity | undefined {
+    return this.catalogIdentities.get(modelName);
   }
 
   bindAttemptToolEnvironment(environment: AttemptToolEnvironment): void {
@@ -7787,6 +7995,7 @@ export const CODE_SEARCH_DIRECTIVE =
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
+  "Codemode calls and result reads require the same live execution attempt. While a Codemode command is pending, keep this attempt alive with `command_wait`/`command_read`; do not end the turn or call `wait_for_input` to await it. After an attempt ends, its CLI credentials expire and a new attempt cannot read its operation ID. Inspect retained command output and session tool receipts before deciding whether another call is needed; an observation error does not prove execution failed. Never automatically replay a mutation. " +
   "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +
   'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
@@ -9895,6 +10104,9 @@ export function repositoryUsesSandboxClone(
     return false;
   }
   return (
+    // A best-effort repository must go through the clone hook: the SDK's
+    // manifest materialization has no per-entry failure tolerance.
+    resource.optional === true ||
     settings.sandboxBackend === "modal" ||
     Boolean(resource.expectedCommitSha) ||
     Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
@@ -10819,13 +11031,165 @@ export async function refreshGitCredentialBindingTokenFiles(
   }
 }
 
+const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository resource ";
+
+/**
+ * Wall-clock bound for one automatically attached (optional) repository clone,
+ * and the share of the repository-clone lifecycle command all optional clones
+ * may use. Both stay below SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS so a hung
+ * optional fetch is skipped with a warning instead of failing sandbox setup.
+ * Explicitly attached repositories are not bounded here.
+ */
+export const OPTIONAL_REPOSITORY_CLONE_TIMEOUT_SECONDS = 60;
+const OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS = 90;
+
+const cloneRepositoryFunctionLines: readonly string[] = [
+  "clone_repository() {",
+  '  target="$1"',
+  '  uri="$2"',
+  '  ref="$3"',
+  '  subpath="$4"',
+  '  expected_commit="${5:-}"',
+  '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
+  // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
+  // proof of a completed materialization: an interrupted clone (worker crash /
+  // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
+  // this check forever. A full-repo target must actually BE a work tree to be
+  // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
+  // the mount path before the repo exists). Subpath extracts are not git repos —
+  // for those the plain non-empty check stands (no stronger signal available).
+  '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
+  "      fi",
+  '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "    fi",
+  '    echo "Re-materializing partial repository resource at $target" >&2',
+  '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
+  "  fi",
+  '  mkdir -p "$(dirname "$target")"',
+  '  tmp="${target}.tmp.$$"',
+  '  rm -rf "$tmp"',
+  // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
+  // (set -eu would exit before any cleanup).
+  '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+  '    rm -rf "$tmp"',
+  '    echo "Repository resource fetch failed for $target" >&2',
+  '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
+  "    exit 1",
+  "  fi",
+  // origin/HEAD is best-effort: workspace capture diffs the branch against it
+  // when present and already treats a missing origin/HEAD as additive. `git
+  // remote set-head` only accepts a branch that the fetch materialized under
+  // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
+  // must not turn a successful fetch into a failed clone.
+  '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+  '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+  "  fi",
+  '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '    rm -rf "$tmp"',
+  '    echo "Repository resource fetch failed for $target" >&2',
+  "    exit 1",
+  "  fi",
+  '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+  '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
+  '    rm -rf "$tmp"',
+  "    exit 1",
+  "  fi",
+  '  if [ -n "$subpath" ]; then',
+  '    if [ ! -e "$tmp/$subpath" ]; then',
+  '      echo "Repository subpath not found: $subpath" >&2',
+  '      rm -rf "$tmp"',
+  "      exit 1",
+  "    fi",
+  '    if [ -d "$tmp/$subpath" ]; then',
+  '      mkdir -p "$target"',
+  '      cp -a "$tmp/$subpath/." "$target/"',
+  "    else",
+  '      rmdir "$target" 2>/dev/null || true',
+  '      cp -a "$tmp/$subpath" "$target"',
+  "    fi",
+  '    rm -rf "$tmp"',
+  "  else",
+  '    rmdir "$target" 2>/dev/null || true',
+  // Two concurrent turn holders can race this install: without the existence
+  // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
+  // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
+  // accept it; a non-empty non-repo survivor here is a mount point the manifest
+  // re-filled — install into it by content copy instead of rename.
+  '    if [ -e "$target" ]; then',
+  '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
+  '        rm -rf "$tmp"',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
+  "      fi",
+  '      cp -a "$tmp/." "$target/"',
+  '      rm -rf "$tmp"',
+  "    else",
+  '      mv "$tmp" "$target"',
+  "    fi",
+  '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+  "  fi",
+  '  if [ ! -e "$target" ]; then',
+  '    echo "Repository resource was not materialized at $target" >&2',
+  "    exit 1",
+  "  fi",
+  '  echo "Repository resource ready at $target"',
+  "}",
+];
+
+/**
+ * The optional-clone runner, emitted only when a repository is optional. Each
+ * optional clone runs `clone_repository` in its own `sh` under `timeout`, which
+ * signals the whole process group, so a hung `git fetch` cannot outlive its
+ * bound and hold the lifecycle command open. The trap removes the temporary
+ * clone of a timed-out fetch. All optional clones share one deadline so they
+ * never push the command past OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS. Without
+ * a usable `timeout` binary an optional clone runs unbounded, as before.
+ */
+function optionalRepositoryCloneRunnerLines(timeoutSeconds: number): string[] {
+  const script = [
+    "set -eu",
+    ...cloneRepositoryFunctionLines,
+    `trap 'rm -rf "\${tmp:-/nonexistent-opengeni-optional-clone}"; exit 143' TERM INT`,
+    'clone_repository "$@"',
+  ].join("\n");
+  return [
+    `optional_clone_script=${shellQuote(script)}`,
+    `optional_clone_deadline=$(( $(date +%s) + ${Math.max(OPTIONAL_REPOSITORY_CLONE_BUDGET_SECONDS, timeoutSeconds)} ))`,
+    "optional_clone_timeout=''",
+    "if command -v timeout >/dev/null 2>&1 && timeout -k 1 5 true >/dev/null 2>&1; then",
+    "  optional_clone_timeout=timeout",
+    "fi",
+    "run_optional_repository_clone() {",
+    `  limit=${timeoutSeconds}`,
+    "  remaining=$(( optional_clone_deadline - $(date +%s) ))",
+    '  if [ "$remaining" -lt "$limit" ]; then limit=$remaining; fi',
+    '  if [ "$limit" -le 0 ]; then',
+    "    return 124",
+    "  fi",
+    '  if [ -n "$optional_clone_timeout" ]; then',
+    '    "$optional_clone_timeout" -k 5 "$limit" sh -c "$optional_clone_script" optional-repository-clone "$@"',
+    "  else",
+    '    ( set -e; clone_repository "$@" )',
+    "  fi",
+    "}",
+  ];
+}
+
 export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+  options: { optionalCloneTimeoutSeconds?: number } = {},
 ): string {
   const cloneConcurrency = 4;
   assertUniqueResourceMountPaths(resources);
+  const optionalCloneTimeoutSeconds = Math.max(
+    1,
+    Math.floor(options.optionalCloneTimeoutSeconds ?? OPTIONAL_REPOSITORY_CLONE_TIMEOUT_SECONDS),
+  );
   const commands = [
     "set +x",
     "set -eu",
@@ -10848,103 +11212,35 @@ export function repositoryCloneCommand(
     "}",
     "ensure_git",
     ...gitCredentialHelperCommandLines(resources, bindings, stagedSeeds),
-    "clone_repository() {",
-    '  target="$1"',
-    '  uri="$2"',
-    '  ref="$3"',
-    '  subpath="$4"',
-    '  expected_commit="${5:-}"',
-    '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
-    // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
-    // proof of a completed materialization: an interrupted clone (worker crash /
-    // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
-    // this check forever. A full-repo target must actually BE a work tree to be
-    // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
-    // the mount path before the repo exists). Subpath extracts are not git repos —
-    // for those the plain non-empty check stands (no stronger signal available).
-    '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-    '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
-    '        echo "Repository resource already present at $target"',
-    "        return 0",
-    "      fi",
-    '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
-    "    fi",
-    '    echo "Re-materializing partial repository resource at $target" >&2',
-    '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
-    "  fi",
-    '  mkdir -p "$(dirname "$target")"',
-    '  tmp="${target}.tmp.$$"',
-    '  rm -rf "$tmp"',
-    // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
-    // (set -eu would exit before any cleanup).
-    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
-    '    rm -rf "$tmp"',
-    '    echo "Repository resource fetch failed for $target" >&2',
-    '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
-    "    exit 1",
-    "  fi",
-    // origin/HEAD is best-effort: workspace capture diffs the branch against it
-    // when present and already treats a missing origin/HEAD as additive. `git
-    // remote set-head` only accepts a branch that the fetch materialized under
-    // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
-    // must not turn a successful fetch into a failed clone.
-    '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-    '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
-    "  fi",
-    '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
-    '    rm -rf "$tmp"',
-    '    echo "Repository resource fetch failed for $target" >&2',
-    "    exit 1",
-    "  fi",
-    '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
-    '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
-    '    rm -rf "$tmp"',
-    "    exit 1",
-    "  fi",
-    '  if [ -n "$subpath" ]; then',
-    '    if [ ! -e "$tmp/$subpath" ]; then',
-    '      echo "Repository subpath not found: $subpath" >&2',
-    '      rm -rf "$tmp"',
-    "      exit 1",
-    "    fi",
-    '    if [ -d "$tmp/$subpath" ]; then',
-    '      mkdir -p "$target"',
-    '      cp -a "$tmp/$subpath/." "$target/"',
-    "    else",
-    '      rmdir "$target" 2>/dev/null || true',
-    '      cp -a "$tmp/$subpath" "$target"',
-    "    fi",
-    '    rm -rf "$tmp"',
-    "  else",
-    '    rmdir "$target" 2>/dev/null || true',
-    // Two concurrent turn holders can race this install: without the existence
-    // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
-    // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
-    // accept it; a non-empty non-repo survivor here is a mount point the manifest
-    // re-filled — install into it by content copy instead of rename.
-    '    if [ -e "$target" ]; then',
-    '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
-    '        rm -rf "$tmp"',
-    '        echo "Repository resource already present at $target"',
-    "        return 0",
-    "      fi",
-    '      cp -a "$tmp/." "$target/"',
-    '      rm -rf "$tmp"',
-    "    else",
-    '      mv "$tmp" "$target"',
-    "    fi",
-    '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
-    "  fi",
-    '  if [ ! -e "$target" ]; then',
-    '    echo "Repository resource was not materialized at $target" >&2',
-    "    exit 1",
-    "  fi",
-    '  echo "Repository resource ready at $target"',
-    "}",
+    ...cloneRepositoryFunctionLines,
+    ...(resources.some((resource) => resource.optional === true)
+      ? optionalRepositoryCloneRunnerLines(optionalCloneTimeoutSeconds)
+      : []),
     "clone_pids=''",
     "clone_failed=0",
     "start_repository_clone() {",
     '  clone_repository "$@" &',
+    '  clone_pids="$clone_pids $!"',
+    "}",
+    // A repository OpenGeni attached on the person's behalf is best effort: its
+    // clone runs in its own errexit subshell exactly like a required one, and a
+    // failure is reported as a warning while the job itself succeeds, so one
+    // empty, deleted or unreachable repository never fails the whole setup.
+    // The sixth argument is the workspace-relative mount path, for the report.
+    // A clone that does not finish within its bound (timeout's 124, or 137
+    // after the follow-up KILL) is skipped the same way.
+    "start_optional_repository_clone() {",
+    "  (",
+    "    set +e",
+    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5"',
+    "    clone_status=$?",
+    '    if [ "$clone_status" -eq 124 ] || [ "$clone_status" -eq 137 ]; then',
+    `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone did not finish in time); the session continues without it" >&2`,
+    '    elif [ "$clone_status" -ne 0 ]; then',
+    `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone exited with status $clone_status); the session continues without it" >&2`,
+    "    fi",
+    "    exit 0",
+    "  ) &",
     '  clone_pids="$clone_pids $!"',
     "}",
     "wait_repository_clone_batch() {",
@@ -10961,14 +11257,16 @@ export function repositoryCloneCommand(
   ];
   for (const [index, resource] of resources.entries()) {
     const mountPath = resourceMountPath(resource);
+    const optional = resource.optional === true;
     commands.push(
       [
-        "start_repository_clone",
+        optional ? "start_optional_repository_clone" : "start_repository_clone",
         shellQuote(posixPath.join("/workspace", mountPath)),
         shellQuote(resource.uri),
         shellQuote(resource.ref),
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
         shellQuote(resource.expectedCommitSha ?? ""),
+        ...(optional ? [shellQuote(mountPath)] : []),
       ].join(" "),
     );
     if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
@@ -11457,10 +11755,39 @@ export async function runRigSetupHook(
   });
 }
 
+/**
+ * The optional repositories the clone script reported as skipped, as their
+ * workspace-relative mount paths. Only this hook's own optional resources
+ * count, so repository output can never add an entry.
+ */
+function skippedOptionalRepositoryPaths(
+  output: string,
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+): string[] {
+  const optionalPaths = new Set(
+    resources
+      .filter((resource) => resource.optional === true)
+      .map((resource) => resourceMountPath(resource)),
+  );
+  if (optionalPaths.size === 0) return [];
+  const skipped = new Set<string>();
+  for (const line of output.split("\n")) {
+    const start = line.indexOf(SKIPPED_OPTIONAL_REPOSITORY_PREFIX);
+    if (start < 0) continue;
+    const rest = line.slice(start + SKIPPED_OPTIONAL_REPOSITORY_PREFIX.length);
+    for (const path of optionalPaths) {
+      if (rest.startsWith(`${path} (`)) skipped.add(path);
+    }
+  }
+  return [...skipped].sort();
+}
+
 export async function runRepositoryCloneHook(
   session: SandboxSessionLike,
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
+  /** Test seam: the per-repository optional clone bound, in seconds. */
+  options: { optionalCloneTimeoutSeconds?: number } = {},
 ): Promise<void> {
   const payload = {
     name: "repository-clone",
@@ -11499,6 +11826,7 @@ export async function runRepositoryCloneHook(
       resources,
       gitCredentialBindings,
       stagedBrokerSeeds.staged,
+      options,
     );
     const command = sandboxGitProvisioningCommand(
       seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand,
@@ -11515,9 +11843,22 @@ export async function runRepositoryCloneHook(
       context.commandRunner,
     );
     assertSandboxCommandSucceeded(result, "Repository clone hook");
+    const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
+      sandboxCommandOutput(result),
+      resources,
+    );
+    if (skippedOptionalRepositories.length > 0) {
+      console.warn("[sandbox] optional repository resources were not cloned", {
+        skippedCount: skippedOptionalRepositories.length,
+        repositoryCount: resources.length,
+      });
+    }
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.completed",
-      payload,
+      payload: {
+        ...payload,
+        ...(skippedOptionalRepositories.length > 0 ? { skippedOptionalRepositories } : {}),
+      },
     });
   } catch (error) {
     await context.onRuntimeEvent?.({

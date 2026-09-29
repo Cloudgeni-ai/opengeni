@@ -16,6 +16,8 @@ import {
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
+  SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
+  SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimeTablePosture,
@@ -482,7 +484,9 @@ function safePosture(): RuntimeDatabasePosture {
         owner: "opengeni_migrator",
         execute: false,
         publicExecute: false,
-        securityDefiner: true,
+        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
       })),
     ],
     privateRoutines: [
@@ -551,7 +555,10 @@ function safePosture(): RuntimeDatabasePosture {
 describe("runtime database posture evaluator", () => {
   test("organization usage read capability forbids direct runtime DML and PUBLIC execution", () => {
     const posture = safePosture();
-    posture.tables.push({ ...knowledgeAuthorityTables()[0]!, name: "usage_events" });
+    posture.tables.push({
+      ...knowledgeAuthorityTables()[0]!,
+      name: "usage_events",
+    });
     const table = {
       name: "organization_usage_read_capabilities",
       owner: "opengeni_migrator",
@@ -631,6 +638,98 @@ describe("runtime database posture evaluator", () => {
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "sandbox file publication capability list_sandbox_file_publications(uuid, uuid, jsonb) is missing or unsafe",
+    );
+  });
+
+  test("Slack file upload ledger uses ordinary session RLS and bounded direct DML", () => {
+    const posture = safePosture();
+    const table = {
+      name: SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: true,
+      insert: true,
+      update: true,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    const guard = posture.targetRoutines.find(
+      (routine) => routine.name === "guard_slack_file_upload_operation()",
+    )!;
+    expect(guard.securityDefiner).toBe(false);
+    guard.execute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden owner-internal helper guard_slack_file_upload_operation()",
+    );
+    guard.execute = false;
+    guard.securityDefiner = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "owner-internal target-schema helper guard_slack_file_upload_operation() is not SECURITY INVOKER",
+    );
+    guard.securityDefiner = false;
+    // Private placement does not change an older public-table contract.
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain(table.name);
+    expect(RUNTIME_TABLE_PRIVILEGES[table.name]).toBeUndefined();
+    table.delete = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has unsafe Slack file upload ledger privileges",
+    );
+    table.delete = false;
+    table.update = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has unsafe Slack file upload ledger privileges",
+    );
+    table.update = true;
+    table.rlsActive = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Slack file upload relation lacks active FORCE-RLS session isolation",
+    );
+  });
+
+  test("scheduled Slack bot messages stay behind their two capabilities", () => {
+    const posture = safePosture();
+    const table = {
+      name: "scheduled_slack_bot_messages",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(
+      ...SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain("scheduled_slack_bot_messages");
+    table.update = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden direct scheduled Slack bot message authority",
+    );
+    table.update = false;
+    table.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "scheduled Slack bot message relation lacks active FORCE-RLS isolation",
+    );
+    table.rlsForced = true;
+    posture.privateRoutines.at(-1)!.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "scheduled Slack bot message capability read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
     );
   });
 
@@ -735,6 +834,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0536 adds the workspace credential provider, webhook, and delivery tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 3
+            : 0) +
           // 0507 adds the scoped, short-lived MCP OAuth state store.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -779,7 +884,7 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1;
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3;
       for (const removed of [
         "workspace_packs",
         "pack_installations",
@@ -806,6 +911,14 @@ describe("runtime database posture evaluator", () => {
       expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
       for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {
+        expect(FORCE_RLS_TABLES).toContain(table);
+        expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
+      }
+      for (const table of [
+        "workspace_credential_providers",
+        "workspace_webhook_deliveries",
+        "workspace_webhooks",
+      ] as const) {
         expect(FORCE_RLS_TABLES).toContain(table);
         expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
       }

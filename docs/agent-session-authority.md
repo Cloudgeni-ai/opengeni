@@ -139,6 +139,9 @@ Authority never widens down a tree or through a side door:
   tools, permissions, and `{ agentAccess, endUser, memoryScope }` as its creator
   policy (`packages/core/src/domain/scheduled-tasks.ts`, migration 0428), and
   every session it generates uses that policy instead of deployment defaults.
+  Only the task owner's signed-in access refresh re-freezes its tools and
+  permissions, within that person's own grants; no agent can call it
+  ([`scheduled-task-access.md`](scheduled-task-access.md)).
 - The Codemode SDK proxy (`/v1/workspaces/:workspaceId/codemode/sdk/*`) mints
   its agent token from the session's permissions intersected with the
   permissions the session's selected first-party tools require, and

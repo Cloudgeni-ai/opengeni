@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
-import { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } from "../src/timeline";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -13,8 +12,6 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
-import { MessageTimeline } from "../src";
-import { TimelineRow } from "../src/components/message-timeline";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -26,6 +23,14 @@ import { TimelineRow } from "../src/components/message-timeline";
    -------------------------------------------------------------------------- */
 
 registerDom();
+
+// Radix chooses its layout-effect implementation at import time. Load the real
+// renderers only after the DOM exists so close/open assertions test browser
+// behavior, not the server no-op that leaves initially open content mounted.
+const { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } =
+  await import("../src/timeline");
+const { MessageTimeline } = await import("../src");
+const { TimelineRow } = await import("../src/components/message-timeline");
 
 test("account-qualified native and Codemode calls render persisted labels after replay", async () => {
   for (const origin of ["native", "codemode"]) {
@@ -748,7 +753,7 @@ describe("published file presentation", () => {
         await r.rerender(timeline([...narrated, timelineEvent("turn.completed", {})], "idle"));
         await flush();
         expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
-        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+        expect(r.container.querySelector('img[alt="implementation.png"]') === null).toBe(true);
       } finally {
         await r.unmount();
       }
@@ -756,7 +761,9 @@ describe("published file presentation", () => {
     10_000,
   );
 
-  test.each([false, true])(
+  // Readable turns have one stable work row; classic grouping retains its
+  // multi-cluster turn wrap. The readable variant follows this test.
+  test.each([false])(
     "explicit image collapse survives a multi-cluster turn wrap (rolling=%p)",
     async (rolling) => {
       resetTimelineEvents();
@@ -855,6 +862,83 @@ describe("published file presentation", () => {
     },
     10_000,
   );
+
+  test("readable turns keep an explicit image collapse while narration stays visible", async () => {
+    resetTimelineEvents();
+    const prepared = [
+      timelineEvent("user.message", { text: "Show the implementation" }),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+      ...["inspect-project", "prepare-project"].flatMap((id) => [
+        timelineEvent("agent.toolCall.created", {
+          id,
+          name: "exec_command",
+          arguments: { cmd: id },
+        }),
+        timelineEvent("agent.toolCall.output", { id, output: "ready" }),
+      ]),
+      timelineEvent("agent.message.completed", { text: "The project is ready." }),
+    ];
+    const loadRetainedArtifact = async () => ({
+      url: "https://objects.example/implementation.png",
+    });
+    const timeline = (events: SessionEvent[], status: "running" | "idle" = "running") => (
+      <MessageTimeline
+        events={events}
+        status={status}
+        turnSummary={{ rolling: true }}
+        loadRetainedArtifact={loadRetainedArtifact}
+      />
+    );
+    const r = await renderComponent(timeline(prepared));
+    try {
+      await flush();
+      // Phase-less narration is always an ordinary visible message.
+      expect(turnSummaryTrigger(r.container)?.textContent).toMatch(/^Working · /);
+      expect(r.container.querySelector("[data-og-wide-table-message]")?.textContent).toBe(
+        "The project is ready.",
+      );
+      const published = [
+        ...prepared,
+        timelineEvent("agent.toolCall.created", {
+          id: "published-image",
+          name: "opengeni__sandbox_file_publish",
+          arguments: { path: "/workspace/implementation.png" },
+        }),
+        timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+      ];
+      await r.rerender(timeline(published));
+      await flush();
+      // The work disclosure opens for its primary image; narration stays outside.
+      const live = turnSummaryTriggers(r.container);
+      expect(live.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual(["true"]);
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+      expect(r.container.querySelector("[data-og-wide-table-message]")?.textContent).toContain(
+        "The project is ready.",
+      );
+      expect(r.container.querySelector("[data-og-activity-note]")).toBeNull();
+      await act(async () => live[0]?.click());
+      expect(live[0]?.getAttribute("aria-expanded")).toBe("false");
+
+      const settled = [
+        ...published,
+        timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+        timelineEvent("turn.completed", {}),
+      ];
+      await r.rerender(timeline(settled, "idle"));
+      await flush();
+      const settledTriggers = turnSummaryTriggers(r.container);
+      expect(settledTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
+        "false",
+      ]);
+      expect(r.container.querySelector('img[alt="implementation.png"]') === null).toBe(true);
+      // The remembered choice is not a lock.
+      await act(async () => settledTriggers[0]?.click());
+      await flush();
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  }, 10_000);
 
   test.each([
     "sandbox_file_publish",
@@ -1757,10 +1841,12 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(visibleOutcome?.hasAttribute("open")).toBe(false);
     expect(visibleOutcome?.querySelector("summary")?.textContent).not.toContain(reason);
     expect(visibleOutcome?.getAttribute("role")).toBe("note");
-    expect(visibleOutcome?.textContent).toContain("Wait recorded");
+    // An open wait says since when; no delegated workers are known here.
+    expect(visibleOutcome?.querySelector("summary")?.textContent).toStartWith("Waiting · since ");
     expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
       events[2]!.occurredAt,
     );
+    // A wait from an earlier day keeps its date, so it never reads as current.
     expect(visibleOutcome?.querySelector("time")?.textContent).toContain(
       String(new Date(events[2]!.occurredAt).getFullYear()),
     );

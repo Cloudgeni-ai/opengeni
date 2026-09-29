@@ -205,7 +205,11 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   // otherwise 302 to the GitHub Release at `redirectUrl` (mac/windows + any
   // un-baked asset). The baked path makes the agent the API enrolls against
   // identical to the API that serves it — no version skew, no extra hop.
-  async function serveAsset(asset: string, redirectUrl: string): Promise<Response> {
+  async function serveAsset(
+    asset: string,
+    redirectUrl: string,
+    allowBaked: boolean,
+  ): Promise<Response> {
     const committed = COMMITTED_BINARY_ASSETS[asset];
     if (committed) {
       const buf = await readFile(new URL(committed.file, INSTALL_DIR));
@@ -218,7 +222,7 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
       });
     }
-    const baked = await readBaked(asset);
+    const baked = allowBaked ? await readBaked(asset) : null;
     if (baked !== null) {
       return new Response(baked, {
         status: 200,
@@ -251,7 +255,7 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!ASSET_NAME.test(asset)) {
       throw new HTTPException(400, { message: "invalid asset name" });
     }
-    return serveAsset(asset, `${releasesBase}/download/${stableAgentTag}/${asset}`);
+    return serveAsset(asset, `${releasesBase}/download/${stableAgentTag}/${asset}`, true);
   });
 
   // Signed self-update channel manifests. Each deployment exposes its own
@@ -296,7 +300,9 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid version or asset name",
       });
     }
-    return serveAsset(asset, `${releasesBase}/download/agent-${versionSeg}/${asset}`);
+    // A pinned release must never be substituted with this deployment's baked
+    // canary, even when its semver happens to match. The archive owns its bytes.
+    return serveAsset(asset, `${releasesBase}/download/agent-${versionSeg}/${asset}`, false);
   });
 }
 

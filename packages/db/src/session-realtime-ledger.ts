@@ -1190,6 +1190,7 @@ async function admitRealtimeDelegationInTransaction(
       realtimeDelegation: { ...provenance, inputTranscript },
     },
     source: "api",
+    surface: "voice",
   });
   return {
     turnId: admitted.turnId,

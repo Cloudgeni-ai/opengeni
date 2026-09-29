@@ -48,6 +48,9 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
 
+RUN cc -O2 -std=c11 -Wall -Wextra -Werror \
+      native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor
+
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
 FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
@@ -196,6 +199,10 @@ RUN set -eux; \
     } > /out/SHA256SUMS
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
+COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
+      /usr/local/bin/opengeni-command-supervisor >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
@@ -262,7 +269,7 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
 ARG CHECKOV_VERSION=3.2.526
 ARG UV_VERSION=0.12.18
-ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1"
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6"
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
@@ -285,7 +292,7 @@ RUN set -eux; \
       "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
       > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     base_packages=" \
-        bash ca-certificates coreutils curl gpg git jq openssh-client \
+        bash ca-certificates coreutils curl gpg git jq openssh-client postgresql-client \
         fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv python-is-python3 \
         apt-transport-https net-tools netcat-openbsd sudo util-linux xxd file \
     "; \
@@ -294,7 +301,8 @@ RUN set -eux; \
         apt-get update && apt-get install -y --no-install-recommends $base_packages && break; \
         if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
     done; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    psql --version
 
 # Node.js LTS from NodeSource. Pin the 20.x LTS line instead of inheriting the
 # distribution's moving Node release, mirroring the gh keyring+repo layer.
@@ -330,7 +338,7 @@ RUN set -eux; \
         xdotool scrot ffmpeg \
         libgl1-mesa-dri \
         xterm tesseract-ocr \
-        fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-color-emoji \
+        fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
@@ -475,7 +483,10 @@ RUN set -eux; \
 # uv caches live in /var/cache, outside the snapshotted HOME=/workspace, because
 # installed packages under /usr/local are per-box anyway. --exclude-newer freezes
 # the transitive closure to what PyPI had published at that instant, so every
-# rebuild of either image resolves the same versions.
+# rebuild of either image resolves the same versions. psycopg is pinned together
+# with its matching psycopg-binary wheel (exactly what `psycopg[binary]` resolves
+# to on CPython), which bundles its own libpq, so Postgres access never depends
+# on the distro libpq that postgresql-client pulls in.
 RUN set -eux; \
     printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\ncache-dir = /var/cache/pip\n' > /etc/pip.conf; \
     install -d -m 0755 /etc/uv; \
@@ -501,7 +512,8 @@ RUN set -eux; \
     uv pip install --system --no-cache --compile-bytecode --only-binary :all: \
       --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
-    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'; \
+    python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'; \
     pytest --version; \
     rm -rf /root/.cache /var/cache/pip /var/cache/uv
 RUN set -eux; \
@@ -580,6 +592,7 @@ COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
+COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
 COPY docker/browserd-THIRD-PARTY-NOTICES /usr/local/share/opengeni/browserd-THIRD-PARTY-NOTICES
 COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
@@ -594,6 +607,7 @@ RUN set -eux; \
                /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
                /usr/local/lib/opengeni/lightpanda \
+               /usr/local/bin/opengeni-command-supervisor \
                /usr/local/lib/opengeni/opengeni-computer-native; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \

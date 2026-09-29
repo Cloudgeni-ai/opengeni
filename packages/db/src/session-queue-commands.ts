@@ -14,7 +14,9 @@ import {
   ResourceRef,
   resourceMountPath,
   stableJson,
+  sessionTurnSurfaceOrNull,
   turnExecutionPolicyAuditMetadata,
+  type SessionTurnSurface,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
   type DraftTimelineAnnotation,
@@ -1754,6 +1756,8 @@ export async function submitHumanPromptInTransaction(
     /** False when the human input originated inside the active realtime provider session. */
     mirrorToRealtime?: boolean;
     source: "user" | "api";
+    /** Content-free product surface the request entered through. */
+    surface?: SessionTurnSurface | null;
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
@@ -2160,6 +2164,8 @@ export async function submitHumanPromptInTransaction(
           temporalWorkflowId: workflowId,
           status: "queued",
           source: input.source,
+          // An edit resubmits the same logical message: keep where it entered.
+          surface: sessionTurnSurfaceOrNull(editedSourceTurn?.surface) ?? input.surface ?? null,
           promptRouting: routing,
           position: effectiveDelivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
@@ -2833,7 +2839,7 @@ export async function sendAgentMessageInTransaction(
     updateId: update.id,
     eventIds,
     wakeRevision: wake?.wakeRevision ?? null,
-    shouldSignal: wake?.shouldSignal ?? false,
+    shouldSignal: wake !== null,
     workflowId,
     effectiveState: effective.state,
     interruptionCount: 0,

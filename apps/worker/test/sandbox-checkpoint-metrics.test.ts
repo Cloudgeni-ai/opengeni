@@ -7,6 +7,8 @@ import {
   recordSandboxDeadlineRotationsRequested,
   recordSandboxInventoryProjectionFailure,
   recordSandboxInventoryProjectionSuccess,
+  recordSandboxRecoveryObservationGauges,
+  recordSandboxProviderMissingBeforeCapture,
   recordSandboxRotationBacklogGauges,
   runtimeMetricsHooksForObservability,
 } from "../src/observability-metrics";
@@ -101,6 +103,21 @@ describe("sandbox checkpoint and deadline metrics", () => {
     expect(metrics).toMatch(/opengeni_sandbox_deadline_rotations_requested_total\{[^}]*\} 2\b/);
   });
 
+  test("provider-before-capture loss has only a bounded backend label", async () => {
+    const observability = workerObservability();
+    recordSandboxProviderMissingBeforeCapture(observability, "modal");
+    recordSandboxProviderMissingBeforeCapture(observability, "opaque-instance-id");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="modal"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="unknown"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toContain("opaque-instance-id");
+  });
+
   test("publishes bounded per-domain projection freshness and failures", async () => {
     const observability = workerObservability();
     recordSandboxInventoryProjectionSuccess(observability, "leases", 1_700_000_000);
@@ -116,6 +133,25 @@ describe("sandbox checkpoint and deadline metrics", () => {
     );
     expect(metrics).toMatch(
       /opengeni_sandbox_inventory_refresh_failures_total\{[^}]*domain="leases"[^}]*\} 1\b/,
+    );
+  });
+
+  test("projects committed recovery observations as bounded fixed-kind gauges", async () => {
+    const observability = workerObservability();
+    recordSandboxRecoveryObservationGauges(observability, {
+      providerLosses: 2,
+      fallbackSelections: 1,
+    });
+    recordSandboxInventoryProjectionSuccess(observability, "recovery_observations", 1_700_000_002);
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_recovery_observations_recent\{[^}]*kind="provider_missing_before_capture"[^}]*\} 2\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_recovery_observations_recent\{[^}]*kind="checkpoint_fallback_selected"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_inventory_refresh_timestamp_seconds\{[^}]*domain="recovery_observations"[^}]*\} 1700000002\b/,
     );
   });
 });

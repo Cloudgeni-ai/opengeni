@@ -12,7 +12,14 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
   }).find((entry) => entry.name === "opengeni-documents");
   expect(artifact).toBeDefined();
   expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toBe(source);
-  expect(source).toContain("a report is a secondary output of another task");
+  const prose = source.replace(/\s+/g, " ");
+  expect(prose).toContain(
+    "Create a document when the user asks for a document or file, or when a deliverable is large (multi-page) or clearly meant to be kept or shared; otherwise answer in chat.",
+  );
+  expect(prose).toContain("Do not create a goal only to declare a document.");
+  expect(prose).toContain("a short summary and the artifact link, not a restatement");
+  expect(prose).not.toContain("create one with the report requirement");
+  expect(source).toContain("a report is a secondary output");
   expect(source).toContain("a Knowledge cleanup audit");
   expect(source).toContain("before authoring");
   expect(source).toContain(

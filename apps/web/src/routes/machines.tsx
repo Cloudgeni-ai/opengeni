@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // Machines: the workspace's bring-your-own-compute fleet — enrolled selfhosted
 // machines, each with its connection-status pill, state badges, latest metrics
@@ -165,9 +166,11 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
   // "Machine connected" moment: watch the polled fleet and, once a machine first
   // shows online (a fresh enrollment coming up, or a reconnect), toast it. The
-  // first poll seeds the baseline silently so existing machines don't announce.
+  // first loaded list seeds the baseline silently so existing machines don't
+  // announce; the empty placeholder before that load is not a baseline.
   const onlineSeenRef = useRef<Set<string> | null>(null);
   useEffect(() => {
+    if (onlineSeenRef.current === null && (machines.loading || machines.error)) return;
     const online = new Set(
       machines.machines
         .filter(
@@ -191,7 +194,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       }
     }
     onlineSeenRef.current = online;
-  }, [machines.machines]);
+  }, [machines.error, machines.loading, machines.machines]);
 
   // The install/approve URLs are deployment-relative: same origin as the API
   // (falling back to the page origin), never a hardcoded marketing domain.
@@ -462,12 +465,13 @@ export function MachineRemovalBlockNotice({
         <ul className="mt-2 space-y-1">
           {result.dependentSessions.map((session) => (
             <li key={session.id}>
-              <a
-                href={`/workspaces/${workspaceId}/sessions/${session.id}`}
+              <Link
+                to="/workspaces/$workspaceId/sessions/$sessionId"
+                params={{ workspaceId, sessionId: session.id }}
                 className="font-medium text-fg underline decoration-border-strong underline-offset-2 hover:text-brand"
               >
                 {session.title?.trim() || session.id}
-              </a>
+              </Link>
             </li>
           ))}
         </ul>

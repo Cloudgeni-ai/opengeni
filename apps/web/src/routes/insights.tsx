@@ -1,12 +1,12 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { BarChart3Icon, XIcon } from "lucide-react";
+import { XIcon } from "lucide-react";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, UsageMeter } from "@/components/insights/charts";
 import { CausalSheet } from "@/components/insights/causal-sheet";
 import { CountUp } from "@/components/insights/count-up";
-import { PageHeader } from "@/components/common";
+import { PageHeader } from "@/components/ui/page-header";
 import {
   RANGE_OPTIONS,
   backendLabel,
@@ -265,7 +265,6 @@ export function InsightsRoute({
 
   const heading = (
     <PageHeader
-      icon={<BarChart3Icon className="size-4" />}
       title="Insights"
       description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
     />
@@ -1183,7 +1182,7 @@ export function InsightsRoute({
           <Metric
             label="Estimated prompt tokens"
             value={formatTokens(promptContributions.estimatedTokens)}
-            delta="Agent Knowledge material only"
+            delta="Knowledge material only"
           />
           <Metric
             label="Average per covered call"

@@ -25,7 +25,9 @@ import type {
   HumanInputAnswerSummary,
   HumanInputItem,
   MachineInputBatchItem,
+  MachineInputMember,
   MemoryItem,
+  NoticeItem,
   SandboxItem,
   StartupPhase,
   StartupPhaseItem,
@@ -39,6 +41,14 @@ import type {
 } from "./types";
 
 export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
+
+/** Message identity only: queue placement needs the surrounding turn history. */
+export function isTimelineUserQuestion(event: SessionEvent): boolean {
+  return (
+    event.type === "user.message" &&
+    workerCompletionPayload(asRecord(event.payload).childCompletion) === null
+  );
+}
 
 /* ----------------------------------------------------------------------------
    Timeline projection
@@ -153,6 +163,35 @@ export function buildTimeline(
       .map((request) => stringValue(request.toolCallId))
       .filter(Boolean),
   );
+  // Delegated workers that have not reported back yet, so a recorded agent wait
+  // can say how many agents it is waiting for. Only a session's own workers
+  // report back, so a message to any other session is never awaited. Best
+  // effort: a bounded replay only knows the spawns and results inside its window.
+  const workerSessions = new Set<string>();
+  const pendingWorkerSessions = new Set<string>();
+  let openWaitNotice: NoticeItem | null = null;
+  // Tool results update the original tool row in place, and running lifecycle
+  // receipts have no row. Carry resume evidence on the attention landmarks so
+  // grouping cannot mistake historical approval for a live wait.
+  const presentationWaits = new Map<string | null, Array<NoticeItem | SessionStatusItem>>();
+  let presentationTurnId: string | null = null;
+  const rememberPresentationWait = (
+    item: NoticeItem | SessionStatusItem,
+    turnId: string | null,
+  ) => {
+    const key = turnId ?? presentationTurnId;
+    const waits = presentationWaits.get(key) ?? [];
+    waits.push(item);
+    presentationWaits.set(key, waits);
+    items.push(item);
+  };
+  const resolvePresentationWait = (event: SessionEvent, turnId: string | null) => {
+    if (event.duplicateOfEventId || (event.turnAssociation && event.turnAssociation !== "current"))
+      return;
+    const key = turnId ?? presentationTurnId;
+    for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
+    presentationWaits.delete(key);
+  };
   const queuedAtByTurn = new Map<string, string>();
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
@@ -310,6 +349,27 @@ export function buildTimeline(
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    if (
+      turnId &&
+      (event.type === "turn.started" ||
+        (presentationTurnId === null && isAgentActivityEvent(event.type)))
+    ) {
+      presentationTurnId = turnId;
+    }
+    if (
+      openWaitNotice &&
+      (event.type === "user.message" ||
+        event.type === "system.update.delivered" ||
+        event.type === "turn.started" ||
+        event.type === "session.control.paused" ||
+        (event.type === "session.status.changed" &&
+          (payload.status === "cancelled" || payload.status === "failed")))
+    ) {
+      // New input, a pause, or the end of the session ends a recorded wait; the
+      // notice keeps its wait span.
+      openWaitNotice.waitEndedAt = event.occurredAt;
+      openWaitNotice = null;
+    }
     if (event.type === "session.created") {
       completeHistoryPrefix = true;
     } else if (
@@ -359,6 +419,8 @@ export function buildTimeline(
         closeStreamingTail();
         const childCompletion = workerCompletionPayload(payload.childCompletion);
         if (childCompletion) {
+          workerSessions.add(childCompletion.childSessionId);
+          pendingWorkerSessions.delete(childCompletion.childSessionId);
           items.push({
             kind: "worker-completion",
             id: event.id,
@@ -413,6 +475,12 @@ export function buildTimeline(
 
       case "system.update.delivered": {
         const inputs = machineInputMembers(payload.members);
+        for (const input of inputs) {
+          if (input.kind === "child_terminal_result") {
+            workerSessions.add(input.sourceId);
+            pendingWorkerSessions.delete(input.sourceId);
+          }
+        }
         if (inputs.length === 0) break;
         // Goal continuations already land as `goal.continuation` GoalRows.
         // A solo continuation batch would duplicate that landmark + dump the
@@ -438,6 +506,9 @@ export function buildTimeline(
         }
         const messageId = stringValue(payload.messageId);
         const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
+        // Responses providers declare the phase when they announce the item, so
+        // a streaming progress note is known as commentary before it completes.
+        const phase = assistantMessagePhase(payload.phase);
         if (
           (!completeHistoryPrefix && !knownMessagePrefixTurns.has(turnId)) ||
           (messageKey && incompleteMessageKeys.has(messageKey))
@@ -449,6 +520,7 @@ export function buildTimeline(
         if (identified) {
           if (identified.annotationSource?.eventType !== "agent.message.completed") {
             identified.text += text;
+            if (phase && !identified.phase) identified.phase = phase;
             rememberAgentResponse(turnId, identified, false);
           }
           break;
@@ -490,6 +562,7 @@ export function buildTimeline(
           id: event.id,
           turnId,
           text,
+          ...(phase ? { phase } : {}),
           streaming: true,
           occurredAt: event.occurredAt,
         };
@@ -532,12 +605,15 @@ export function buildTimeline(
           if (!open.text || (text && (messageKey || text.startsWith(open.text)))) {
             open.text = text || open.text;
           }
-          open.streaming = false;
           // A phase-less settlement mirror (the worker's final-output receipt)
           // must not erase the provider-declared phase captured by the SDK item.
           if (phase) open.phase = phase;
-          // Completion time is what the footer shows ("finished at"); keep the
-          // first-delta stamp only until this event arrives.
+          // Completion time is what the footer shows ("finished at"); the
+          // first-delta stamp stays as the stream's start.
+          if (open.startedAt === undefined && open.occurredAt !== event.occurredAt) {
+            open.startedAt = open.occurredAt;
+          }
+          open.streaming = false;
           open.occurredAt = event.occurredAt;
           open.annotationSource =
             text && open.text === text
@@ -689,12 +765,20 @@ export function buildTimeline(
         if (!target) {
           break;
         }
+        resolvePresentationWait(event, turnId ?? target.turnId);
         if (target.kind === "worker") {
           // A worker spawn/message that returns an error flag (or an MCP
           // isError result) settles to "failed" too, so WorkerRow surfaces it.
           target.status = isErrorOutput(payload) ? "failed" : "complete";
           target.workerSessionId = target.workerSessionId ?? extractSessionRef(payload.output);
           target.failure = target.status === "failed" ? workerFailure(payload.output) : null;
+          // A spawned or re-messaged worker owes this session a result.
+          if (target.status === "complete" && target.workerSessionId) {
+            if (target.action === "spawn") workerSessions.add(target.workerSessionId);
+            if (workerSessions.has(target.workerSessionId)) {
+              pendingWorkerSessions.add(target.workerSessionId);
+            }
+          }
           break;
         }
         // An output carrying an explicit error flag (or an MCP isError result)
@@ -800,8 +884,13 @@ export function buildTimeline(
         // Rendering either every turn reads as churn. Only FAILURES surface, and
         // they surface loudly — the failed event below creates its own item even
         // without a started row.
+        //   - optional-repository-access: the worker's per-turn report of an
+        //     automatically attached repository that sat the turn out, reported
+        //     like a skipped optional clone (event payload + log, no row).
         if (
-          (name === "repository-clone" || name === "file-resource-download") &&
+          (name === "repository-clone" ||
+            name === "file-resource-download" ||
+            name === "optional-repository-access") &&
           status !== "failed"
         ) {
           break;
@@ -889,6 +978,7 @@ export function buildTimeline(
         if (!isSessionStatus(status)) {
           break;
         }
+        if (status === "running") resolvePresentationWait(event, turnId);
         // Only attention-worthy statuses earn a timeline divider. queued /
         // running / idle are machinery telemetry: the header pill carries the
         // live status, the shimmer says "running", and the turn chip's duration
@@ -900,15 +990,17 @@ export function buildTimeline(
         const previous = [...items]
           .reverse()
           .find((item): item is SessionStatusItem => item.kind === "session-status");
-        if (previous?.status === status) {
+        if (previous?.status === status && !previous.resolvedAt) {
           break;
         }
-        items.push({
+        const item: SessionStatusItem = {
           kind: "session-status",
           id: event.id,
           status,
           occurredAt: event.occurredAt,
-        });
+        };
+        if (status === "requires_action") rememberPresentationWait(item, turnId);
+        else items.push(item);
         break;
       }
 
@@ -928,13 +1020,16 @@ export function buildTimeline(
 
       case "session.requiresAction": {
         finalizeOpen(turnId, "complete", event.occurredAt);
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "waiting",
-          text: "Approval needed — the turn is paused until someone decides.",
-          occurredAt: event.occurredAt,
-        });
+        rememberPresentationWait(
+          {
+            kind: "notice",
+            id: event.id,
+            tone: "waiting",
+            text: "Approval needed — the turn is paused until someone decides.",
+            occurredAt: event.occurredAt,
+          },
+          turnId,
+        );
         break;
       }
 
@@ -1117,10 +1212,11 @@ export function buildTimeline(
           Boolean(visibleFinalOutput) && !finalOutputMirrorsCommentary;
         const pendingWaitOutcome = takePendingWaitOutcome(turnId);
         if (hasAuthoritativeFinalOutput) {
-          // `agent.message.completed` and `turn.completed` normally commit
-          // together, but legacy or partially compacted ledgers may retain only
-          // the terminal output receipt. Keep that authoritative response
-          // visible instead of leaving it trapped in raw audit data.
+          // The final message normally lands as its own completion before
+          // `turn.completed` (older workers commit a copy with it), but legacy or
+          // partially compacted ledgers may retain only the terminal output
+          // receipt. Keep that authoritative response visible instead of
+          // leaving it trapped in raw audit data.
           if (
             latestAgentResponse &&
             !latestAgentResponse.completed &&
@@ -1128,6 +1224,12 @@ export function buildTimeline(
           ) {
             latestAgentResponse.item.text = finalOutput;
             latestAgentResponse.item.streaming = false;
+            if (
+              latestAgentResponse.item.startedAt === undefined &&
+              latestAgentResponse.item.occurredAt !== event.occurredAt
+            ) {
+              latestAgentResponse.item.startedAt = latestAgentResponse.item.occurredAt;
+            }
             latestAgentResponse.item.occurredAt = event.occurredAt;
             const responseIndex = items.indexOf(latestAgentResponse.item);
             if (responseIndex >= 0 && responseIndex < items.length - 1) {
@@ -1158,14 +1260,19 @@ export function buildTimeline(
           completedTurn.preserveWaitResponse = true;
         }
         if (!hasAuthoritativeFinalOutput && !hasCompletedFinalResponse && pendingWaitOutcome) {
-          items.push({
+          const notice: NoticeItem = {
             kind: "notice",
             id: `${pendingWaitOutcome.id}-visible-outcome`,
             tone: "waiting",
             text: waitingOutcomeText(pendingWaitOutcome.reason),
             recordedOutcome: true,
+            ...(pendingWorkerSessions.size > 0
+              ? { waitingAgents: pendingWorkerSessions.size }
+              : {}),
             occurredAt: pendingWaitOutcome.occurredAt,
-          });
+          };
+          items.push(notice);
+          openWaitNotice = notice;
         }
         break;
       }
@@ -1599,12 +1706,16 @@ export function sessionStatusFromEvents(events: SessionEvent[]): SessionStatus |
    non-user span folds behind a turn group, with activity blocks nested inside.
    -------------------------------------------------------------------------- */
 
+/** Work items: every activity kind except assistant commentary. */
+type WorkActivityItem = Exclude<ActivityItem, AgentMessageItem>;
+
 /**
  * Whether an item clusters into an activity block. A `switch` (not a stringly-
  * typed set) so adding an {@link ActivityItem} kind is a compile-time prompt to
- * decide its grouping — and it narrows `item` to `ActivityItem` with no cast.
+ * decide its grouping, and it narrows `item` to a work item with no cast.
+ * Assistant prose stays outside activity clusters.
  */
-function isActivityItem(item: TimelineItem): item is ActivityItem {
+function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   switch (item.kind) {
     case "reasoning":
     case "tool-call":
@@ -1620,7 +1731,18 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
   }
 }
 
-export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
+export type GroupTimelineOptions = {
+  /** Readable assistant prose with an independent work summary for each turn. */
+  readableTurns?: boolean;
+  /** @deprecated Use readableTurns. Cross-turn exchange folding has been removed. */
+  foldExchanges?: boolean;
+};
+
+export function groupTimeline(
+  items: TimelineItem[],
+  options: GroupTimelineOptions = {},
+): TimelineGroup[] {
+  if (options.readableTurns || options.foldExchanges) return groupReadableTurns(items);
   const groups: TimelineGroup[] = [];
   for (const item of items) {
     if (isActivityItem(item)) {
@@ -1646,6 +1768,189 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
   return groups;
 }
 
+/** Prose and attention surfaces never enter a work fold. */
+function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
+  type Work = Extract<TimelineGroup, { kind: "activity" }>;
+  let groups: TimelineGroup[] = [];
+  const turns = new Map<string, Work>();
+  const compactionTurns = new Map<ContextCompactionItem, string>();
+  const messages = new Map<string, AgentMessageItem[]>();
+  const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
+  let legacyTurn = "start";
+  let currentTurn = legacyTurn;
+  for (const item of items) {
+    if (item.kind === "user-message") legacyTurn = item.id;
+    const key = ("turnId" in item && item.turnId) || legacyTurn;
+    if ("turnId" in item && item.turnId && key !== currentTurn && !turns.has(key)) {
+      const previous = turns.get(currentTurn);
+      if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
+      currentTurn = key;
+    }
+    const workForTurn = () => {
+      let group = turns.get(key);
+      if (!group) {
+        group = {
+          kind: "activity",
+          id: `work-${key}`,
+          items: [],
+          work: { startedAt: item.occurredAt, details: [] },
+        };
+        turns.set(key, group);
+        groups.push(group);
+      }
+      return group;
+    };
+    if (isActivityItem(item)) {
+      const group = workForTurn();
+      group.items.push(item);
+      delete group.work!.waiting;
+    } else if (item.kind === "turn-end") {
+      const group = turns.get(key);
+      if (group?.work) {
+        group.outcome = item.outcome;
+        if (item.failureText) group.failureText = item.failureText;
+        group.work.endedAt = item.occurredAt;
+      }
+    } else if (item.kind === "context-compaction" && item.phase === "compacted") {
+      // A maintenance checkpoint alone is not conversational work. Resolve its
+      // attachment after real activity has established this turn's work row.
+      compactionTurns.set(item, key);
+      groups.push({ kind: "item", item });
+    } else if (
+      item.kind === "machine-input-batch" &&
+      item.members.every((member) => ROUTINE_MACHINE_INPUT_KINDS.has(member.kind))
+    ) {
+      const previous = inputs.get(key);
+      if (previous) {
+        previous.members.push(
+          ...item.members.filter((member) => !previous.members.some((old) => old.id === member.id)),
+        );
+        previous.sourceEvents = [...(previous.sourceEvents ?? []), ...(item.sourceEvents ?? [])];
+      } else {
+        const batch = { ...item, compact: true, members: [...item.members] };
+        inputs.set(key, batch);
+        groups.push({ kind: "item", item: batch });
+      }
+    } else if (
+      item.kind === "worker-completion" ||
+      (item.kind === "goal" && item.action === "continuation")
+    ) {
+      const group = turns.get(currentTurn);
+      if (group?.work) group.work.details.push({ kind: "item", item });
+      else groups.push({ kind: "item", item });
+    } else {
+      groups.push({ kind: "item", item });
+      const current = turns.get(currentTurn)?.work;
+      if (current && !current.endedAt) {
+        if (
+          item.kind === "notice" &&
+          item.tone === "waiting" &&
+          !item.recordedOutcome &&
+          !item.resolvedAt
+        ) {
+          current.waiting = {
+            label: item.text.startsWith("Approval needed") ? "Waiting for you" : "Waiting",
+            since: item.occurredAt,
+          };
+        } else if (
+          item.kind === "session-status" &&
+          item.status === "requires_action" &&
+          !item.resolvedAt
+        ) {
+          current.waiting = { label: "Waiting for you", since: item.occurredAt };
+        } else if (
+          item.kind === "session-status" &&
+          ["paused", "cancelled", "failed"].includes(item.status)
+        ) {
+          current.endedAt = item.occurredAt;
+          delete current.waiting;
+        }
+      }
+      if (item.kind === "agent-message" && item.text.trim()) {
+        const prose = messages.get(key) ?? [];
+        prose.push(item);
+        messages.set(key, prose);
+      }
+    }
+  }
+  groups = groups.filter((entry) => {
+    if (entry.kind !== "item" || entry.item.kind !== "context-compaction") return true;
+    const key = compactionTurns.get(entry.item);
+    const work = key === undefined ? undefined : turns.get(key)?.work;
+    if (!work) return true;
+    work.details.push(entry);
+    return false;
+  });
+  // A declared answer starts the response clock immediately. Without a phase,
+  // only settlement identifies the last response; text length never does.
+  const responseRows = new Map<AgentMessageItem, Work>();
+  const movedRows = new Set<Work>();
+  const positions = new Map<TimelineGroup | TimelineItem, number>();
+  const nextBoundary = new Map<Work, number>();
+  let boundary = groups.length;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const entry = groups[index]!;
+    positions.set(entry.kind === "item" ? entry.item : entry, index);
+    if (entry.kind === "activity" && entry.work) {
+      nextBoundary.set(entry, boundary);
+      boundary = index;
+    } else if (
+      entry.kind === "item" &&
+      (entry.item.kind === "user-message" || entry.item.kind === "machine-input-batch")
+    ) {
+      boundary = index;
+    }
+  }
+  for (const [key, group] of turns) {
+    const prose = messages.get(key) ?? [];
+    const settledAt = group.work!.endedAt;
+    const responseCandidates = settledAt
+      ? prose.filter(
+          (message) => Date.parse(message.startedAt ?? message.occurredAt) <= Date.parse(settledAt),
+        )
+      : prose;
+    const response =
+      responseCandidates.find((message) => message.phase === "final_answer") ??
+      (settledAt
+        ? (responseCandidates.at(-1) ?? prose.find((message) => message.phase === "final_answer"))
+        : undefined);
+    if (response) {
+      const responseAt = response.startedAt ?? response.occurredAt;
+      // A delayed completion-only receipt cannot extend a settled work clock.
+      group.work!.responseStartedAt =
+        settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
+      // A late completion may belong to an older turn. Keep its work at its
+      // original boundary rather than moving it across a newer turn's input.
+      if ((positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)) {
+        responseRows.set(response, group);
+        movedRows.add(group);
+      }
+    }
+  }
+  return groups.flatMap((group) => {
+    if (group.kind === "activity" && movedRows.has(group)) return [];
+    const row =
+      group.kind === "item" && group.item.kind === "agent-message"
+        ? responseRows.get(group.item)
+        : undefined;
+    return row ? [row, group] : [group];
+  });
+}
+
+/** Machine inputs that continue the current exchange rather than start one. */
+const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new Set([
+  "goal_continuation",
+  "background_command_result",
+  "session_wait_timeout",
+  "agent_message",
+  "agent_steer_instruction",
+  "child_terminal_result",
+  "child_requires_action_resolved",
+  "child_paused",
+  "child_waiting_capacity",
+  "child_progress",
+]);
+
 /* --- helpers ---------------------------------------------------------------- */
 
 type TurnAnchorPrescan = {
@@ -1656,6 +1961,22 @@ type TurnAnchorPrescan = {
   explicitQueuedTriggers: Set<string>;
   startedTurnIds: Set<string>;
 };
+
+/** Navigation uses the same queue/start/withdrawal rules as transcript ordering. */
+export function timelineQuestionPlacement(question: SessionEvent, evidence: SessionEvent[]) {
+  const anchors = prescanTurnAnchors([question, ...evidence]);
+  const direct = anchors.directChatSequenceByTrigger.get(question.id);
+  if (direct !== undefined) return { kind: "visible" as const, sequence: direct };
+  if (anchors.cancelledBeforeStartTriggers.has(question.id)) return { kind: "withdrawn" as const };
+  const start = anchors.startSeqByTrigger.get(question.id);
+  if (start !== undefined) return { kind: "visible" as const, sequence: start };
+  if (
+    anchors.queuedTurnByTrigger.has(question.id) ||
+    anchors.explicitQueuedTriggers.has(question.id)
+  )
+    return { kind: "pending" as const };
+  return { kind: "visible" as const, sequence: question.sequence };
+}
 
 function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
@@ -1855,7 +2176,7 @@ function isAgentActivityEvent(type: string): boolean {
  * steering, or deleting a waiting row must never make its prompt appear in the
  * transcript as though inference had begun.
  */
-function isTurnExecutionEvidence(type: string): boolean {
+export function isTurnExecutionEvidence(type: string): boolean {
   return (
     isAgentActivityEvent(type) ||
     type === "turn.completed" ||
@@ -1969,6 +2290,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   if (collected.length === 0) {
     return;
   }
+  const collectedLength = collected.length;
 
   // Resolve only inside this turn's collected suffix. A user/machine-input
   // boundary or an interleaved foreign turn must never donate its answer.
@@ -2028,7 +2350,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
 
   groups.splice(
     startIndex,
-    collected.length,
+    collectedLength,
     ...(visibleMessage ? [turnGroup, visibleMessage] : [turnGroup]),
   );
 }

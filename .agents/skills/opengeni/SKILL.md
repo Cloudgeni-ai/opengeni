@@ -145,10 +145,17 @@ Keep these concepts straight while working:
 - **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installation bindings, usage, and first-party MCP.
 - **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many OpenGeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
-- **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn.
+- **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn. Normal idle closes without a grace timer after durable rechecks and transactional parent-result settlement; late input can start another workflow run of the same session. Keep the legacy timer replay patch and unrelated lifecycle waits intact; see `docs/run-lifecycle.md`.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
 - **Sandbox rotation wait**: a recovering turn fenced by an active managed-sandbox rotation parks on its exact sandbox group and lease epoch. Every authoritative rotation-ending or epoch-advancing transaction durably wakes that waiter; the workflow does not repeatedly reserve turn-worker slots while the same transition remains pending.
 - **Goal**: optional durable per-session objective that flips "stop" into an explicit act — while active, the session workflow synthesizes continuation turns until the agent calls `goal_complete`/`goal_pause` or a user interrupts. The mechanism behind long-running autonomous runs. See `docs/goals.md`.
+  Continuation is generated input, not new authority: resume established work
+  against the current applied turn-frozen objective. Reuse only relevant,
+  still-valid authoritative evidence; retain requested comprehensive audits and
+  the full completion audit. Distinguish recoverable failures, definitive human
+  blockers, and work in flight without fixed retry quotas or preliminary wait
+  rituals. `docs/goals.md` owns the guidance scenarios; these instructions do not
+  change runtime wake timing, child-result selection, or approval authority.
 - **Admission block**: a non-transient preclaim persistence rejection parks accepted work without failing or consuming it. Inspect `sessions.admission_block`, the worker classifier and `docs/run-lifecycle.md`; authorized Resume or new Send/Steer explicitly rechecks, never grants missing authority. Operational DB failures retain timed recovery.
 - **Control observation**: unavailable scoped reads are not deletion or idle truth; exact still-owned attempts are not successor admission. Versioned observers wait on signals/bounded control timers, retain outbox obligations, and inspect exact Temporal identity without replacing physical-writer proof. See `docs/run-lifecycle.md` before changing these paths.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
@@ -273,6 +280,13 @@ does not rewrite message/event history. Do not generalize this into automatic re
 every sandbox file, live mid-session remount, or an unbounded artifact system.
 
 ## Sandbox Backend Discovery
+
+Lease-owned Modal creation is fenced at `modal-create-boundary.ts`, before the
+physical RPC, and attributed through `modal-create-session.ts` before setup.
+Unknown outcomes retain their epoch/checkpoint. Historical positive discovery
+must match the same provider namespace; absence never permits replay. The
+maintenance activity attributes receipts; ordinary draining owns termination.
+See `docs/run-lifecycle.md` before changing this boundary.
 
 For sandbox pluggability or adding a backend:
 

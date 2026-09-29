@@ -570,6 +570,12 @@ export type RepositoryResourceRef = {
   connectionId?: string | undefined;
   githubInstallationId?: number | undefined;
   githubRepositoryId?: number | undefined;
+  /**
+   * Best-effort materialization: a failed clone logs a warning and the
+   * session continues without this repository instead of failing sandbox
+   * setup. Omit it to keep a failed clone fatal.
+   */
+  optional?: boolean | undefined;
 };
 
 /** Value mirror of `@opengeni/contracts`; parity-tested without importing it from ordinary SDK entries. */
@@ -2258,6 +2264,11 @@ export type AgentToolCallCreatedPayload = {
   name: string;
   arguments: unknown;
   raw?: unknown | undefined;
+  /**
+   * Content-free analytics family: an OpenGeni first-party tool name,
+   * `integration:<reviewed domain>`, or `custom`. Absent when unclassified.
+   */
+  toolFamily?: string | undefined;
 };
 export type AgentToolCallOutputPayload = { id: string | null; output: unknown };
 export type SessionStatusChangedPayload = { status: SessionStatus };
@@ -2890,6 +2901,8 @@ export type ScheduledTaskAgentConfig = {
   tools: ToolRef[];
   metadata: Record<string, unknown>;
   slackBotConnectionId?: string | undefined;
+  /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
+  slackBotChannelId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -2966,6 +2979,45 @@ export type ScheduledTask = {
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+  /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
+  policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
+};
+
+/** One connector named in a scheduled task's access report. */
+export type ScheduledTaskAccessConnector = {
+  id: string;
+  name: string;
+};
+
+/**
+ * What a scheduled task's frozen connectors, connector accounts and OpenGeni
+ * tools lack compared with what its owner would get by saving it again now.
+ */
+export type ScheduledTaskPolicyDrift = {
+  /** Workspace default connectors that new schedules get and this one lacks. */
+  missingConnectors: ScheduledTaskAccessConnector[];
+  /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
+  unavailableConnectors: ScheduledTaskAccessConnector[];
+  /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+  missingOpenGeniTools: FirstPartyMcpToolName[];
+  /** Connectors whose chosen account can no longer be used by this schedule. */
+  unavailableAccounts: ScheduledTaskAccessConnector[];
+  /** Connectors this schedule has no account for, although one is now available. */
+  attachableAccounts: ScheduledTaskAccessConnector[];
+  /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
+  canRefresh: boolean;
+};
+
+/** Re-freeze with the caller's current authority; `executionDigest` is the reviewed head. */
+export type RefreshScheduledTaskAccessRequest = {
+  executionDigest: string;
+  /** Default connectors and OpenGeni tools to keep off; only narrows what the refresh adds. */
+  leaveOut?:
+    | {
+        connectors?: string[] | undefined;
+        openGeniTools?: FirstPartyMcpToolName[] | undefined;
+      }
+    | undefined;
 };
 
 export type CreateSessionRequest = {
@@ -3260,8 +3312,11 @@ export type FirstPartyMcpToolName =
   | "slack_bot_list_files"
   | "slack_bot_file_info"
   | "slack_bot_file_content"
+  | "slack_bot_upload_file"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "slack_bot_prepare_message"
+  | "slack_bot_send_prepared_message"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -3630,6 +3685,16 @@ export type CodexUsagePayload = {
   };
 };
 
+/** One model a Codex account's current ChatGPT plan was proven not to include. */
+export type CodexPlanExcludedModel = {
+  /** Product model id, for example `codex/gpt-6-sol`. */
+  model: string;
+  /** Display name, for example "GPT-6 Sol". */
+  label: string;
+  excludedAt: string;
+  retryAfter: string;
+};
+
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
 export type CodexAccount = {
   id: string;
@@ -3638,6 +3703,17 @@ export type CodexAccount = {
   label?: string | null;
   email?: string | null;
   plan?: string | null;
+  /** When the provider last confirmed `plan` (connect, token refresh, or usage read). */
+  planCheckedAt?: string | null;
+  /** Plan before the most recent observed plan change, and when that change was seen. */
+  planChangedFrom?: string | null;
+  planChangedAt?: string | null;
+  /**
+   * Models the current plan was proven not to include. Each is skipped by
+   * automatic selection until `retryAfter` (one request then re-checks it), or
+   * until a different plan is observed, for example after refreshing usage.
+   */
+  planExcludedModels?: CodexPlanExcludedModel[];
   status: "active" | "needs_relogin" | "error";
   active: boolean;
   expiresAt?: string | null;
@@ -4588,6 +4664,8 @@ export type WorkspaceSettings = {
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
   /** Exact capability selection inherited by new top-level sessions. */
   sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  /** Allowlisted sandbox image for new managed boxes; absent uses the deployment image. */
+  defaultSandboxImage?: string | null | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4691,6 +4769,8 @@ export type UpdateWorkspaceSettingsRequest = {
   codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
+  /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
+  defaultSandboxImage?: string | null | undefined;
   [key: string]: unknown;
 };
 
@@ -5276,6 +5356,7 @@ export type SandboxRecoveryProjection = {
   reason: string | null;
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
+  automaticAvailable?: boolean;
 };
 export type SandboxRecoveryRequest = {
   operationId: string;
@@ -5435,6 +5516,8 @@ export type ScheduledTaskAgentConfigInput = {
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   slackBotConnectionId?: string | undefined;
+  /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
+  slackBotChannelId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -5462,7 +5545,12 @@ export type CreateAgentScheduledTaskRequest = {
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
-  // The rig each run binds to (M3); active version resolved per fire.
+  /**
+   * Sandbox Environment each run binds to; its active version is resolved per
+   * fire. Omit to resolve it once at create: the workspace default (none for a
+   * Connected Machine task), or the target session's own environment for an
+   * existing-session task. `null` means none.
+   */
   rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
@@ -5561,8 +5649,72 @@ export type ScheduledTaskRun = {
   knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
   completedAt: string | null;
   error: string | null;
+  admissionDiagnostic?:
+    | {
+        version: 1;
+        reason:
+          | "selected_account_unavailable"
+          | "owner_access_unavailable"
+          | "ambiguous_account"
+          | "parent_accounts_required"
+          | "selection_unavailable";
+        accounts: Array<{
+          serverId: string;
+          connectionId: string | null;
+          reason:
+            | "connector_unavailable"
+            | "account_not_visible"
+            | "account_inactive"
+            | "account_mismatch"
+            | "selection_unavailable";
+        }>;
+      }
+    | null
+    | undefined;
   createdAt: string;
   updatedAt: string;
+  /** Connectors this run could not use; projected only for a viewer who can act on the task. */
+  accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+};
+
+export type ScheduledTaskAccessFailureReason =
+  | "missing_connection"
+  | "expired"
+  | "insufficient_scope"
+  | "refresh_failed"
+  | "personal_authority_unavailable"
+  | "unsupported_auth"
+  | "resource_scope_unavailable";
+
+/** A connector a scheduled run's own turn could not use (a `tool.auth_needed` fact). */
+export type ScheduledTaskRunAccessFailure = {
+  serverId: string;
+  name: string;
+  providerDomain: string;
+  reason: ScheduledTaskAccessFailureReason;
+  count: number;
+  firstOccurredAt: string;
+};
+
+/**
+ * A schedule that needs its owner's attention: its latest run failed closed on
+ * connector access (`runId`, `failures`), and/or a chosen connector account can
+ * no longer be used so new runs cannot start (`unavailableAccounts`; `runId`
+ * and `firedAt` are null when only this applies).
+ */
+export type ScheduledTaskAccessAttention = {
+  taskId: string;
+  taskName: string;
+  /** The task head this item was computed against; a new head is a new notice. */
+  executionDigest: string;
+  runId: string | null;
+  firedAt: string | null;
+  failures: ScheduledTaskRunAccessFailure[];
+  unavailableAccounts: ScheduledTaskAccessConnector[];
+};
+
+export type ListScheduledTaskAccessAttentionResponse = {
+  tasks: ScheduledTaskAccessAttention[];
 };
 
 // --- VariableSets -------------------------------------------------------------
@@ -7331,6 +7483,10 @@ export type GitHubRepository = {
   defaultBranch: string;
   accountLogin: string;
   accountType: string | null;
+  /** GitHub's archived flag, when the provider reported it. */
+  archived?: boolean | undefined;
+  /** GitHub's reported size in kilobytes, when reported. Zero means empty. */
+  sizeKb?: number | undefined;
 };
 
 export type GitHubRepositoryScope = "all" | "selected";
@@ -7940,6 +8096,8 @@ export type MachineRuntime = {
   updateChannel: "stable" | "beta" | null;
   desiredVersion: string | null;
   versionState: "unknown" | "current" | "outdated" | "ahead" | "updating" | "update_failed";
+  /** Required installer bootstrap when a legacy updater cannot safely replace the install. */
+  updateBlockedReason?: string | null | undefined;
   capabilities: MachineRuntimeCapabilities;
   update: MachineUpdateState | null;
 };

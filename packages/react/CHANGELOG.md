@@ -1,5 +1,51 @@
 # @opengeni/react
 
+## 7.3.1
+
+### Patch Changes
+
+- 6cbccaa: Keep IME candidate-selection and commit keys local to the browser viewer so composing text cannot move the remote caret or submit a remote form. Continue forwarding committed text and subsequent ordinary keys.
+
+## 7.3.0
+
+### Patch Changes
+
+- 78f1d59: Offer native dropdown choices in BrowserViewer when Chromium page frames omit the popup. Keep selection bound to the observed control and preserve normal input/change events, private-field redaction, and disabled options.
+- 7f75daa: Keep long browser session lists scrollable with their action buttons visible, and label browser choices for assistive technology.
+- 889a360: Accept fresh browser frames when an attachment renews and its producer restarts the frame sequence for the same page.
+- ac83339: Show browser discovery failures and retry target loading instead of displaying a semantic-only browser when session loading fails.
+- 1fa1216: Bind browser viewer input to the frame actually painted, cancel stale queued input
+  across navigation and target changes, and preserve ordered scroll input. Treat
+  plain upstream gateway failures as transport errors without blindly replaying
+  browser mutations.
+- 1842911: Recover managed browser viewers through the existing session when an unrelated attached Chrome profile loses its connection. Negotiate focused-input observations so native select choices appear after a viewer click, with existing generation fences and explicit fallback for older controllers.
+- 6d4ccb9: Preserve keyboard focus after desktop canvas clicks, bind pointer input to the
+  painted frame, and discard stale queued gestures and clipboard continuations.
+  Keep continuous scrolling responsive while preserving ordered input and deltas.
+- ec707de: Negotiate bounded viewer typing batches from the active browser controller. Preserve
+  individual text events and input order while reducing request overhead; recheck the
+  original document fence before each action and discard uncertain queued input
+  without replay. Older controllers retain sequential input.
+- 212de3d: Keep queued browser input fences without retaining earlier screenshot bytes or render callbacks. Preserve input order and discard queued actions when their viewer generation changes.
+- cc4bc8e: Hide the agent workspace's machine-state chip while viewing independent Browser or Desktop resources. Those viewers retain their own runtime status, so a sleeping agent sandbox no longer makes an active browser appear asleep.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+  - @opengeni/sdk@7.3.0
+
+## 7.2.0
+
+### Patch Changes
+
+- 19ecc86: Composer `autoFocus` no longer moves focus out of an open menu, listbox, or dialog when the composer becomes interactive late, so a hydrating composer cannot dismiss a menu the person just opened.
+- b85a966: Keep suspended browsers asleep when their viewer opens, and resume only after an explicit Open browser action.
+- d0b6742: Detach live browser frames when the page has been hidden, and reconnect when it becomes visible.
+- 2eaeec6: Publish the `@opengeni/react/accounts` subpath with its built JavaScript and declaration files. The previous release mapped that export to a source file name the package does not ship, so importing it failed.
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+  - @opengeni/sdk@7.2.0
+
 ## 7.1.2
 
 ### Patch Changes

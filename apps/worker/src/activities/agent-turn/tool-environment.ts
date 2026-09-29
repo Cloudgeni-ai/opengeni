@@ -33,6 +33,7 @@ import {
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
   mcpToolDisplayMetadata,
+  toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import {
   createGoogleDrivePublicationAttemptTool,
@@ -71,13 +72,19 @@ import {
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
-import { recordToolPreparationPhase, recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  recordSkillCheckout,
+  recordSkillRead,
+  recordToolPreparationPhase,
+  recordTurnStartupPhase,
+} from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  type ResourceRef,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
@@ -97,6 +104,7 @@ import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
 import type {
   AttemptIdentityState,
   EventingState,
+  RenewalState,
   SandboxRuntimeState,
   WorkspaceRefState,
 } from "./turn-context";
@@ -108,6 +116,7 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
@@ -169,8 +178,15 @@ export type PrepareTurnToolRuntimeDeps = {
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
   /** Deployment and workspace allow the Jev-backed code_search tool. */
   codeSearchEnabled: boolean;
+  /**
+   * False for an optional repository that sits this turn out after losing
+   * access (dropUnavailableOptionalRepositories), so no tool surface offers it.
+   */
+  retainsOptionalRepository?: (resource: ResourceRef) => boolean;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
+  /** Present when this turn resolves host-managed run credentials. */
+  runCredentialRenewals?: RenewalState | undefined;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
@@ -389,6 +405,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
     codeSearchEnabled,
+    retainsOptionalRepository,
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
   } = deps;
@@ -520,7 +537,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     sessionId: input.sessionId,
     attemptId: input.attemptId,
     turn,
-    resources: mergeResourceRefs(session.resources, turn.resources),
+    resources: mergeResourceRefs(session.resources, turn.resources).filter(
+      (resource) => retainsOptionalRepository?.(resource) ?? true,
+    ),
     tools: turnTools,
     resolveCredential,
   });
@@ -674,6 +693,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       executionGeneration: attempt.executionGeneration,
     },
     selected: selectedSkills,
+    modelToolOutputTruncationTokens: () =>
+      eventing.modelRunSettings.modelToolOutputTruncationTokens,
+    onSkillReadHistoryLookupFailed: () =>
+      observability.warn("skill_read history lookup failed; returning the full Skill text", {
+        errorCode: "skill_read_history_lookup_failed",
+        origin: "worker",
+      }),
+    skillReadTelemetry: {
+      // Set once agent build freezes this turn's model-visible Skill index.
+      indexedSkillIds: () => eventing.modelVisibleSkillIds,
+      observe: (observation) => recordSkillRead(observability, observation),
+    },
+    observeSkillCheckout: (observation) => recordSkillCheckout(observability, observation),
     filesystem: async () => {
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
@@ -839,6 +871,20 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : []),
     ...skillTools,
     ...sourceTools,
+    ...(deps.runCredentialRenewals
+      ? [
+          createRefreshCredentialsAttemptToolDefinition({
+            refresh: async () => {
+              const renewals = deps.runCredentialRenewals!;
+              const controller = renewals.runCredentialRenewal;
+              if (!controller) return "not_provisioned";
+              renewals.runCredentialRenewalOutcome = null;
+              await controller.refreshNow();
+              return renewals.runCredentialRenewalOutcome ?? "completed";
+            },
+          }),
+        ]
+      : []),
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
       load: async () => {
@@ -1045,6 +1091,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         subjectLabel: "OpenGeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
+        initiatingHumanSubjectId: deps.fileAuthoritySubjectId,
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
         ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),
@@ -1163,6 +1210,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       undefined,
       {},
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
+      (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
     );
     eventing.codemodeDispatcher.start();
   };

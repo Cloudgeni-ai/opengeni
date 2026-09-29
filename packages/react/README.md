@@ -90,6 +90,14 @@ your authenticated host routes. For custom or compatible frontends, the backend
 
 ### Exact conversation search navigation
 
+`useSessionEvents().initialHistoryReady` becomes true when a history window has
+loaded successfully, including an empty tail. It stays true through later stream
+errors, history navigation, and tip reloads, and resets for a new session/replay
+identity. Use it rather than inferring initial success from `initialLoading` or
+the combined `error`. A failed first load stays unready until recovery;
+`jumpToLatest()` clears its stale error and retries. Full replay has no history
+snapshot-completion watermark, so SSE alone does not set this flag.
+
 `useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
 window with at most two bounded cursor reads around an exact durable event.
 It resolves `true` only when that event is retained, `false` for a missing or
@@ -541,6 +549,26 @@ workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
 
+A managed browser's attachment authority error keeps a same-browser **Reconnect**
+action available. It obtains a fresh server-authorized attachment without creating
+a replacement browser or replaying input. The fresh Connected Chrome instruction
+is reserved for the selected extension-attached browser's generation loss; a
+different lost browser in the workspace cannot change that recovery path.
+
+The browser viewer negotiates bounded typing batches from the active controller's
+short-lived attachment. Supporting helpers recheck the original controller,
+target, document and frame fence before every action; old helpers retain one
+request per action. Only queued text actions share a request (at most 16), with
+each text/input event preserved. Keys, pointer input and clipboard operations
+remain ordering barriers. A failed or uncertain action discards the queued suffix
+without replay.
+IME candidate-selection keys stay local to the viewer; only committed text is
+sent to the remote page. A later ordinary Enter remains a remote key action.
+Live image props use opaque byte buffers so React development timing diagnostics
+cannot expand and retain every screenshot byte. Normal timing diagnostics remain enabled.
+Queued inputs retain only immutable frame fences, not screenshot bytes or prior
+render callbacks. Replacing the selected viewer invalidates its queued suffix.
+
 ```tsx
 import { OpenGeniProvider } from "@opengeni/react";
 import { BrowserViewer, ComputerViewer } from "@opengeni/react/interaction";
@@ -565,6 +593,18 @@ browser. A headed managed browser can receive `createLinkedComputer`; the
 returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
+
+Native dropdown popups may not appear in page frames. With a controller that
+advertises focused input observations, clicking one opens its choices beside
+the click. Ordinary clicks use a bounded focus probe instead of a full page
+snapshot; only a focused native dropdown (or a child-frame focus hint) requests
+semantic options. **Choose option** remains an explicit fallback for older
+controllers and controls that cannot be identified automatically. Selection uses the
+normal browser action API. The viewer retains that
+observation's target/document/frame fence. Private, oversized, or ambiguous
+choices remain unavailable; the page's keyboard controls still work. This
+fallback requires a controller with focused native-select metadata support and
+does not rewrite the page or capture the desktop.
 
 The provider opens one shared workspace interaction-revision stream and every
 catalog refreshes only when its revision advances; hidden or disconnected pages
@@ -870,6 +910,76 @@ ordered tool arguments, outputs, status, and timing. Added facets follow the
 remaining built-ins in supplied order. Duplicate IDs keep their first
 definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
+
+`turnSummary={{ rolling: true }}` selects the readable per-turn presentation:
+every assistant progress message and answer stays fully formatted and visible.
+Each turn has its own Working / Worked disclosure and rolling latest step;
+routine machine inputs get one compact reason per resumed turn. Normal tip-follow
+continues through long answers, and manual scrolling never auto-repins on new work.
+Expanded outer work headers stay reachable at the top of the timeline (below
+Latest question when shown) until their own details end; nested headers never stick.
+
+Wire the newest-question resolver when history can be unloaded:
+
+`SessionConversation` includes the readable-turn presentation and this wiring automatically.
+
+```tsx
+const events = useSessionEvents(sessionId);
+<MessageTimeline
+  events={events.events}
+  items={events.timeline}
+  turnSummary={{ rolling: true }}
+  hasNewer={events.hasNewer}
+  onJumpToLatest={events.jumpToLatest}
+  onJumpToLatestQuestion={events.jumpToLatestQuestion}
+/>;
+```
+
+The single **Latest question** button targets the newest durable user message,
+not the viewport-relative question or the newest message in an older loaded page.
+The resolver checks the authoritative queue and normally uses one filtered forensic
+lookup plus, if needed, two bounded context reads. It pages past legacy worker
+completions and withdrawn/cancelled-before-start prompts, never substituting an
+arbitrary question from a loaded old page. Queued/legacy admission uses filtered
+lifecycle evidence to locate its real turn start. A distant prompt is retained as
+one projection-only witness in `events.timeline`; `events.events` remains the
+bounded contiguous raw window, so pass `items` as above.
+The optional resolver loads on the first click, not when opening a session.
+Identity and navigation guards also cover that module-loading delay.
+
+`SessionConversation` also opens and focuses the newest pending prompt in
+`SessionChrome`. Custom hosts can provide the same destination without changing
+the existing `Promise<number | null>` timeline callback:
+
+```tsx
+onJumpToLatestQuestion={() => events.jumpToLatestQuestion({
+  onQueuedQuestion: async (turn, navigation) => {
+    await queue.refresh();
+    if (!navigation.isCurrent()) return;
+    // Check the host's latest queue/error state before applying its focus request.
+    setQueueFocusTarget((previous) => ({
+      turnId: turn.id,
+      requestId: (previous?.requestId ?? 0) + 1,
+    }));
+  },
+})}
+// Pass queueFocusTarget to SessionChrome; each new request opens/focuses once.
+```
+
+A queue destination returns `null`, not an invisible transcript sequence. Without
+`onQueuedQuestion`, a pending prompt produces explicit queue guidance in the
+timeline; transitional queue state can be retried rather than silently no-oping.
+Check `navigation.isCurrent()` after awaits and immediately before queue UI effects:
+an explicit history jump can supersede a queued lookup without changing the session.
+The shared projection predicate supplies execution evidence for older queued turns
+without `turn.started`, including tools, agent/sandbox activity, startup, recovery,
+and capacity events. Compact cursor coverage skips coalesced delta runs.
+Without `onJumpToLatestQuestion`, local navigation is available only at the live history
+window; the component never guesses from an older page. `onJumpToLatest` retains
+its separate bottom-follow behavior. `groupTimeline(items)` retains classic
+grouping; `{ readableTurns: true }` selects the new projection. The deprecated
+`foldExchanges` option aliases readable turns, not the removed cross-turn fold. See
+[`docs/design/genie-loading.md`](../../docs/design/genie-loading.md).
 
 ## Sandbox surfacing
 

@@ -1,10 +1,16 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
 import {
   CLIENT_ERRORS_PATH,
   isClientErrorReportRequest,
   registerClientErrorRoutes,
 } from "./routes/client-errors";
+import {
+  ANALYTICS_CONSENT_PATH,
+  isAnalyticsConsentReportRequest,
+  registerAnalyticsConsentRoutes,
+} from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
@@ -596,9 +602,12 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    // The anonymous web error beacon enforces its own 512-byte limit on the
+    // The anonymous web beacons enforce their own small limits on the
     // streamed body; the generic ceiling would buffer far more first.
-    if (isClientErrorReportRequest(c.req.method, pathname)) {
+    if (
+      isClientErrorReportRequest(c.req.method, pathname) ||
+      isAnalyticsConsentReportRequest(c.req.method, pathname)
+    ) {
       await next();
       return;
     }
@@ -985,6 +994,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerMcpOAuthRoutes(app, routeDeps);
 
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
+  registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
@@ -1420,6 +1430,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
+  registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
@@ -1973,6 +1984,7 @@ const routeLabelPatterns: Array<{
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
   { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
+  { pattern: /^\/v1\/analytics-consent$/, label: "/v1/analytics-consent" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
@@ -2792,6 +2804,7 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname.startsWith("/v1/github/") ||
     // A stale tab must still report the error that follows a rollout.
     pathname === CLIENT_ERRORS_PATH ||
+    pathname === ANALYTICS_CONSENT_PATH ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||
     pathname === "/v1/enrollments/token/exchange"

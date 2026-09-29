@@ -45,6 +45,7 @@ import {
   usePortalTokenStyle,
 } from "../lib/use-portal-token-style";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
+import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
 
@@ -529,8 +530,7 @@ type QueuePromptPreview = {
   isFallback: boolean;
 };
 
-function annotationOnlyQueuePreview(count: number): QueuePromptPreview {
-  const summary = `${count} timeline ${count === 1 ? "annotation" : "annotations"}`;
+function labelQueuePreview(summary: string): QueuePromptPreview {
   return {
     summary,
     collapsedVisual: summary,
@@ -546,10 +546,24 @@ function queueTurnPreview(
   maxCharacters: number,
 ): QueuePromptPreview {
   if (!turn) return queuePromptPreview("", maxCharacters);
-  const annotations = turn.annotations ?? [];
-  return turn.prompt.length === 0 && annotations.length > 0
-    ? annotationOnlyQueuePreview(annotations.length)
-    : queuePromptPreview(turn.prompt, maxCharacters);
+  return queueContentPreview(turn.prompt, turn.annotations?.length ?? 0, maxCharacters);
+}
+
+function queueContentPreview(
+  prompt: string,
+  annotationCount: number,
+  maxCharacters: number,
+): QueuePromptPreview {
+  switch (queueItemContent(prompt, annotationCount)) {
+    case "text":
+      return queuePromptPreview(prompt, maxCharacters);
+    case "annotations":
+      return labelQueuePreview(
+        `${annotationCount} timeline ${annotationCount === 1 ? "annotation" : "annotations"}`,
+      );
+    case "unavailable":
+      return labelQueuePreview(QUEUE_ITEM_CONTENT_UNAVAILABLE);
+  }
 }
 
 /**
@@ -825,11 +839,9 @@ function QueuePrompt({
 }) {
   const [expanded, setExpanded] = useState(false);
   const fullContentId = useId();
+  const content = queueItemContent(prompt, annotations.length);
   const preview = useMemo(
-    () =>
-      prompt.length === 0 && annotations.length > 0
-        ? annotationOnlyQueuePreview(annotations.length)
-        : queuePromptPreview(prompt, QUEUE_ROW_PREVIEW_CHARACTERS),
+    () => queueContentPreview(prompt, annotations.length, QUEUE_ROW_PREVIEW_CHARACTERS),
     [annotations.length, prompt],
   );
 
@@ -879,6 +891,14 @@ function QueuePrompt({
           annotations={annotations}
           className={prompt ? "mt-1" : undefined}
         />
+      ) : null}
+      {content === "unavailable" ? (
+        <p
+          className="text-og-control leading-5 text-fg-muted italic"
+          data-testid={`queue-prompt-unavailable-${index + 1}`}
+        >
+          {QUEUE_ITEM_CONTENT_UNAVAILABLE}
+        </p>
       ) : null}
       {prompt ? (
         <button
@@ -1075,6 +1095,7 @@ function SortableQueueRow({
             disabled={pending !== null}
             onClick={onSteer}
             aria-label={`Steer queued prompt ${index + 1}`}
+            data-analytics-action="steer"
             title="Steer — interrupt the current turn and send this message now"
             className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-og-control font-medium text-fg outline-hidden transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >

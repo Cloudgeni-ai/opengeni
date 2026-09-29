@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "1a532e5004b6a09bafb34d77e83d67619470585718a70858778596ef21f28319"
+      "sha256": "dad9af393c6b793005a2911395f925669a29cc8c4347d7a234cb5cd31ca40006"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "077e8c657213facd1fabde9c9b123441795d7df3d38671969da630ef34468948"
+      "sha256": "d8d70a2655d7439f3335a208c773dd40f533f1d73a5dd4455ebfa73a8fd67999"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -46,7 +46,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "65eda9e447d13bccaecd130c61182fbeddea2c49bda6fcd0529645f5e0eb591e"
+      "sha256": "ca17a460d150a375f6d3404e6dfe586a146917d3d2e36dcd0f93ec3f29538887"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -317,7 +317,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "publish",
       "step": "Build and sign the stable update manifest",
-      "sha256": "5ab7a487c5f60332081350a17b61bf22edfb12172c1dbb0f7197b4168d896b54"
+      "sha256": "b7d30577e17094d0ea6011f9821ed2f123d7cf7f6715bb58a0de159319e62a33"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -569,7 +569,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "browser-acceptance",
       "step": "Timeline pagination and tip-follow browser regressions",
-      "sha256": "010c7a4b7d04eb1940dbfc2c7e4c27db4f711a1217a5dca52c70da65e61c676f"
+      "sha256": "254ad9bb6b4dd8aa90e9383780dd1b4af7efd08d6851af7cc66cb4b0c85f9965"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -857,7 +857,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Admit protected main source",
-      "sha256": "faec0df74f1ec9d6b83e2b21389f8cc52ec16d8f7873ecbec89edaec0cbc1bf8"
+      "sha256": "6590c803e20faf9692c6f63fe4e23f8c131e38f604f13d1288da3d709cdddc6e"
     },
     {
       "workflow": ".github/workflows/publish-canary.yml",
@@ -875,7 +875,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Verify exact source",
-      "sha256": "e10d2a67ae143c5223960cad1b2433bdeba7046fecd1a05ae1519a8a880e5022"
+      "sha256": "614d4b19bde5f2c3b017a6127b62ef698b9a7c0e78f56f1f5aacf146885067e2"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",

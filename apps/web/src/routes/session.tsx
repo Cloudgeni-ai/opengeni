@@ -39,6 +39,7 @@ import {
   type TimelineSearchTarget,
 } from "@opengeni/react/session-ui";
 import type { SessionSearchRoute } from "@/lib/session-search-route";
+import { expireArtifactCatalog } from "@/lib/artifact-catalog-cache";
 import {
   creditExhaustedFromEvents,
   conversationTimeline,
@@ -85,7 +86,10 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
-import { LoadingPanel } from "@/components/common";
+import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { useSessionOpening } from "@/lib/session-opening";
+import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
+import { useQueuedQuestionFocus } from "@/lib/queued-question-focus";
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
@@ -131,6 +135,7 @@ import {
   composerLaunchSearchKey,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
+import { connectableSubscriptions, isDeploymentFreeModel } from "@/lib/deployment-free-model";
 import {
   effortOptionsForModel,
   findPickerRow,
@@ -288,15 +293,29 @@ export function SessionRoute({
       replace: true,
     });
   }, [navigate, sessionId, workspaceId]);
+  // The session-search origin only labels the navigation that opened the find
+  // bar. Drop it once the bar closes so a reload or shared link starts plain.
+  const hasSearchOrigin = searchTarget.searchOrigin === "session-search";
+  const consumeSearchOrigin = useCallback(() => {
+    if (!hasSearchOrigin) return;
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId },
+      search: ({ searchOrigin: _searchOrigin, ...rest }) => rest,
+      replace: true,
+    });
+  }, [hasSearchOrigin, navigate, sessionId, workspaceId]);
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
   const {
     events,
+    timeline: eventTimeline,
     sessionStatus,
     sessionStatusSequence,
     connectionState,
     initialLoading,
+    initialHistoryReady,
     hasOlder,
     loadingOlder,
     loadOlder,
@@ -307,6 +326,7 @@ export function SessionRoute({
     loadOldest,
     lastSequence: renderedThroughSequence,
     jumpToLatest,
+    jumpToLatestQuestion,
     jumpToSequence,
     error: streamError,
   } = useSessionEvents(sessionId);
@@ -324,7 +344,6 @@ export function SessionRoute({
   );
   const {
     session: fetchedSession,
-    loading,
     error: loadError,
     readRevision: sessionReadRevision,
     readGeneration: sessionReadGeneration,
@@ -347,6 +366,9 @@ export function SessionRoute({
     context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
       ? context.sessionCreationHandoff
       : null;
+  const pendingCreationHandoff = creationHandoffReconciled(creationHandoff, events)
+    ? null
+    : creationHandoff;
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -415,6 +437,11 @@ export function SessionRoute({
         : events,
     [events, viewClearedAfter],
   );
+  const { opened, hasObservedHistory } = useSessionOpening(
+    `${workspaceId}:${sessionId}`,
+    Boolean(session && (initialHistoryReady || pendingCreationHandoff)),
+    events.length > 0,
+  );
   const timeline = useMemo(() => {
     if (!session) {
       return [];
@@ -423,20 +450,35 @@ export function SessionRoute({
     // projectSessionTimeline's initial-message fallback — on a large session
     // that fallback painted the GENESIS message at the top for the whole fetch
     // (user-reported). The fallback is only for genuinely-empty NEW sessions,
-    // i.e. after the load settles with no events.
-    if (initialLoading && visibleEvents.length === 0 && !creationHandoff) {
+    // i.e. after the load settles with no events. Once real history was seen,
+    // clearing the window for a reload (including failure) is never genesis.
+    if (
+      (!opened || initialLoading || hasObservedHistory) &&
+      visibleEvents.length === 0 &&
+      !pendingCreationHandoff
+    ) {
       return [];
     }
     const projected = projectSessionTimeline(
       session,
       visibleEvents,
-      creationHandoff?.clientEventId,
+      pendingCreationHandoff?.clientEventId,
+      viewClearedAfter === null ? eventTimeline : undefined,
     );
     // projectSessionTimeline falls back to the session's initial message when
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
-  }, [creationHandoff, session, visibleEvents, viewClearedAfter, initialLoading]);
+  }, [
+    pendingCreationHandoff,
+    session,
+    visibleEvents,
+    viewClearedAfter,
+    opened,
+    initialLoading,
+    hasObservedHistory,
+    eventTimeline,
+  ]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
@@ -1020,10 +1062,13 @@ export function SessionRoute({
     [setInspectorOpen],
   );
 
-  if (!session) {
-    if (loadError) {
+  // Keep the same pending canvas through detail and the first history read.
+  // A freshly sent creation handoff already has visible conversation truth.
+  // Never paint the genesis message or mount a second loading treatment first.
+  if (!session || !opened) {
+    if (!session && loadError) {
       return (
-        <Suspense fallback={<LoadingPanel label="Looking for this session" />}>
+        <Suspense fallback={<LoadingPanel />}>
           <LazySessionRouteAuxiliary
             workspaceId={workspaceId}
             sessionId={sessionId}
@@ -1040,7 +1085,21 @@ export function SessionRoute({
           session={null}
           events={events}
           connectionState={connectionState}
-          primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
+          primary={
+            session && streamError && !initialLoading ? (
+              <ProblemPanel
+                title="Conversation couldn't be loaded"
+                description="Your saved messages are unchanged. Try loading them again."
+                action={
+                  <Button variant="secondary" onClick={() => void jumpToLatest()}>
+                    Retry conversation
+                  </Button>
+                }
+              />
+            ) : (
+              <LoadingPanel />
+            )
+          }
           onReloadSession={refreshSession}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
@@ -1064,9 +1123,11 @@ export function SessionRoute({
       searchTarget={searchTarget}
       onJumpToSequence={jumpToSequence}
       initialLoading={initialLoading}
+      historyReloadFailed={hasObservedHistory && events.length === 0 && !!streamError}
       launch={launch}
       realtimeAutostartModel={realtimeAutostartModel}
       onRealtimeAutostartConsumed={consumeRealtimeAutostart}
+      onSearchOriginConsumed={consumeSearchOrigin}
       approvals={approvals}
       humanInput={humanInput}
       failure={failure}
@@ -1083,6 +1144,7 @@ export function SessionRoute({
       loadingOldest={loadingOldest}
       onJumpToStart={loadOldest}
       onJumpToLatest={jumpToLatest}
+      onJumpToLatestQuestion={jumpToLatestQuestion}
       onClearView={clearView}
       onOpenSession={(nextSessionId) =>
         void navigate({
@@ -1223,6 +1285,11 @@ function SessionDock(props: {
     }
     return 0;
   }, [props.events]);
+  // Tool output may have published a file or Site: let the Artifacts page show
+  // its cached rows on the next visit but refetch them.
+  useEffect(() => {
+    if (artifactRefreshSequence) expireArtifactCatalog(context.client, props.workspaceId);
+  }, [artifactRefreshSequence, context.client, props.workspaceId]);
   const artifactState = useSessionEditableArtifactSummaries({
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
@@ -1472,9 +1539,11 @@ function SessionChatPane(props: {
   searchTarget: SessionSearchRoute;
   onJumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   initialLoading: boolean;
+  historyReloadFailed: boolean;
   launch?: ComposerLaunchSearch;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed: () => void;
+  onSearchOriginConsumed: () => void;
   approvals: PendingApproval[];
   humanInput: ReturnType<typeof useHumanInputRequests>;
   failure: ReturnType<typeof summarizeSessionFailure> | null;
@@ -1493,6 +1562,7 @@ function SessionChatPane(props: {
   loadingOldest: boolean;
   onJumpToStart: () => Promise<boolean>;
   onJumpToLatest: () => Promise<void>;
+  onJumpToLatestQuestion: ReturnType<typeof useSessionEvents>["jumpToLatestQuestion"];
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -1509,6 +1579,18 @@ function SessionChatPane(props: {
   onOpenSandboxFile: (path: string, line?: number) => void;
 }) {
   const context = useAppContext();
+  const { onQueuedQuestion, queueFocusTarget } = useQueuedQuestionFocus({
+    client: context.client,
+    subjectId: context.accessContext.subjectId,
+    workspaceId: props.session.workspaceId,
+    sessionId: props.session.id,
+    queue: props.queue,
+  });
+  const jumpToQuestion = props.onJumpToLatestQuestion;
+  const jumpToLatestQuestion = useCallback(
+    () => jumpToQuestion({ onQueuedQuestion }),
+    [jumpToQuestion, onQueuedQuestion],
+  );
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
@@ -1519,11 +1601,15 @@ function SessionChatPane(props: {
     setFindOpen(true);
     setFindFocusRevision((value) => value + 1);
   }, []);
+  // The back link follows the URL's session-search origin, which closing the
+  // bar removes, so Ctrl/Cmd+F and the Find button then open a plain bar.
+  const { onSearchOriginConsumed } = props;
   const closeFind = useCallback(() => {
     setFindOpen(false);
     setActiveSearchTarget(null);
+    onSearchOriginConsumed();
     requestAnimationFrame(() => findButton.current?.focus({ preventScroll: true }));
-  }, []);
+  }, [onSearchOriginConsumed]);
   useEffect(() => {
     if (props.searchTarget.find) openFind();
   }, [
@@ -2115,6 +2201,9 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // Shown while the banner chunk loads or if it fails. On the free model the
+  // generic daily-limit line then gives way to the free-model copy; that brief
+  // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
     <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
       {
@@ -2435,6 +2524,9 @@ function SessionChatPane(props: {
             key={props.session.id}
             failure={props.failure}
             canChooseModel={canChooseRecoveryModel}
+            hasModelPicker={hasComposerPolicy}
+            freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
+            subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
             workspaceId={props.session.workspaceId}
@@ -2541,6 +2633,7 @@ function SessionChatPane(props: {
             open={findOpen}
             focusRevision={findFocusRevision}
             initial={props.searchTarget}
+            showBackToSessionSearch={props.searchTarget.searchOrigin === "session-search"}
             onClose={closeFind}
             onTarget={setActiveSearchTarget}
             onJump={props.onJumpToSequence}
@@ -2635,6 +2728,7 @@ function SessionChatPane(props: {
                   await props.onJumpToStart();
                 }}
                 onJumpToLatest={props.onJumpToLatest}
+                onJumpToLatestQuestion={jumpToLatestQuestion}
                 emptyState={
                   // Clear view hides history, not the retained failure or retry operation.
                   failureRecovery ??
@@ -2656,11 +2750,19 @@ function SessionChatPane(props: {
                       }
                     />
                   ) : props.initialLoading ? (
-                    // History is still fetching — a quiet shimmer, not the
-                    // "waiting for the first step" copy (that's for NEW sessions).
-                    <div className="grid min-h-[24rem] place-items-center text-sm">
-                      <span className="og-shimmer-text font-medium">Loading conversation…</span>
+                    <div className="flex min-h-[24rem]">
+                      <LoadingPanel />
                     </div>
+                  ) : props.historyReloadFailed ? (
+                    <ProblemPanel
+                      title="Conversation couldn't be loaded"
+                      description="Your saved messages are unchanged. Try loading them again."
+                      action={
+                        <Button variant="secondary" onClick={() => void props.onJumpToLatest()}>
+                          Retry conversation
+                        </Button>
+                      }
+                    />
                   ) : (
                     <EmptyState
                       className="min-h-[24rem]"
@@ -2778,6 +2880,7 @@ function SessionChatPane(props: {
             }
           />
           <SessionChrome
+            queueFocusTarget={queueFocusTarget}
             sessionStatus={props.session.status}
             onOpenSession={props.onOpenSession}
             queue={props.queue}

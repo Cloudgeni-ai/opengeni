@@ -22,7 +22,7 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import type { GitHubAppInfo } from "@/types";
 
 export const GITHUB_APP_DESCRIPTION =
-  "Use the workspace App for automation, or your identity for reviews and merges.";
+  "Work on repositories, issues, and pull requests. Automation uses the workspace GitHub App; reviews and merges can use your own GitHub identity.";
 // Use the same bundled mark as the conversation card. The workspace App row
 // does not have a registry logo path, and a remote favicon is not reliable.
 export const GITHUB_LOGO_URL = "/capability-logos/github.svg";
@@ -192,7 +192,10 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     status.setupMode === "operator" &&
     !status.configured
   ) {
-    facts.push({ label: "GitHub App", value: "Not registered for this deployment" });
+    facts.push({
+      label: "GitHub App",
+      value: "Not set up on this server yet. Connecting creates it first.",
+    });
   }
   if (personalConnection) {
     facts.push({

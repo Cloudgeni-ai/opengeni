@@ -1,117 +1,141 @@
-import { WorkspaceRuntimeControl } from "@/components/workspace-runtime-control";
-// Workspace settings hub: browse links to workspace config surfaces, then
-// name/rename, members, API keys, memory/transcription/Codex policy, Codex
-// subscriptions, and a danger zone with workspace deletion. The org/billing
-// console lives at Organization settings.
+// Workspace settings pages, rendered inside the settings shell
+// (components/settings/workspace-settings-shell.tsx): General, Access,
+// Models and API keys. The org/billing console lives at
+// Organization settings.
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
-import {
-  ArrowUpRightIcon,
-  CopyIcon,
-  Loader2Icon,
-  PencilIcon,
-  PlusIcon,
-  SearchCodeIcon,
-  ShrinkIcon,
-  Trash2Icon,
-  TriangleAlertIcon,
-  UserIcon,
-  XIcon,
-} from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { CodexSubscriptionsCard } from "@/components/codex-connection";
-import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
-import { ModelAccessPolicySection } from "@/components/model-access-policy";
-import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
-import {
-  AiGatewayConnectionCard,
-  OpenRouterConnectionCard,
-} from "@/components/ai-gateway-connection";
-import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
+import { WorkspaceModelsPage } from "@/components/models/workspace-models-page";
+import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
-import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
-import { LoadErrorState } from "@/components/common";
+import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
+import {
+  WorkspaceDeveloperSettings,
+  WorkspaceSandboxImageRow,
+} from "@/components/workspace-developer-settings";
 import {
   WorkspaceSettingsContent,
   type WorkspaceSettingsSection,
 } from "@/components/settings/workspace-settings-shell";
-import { SettingsSection } from "@/components/settings/settings-layout";
 import {
   useOrganizationWorkspaceAdministration,
   type OrganizationWorkspaceAdministration,
 } from "@/components/settings/organization-workspace-administration";
-import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
-import { PermissionGroupPicker } from "@/components/permission-picker";
+import { VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { CopyField } from "@/components/ui/copy-field";
+import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DisabledReasonTooltip, SettingRow, SettingRowSkeleton } from "@/components/ui/setting-row";
+import { Field, FieldStack, TextInput } from "@/components/ui/field";
+import { FormDialog } from "@/components/ui/form-dialog";
 import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
+import { Section, SectionStack } from "@/components/ui/section";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
+import type { ModelsView } from "@/lib/models-route";
+import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
 import { orgLabel } from "@/lib/org";
+import { useOrganizationName } from "@/lib/use-organization-name";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@/lib/workspace-deletion";
-import {
-  apiKeyPermissionGroups,
-  canManageWorkspaceSettings,
-  defaultApiKeyPermissions,
-  delegableApiKeyPermissions,
-  hasWorkspacePermission,
-} from "@/lib/permissions";
-import type { ApiKey, OrganizationMember, OrganizationWorkspaceAccessMember } from "@/types";
-import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
+import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
+import { WorkspaceApiKeysPage } from "./workspace-api-keys";
+import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
 export function WorkspaceSettingsRoute({
   workspaceId,
   section,
+  modelsAccount,
+  modelsView,
+  apiKey,
+  access,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
+  /** Settings > Models: the account page that is open. */
+  modelsAccount?: string | undefined;
+  /** Settings > Models: the form page that is open. */
+  modelsView?: ModelsView | undefined;
+  /** Settings > API keys: `new` or the key whose page is open. */
+  apiKey?: string | undefined;
+  /** Settings > Access: Add people or one person's custom permissions. */
+  access?: AccessSearch | undefined;
 }) {
   const context = useAppContext();
   const administration = useOrganizationWorkspaceAdministration();
   const activeWorkspace = context.workspaces.some((workspace) => workspace.id === workspaceId);
   if (!activeWorkspace && administration) {
     return (
-      <OrganizationManagedWorkspaceSettings section={section} administration={administration} />
+      <OrganizationManagedWorkspaceSettings
+        section={section}
+        administration={administration}
+        access={access}
+      />
     );
   }
-  return <OperationalWorkspaceSettingsRoute workspaceId={workspaceId} section={section} />;
+  return (
+    <OperationalWorkspaceSettingsRoute
+      workspaceId={workspaceId}
+      section={section}
+      modelsAccount={modelsAccount}
+      modelsView={modelsView}
+      apiKey={apiKey}
+      access={access}
+    />
+  );
+}
+
+/** Keeps Settings > Access sub-pages in the URL, so Back and reload land on them. */
+function useAccessNavigation(workspaceId: string, access: AccessSearch | undefined) {
+  const navigate = useNavigate();
+  return {
+    view: accessViewOf(access ?? {}),
+    onViewChange: (next: ReturnType<typeof accessViewOf>) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId },
+        search: { section: "access", ...accessSearchOf(next) },
+      }),
+  };
 }
 
 function OperationalWorkspaceSettingsRoute({
   workspaceId,
   section,
+  modelsAccount,
+  modelsView,
+  apiKey,
+  access,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
+  modelsAccount?: string | undefined;
+  modelsView?: ModelsView | undefined;
+  apiKey?: string | undefined;
+  access?: AccessSearch | undefined;
 }) {
   const context = useAppContext();
-  const client = context.client;
-  const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
-  const navigate = useNavigate();
+  const accessNavigation = useAccessNavigation(workspaceId, access);
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
+  const organizationRole =
+    context.accessContext.accountGrants.find((grant) => grant.accountId === accountId)?.role ??
+    null;
+  const canManageOrganizationModels =
+    (context.clientConfig.auth.mode === "managedSession" ||
+      context.clientConfig.productAccessMode === "local") &&
+    (organizationRole === "owner" || organizationRole === "admin");
+  // The real name when known (an admin reads it from the organization overview).
+  const organizationName = useOrganizationName(accountId, canManageOrganizationModels);
   const organizationLabel = accountId
-    ? orgLabel(accountId, context.accessContext.accountGrants)
+    ? (organizationName ?? orgLabel(accountId, context.accessContext.accountGrants))
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const canManageSettings = canManageWorkspaceSettings(
@@ -119,203 +143,129 @@ function OperationalWorkspaceSettingsRoute({
     activeWorkspace,
     context.managedSelfContext,
   );
-
-  const [nameDraft, setNameDraft] = useState(activeWorkspace?.name ?? "");
-  const [nameEditing, setNameEditing] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const canRename =
-    activeWorkspace !== null &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-
   const canManageMembers = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "members:manage",
-  );
-  const canDeleteWorkspace = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "workspace:admin",
   );
   const canManageConnections = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "connections:write",
   );
+  const canAdministerWorkspace = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
+  );
+  // canManageOrganizationModels (above) is the same rule as Organization settings >
+  // Models: owners and admins in an organization administrator session (or the single
+  // local user).
+  const [gatewayRevision, setGatewayRevision] = useState(0);
+
+  return (
+    <WorkspaceSettingsContent>
+      {section === "general" ? (
+        <WorkspaceGeneralSettings
+          workspaceId={workspaceId}
+          organizationLabel={organizationLabel}
+          personal={personal}
+          canManageSettings={canManageSettings}
+          gatewayRevision={gatewayRevision}
+        />
+      ) : null}
+
+      {section === "access" ? (
+        personal ? (
+          <PersonalWorkspaceNotice organizationLabel={organizationLabel} />
+        ) : (
+          <Suspense fallback={<SettingsRowsFallback label="Loading people" />}>
+            <LazyMembersSection
+              workspaceId={workspaceId}
+              canManage={canManageMembers}
+              {...accessNavigation}
+            />
+          </Suspense>
+        )
+      ) : null}
+
+      {section === "models" ? (
+        <WorkspaceModelsPage
+          key={`models:${workspaceId}`}
+          workspaceId={workspaceId}
+          workspaceName={activeWorkspace?.name ?? "this workspace"}
+          organizationId={accountId}
+          organizationName={organizationName ?? "your organization"}
+          canManageSettings={canManageSettings}
+          canManageConnections={canManageConnections}
+          canManageOrganizationModels={canManageOrganizationModels}
+          account={modelsAccount}
+          view={modelsView}
+          onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+        />
+      ) : null}
+
+      {section === "api-keys" ? (
+        <WorkspaceApiKeysPage key={workspaceId} workspaceId={workspaceId} keyParam={apiKey} />
+      ) : null}
+
+      {section === "developer" ? (
+        <WorkspaceDeveloperSettings
+          client={context.client}
+          workspaceId={workspaceId}
+          canManage={canAdministerWorkspace}
+        />
+      ) : null}
+    </WorkspaceSettingsContent>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   General: the workspace, agent activity, new session defaults, delete.
+   -------------------------------------------------------------------------- */
+
+function WorkspaceGeneralSettings({
+  workspaceId,
+  organizationLabel,
+  personal,
+  canManageSettings,
+  gatewayRevision,
+}: {
+  workspaceId: string;
+  organizationLabel: string;
+  personal: boolean;
+  canManageSettings: boolean;
+  gatewayRevision: number;
+}) {
+  const context = useAppContext();
+  const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
+  const navigate = useNavigate();
+  const activeWorkspace =
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const accountId = activeWorkspace?.accountId ?? "";
+  const canRename =
+    activeWorkspace !== null &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const canDeleteWorkspace = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
+  );
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
   const isOnlyWorkspaceInAccount =
     context.workspaces.filter((workspace) => workspace.accountId === accountId).length <= 1;
+  const organizationSettingsWorkspaceId = accountId ? workspaceId : undefined;
+  const [renaming, setRenaming] = useState(false);
 
-  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
-  const [apiKeysError, setApiKeysError] = useState<Error | null>(null);
-  const [apiKeysLoaded, setApiKeysLoaded] = useState(false);
-  const [apiKeyName, setApiKeyName] = useState("Default API key");
-  const [apiKeyDescription, setApiKeyDescription] = useState("");
-  const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(
-    () => new Set(defaultApiKeyPermissions),
-  );
-  const [createdToken, setCreatedToken] = useState<string | null>(null);
-  const [createKeyOpen, setCreateKeyOpen] = useState(false);
-  const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [gatewayRevision, setGatewayRevision] = useState(0);
-  const canManageApiKeys = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "api_keys:manage",
-  );
-  const workspaceGrant =
-    context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ??
-    null;
-  const accountGrant = context.accessContext.accountGrants.find(
-    (grant) => grant.accountId === workspaceGrant?.accountId,
-  );
-  const delegablePermissions = delegableApiKeyPermissions(
-    workspaceGrant?.permissions ?? [],
-    accountGrant?.permissions ?? [],
-  );
-  const requestedPermissions = [...selectedPermissions].filter((permission) =>
-    delegablePermissions.has(permission),
-  );
-
-  useEffect(() => {
-    setNameDraft(activeWorkspace?.name ?? "");
-    setNameEditing(false);
-  }, [activeWorkspace?.id, activeWorkspace?.name]);
-
-  const refreshApiKeys = useCallback(async () => {
-    if (!canManageApiKeys) {
-      setApiKeys([]);
-      setApiKeysError(null);
-      setApiKeysLoaded(true);
-      return;
-    }
-    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    try {
-      const nextApiKeys = await client.listApiKeys(workspaceId);
-      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-      setApiKeys(nextApiKeys);
-      setApiKeysError(null);
-    } catch (error) {
-      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-      setApiKeys([]);
-      setApiKeysError(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      if (ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        setApiKeysLoaded(true);
-      }
-    }
-  }, [canManageApiKeys, captureWorkspaceInvocation, client, ownsWorkspaceInvocation, workspaceId]);
-
-  useEffect(() => {
-    if (!workspaceId) {
-      return;
-    }
-    void refreshApiKeys();
-  }, [refreshApiKeys, workspaceId]);
-
-  async function submitRename() {
-    const name = nameDraft.trim();
-    if (!name) {
-      return;
-    }
-    if (name === activeWorkspace?.name) {
-      setNameEditing(false);
-      return;
-    }
-    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    setRenaming(true);
-    try {
-      const renamed = await context.renameWorkspace(workspaceId, name);
-      if (renamed && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        setNameEditing(false);
-        toast.success("Workspace renamed");
-      }
-    } finally {
-      setRenaming(false);
-    }
-  }
-
-  function cancelRename() {
-    setNameDraft(activeWorkspace?.name ?? "");
-    setNameEditing(false);
-  }
-
-  async function createKey() {
-    if (!apiKeyName.trim() || requestedPermissions.length === 0) {
-      toast.error("API key name and permissions are required");
-      return;
-    }
-    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    setBusy(true);
-    try {
-      const result = await client.createApiKey(workspaceId, {
-        name: apiKeyName.trim(),
-        ...(apiKeyDescription.trim() ? { description: apiKeyDescription.trim() } : {}),
-        permissions: requestedPermissions,
-      });
-      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-      setCreatedToken(result.token);
-      setApiKeys((current) => [result.apiKey, ...current]);
-      setApiKeyDescription("");
-      setCreateKeyOpen(false);
-      toast.success("API key created");
-    } catch (error) {
-      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-      toast.error("Failed to create API key", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function copyToken(token: string) {
-    try {
-      await navigator.clipboard.writeText(token);
-      toast.success("Token copied");
-    } catch {
-      toast.error("Couldn't copy the token", {
-        description: "Copy it manually instead.",
-      });
-    }
-  }
-
-  async function revokeKey(apiKeyId: string) {
+  async function rename(name: string): Promise<boolean> {
+    if (name === activeWorkspace?.name) return true;
     const acceptedTransition = captureWorkspaceInvocation(workspaceId);
     if (!acceptedTransition) return false;
-    setBusy(true);
-    try {
-      const revoked = await client.deleteApiKey(workspaceId, apiKeyId);
-      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
-      setApiKeys((current) => current.map((key) => (key.id === revoked.id ? revoked : key)));
-      toast.success("API key revoked");
-      return true;
-    } catch (error) {
-      if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
-      toast.error("Failed to revoke API key", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function togglePermission(permission: string) {
-    setSelectedPermissions((current) => {
-      const next = new Set(current);
-      if (next.has(permission)) {
-        next.delete(permission);
-      } else {
-        next.add(permission);
-      }
-      return next;
-    });
+    const renamed = await context.renameWorkspace(workspaceId, name);
+    if (!renamed || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
+    toast.success(`Renamed to ${renamed.name}`);
+    return true;
   }
 
   async function deleteWorkspace(): Promise<boolean> {
@@ -343,622 +293,418 @@ function OperationalWorkspaceSettingsRoute({
     return true;
   }
 
-  const activeApiKeyCount = apiKeys.filter((key) => !key.revokedAt).length;
+  if (!activeWorkspace) return <SettingsRowsFallback label="Loading settings" />;
 
   return (
-    <WorkspaceSettingsContent section={section}>
-      <div className="grid min-w-0 gap-9 text-left">
-        {section === "general" ? (
-          <>
-            <SettingsSection
-              id="workspace-identity-heading"
-              title="Workspace identity"
-              action={
-                canRename && !nameEditing ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    className="shrink-0 text-fg-muted hover:text-fg"
-                    onClick={() => setNameEditing(true)}
-                    aria-label={`Rename workspace ${activeWorkspace?.name ?? ""}`}
-                  >
-                    <PencilIcon className="size-3.5" />
-                    Rename
-                  </Button>
-                ) : null
-              }
+    <SectionStack>
+      <Section aria-label="Workspace">
+        <SettingRow
+          label="Name"
+          description={<RowValue>{activeWorkspace.name}</RowValue>}
+          control={
+            <DisabledReasonTooltip
+              reason={canRename ? undefined : "Only workspace admins can rename it."}
             >
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <p className="min-w-0 truncate text-lg font-semibold tracking-tight text-fg">
-                  {activeWorkspace?.name ?? "Workspace"}
-                </p>
-                {personal ? <PersonalWorkspaceBadge /> : null}
-              </div>
-              <p className="mt-1 text-xs text-fg-muted">
-                {personal ? "Private workspace" : "Shared workspace"} in {organizationLabel}
-              </p>
-              {nameEditing && canRename ? (
-                <form
-                  className="mt-4 grid max-w-xl gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void submitRename();
-                  }}
-                >
-                  <div className="grid min-w-0 gap-1.5">
-                    <Label htmlFor="workspace-name" className="text-fg-muted">
-                      Workspace name
-                    </Label>
-                    <Input
-                      id="workspace-name"
-                      suppressAutofill
-                      value={nameDraft}
-                      onChange={(event) => setNameDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") cancelRename();
-                      }}
-                      disabled={renaming}
-                      placeholder="Workspace name"
-                      aria-label="Workspace name"
-                      autoFocus
-                    />
-                  </div>
-                  <div className="flex items-center justify-end gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      disabled={renaming}
-                      onClick={cancelRename}
-                    >
-                      <XIcon className="size-3.5" />
-                      Cancel
-                    </Button>
-                    <Button
-                      type="submit"
-                      size="sm"
-                      disabled={
-                        renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name
-                      }
-                    >
-                      {renaming ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-                      Save
-                    </Button>
-                  </div>
-                </form>
-              ) : null}
-            </SettingsSection>
-
-            {activeWorkspace ? (
-              <WorkspaceRuntimeControl
-                key={workspaceId}
-                control={activeWorkspace.inferenceControl}
-                canManage={canManageSettings}
-                onControl={async (action) => {
-                  await context.setWorkspaceInferenceControl(workspaceId, action);
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-disabled={canRename ? undefined : "true"}
+                aria-label={`Rename workspace ${activeWorkspace.name}`}
+                onClick={() => {
+                  if (canRename) setRenaming(true);
                 }}
-                onRefresh={() => context.refreshWorkspace(workspaceId)}
-                onTimer={async (request, expectedRevision) => {
-                  const accepted = context.captureWorkspaceInvocation(workspaceId);
-                  if (!accepted) return;
-                  await context.client.setWorkspacePauseTimer(workspaceId, {
-                    ...request,
-                    expectedRevision,
-                    clientEventId: crypto.randomUUID(),
-                  });
-                  if (context.ownsWorkspaceInvocation(workspaceId, accepted))
-                    await context.refreshWorkspace(workspaceId);
-                }}
-              />
-            ) : null}
-
-            {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
-
-            <SettingsSection
-              id="workspace-preferences-heading"
-              title="Session defaults"
-              description="Applied when someone starts a new session in this workspace."
-            >
-              <div className="divide-y divide-border/70">
-                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
-                <VideoGenerationPreferenceRow
-                  workspaceId={workspaceId}
-                  canManage={canManageSettings}
-                  refreshKey={gatewayRevision}
-                />
-                <CodexCompactionPreferenceRow
-                  workspaceId={workspaceId}
-                  canManage={canManageSettings}
-                />
-                <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
-              </div>
-            </SettingsSection>
-
-            <NativeIdentityLinkAccounts workspaceId={workspaceId} />
-          </>
-        ) : null}
-
-        {section === "learning" ? (
-          <WorkspaceLearningAdministration workspaceId={workspaceId} />
-        ) : null}
-
-        {section === "members" ? (
-          personal ? (
-            <PersonalWorkspaceNotice organizationLabel={organizationLabel} />
-          ) : (
-            <Suspense fallback={<MembersSectionFallback />}>
-              <LazyMembersSection workspaceId={workspaceId} canManage={canManageMembers} />
-            </Suspense>
-          )
-        ) : null}
-
-        {section === "plugins" ? (
-          <SettingsSection
-            id="workspace-capabilities-heading"
-            title="Manage capabilities"
-            description="Manage Plugins, Skills, and integrations on the Capabilities page."
-            action={
-              <Button asChild type="button" variant="secondary" size="sm">
-                <Link to="/workspaces/$workspaceId/plugins" params={{ workspaceId }}>
-                  Open Capabilities
-                  <ArrowUpRightIcon className="size-3.5" />
-                </Link>
+                className={canRename ? "pointer-coarse:h-11" : "opacity-50 pointer-coarse:h-11"}
+              >
+                <PencilIcon aria-hidden="true" />
+                Rename
               </Button>
-            }
-          >
-            <WorkspaceCapabilityDefaults
-              workspaceId={workspaceId}
-              canManage={canManageSettings}
-              kind="plugins"
-            />
-          </SettingsSection>
-        ) : null}
-
-        {section === "models" ? (
-          <>
-            <div className="border-b border-border/70 pb-3">
-              <DefaultSessionModelPreferenceRow
-                key={`default-model:${workspaceId}:${gatewayRevision}`}
-                workspaceId={workspaceId}
-                canManage={canManageSettings}
-              />
-            </div>
-            <SettingsSection
-              id="model-connections-heading"
-              title="Connections"
-              description="Connect subscriptions or provider accounts for this workspace. Your organization can also make connections available here. Choose model access on each connected account."
-              action={
+            </DisabledReasonTooltip>
+          }
+        />
+        <SettingRow
+          label="Type"
+          description={
+            <RowValue>
+              {personal ? "Personal · only you" : "Shared"} ·{" "}
+              {organizationSettingsWorkspaceId ? (
                 <Link
                   to="/workspaces/$workspaceId/organization"
-                  params={{ workspaceId }}
-                  search={{ section: "models" }}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                  params={{ workspaceId: organizationSettingsWorkspaceId }}
+                  className="text-brand underline-offset-2 hover:underline"
                 >
-                  Manage organization connections <ArrowUpRightIcon className="size-3.5" />
+                  {organizationLabel}
                 </Link>
-              }
-            >
-              <div className="min-w-0">
-                {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
-                <CodexSubscriptionsCard
-                  key={`codex-subscriptions:${workspaceId}`}
-                  workspaceId={workspaceId}
-                  canManage={canManageConnections}
-                />
-                <SuperGrokSubscriptionsCard
-                  key={`supergrok:${workspaceId}`}
-                  workspaceId={workspaceId}
-                  canManage={canManageConnections}
-                />
-                <AiGatewayConnectionCard
-                  workspaceId={workspaceId}
-                  canManageConnection={canManageConnections}
-                  canManageCustomModels={canManageSettings}
-                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-                />
-                <OpenRouterConnectionCard
-                  workspaceId={workspaceId}
-                  canManageConnection={canManageConnections}
-                  canManageCustomModels={canManageSettings}
-                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-                />
-              </div>
-            </SettingsSection>
-            <ModelAccessPolicySection
-              key={`model-access:${workspaceId}:${gatewayRevision}`}
-              workspaceId={workspaceId}
-              canManage={canManageSettings}
-            />
-          </>
-        ) : null}
-
-        {section === "api-keys" ? (
-          <SettingsSection
-            id="workspace-api-keys-heading"
-            title="Workspace keys"
-            action={
-              <>
-                <span className="text-xs text-fg-subtle">
-                  {!apiKeysLoaded
-                    ? "Loading…"
-                    : activeApiKeyCount === 0
-                      ? "No active keys"
-                      : `${activeApiKeyCount} active`}
-                </span>
-                {canManageApiKeys ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => {
-                      setSelectedPermissions(
-                        new Set(
-                          [...defaultApiKeyPermissions].filter((permission) =>
-                            delegablePermissions.has(permission),
-                          ),
-                        ),
-                      );
-                      setCreateKeyOpen(true);
-                    }}
-                  >
-                    <PlusIcon className="size-3.5" />
-                    Create API key
-                  </Button>
-                ) : null}
-              </>
-            }
-          >
-            <div className="grid gap-4">
-              {createdToken ? (
-                <Notice tone="success" title="Copy this token now — it won't be shown again.">
-                  <div className="mt-2 flex min-w-0 items-center gap-2">
-                    <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
-                      {createdToken}
-                    </code>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="Copy token"
-                      onClick={() => void copyToken(createdToken)}
-                    >
-                      <CopyIcon className="size-3.5" />
-                    </Button>
-                  </div>
-                </Notice>
-              ) : null}
-              <div className="divide-y divide-border/70">
-                {apiKeysError ? (
-                  <div>
-                    <LoadErrorState
-                      title="Couldn't load API keys"
-                      error={apiKeysError}
-                      onRetry={() => void refreshApiKeys()}
-                    />
-                  </div>
-                ) : !apiKeysLoaded ? (
-                  <>
-                    {[0, 1].map((key) => (
-                      <div key={key} className="flex items-center justify-between gap-3 py-3">
-                        <div className="min-w-0 space-y-1.5">
-                          <Skeleton className="h-4 w-32" />
-                          <Skeleton className="h-3 w-24" />
-                        </div>
-                        <Skeleton className="h-8 w-20 rounded-md" />
-                      </div>
-                    ))}
-                  </>
-                ) : apiKeys.length === 0 ? (
-                  <div>
-                    <EmptyState
-                      title="No API keys yet"
-                      description={
-                        canManageApiKeys
-                          ? "Create a key to call OpenGeni from another product."
-                          : "Keys created here call OpenGeni from another product."
-                      }
-                    />
-                  </div>
-                ) : (
-                  apiKeys.map((apiKey) => (
-                    <div
-                      key={apiKey.id}
-                      className="flex min-w-0 items-center justify-between gap-3 py-3"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{apiKey.name}</div>
-                        {apiKey.description ? (
-                          <div className="truncate text-xs text-fg-muted">{apiKey.description}</div>
-                        ) : null}
-                        <div className="truncate text-2xs text-fg-subtle">
-                          {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
-                        </div>
-                      </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy || Boolean(apiKey.revokedAt)}
-                        onClick={() => setRevokingKey(apiKey)}
-                      >
-                        <Trash2Icon className="size-3.5" />
-                        Revoke
-                      </Button>
-                    </div>
-                  ))
-                )}
-              </div>
-              {!canManageApiKeys ? (
-                <p className="text-xs text-fg-subtle">
-                  You don't have permission to manage API keys here.
-                </p>
-              ) : null}
-
-              <Dialog open={createKeyOpen} onOpenChange={setCreateKeyOpen}>
-                <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-h-[85vh] sm:max-w-2xl">
-                  <DialogHeader>
-                    <DialogTitle>Create API key</DialogTitle>
-                    <DialogDescription>
-                      Create a workspace-scoped key and choose what it can access.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <div className="grid min-h-0 gap-5 overflow-y-auto px-1">
-                    <div className="grid gap-4">
-                      <div className="grid gap-2">
-                        <Label htmlFor="api-key-name">Name</Label>
-                        <Input
-                          id="api-key-name"
-                          suppressAutofill
-                          autoFocus
-                          value={apiKeyName}
-                          onChange={(event) => setApiKeyName(event.target.value)}
-                          placeholder="Default API key"
-                        />
-                      </div>
-                      <div className="grid gap-2">
-                        <Label htmlFor="api-key-description">Description</Label>
-                        <Textarea
-                          id="api-key-description"
-                          value={apiKeyDescription}
-                          onChange={(event) => setApiKeyDescription(event.target.value)}
-                          placeholder="What will this key be used for?"
-                          maxLength={500}
-                          rows={3}
-                        />
-                      </div>
-                    </div>
-                    <section className="grid gap-3" aria-labelledby="api-key-permissions-heading">
-                      <div className="flex flex-wrap items-end justify-between gap-2">
-                        <div>
-                          <h3 id="api-key-permissions-heading" className="text-sm font-medium">
-                            Permissions
-                          </h3>
-                          <p className="mt-1 text-xs text-fg-muted">
-                            A key can only carry permissions your own grant can delegate.
-                          </p>
-                        </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={delegablePermissions.size === 0}
-                          onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
-                        >
-                          Select all delegable
-                        </Button>
-                      </div>
-                      <PermissionGroupPicker
-                        groups={apiKeyPermissionGroups()}
-                        selected={new Set(requestedPermissions)}
-                        delegable={delegablePermissions}
-                        disabled={busy}
-                        onToggle={togglePermission}
-                      />
-                    </section>
-                  </div>
-                  <DialogFooter>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={() => setCreateKeyOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      type="button"
-                      disabled={busy || !apiKeyName.trim() || requestedPermissions.length === 0}
-                      onClick={() => void createKey()}
-                    >
-                      {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-                      Create API key
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            </div>
-          </SettingsSection>
-        ) : null}
-
-        <ConfirmDialog
-          open={revokingKey !== null}
-          onOpenChange={(next) => setRevokingKey(next ? revokingKey : null)}
-          title={`Revoke API key “${revokingKey?.name ?? ""}”?`}
-          description={`Any product calling OpenGeni with ${revokingKey?.prefix ?? ""}… stops working immediately. This can't be undone.`}
-          confirmLabel="Revoke key"
-          onConfirm={() => (revokingKey ? revokeKey(revokingKey.id) : false)}
+              ) : (
+                organizationLabel
+              )}
+            </RowValue>
+          }
         />
+        <SettingRow
+          label="Workspace ID"
+          description={
+            <span className="mt-0.5 flex min-w-0">
+              <CopyField value={workspaceId} label="workspace ID" truncate="middle" />
+            </span>
+          }
+        />
+      </Section>
+      <RenameWorkspaceDialog
+        open={renaming}
+        onOpenChange={setRenaming}
+        name={activeWorkspace.name}
+        onRename={rename}
+      />
 
-        {section === "danger" ? (
-          <DangerZone
-            workspaceName={activeWorkspace?.name ?? ""}
-            canDelete={canDeleteWorkspace}
-            isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
-            onDelete={deleteWorkspace}
-          />
-        ) : null}
-      </div>
-    </WorkspaceSettingsContent>
+      <Section title="Agent activity">
+        <AgentActivityRow
+          key={workspaceId}
+          control={activeWorkspace.inferenceControl}
+          canManage={canManageSettings}
+          onControl={async (action) => {
+            await context.setWorkspaceInferenceControl(workspaceId, action);
+          }}
+          onRefresh={() => context.refreshWorkspace(workspaceId)}
+          onTimer={async (request, expectedRevision) => {
+            const accepted = context.captureWorkspaceInvocation(workspaceId);
+            if (!accepted) return;
+            await context.client.setWorkspacePauseTimer(workspaceId, {
+              ...request,
+              expectedRevision,
+              clientEventId: crypto.randomUUID(),
+            });
+            if (context.ownsWorkspaceInvocation(workspaceId, accepted))
+              await context.refreshWorkspace(workspaceId);
+          }}
+        />
+      </Section>
+
+      <Section
+        title="New session defaults"
+        description="Applied when someone starts a new session in this workspace."
+      >
+        <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+        <VideoGenerationPreferenceRow
+          workspaceId={workspaceId}
+          canManage={canManageSettings}
+          refreshKey={gatewayRevision}
+          onConnectGateway={() =>
+            void navigate({
+              to: "/workspaces/$workspaceId/settings",
+              params: { workspaceId },
+              search: { section: "models", view: "connect:vercel" },
+            })
+          }
+        />
+        <WorkspaceSandboxImageRow
+          client={context.client}
+          workspaceId={workspaceId}
+          canManage={canRename}
+        />
+        <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+        <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />
+      </Section>
+
+      <NativeIdentityLinkAccounts workspaceId={workspaceId} />
+
+      <DangerZone
+        workspaceName={activeWorkspace.name}
+        canDelete={canDeleteWorkspace}
+        isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
+        onDelete={deleteWorkspace}
+      />
+    </SectionStack>
   );
 }
 
-function managedWorkspaceMemberLabel(member: OrganizationWorkspaceAccessMember): string {
-  return member.name ?? member.email ?? member.subjectLabel ?? "Workspace member";
+/** A row's current value, in the description slot: 14px, full strength. */
+function RowValue({ children }: { children: React.ReactNode }) {
+  return <span className="mt-0.5 block text-sm leading-5 break-words text-fg">{children}</span>;
 }
+
+function SettingsRowsFallback({ label }: { label: string }) {
+  return (
+    <div role="status" aria-label={label}>
+      <SettingRowSkeleton />
+      <SettingRowSkeleton />
+      <SettingRowSkeleton />
+    </div>
+  );
+}
+
+const NAME_MAX = 120;
+
+function RenameWorkspaceDialog({
+  open,
+  onOpenChange,
+  name,
+  onRename,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  name: string;
+  /** Resolves false when the rename didn't happen (the context already told the user why). */
+  onRename: (name: string) => Promise<boolean>;
+}) {
+  const [value, setValue] = useState(name);
+  const [error, setError] = useState<string>();
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) {
+          setValue(name);
+          setError(undefined);
+        }
+        onOpenChange(next);
+      }}
+      size="sm"
+      title="Rename workspace"
+      description="Everyone with access sees the new name."
+      submitLabel="Save name"
+      pendingLabel="Saving…"
+      onSubmit={async () => {
+        const trimmed = value.trim();
+        if (!trimmed) {
+          setError("Name the workspace.");
+          return false;
+        }
+        if (trimmed.length > NAME_MAX) {
+          setError(`Use ${NAME_MAX} characters or fewer.`);
+          return false;
+        }
+        return await onRename(trimmed);
+      }}
+    >
+      <FieldStack>
+        <Field
+          label="Name"
+          error={error}
+          hint="Shown in the workspace switcher, invitations and Slack."
+        >
+          <TextInput
+            value={value}
+            maxLength={NAME_MAX}
+            onChange={(event) => {
+              setValue(event.target.value);
+              setError(undefined);
+            }}
+            placeholder="Workspace name"
+            suppressAutofill
+          />
+        </Field>
+      </FieldStack>
+    </FormDialog>
+  );
+}
+
+/**
+ * Jev-backed code_search agent tool. Shown only when the deployment offers it.
+ * "Default" follows the deployment (which may give the tool to half of all
+ * sessions during an experiment). Each session keeps the choice it was created
+ * with, so its cached prompt stays stable; Off also pauses the tool in running
+ * sessions until it is switched back.
+ */
+function CodeSearchPreferenceRow({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const capability = context.clientConfig.codeSearch;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const explicit = workspace?.settings?.codeSearchEnabled;
+  const value = explicit === true ? "on" : explicit === false ? "off" : "default";
+  const [saving, setSaving] = useState(false);
+  if (capability?.available !== true) return null;
+  const defaultPhrase =
+    capability.workspaceDefault === "on"
+      ? "Default turns it on"
+      : capability.workspaceDefault === "split"
+        ? "Default gives it to half of new sessions"
+        : "Default leaves it off";
+
+  async function choose(next: "default" | "on" | "off") {
+    if (next === value) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        codeSearchEnabled: next === "default" ? null : next === "on",
+      });
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success("Fast code search saved");
+      }
+    } catch {
+      if (context.ownsWorkspaceInvocation(workspaceId, acceptedTransition))
+        toast.error("Couldn't update fast code search");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const reason = canManage ? undefined : "Only workspace admins can change this.";
+  return (
+    <SettingRow
+      label="Fast code search"
+      description={`Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`}
+      controlWidth="auto"
+      control={
+        <SegmentedControl
+          size="sm"
+          value={value}
+          onValueChange={(next) => void choose(next as "default" | "on" | "off")}
+          options={[
+            { value: "default", label: "Default" },
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ].map((option) => ({
+            ...option,
+            disabled: saving || !canManage,
+            ...(reason ? { disabledReason: reason } : {}),
+          }))}
+        />
+      }
+    />
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   Delete workspace: the last section of General.
+   -------------------------------------------------------------------------- */
+
+/** Delete workspace: a quiet last section that confirms with the typed name. */
+export function DangerZone(props: {
+  workspaceName: string;
+  canDelete: boolean;
+  isOnlyWorkspaceInAccount: boolean;
+  onDelete: () => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const deleteInFlight = useRef(false);
+
+  const disabledReason = !props.canDelete
+    ? "Only workspace admins can delete this workspace."
+    : props.isOnlyWorkspaceInAccount
+      ? "You can't delete an organization's only workspace. Create another one first."
+      : null;
+
+  async function confirmDelete(): Promise<boolean> {
+    if (deleteInFlight.current) return false;
+    deleteInFlight.current = true;
+    // onDelete surfaces expected mutation errors. Close explicitly on success
+    // because a best-effort post-delete navigation can leave this route mounted.
+    try {
+      const ok = await props.onDelete();
+      if (ok) {
+        toast.success(`Deleted ${props.workspaceName}`);
+        setOpen(false);
+      }
+      return ok;
+    } catch (error) {
+      throw new Error(
+        error instanceof Error && error.message
+          ? `Couldn't delete the workspace: ${error.message}`
+          : "Couldn't delete the workspace. Try again.",
+        { cause: error },
+      );
+    } finally {
+      deleteInFlight.current = false;
+    }
+  }
+
+  return (
+    <Section
+      title="Delete workspace"
+      description={
+        disabledReason ??
+        `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, variable sets, knowledge, files and API keys.`
+      }
+      action={
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={Boolean(disabledReason)}
+          onClick={() => setOpen(true)}
+          className="text-danger hover:text-danger pointer-coarse:h-11"
+        >
+          <Trash2Icon aria-hidden="true" />
+          Delete
+        </Button>
+      }
+    >
+      {disabledReason ? null : (
+        <DestructiveConfirm
+          open={open}
+          onOpenChange={(next) => {
+            if (!deleteInFlight.current) setOpen(next);
+          }}
+          variant="type-to-confirm"
+          title={`Delete ${props.workspaceName}?`}
+          consequences={[
+            `Deletes every session, schedule, variable set, knowledge entry, file and API key in ${props.workspaceName}.`,
+            "Everyone loses access to it. Their other workspaces aren't affected.",
+            "Running sessions, video generations, background commands and live sandboxes must finish first.",
+            "This can't be undone.",
+          ]}
+          confirmText={props.workspaceName}
+          confirmPlaceholder="Workspace name"
+          confirmLabel="Delete workspace"
+          pendingLabel="Deleting…"
+          onConfirm={confirmDelete}
+        />
+      )}
+    </Section>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   Organization management: an organization admin who manages this workspace
+   without access to its content. Name and delete on General, and Access.
+   -------------------------------------------------------------------------- */
 
 function OrganizationManagedWorkspaceSettings({
   section,
   administration,
+  access,
 }: {
   section: WorkspaceSettingsSection;
   administration: OrganizationWorkspaceAdministration;
+  access?: AccessSearch | undefined;
 }) {
   const context = useAppContext();
+  const accessNavigation = useAccessNavigation(administration.workspace.id, access);
   const navigate = useNavigate();
   const { organizationId, overview, workspace, refresh } = administration;
-  const [name, setName] = useState(workspace.name);
-  const [busy, setBusy] = useState(false);
-  const [members, setMembers] = useState<OrganizationMember[]>([]);
-  const [membersLoading, setMembersLoading] = useState(section === "members");
-  const [selectedMembershipId, setSelectedMembershipId] = useState("");
-  const [selectedRole, setSelectedRole] = useState<"viewer" | "member" | "admin">("member");
-  const [removing, setRemoving] = useState<OrganizationWorkspaceAccessMember | null>(null);
+  const [renaming, setRenaming] = useState(false);
 
-  useEffect(() => setName(workspace.name), [workspace.name]);
-  useEffect(() => {
-    if (section !== "members") return;
-    let disposed = false;
-    setMembersLoading(true);
-    void context.client
-      .listOrganizationAdministrationMembers(organizationId)
-      .then((response) => {
-        if (!disposed) setMembers(response.members.filter((member) => member.status === "active"));
-      })
-      .catch((error) => {
-        if (!disposed) {
-          toast.error("Couldn't load organization members", {
-            description: error instanceof Error ? error.message : String(error),
-          });
-        }
-      })
-      .finally(() => {
-        if (!disposed) setMembersLoading(false);
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [context.client, organizationId, section, overview]);
-
-  const assignedSubjects = new Set(workspace.members.map((member) => member.subjectId));
-  const candidates = members.filter((member) => !assignedSubjects.has(member.subjectId));
-
-  async function rename() {
-    const nextName = name.trim();
-    if (!nextName || nextName === workspace.name || busy) return;
-    setBusy(true);
+  async function rename(nextName: string): Promise<boolean> {
+    if (nextName === workspace.name) return true;
     try {
       await context.client.updateOrganizationWorkspace(organizationId, workspace.id, {
         name: nextName,
         expectedUpdatedAt: workspace.updatedAt,
         operationId: crypto.randomUUID(),
       });
-      toast.success("Workspace renamed");
-      refresh();
-    } catch (error) {
-      toast.error("Couldn't rename workspace", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addMember() {
-    if (!selectedMembershipId || busy) return;
-    setBusy(true);
-    try {
-      await context.client.putOrganizationWorkspaceMember(
-        organizationId,
-        workspace.id,
-        selectedMembershipId,
-        {
-          role: selectedRole,
-          expectedUpdatedAt: null,
-          operationId: crypto.randomUUID(),
-        },
-      );
-      setSelectedMembershipId("");
-      toast.success("Workspace access added");
-      await context.revalidatePrincipalAccess();
-      refresh();
-    } catch (error) {
-      toast.error("Couldn't add workspace access", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function setMemberRole(
-    member: OrganizationWorkspaceAccessMember,
-    role: "viewer" | "member" | "admin",
-  ) {
-    if (!member.organizationMembershipId || busy) return;
-    setBusy(true);
-    try {
-      await context.client.putOrganizationWorkspaceMember(
-        organizationId,
-        workspace.id,
-        member.organizationMembershipId,
-        {
-          role,
-          expectedUpdatedAt: member.updatedAt,
-          operationId: crypto.randomUUID(),
-        },
-      );
-      toast.success("Workspace access updated");
-      await context.revalidatePrincipalAccess();
-      refresh();
-    } catch (error) {
-      toast.error("Couldn't update workspace access", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function removeMember(): Promise<boolean> {
-    if (!removing?.organizationMembershipId || busy) return false;
-    setBusy(true);
-    try {
-      await context.client.revokeOrganizationWorkspaceMember(
-        organizationId,
-        workspace.id,
-        removing.organizationMembershipId,
-        {
-          expectedUpdatedAt: removing.updatedAt,
-          operationId: crypto.randomUUID(),
-        },
-      );
-      setRemoving(null);
-      toast.success("Workspace access removed");
-      await context.revalidatePrincipalAccess();
+      toast.success(`Renamed to ${nextName}`);
       refresh();
       return true;
     } catch (error) {
-      toast.error("Couldn't remove workspace access", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      return false;
-    } finally {
-      setBusy(false);
+      throw new Error(
+        error instanceof Error && error.message
+          ? `Couldn't rename the workspace: ${error.message}`
+          : "Couldn't rename the workspace. Try again.",
+        { cause: error },
+      );
     }
   }
 
   async function deleteWorkspace(): Promise<boolean> {
-    setBusy(true);
     try {
       const currentOverview = await deleteOrganizationWorkspaceWithReconciliation({
         client: context.client,
@@ -995,16 +741,21 @@ function OrganizationManagedWorkspaceSettings({
         description: error instanceof Error ? error.message : String(error),
       });
       return false;
-    } finally {
-      setBusy(false);
     }
   }
 
-  if (section !== "general" && section !== "members" && section !== "danger") {
+  const scopeNotice = (
+    <Notice tone="muted" title="You manage this workspace for the organization">
+      You can rename it, change who has access and delete it. This doesn't give you access to its
+      sessions, files, credentials or integrations.
+    </Notice>
+  );
+
+  if (section !== "general" && section !== "access") {
     return (
-      <WorkspaceSettingsContent section={section}>
+      <WorkspaceSettingsContent>
         <Notice tone="muted" title="Workspace access required">
-          Organization administrators can manage identity, members, and deletion here without
+          Organization administrators can manage the name, access and deletion here without
           receiving access to workspace content.
         </Notice>
       </WorkspaceSettingsContent>
@@ -1012,205 +763,66 @@ function OrganizationManagedWorkspaceSettings({
   }
 
   return (
-    <WorkspaceSettingsContent section={section}>
-      <div className="grid min-w-0 gap-9 text-left">
-        <Notice tone="muted" title="Organization management mode">
-          You can manage this shared workspace, but this does not give you access to its chats,
-          files, credentials, or integrations.
-        </Notice>
-
-        {section === "general" ? (
-          <SettingsSection
-            id="managed-workspace-name-heading"
-            title="Workspace name"
-            description="Shown to everyone with workspace access."
-          >
-            <form
-              className="flex flex-wrap items-end gap-3"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void rename();
-              }}
-            >
-              <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
-                Name
-                <Input
-                  value={name}
-                  suppressAutofill
-                  onChange={(event) => setName(event.target.value)}
-                  maxLength={120}
-                />
-              </label>
-              <Button
-                type="submit"
-                size="sm"
-                disabled={busy || !name.trim() || name.trim() === workspace.name}
-              >
-                {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-                Save name
-              </Button>
-            </form>
-          </SettingsSection>
-        ) : null}
-
-        {section === "members" ? (
-          <SettingsSection
-            id="managed-workspace-members-heading"
-            title="People with access"
-            description="Workspace access is separate from organization administration."
-          >
-            <div className="grid gap-4">
-              {candidates.length > 0 ? (
-                <div className="flex flex-wrap items-end gap-3">
-                  <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
-                    Organization member
-                    <Select
-                      value={selectedMembershipId}
-                      onChange={(event) => setSelectedMembershipId(event.target.value)}
-                      disabled={busy}
-                    >
-                      <option value="">Choose a person…</option>
-                      {candidates.map((member) => (
-                        <option key={member.id} value={member.id}>
-                          {member.name ?? member.email ?? "Member"}
-                        </option>
-                      ))}
-                    </Select>
-                  </label>
-                  <label className="grid min-w-40 gap-1 text-xs text-fg-muted">
-                    Access
-                    <Select
-                      value={selectedRole}
-                      onChange={(event) =>
-                        setSelectedRole(event.target.value as typeof selectedRole)
-                      }
-                      disabled={busy}
-                    >
-                      {overview.roles.map((role) => (
-                        <option key={role.role} value={role.role}>
-                          {role.label}
-                        </option>
-                      ))}
-                    </Select>
-                  </label>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={busy || !selectedMembershipId}
-                    onClick={() => void addMember()}
-                  >
-                    Add access
-                  </Button>
-                </div>
-              ) : null}
-              {membersLoading ? (
-                <p role="status" className="text-xs text-fg-muted">
-                  Loading organization members…
-                </p>
-              ) : workspace.members.length === 0 ? (
-                <EmptyState
-                  title="No one has access"
-                  description="Add an organization member to this workspace."
-                />
-              ) : (
-                <div className="divide-y divide-border">
-                  {workspace.members.map((member) => (
-                    <div
-                      key={member.membershipId}
-                      className="flex flex-wrap items-center gap-3 py-3"
-                    >
-                      <div className="min-w-48 flex-1">
-                        <p className="truncate text-sm font-medium">
-                          {managedWorkspaceMemberLabel(member)}
-                        </p>
-                        <p className="text-2xs capitalize text-fg-subtle">{member.principalKind}</p>
-                      </div>
-                      {member.organizationMembershipId && member.principalKind === "human" ? (
-                        <Select
-                          className="w-44"
-                          value={member.role}
-                          disabled={busy}
-                          onChange={(event) =>
-                            void setMemberRole(
-                              member,
-                              event.target.value as "viewer" | "member" | "admin",
-                            )
-                          }
-                        >
-                          {member.role === "custom" ? (
-                            <option value="custom" disabled>
-                              Custom access
-                            </option>
-                          ) : null}
-                          {overview.roles.map((role) => (
-                            <option key={role.role} value={role.role}>
-                              {role.label}
-                            </option>
-                          ))}
-                        </Select>
-                      ) : (
-                        <span className="text-xs capitalize text-fg-muted">{member.role}</span>
-                      )}
-                      {member.organizationMembershipId &&
-                      member.subjectId !== context.accessContext.subjectId ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={busy}
-                          onClick={() => setRemoving(member)}
-                        >
-                          Remove
-                        </Button>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </SettingsSection>
-        ) : null}
-
-        {section === "danger" ? (
+    <WorkspaceSettingsContent>
+      {accessNavigation.view ? null : <div className="mb-6">{scopeNotice}</div>}
+      {section === "general" ? (
+        <SectionStack>
+          <Section aria-label="Workspace">
+            <SettingRow
+              label="Name"
+              description={<RowValue>{workspace.name}</RowValue>}
+              control={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRenaming(true)}
+                  className="pointer-coarse:h-11"
+                >
+                  <PencilIcon aria-hidden="true" />
+                  Rename
+                </Button>
+              }
+            />
+            <SettingRow
+              label="Type"
+              description={<RowValue>Shared · {overview.organization.name}</RowValue>}
+            />
+            <SettingRow
+              label="Workspace ID"
+              description={
+                <span className="mt-0.5 flex min-w-0">
+                  <CopyField value={workspace.id} label="workspace ID" truncate="middle" />
+                </span>
+              }
+            />
+          </Section>
+          <RenameWorkspaceDialog
+            open={renaming}
+            onOpenChange={setRenaming}
+            name={workspace.name}
+            onRename={rename}
+          />
           <DangerZone
             workspaceName={workspace.name}
             canDelete
             isOnlyWorkspaceInAccount={false}
             onDelete={deleteWorkspace}
           />
-        ) : null}
-
-        <ConfirmDialog
-          open={removing !== null}
-          onOpenChange={(open) => {
-            if (!open) setRemoving(null);
-          }}
-          title={`Remove ${removing ? managedWorkspaceMemberLabel(removing) : "member"}?`}
-          description="Their workspace access stops immediately. Their organization membership and Personal workspace are unchanged."
-          confirmLabel="Remove access"
-          onConfirm={removeMember}
-        />
-      </div>
+        </SectionStack>
+      ) : (
+        <OrganizationManagedWorkspaceAccess administration={administration} {...accessNavigation} />
+      )}
     </WorkspaceSettingsContent>
   );
 }
 
 function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: string }) {
   return (
-    <section
-      aria-labelledby="personal-workspace-heading"
-      className="grid gap-2 rounded-lg border border-brand/25 bg-brand/5 p-4"
-    >
-      <h2 id="personal-workspace-heading" className="flex items-center gap-2 text-sm font-medium">
-        <UserIcon className="size-3.5 text-brand" />
-        Personal workspace
-        <PersonalWorkspaceBadge decorative />
-      </h2>
-      <p className="text-xs text-fg-muted">
-        This workspace is your owner-only context inside {organizationLabel}. Organization
-        administrators and other members do not gain access to its sessions or content.
-      </p>
-    </section>
+    <Notice tone="muted" icon={<UserIcon />} title="Only you can use your Personal workspace">
+      This workspace is your owner-only space inside {organizationLabel}. Organization
+      administrators and other members do not gain access to its sessions or content.
+    </Notice>
   );
 }
 
@@ -1218,274 +830,3 @@ const LazyMembersSection = lazy(async () => {
   const module = await import("./workspace-members-section");
   return { default: module.MembersSection };
 });
-
-function MembersSectionFallback() {
-  return (
-    <div role="status" className="grid gap-2" aria-label="Loading workspace members">
-      <Skeleton className="h-16 rounded-lg" />
-      <Skeleton className="h-16 rounded-lg" />
-    </div>
-  );
-}
-
-/**
- * Default for NEW Codex sessions. Off (= remote_v2): best ChatGPT compaction,
- * Codex-only. On (= portable): can switch to other models mid-session.
- */
-function CodexCompactionPreferenceRow({
-  workspaceId,
-  canManage,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const portable = workspace?.settings?.codexCompactionDefault === "portable";
-  const [saving, setSaving] = useState(false);
-
-  async function toggle(nextPortable: boolean) {
-    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    setSaving(true);
-    try {
-      const updated = await context.updateWorkspaceSettings(workspaceId, {
-        codexCompactionDefault: nextPortable ? "portable" : "remote_v2",
-      });
-      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        toast.success(
-          nextPortable
-            ? "New Codex sessions can switch to other providers"
-            : "New Codex sessions stay on Codex",
-        );
-      }
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <PreferenceToggleRow
-      icon={<ShrinkIcon className="size-3.5 text-brand" />}
-      label="Allow other providers (Codex only)"
-      description="On: switch from Codex models to other providers mid-session. Off (recommended): better compaction."
-      checked={portable}
-      disabled={saving || !canManage}
-      saving={saving}
-      onToggle={() => void toggle(!portable)}
-    />
-  );
-}
-
-/**
- * Jev-backed code_search agent tool. Shown only when the deployment offers it.
- * "Default" follows the deployment (which may give the tool to half of all
- * sessions during an experiment). Each session keeps the choice it was created
- * with, so its cached prompt stays stable; Off also pauses the tool in running
- * sessions until it is switched back.
- */
-function CodeSearchPreferenceRow({
-  workspaceId,
-  canManage,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-}) {
-  const context = useAppContext();
-  const capability = context.clientConfig.codeSearch;
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const explicit = workspace?.settings?.codeSearchEnabled;
-  const value = explicit === true ? "on" : explicit === false ? "off" : "default";
-  const [saving, setSaving] = useState(false);
-  if (capability?.available !== true) return null;
-  const defaultLabel =
-    capability.workspaceDefault === "on"
-      ? "Default · on"
-      : capability.workspaceDefault === "split"
-        ? "Default · half of sessions"
-        : "Default · off";
-
-  async function choose(next: "default" | "on" | "off") {
-    if (next === value) return;
-    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    setSaving(true);
-    try {
-      const updated = await context.updateWorkspaceSettings(workspaceId, {
-        codeSearchEnabled: next === "default" ? null : next === "on",
-      });
-      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        toast.success("Fast code search updated");
-      }
-    } catch {
-      if (context.ownsWorkspaceInvocation(workspaceId, acceptedTransition))
-        toast.error("Couldn’t update fast code search");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="flex min-h-10 items-center gap-3 px-1 py-1.5">
-      <SearchCodeIcon className="size-3.5 shrink-0 text-brand" />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium">Fast code search</div>
-        <p className="truncate text-2xs text-fg-subtle">
-          Agents find code in one step with TypeSafe Jev. Applies to new sessions; Off also pauses
-          it in running ones.
-        </p>
-      </div>
-      {saving ? <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" /> : null}
-      <Select
-        aria-label="Fast code search"
-        value={value}
-        disabled={!canManage || saving}
-        onChange={(event) => void choose(event.currentTarget.value as "default" | "on" | "off")}
-        className="h-7 w-44 py-0 text-xs"
-      >
-        <option value="default">{defaultLabel}</option>
-        <option value="on">On</option>
-        <option value="off">Off</option>
-      </Select>
-    </div>
-  );
-}
-
-/** Danger zone: delete the workspace behind a typed-name confirmation. */
-export function DangerZone(props: {
-  workspaceName: string;
-  canDelete: boolean;
-  isOnlyWorkspaceInAccount: boolean;
-  onDelete: () => Promise<boolean>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [confirmName, setConfirmName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const deleteInFlight = useRef(false);
-  const nameMatches =
-    confirmName.trim() === props.workspaceName.trim() && props.workspaceName.trim().length > 0;
-
-  const disabledReason = !props.canDelete
-    ? "Only workspace admins can delete this workspace."
-    : props.isOnlyWorkspaceInAccount
-      ? "You can't delete an organization's only workspace."
-      : null;
-
-  async function confirmDelete() {
-    if (!nameMatches || deleteInFlight.current) {
-      return;
-    }
-    deleteInFlight.current = true;
-    setBusy(true);
-    // onDelete surfaces expected mutation errors. Close explicitly on success
-    // because a best-effort post-delete navigation can leave this route mounted.
-    try {
-      const ok = await props.onDelete();
-      if (ok) {
-        toast.success("Workspace deleted");
-        deleteInFlight.current = false;
-        setBusy(false);
-        setOpen(false);
-        setConfirmName("");
-      }
-      if (!ok) {
-        deleteInFlight.current = false;
-        setBusy(false);
-      }
-    } catch (error) {
-      toast.error("Couldn't finish workspace deletion", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      deleteInFlight.current = false;
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section className="grid gap-2 rounded-lg border border-status-failed/30 bg-status-failed/5 px-3 py-3">
-      <div>
-        <h2 className="flex items-center gap-1.5 text-sm font-medium text-status-failed">
-          <TriangleAlertIcon className="size-3.5" />
-          Danger zone
-        </h2>
-        <p className="mt-1 text-xs text-fg-muted">
-          Workspace deletion is irreversible and removes every session, environment, and API key.
-        </p>
-      </div>
-      <div>
-        <span title={disabledReason ?? undefined} className="inline-block">
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            disabled={Boolean(disabledReason)}
-            onClick={() => {
-              setConfirmName("");
-              setOpen(true);
-            }}
-          >
-            <Trash2Icon className="size-3.5" />
-            Delete workspace
-          </Button>
-        </span>
-        {disabledReason ? (
-          <p className="mt-1.5 text-2xs text-fg-subtle">{disabledReason}</p>
-        ) : (
-          <p className="mt-1.5 text-2xs text-fg-subtle">
-            Stop any running sessions first; deletion is refused while one is live.
-          </p>
-        )}
-      </div>
-
-      <Dialog
-        open={open}
-        onOpenChange={(next) => {
-          if (!busy) setOpen(next);
-        }}
-      >
-        <DialogContent className="sm:max-w-sm">
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void confirmDelete();
-            }}
-          >
-            <DialogHeader>
-              <DialogTitle>Delete workspace</DialogTitle>
-              <DialogDescription>
-                This permanently removes the workspace and everything in it. This cannot be undone.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="mt-4 grid gap-1.5">
-              <Label htmlFor="confirm-workspace-name">
-                Type <span className="font-mono text-fg">{props.workspaceName}</span> to confirm
-              </Label>
-              <Input
-                id="confirm-workspace-name"
-                suppressAutofill
-                value={confirmName}
-                onChange={(event) => setConfirmName(event.target.value)}
-                placeholder={props.workspaceName}
-                autoFocus
-                autoComplete="off"
-              />
-            </div>
-            <DialogFooter className="mt-4">
-              <Button type="button" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" variant="destructive" disabled={busy || !nameMatches}>
-                {busy ? (
-                  <Loader2Icon className="size-4 animate-spin" />
-                ) : (
-                  <Trash2Icon className="size-4" />
-                )}
-                Delete workspace
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-    </section>
-  );
-}

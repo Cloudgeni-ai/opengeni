@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserAction,
@@ -18,6 +18,7 @@ import {
   resolvePinnedLightpandaBinary,
   uploadBrowserDownload,
 } from "../src";
+import { resolvePinnedHeadlessShell, selectManagedChromiumExecutable } from "../src/headless-shell";
 import { startBrowserConformanceFixture } from "./fixtures/browser-conformance-fixture";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
@@ -56,10 +57,26 @@ e2e(
       ],
     });
     const fixture = startBrowserConformanceFixture();
-    const lightpandaBinaryPath = process.env.OPENGENI_BROWSERD_LIGHTPANDA_BINARY;
+    // Stock images advertise both installed engines. An explicit shell test
+    // must not accidentally exercise their default Lightpanda binary instead.
+    const lightpandaBinaryPath = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? undefined
+      : process.env.OPENGENI_BROWSERD_LIGHTPANDA_BINARY;
     const lightpandaBinary = lightpandaBinaryPath
       ? await resolvePinnedLightpandaBinary({ binaryPath: lightpandaBinaryPath })
       : null;
+    const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+      ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
+      : undefined;
+    await mkdir(join(directory, "profile"), { recursive: true });
+    const browserExecutablePath = await selectManagedChromiumExecutable({
+      headed: false,
+      profileDirectory: join(directory, "profile"),
+      ...(headlessShell ? { headlessShell } : {}),
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
     const runner = lightpandaBinary
       ? await LightpandaRunner.create({
           binary: lightpandaBinary,
@@ -73,14 +90,13 @@ e2e(
           downloadDirectory: downloadStore.filesDirectory,
           screenshotDirectory: join(directory, "screenshots"),
           headed: false,
-          ...(process.env.OPENGENI_BROWSER_EXECUTABLE
-            ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
-            : {}),
+          ...(browserExecutablePath ? { browserExecutablePath } : {}),
         });
     const driver = new AgentBrowserDriver({
       browserSessionId,
       controllerGeneration,
       runner,
+      ...(headlessShell ? { userAgentMetadataSource: "intercepted_local" as const } : {}),
       downloadDirectory: downloadStore.filesDirectory,
       downloadEvents: {
         begin: downloadStore.begin.bind(downloadStore),
@@ -122,11 +138,27 @@ e2e(
         expect(names(page)).toContain("Shadow 1");
       }
 
-      page = await act(driver, page, {
-        type: "fill",
-        locator: { kind: "role", role: "textbox", name: "Editable note", exact: true },
-        value: "fixture note",
-      });
+      if (lightpandaBinary) {
+        // Pinned Lightpanda cannot natively edit contenteditable. Refusal is the
+        // supported contract; do not turn a silent no-op into a success claim.
+        await expectDefiniteError(
+          driver.dispatch(
+            command(page, {
+              type: "fill",
+              locator: { kind: "role", role: "textbox", name: "Editable note", exact: true },
+              value: "fixture note",
+            }),
+          ),
+          "invalid_action",
+        );
+        page = await driver.observe(page.target.id);
+      } else {
+        page = await act(driver, page, {
+          type: "fill",
+          locator: { kind: "role", role: "textbox", name: "Editable note", exact: true },
+          value: "fixture note",
+        });
+      }
       expect(names(page)).not.toContain("fixture note");
       page = await act(driver, page, {
         type: "select",
@@ -369,10 +401,22 @@ e2e(
       page = await act(driver, page, { type: "navigate", url: `${fixture.mainUrl}/redirect` });
       expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
       expect(names(page)).toContain("Redirect complete");
-      page = await act(driver, page, { type: "history", direction: "back" });
-      expect(page.target.url).toBe(beforeRedirect);
-      page = await act(driver, page, { type: "history", direction: "forward" });
-      expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
+      if (lightpandaBinary) {
+        for (const direction of ["back", "forward"] as const) {
+          await expectDefiniteError(
+            driver.dispatch(command(page, { type: "history", direction })),
+            "invalid_action",
+          );
+          page = await driver.observe(page.target.id);
+          expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
+          expect(names(page)).toContain("Redirect complete");
+        }
+      } else {
+        page = await act(driver, page, { type: "history", direction: "back" });
+        expect(page.target.url).toBe(beforeRedirect);
+        page = await act(driver, page, { type: "history", direction: "forward" });
+        expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
+      }
 
       if (!lightpandaBinary) {
         page = await act(driver, page, {

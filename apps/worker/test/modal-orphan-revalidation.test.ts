@@ -34,4 +34,12 @@ describe("Modal orphan pre-termination lease revalidation", () => {
   test("does not let copied tags protect a different provider instance", () => {
     expect(modalOrphanTerminationStillEligible([lease], candidate("sb-copy"))).toBe(true);
   });
+
+  test("lost create reply also protects an untagged provider until attribution", () => {
+    const untagged = { sandboxId: "sb-unreturned", reason: "unattributed" as const, tags: {} };
+    expect(modalOrphanTerminationStillEligible([{ ...lease, instanceId: null }], untagged)).toBe(
+      false,
+    );
+    expect(modalOrphanTerminationStillEligible([lease], untagged)).toBe(true);
+  });
 });

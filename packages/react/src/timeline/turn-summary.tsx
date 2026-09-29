@@ -1,4 +1,4 @@
-import { ChevronRightIcon, CircleSlashIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronRightIcon, CircleSlashIcon, ShrinkIcon, TriangleAlertIcon } from "lucide-react";
 import {
   Component,
   createContext,
@@ -118,9 +118,29 @@ type ReplaceTurnSummaryFacets = Readonly<{
 export type TurnSummaryFacetConfiguration = ModifyTurnSummaryFacets | ReplaceTurnSummaryFacets;
 
 export type TurnSummaryOptions = Readonly<{
-  /** Experimental compact live activity reel. */
+  /**
+   * Readable per-turn presentation. Assistant progress stays fully formatted;
+   * each turn has its own Working / Worked row and rolling latest step.
+   * Ordinary tip-follow and manual scrolling are unchanged.
+   */
   rolling?: boolean;
   facets?: TurnSummaryFacetConfiguration;
+}>;
+
+/**
+ * Exchange status shown in place of the plain facet line. `working` and
+ * `waiting` run a live clock from `since`; `worked` shows the settled span.
+ */
+export type TurnSummaryStatus = Readonly<{
+  kind: "working" | "waiting" | "worked";
+  /** Replaces the default "Working" / "Waiting" wording. */
+  label?: string | undefined;
+  /** Live clock start for `working` and `waiting`. */
+  since?: string | undefined;
+  /** Settled span for `worked`. */
+  durationMs?: number | undefined;
+  /** Live step preview under the row while it is collapsed. */
+  preview?: ReactNode;
 }>;
 
 export type TurnSummaryProps = {
@@ -176,6 +196,11 @@ export type TurnSummaryProps = {
   copyText?: string | undefined;
   /** Adjacent compaction landmark count for the secondary chip facet. */
   contextCompactionCount?: number | undefined;
+  /**
+   * Exchange status line (compact progress presentation). Replaces the state
+   * marker and the duration facet; a settled `worked` row reads as a separator.
+   */
+  status?: TurnSummaryStatus | undefined;
   /** The rendered activity rail revealed on expand. */
   children: ReactNode;
 };
@@ -200,6 +225,7 @@ export function TurnSummary({
   foldKey,
   copyText,
   contextCompactionCount,
+  status,
   children,
 }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
@@ -384,9 +410,21 @@ export function TurnSummary({
     () => resolveTurnSummaryFacets(facetConfiguration),
     [facetConfiguration],
   );
+  const statusKind = status?.kind;
   const facets = useMemo(
     () =>
       facetDefinitions.flatMap((facet) => {
+        // The status line owns elapsed time; a live line keeps only the step
+        // count (plus host facets) so it stays one short line.
+        if (
+          statusKind &&
+          (facet.id === "duration" ||
+            (statusKind !== "worked" &&
+              facet.id !== "steps" &&
+              BUILT_IN_TURN_SUMMARY_FACET_IDS.includes(facet.id as BuiltInTurnSummaryFacetId)))
+        ) {
+          return [];
+        }
         try {
           const result = facet.summarize(context);
           return result && hasFacetContent(result.content) ? [{ facet, result }] : [];
@@ -396,7 +434,7 @@ export function TurnSummary({
           return [];
         }
       }),
-    [context, facetDefinitions],
+    [context, facetDefinitions, statusKind],
   );
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
@@ -409,6 +447,8 @@ export function TurnSummary({
   // Nested chips stay force-open for this window (stable height).
   const settleChrome = settling || settlePhase || nestSuppressLatch;
 
+  const statusLine = status ? turnSummaryStatusLine(status) : null;
+
   // Copy only on the collapsed chip — when open, per-message copy is enough
   // and a second control on the summary row felt crowded / off.
   const copyable = Boolean(
@@ -419,6 +459,7 @@ export function TurnSummary({
     <TurnSettleChromeContext.Provider value={settleChrome}>
       <div className={cn(copyable && "group/copy relative")}>
         <Collapsible.Root
+          data-og-work-section={bare ? undefined : ""}
           open={open}
           onOpenChange={onOpenChange}
           // History-only entrance. Never toggle this on after mount — see
@@ -426,7 +467,12 @@ export function TurnSummary({
           className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
         >
           <Collapsible.Trigger
+            data-og-work-header={bare ? "nested" : "outer"}
             className={cn(
+              // The section, not the viewport, bounds this sticky row. Content
+              // is a sibling: its disclosure overflow never traps the header.
+              // Nested rail folds must never stack additional sticky headers.
+              !bare && open && "sticky top-[var(--og-work-header-top,0px)] z-10 bg-og-bg",
               settling && "animate-og-settle-chip",
               // Top-level turn fold and (when used) nested cluster folds render as
               // FLAT rail rows — chevron + glyph + facets on the page background, no
@@ -448,6 +494,8 @@ export function TurnSummary({
                 ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
                 : "hover:bg-og-surface-1 hover:text-og-fg",
               liveShell && "text-og-fg-subtle",
+              // Phones hide the hint, so keep the copy control clear of the separator.
+              status && copyable && "max-sm:pr-10",
             )}
           >
             {/* Disclosure grammar matches the rows: chevron leads (far left), then any
@@ -463,7 +511,9 @@ export function TurnSummary({
             />
             {/* Completion is the quiet default and needs no repeated glyph. Failed,
             cancelled, and still-running folds retain a visible state marker. */}
-            {outcome === "complete" || (!outcome && (liveHeader || context.settled)) ? null : (
+            {status ||
+            outcome === "complete" ||
+            (!outcome && (liveHeader || context.settled)) ? null : (
               <span
                 className={cn(
                   "inline-flex shrink-0 items-center justify-center",
@@ -481,14 +531,19 @@ export function TurnSummary({
               </span>
             )}
             <span
-              className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}
+              className={cn(
+                "min-w-0 truncate",
+                status?.kind === "worked" ? "shrink" : "flex-1",
+                bare ? "text-og-sm" : "text-og-fg-muted",
+              )}
             >
-              {liveHeader && !open
+              {statusLine}
+              {liveHeader && !open && !status
                 ? liveHeader
                 : facets.map(({ facet, result }, index) => (
                     <FacetRenderBoundary key={facet.id}>
                       <>
-                        {index > 0 ? " · " : null}
+                        {index > 0 || statusLine ? " · " : null}
                         <span aria-label={result.ariaLabel} title={result.title}>
                           {result.icon ? (
                             <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
@@ -507,24 +562,28 @@ export function TurnSummary({
                 <span className="text-og-fg-subtle"> · interrupted</span>
               ) : null}
             </span>
-            {/* The disclosure hint. Calm at rest on fine pointers (revealed on hover
-            and keyboard focus), but always present on coarse pointers where there
-            is no hover to lean on — so the fold never reads as a static status
-            line. Purely visual: the trigger's aria-expanded already conveys state
-            to assistive tech, so the hint is hidden from the accessible name. */}
-            <span
-              aria-hidden
-              className={cn(
-                "ml-auto shrink-0 pl-2 text-og-xs text-og-fg-subtle transition-opacity duration-150",
-                // Leave a sliver so a collapsed-chip copy icon can sit outside.
-                copyable ? "pr-8" : null,
-                "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
-                "pointer-coarse:opacity-100",
-              )}
-            >
-              {open ? "hide steps" : "show steps"}
-            </span>
+            {/* A settled exchange reads as a separator above its answer. */}
+            {status?.kind === "worked" ? (
+              <span aria-hidden className="ml-1 h-px min-w-0 flex-1 bg-og-border" />
+            ) : null}
+            {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
+              <ShrinkIcon
+                className="size-3.5 shrink-0"
+                aria-label="Context compacted; expand for details"
+              />
+            ) : null}
           </Collapsible.Trigger>
+          {status && !open && status.preview ? (
+            // Readable progress under the status line; the line above stays
+            // the one disclosure control, so a click here is a mouse shortcut.
+            <div
+              data-og-exchange-preview=""
+              className="flex min-w-0 cursor-pointer flex-col gap-0.5 pb-1 pl-6"
+              onClick={() => onOpenChange(true)}
+            >
+              {status.preview ? <div className="min-w-0">{status.preview}</div> : null}
+            </div>
+          ) : null}
           <Collapsible.Content
             {...(nestSuppressLatch ? { forceMount: true as const } : {})}
             data-og-fold-content=""
@@ -554,6 +613,58 @@ export function TurnSummary({
   );
 }
 
+/**
+ * "Working · 2m 14s", "Waiting for 2 agents · 3m 5s", or "Worked for 4m 10s";
+ * null when a settled span is too short to state.
+ */
+function turnSummaryStatusLine(status: TurnSummaryStatus): ReactNode {
+  if (status.kind === "worked") {
+    return status.durationMs !== undefined &&
+      Number.isFinite(status.durationMs) &&
+      status.durationMs >= 1000 ? (
+      <span data-og-exchange-status="worked">
+        {status.label ?? "Worked for"} {formatElapsed(status.durationMs)}
+      </span>
+    ) : null;
+  }
+  const label = status.label ?? (status.kind === "working" ? "Working" : "Waiting");
+  return (
+    <span data-og-exchange-status={status.kind}>
+      <span className={status.kind === "working" ? "og-shimmer-text" : undefined}>{label}</span>
+      {status.since ? <LiveElapsed since={status.since} /> : null}
+    </span>
+  );
+}
+
+/** A second-resolution clock; unmounts with the live row. */
+function LiveElapsed({ since }: { since: string }) {
+  const startedAt = Date.parse(since);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  if (!Number.isFinite(startedAt)) return null;
+  return (
+    <span className="tabular-nums">{` · ${formatElapsed(Math.max(0, now - startedAt))}`}</span>
+  );
+}
+
+/** Elapsed wall time with seconds below an hour: "14s", "2m 14s", "1h 05m". */
+export function formatElapsed(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    const seconds = totalSeconds % 60;
+    return seconds ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
+}
+
 function createTurnSummaryContext(
   items: ActivityItem[],
   outcome: TurnOutcome | undefined,
@@ -566,7 +677,7 @@ function createTurnSummaryContext(
     itemSnapshot.filter((item): item is ToolCallItem => item.kind === "tool-call"),
   );
   const settled = itemSnapshot.every((item) => {
-    if (item.kind === "reasoning") {
+    if (item.kind === "reasoning" || item.kind === "agent-message") {
       return !item.streaming;
     }
     if (
@@ -594,10 +705,13 @@ const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze(
   {
     id: "steps",
     summarize: ({ items }) => {
-      const count = items.filter((item) => item.kind !== "startup-phase").length;
+      // Progress notes narrate steps; they are not steps themselves.
+      const count = items.filter(
+        (item) => item.kind !== "startup-phase" && item.kind !== "agent-message",
+      ).length;
       return count
         ? { content: `${count} ${count === 1 ? "step" : "steps"}` }
-        : items.length
+        : items.some((item) => item.kind === "startup-phase")
           ? { content: "Preparation" }
           : null;
     },

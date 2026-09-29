@@ -50,6 +50,7 @@ export type TurnHistorySinkDeps = {
  */
 export class TurnHistorySink {
   private readonly prefix = new HistoryPrefixGuard();
+  private checkpointTail: Promise<void> = Promise.resolve();
 
   seedHistory(input: string | readonly unknown[] | { readonly history: unknown[] }, count: number) {
     const items =
@@ -76,9 +77,22 @@ export class TurnHistorySink {
 
   constructor(private readonly deps: TurnHistorySinkDeps) {}
 
-  reconcileConversationTruth = async (
+  reconcileConversationTruth = (
     options: { skipInputOnlyRows?: boolean; requireDurable?: boolean } = {},
-  ) => {
+  ): Promise<void> => {
+    // The provider loop and the stream consumer checkpoint independently.
+    // Serialize the complete read/write/acknowledgment boundary, not just the
+    // database write: each caller must read history against the latest durable
+    // watermark. Keep each caller's durability policy and rejection intact.
+    const checkpoint = this.checkpointTail.then(() => this.reconcile(options));
+    this.checkpointTail = checkpoint.catch(() => {});
+    return checkpoint;
+  };
+
+  private reconcile = async (options: {
+    skipInputOnlyRows?: boolean;
+    requireDurable?: boolean;
+  }) => {
     const { media } = this.deps;
     const stream = this.deps.getStream();
     const turnId = this.deps.getTurnId();

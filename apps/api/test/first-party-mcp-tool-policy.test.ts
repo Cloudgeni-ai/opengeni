@@ -421,6 +421,102 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("delegation tools default to reuse but honor fresh workers and result-bearing wakes", () => {
+    const names: FirstPartyMcpToolName[] = [
+      "session_create",
+      "session_wait",
+      "session_get",
+      "session_send_message",
+      "wait_for_input",
+    ];
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:create", "sessions:read", "sessions:control"], names),
+    );
+    const registered = (
+      server as unknown as { _registeredTools: Record<string, { description: string }> }
+    )._registeredTools;
+    // Guidance only: every delegation and join tool stays registered.
+    expect(registeredToolNames(server)).toEqual([...names].sort());
+    const description = (name: FirstPartyMcpToolName) => registered[name]!.description;
+    expect(description("session_create")).toContain(
+      "Delegation has setup and coordination overhead: by default",
+    );
+    expect(description("session_create")).not.toContain("A worker costs minutes");
+    expect(description("session_create")).toContain(
+      "Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority",
+    );
+    expect(description("session_send_message")).toContain(
+      "override that default within existing authority",
+    );
+    expect(description("session_create")).toContain(
+      "send a related follow-up to a worker you already spawned with session_send_message",
+    );
+    expect(description("session_create")).toContain(
+      "call wait_for_input and end the turn instead of alternating session_wait and session_get",
+    );
+    expect(description("session_send_message")).toContain(
+      "message a worker you already spawned instead of spawning a new one",
+    );
+    expect(description("session_get")).toContain("An unchanged snapshot is not new evidence");
+    expect(description("session_wait")).toContain(
+      "an unchanged session_get snapshot between waits is not new evidence",
+    );
+    for (const name of [
+      "session_create",
+      "session_get",
+      "session_wait",
+      "wait_for_input",
+    ] as const) {
+      expect(description(name)).toContain("payload.finalAnswer");
+    }
+    expect(description("wait_for_input")).toContain(
+      "No preliminary short wait or status recheck is required",
+    );
+    expect(description("wait_for_input")).toContain(
+      "potentially hours or days within the schema limits",
+    );
+    expect(description("wait_for_input")).toContain(
+      "unless an explicit update cadence requires it",
+    );
+    expect(description("wait_for_input")).toContain(
+      "passing the time remaining, not a fresh full timeout",
+    );
+    expect(description("wait_for_input")).toContain(
+      "If less than the schema minimum remains or the deadline has passed",
+    );
+    expect(description("wait_for_input")).toContain(
+      "consumed no immediate machine input may finish without replacing the retained wait",
+    );
+    expect(description("wait_for_input")).toContain(
+      "make any unavoidable deadline adjustment explicit",
+    );
+    expect(description("wait_for_input")).toContain(
+      "Pending Codemode calls require the same live attempt",
+    );
+  });
+
+  test("goal pause and resume descriptions preserve evidence and human authority", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["goals:manage"], ["goal_pause", "goal_resume"]),
+    );
+    const registered = (
+      server as unknown as { _registeredTools: Record<string, { description: string }> }
+    )._registeredTools;
+    expect(registered.goal_pause!.description).toContain(
+      "no fixed turn or retry count is required",
+    );
+    expect(registered.goal_pause!.description).toContain("can justify pausing immediately");
+    expect(registered.goal_pause!.description).toContain(
+      "Work already in flight or a meaningful timed recheck",
+    );
+    expect(registered.goal_pause!.description).toContain("Tool approvals remain human-only");
+    expect(registered.goal_resume!.description).toContain(
+      "A user's question alone is not a reason to resume",
+    );
+  });
+
   test("session_get tools/list and generated attempt declarations allow an omitted ID", async () => {
     const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["session_get"]));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1104,6 +1200,74 @@ describe("first-party MCP tool visibility policy", () => {
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+  });
+
+  test("scheduled Slack posting tools take no destination and stay explicit-only", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_prepare_message");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_send_prepared_message");
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["connections:read"], ["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "scheduled-slack-post-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      const prepare = tools.find((tool) => tool.name === "slack_bot_prepare_message");
+      const send = tools.find((tool) => tool.name === "slack_bot_send_prepared_message");
+      // The agent cannot name a channel, user, or bot connection.
+      expect(Object.keys(prepare?.inputSchema.properties ?? {}).sort()).toEqual([
+        "text",
+        "threadTimestamp",
+      ]);
+      expect(Object.keys(send?.inputSchema.properties ?? {})).toEqual(["messageId"]);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+    const sessionless = buildOpenGeniMcpServer(deps(), {
+      ...grant(["connections:read"], ["slack_bot_prepare_message"]),
+      metadata: { firstPartyMcpTools: ["slack_bot_prepare_message"] },
+    });
+    expect(registeredToolNames(sessionless)).not.toContain("slack_bot_prepare_message");
+  });
+
+  test("Slack file upload is explicit, session-bound, and requires source-file permission", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_upload_file");
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["connections:read", "files:read"], ["slack_bot_upload_file"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "slack-file-upload-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "slack_bot_upload_file",
+      );
+      expect(Object.keys(tool?.inputSchema.properties ?? {}).sort()).toEqual([
+        "fileId",
+        "operationId",
+      ]);
+      expect(tool?.description).toContain("personal Slack account");
+      expect(tool?.description).toContain("same operationId");
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+    for (const permissions of [["connections:read"], ["files:read"]] as const) {
+      expect(
+        registeredToolNames(
+          buildOpenGeniMcpServer(deps(), grant([...permissions], ["slack_bot_upload_file"])),
+        ),
+      ).not.toContain("slack_bot_upload_file");
+    }
+    const sessionless = buildOpenGeniMcpServer(deps(), {
+      ...grant(["connections:read", "files:read"], ["slack_bot_upload_file"]),
+      metadata: { firstPartyMcpTools: ["slack_bot_upload_file"] },
+    });
+    expect(registeredToolNames(sessionless)).not.toContain("slack_bot_upload_file");
   });
 
   test("capability discovery is default-visible but separates search from human authorization", async () => {

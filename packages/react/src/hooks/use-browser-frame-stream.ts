@@ -58,7 +58,12 @@ export type UseBrowserFrameStreamResult = {
   frame: BrowserFrame | null;
   attachment: Pick<
     BrowserSessionAttachment,
-    "browserSessionId" | "controllerGeneration" | "targetId" | "expiresAt"
+    | "browserSessionId"
+    | "controllerGeneration"
+    | "targetId"
+    | "expiresAt"
+    | "fencedInputBatches"
+    | "focusedInputObservations"
   > | null;
   error: Error | null;
   reconnect: () => void;
@@ -322,6 +327,10 @@ export function useBrowserFrameStream(
           : browserFrameSocketUrl(activeAttachment, streamRef.current),
         activeStream.kind === "direct_websocket" ? [...activeStream.protocols] : [],
       );
+      // Frame sequence numbers belong to the producer behind this socket, not
+      // to the target document. A refreshed attachment can restart at one
+      // without changing any target or document generation.
+      latestRef.current = { key: "", sequence: -1 };
       socket = openedSocket;
       socketHandlers = {
         open: () => onOpen(openedSocket),
@@ -374,6 +383,12 @@ export function useBrowserFrameStream(
             controllerGeneration: attachment.controllerGeneration,
             targetId: attachment.targetId,
             expiresAt: attachment.expiresAt,
+            ...(attachment.fencedInputBatches === true
+              ? { fencedInputBatches: true as const }
+              : {}),
+            ...(attachment.focusedInputObservations === true
+              ? { focusedInputObservations: true as const }
+              : {}),
           },
           error: null,
         }));

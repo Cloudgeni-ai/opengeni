@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  renderMessageSentAtForModel,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -276,6 +277,13 @@ async function addAcceptedScheduledOccurrence(
   );
   if (!added.added) throw new Error("scheduled occurrence was not added");
   return { taskId: task.id, runId: run.id };
+}
+
+async function turnSurface(turnId: string): Promise<string | null> {
+  const [row] = await shared.admin<Array<{ surface: string | null }>>`
+    select surface from session_turns where id = ${turnId}`;
+  if (!row) throw new Error(`turn ${turnId} not found`);
+  return row.surface;
 }
 
 describe("immutable session turn initiators", () => {
@@ -888,6 +896,8 @@ describe("immutable session turn initiators", () => {
     expect(steeredClaim.turn.model).toBe("scripted-model");
     expect(steeredClaim.turn.initiatingHumanSubjectId).toBe(sourceGrant.subjectId);
     expect(steeredClaim.turn.personalConnectionDelegations).toEqual(sourceDelegations);
+    // Another agent's Steer is a new request that entered through an agent.
+    expect(await turnSurface(steeredClaim.turn.id)).toBe("agent");
     expect(
       (
         await listSessionSystemUpdatesForTurn(
@@ -1075,6 +1085,9 @@ describe("immutable session turn initiators", () => {
     });
     expect(scheduledClaim.turn.initiatingHumanSubjectId).toBeNull();
     expect(scheduledClaim.turn.scheduledTaskRunId).toBe(scheduledRunId);
+    // A scheduled occurrence keeps origin `system` but records its own surface.
+    expect(scheduledClaim.turn.source).toBe("system");
+    expect(await turnSurface(scheduledClaim.turn.id)).toBe("scheduled");
     expect(scheduledClaim.turn.initiatorContext.scheduledRunIds).toEqual([scheduledRunId]);
     const [scheduledHistory] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
@@ -1140,7 +1153,10 @@ describe("immutable session turn initiators", () => {
         .orderBy(schema.sessionHistoryItems.position),
     );
     expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user", "system"]);
-    expect(attachedHistory[0]?.item.content).toBe("Keep this human task authoritative.");
+    expect(attachedHistory[0]?.item.content).toEqual([
+      { type: "input_text", text: renderMessageSentAtForModel(attachedClaim.turn.createdAt) },
+      { type: "input_text", text: "Keep this human task authoritative." },
+    ]);
     expect(attachedHistory[1]?.item.content).toContain("[OpenGeni internal updates]");
     expect(attachedHistory[1]?.item.content).not.toContain("[OpenGeni scheduled task occurrence]");
 

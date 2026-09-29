@@ -65,8 +65,50 @@ async function count(table: "sessions" | "session_spawn_denials", workspaceId: s
   return row?.count ?? 0;
 }
 
-async function delay(milliseconds: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function replayWhileWriterHoldsLock<T>(
+  writer: Promise<T>,
+  locked: ReturnType<typeof Promise.withResolvers<number>>,
+  release: () => void,
+  workspace: Workspace,
+  key: string,
+): Promise<[T, SessionCreateResult]> {
+  // A slow pool acquisition must not let the application writer win, and a
+  // failed setup must not leave the readiness promise or transaction hanging.
+  void writer.catch(locked.reject);
+  let currentWriter: Promise<SessionCreateResult> | undefined;
+  let observingLock = true;
+  try {
+    const holderPid = await locked.promise;
+    currentWriter = createSessionWithIdempotencyKeyResult(db, {
+      ...sessionInput(workspace, "current writer"),
+      createIdempotencyKey: key,
+    });
+    await Promise.race([
+      (async () => {
+        const deadline = Date.now() + 10_000;
+        do {
+          if (!observingLock) return;
+          const [state] = await admin<{ waiting: boolean }[]>`
+            select exists (
+              select 1 from pg_stat_activity
+              where datname = current_database()
+                and ${holderPid} = any(pg_blocking_pids(pid))
+            ) as waiting`;
+          if (state?.waiting) return;
+          await Bun.sleep(10);
+        } while (Date.now() < deadline);
+        throw new Error("application writer did not wait on the source writer's lock");
+      })(),
+      currentWriter.then(() => {
+        throw new Error("application writer completed before the source writer released its lock");
+      }),
+    ]);
+  } finally {
+    observingLock = false;
+    release();
+    await Promise.allSettled(currentWriter ? [writer, currentWriter] : [writer]);
+  }
+  return [await writer, await currentWriter!];
 }
 
 beforeAll(async () => {
@@ -221,9 +263,10 @@ describe("nested-agent depth database admission", () => {
     // This direct transaction takes the same advisory lock as the boundary
     // trigger, reserves the source row, and holds the transaction open while
     // the normal application writer waits. It still uses the commit gate.
+    const locked = Promise.withResolvers<number>();
+    const release = Promise.withResolvers<void>();
     const directWriter = withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${lockKey}))`);
-      await tx.execute(sql`select pg_sleep(0.1)`);
       const rows = await tx.execute(sql<{ id: string }>`
         insert into sessions (
           account_id, workspace_id, initial_message, model, reasoning_effort, latency_mode, sandbox_backend,
@@ -234,16 +277,18 @@ describe("nested-agent depth database admission", () => {
           jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         )
         returning id`);
-      await tx.execute(sql`select pg_sleep(0.1)`);
+      const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      locked.resolve(backend!.pid);
+      await release.promise;
       return rows[0]?.id ?? null;
     });
-    await delay(25);
-
-    const currentWriter = createSessionWithIdempotencyKeyResult(db, {
-      ...sessionInput(workspace, "current writer"),
-      createIdempotencyKey: key,
-    });
-    const [oldSessionId, replay] = await Promise.all([directWriter, currentWriter]);
+    const [oldSessionId, replay] = await replayWhileWriterHoldsLock(
+      directWriter,
+      locked,
+      release.resolve,
+      workspace,
+      key,
+    );
 
     expect(oldSessionId).not.toBeNull();
     if (oldSessionId === null) throw new Error("old writer did not create a session");
@@ -274,9 +319,10 @@ describe("nested-agent depth database admission", () => {
     const key = `denial-race-${crypto.randomUUID()}`;
     const lockKey = `session-create:${workspace.workspaceId}:${key}`;
 
+    const locked = Promise.withResolvers<number>();
+    const release = Promise.withResolvers<void>();
     const oldWriter = admin.begin(async (tx) => {
       await tx`select pg_advisory_xact_lock(hashtext(${lockKey}))`;
-      await tx`select pg_sleep(0.1)`;
       const rows = await tx<{ id: string }[]>`
         insert into session_spawn_denials (
           account_id, workspace_id, current_depth, attempted_depth,
@@ -286,16 +332,18 @@ describe("nested-agent depth database admission", () => {
           'default', 'nested_agent_depth_exceeded', ${key}
         )
         returning id`;
-      await tx`select pg_sleep(0.1)`;
+      const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      locked.resolve(backend!.pid);
+      await release.promise;
       return rows[0]?.id ?? null;
     });
-    await delay(25);
-
-    const currentWriter = createSessionWithIdempotencyKeyResult(db, {
-      ...sessionInput(workspace, "current writer"),
-      createIdempotencyKey: key,
-    });
-    const [oldDenialId, replay] = await Promise.all([oldWriter, currentWriter]);
+    const [oldDenialId, replay] = await replayWhileWriterHoldsLock(
+      oldWriter,
+      locked,
+      release.resolve,
+      workspace,
+      key,
+    );
 
     expect(oldDenialId).not.toBeNull();
     if (oldDenialId === null) throw new Error("old writer did not create a denial");

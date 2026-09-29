@@ -2,27 +2,32 @@ import { useEffect, useState } from "react";
 import { Clock3Icon } from "lucide-react";
 import type { Session } from "@opengeni/sdk";
 import { sessionInputWait } from "@/lib/session-rail";
+import {
+  useSessionStartup,
+  type SessionStartup,
+  type SessionStartupSource,
+} from "@/lib/session-startup";
 
 /** Current durable wait state, separate from immutable timeline history. */
 export function SessionWaitStatus({
   session,
 }: {
-  session: Pick<
-    Session,
-    "status" | "effectiveControl" | "inputWait" | "activeTurnId" | "dispatchWait"
-  >;
+  session: SessionStartupSource & Pick<Session, "inputWait">;
 }) {
-  if (
-    session.status === "queued" &&
-    !session.activeTurnId &&
-    session.effectiveControl.state === "active"
-  ) {
-    return <SessionDispatchWaitStatus wait={session.dispatchWait} />;
+  const startup = useSessionStartup(session);
+  if (startup) {
+    return <SessionDispatchWaitStatus wait={session.dispatchWait} startup={startup} />;
   }
   return <SessionInputWaitStatus session={session} />;
 }
 
-function SessionDispatchWaitStatus({ wait }: { wait: Session["dispatchWait"] }) {
+function SessionDispatchWaitStatus({
+  wait,
+  startup,
+}: {
+  wait: Session["dispatchWait"];
+  startup: SessionStartup;
+}) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
@@ -38,35 +43,40 @@ function SessionDispatchWaitStatus({ wait }: { wait: Session["dispatchWait"] }) 
             <p className="font-medium text-fg">
               {wait?.lastError
                 ? "Unable to start yet"
-                : (wait?.attempts ?? 0) > 1
+                : startup !== "starting"
                   ? "Still waiting to start"
-                  : "Queued · waiting to start"}
+                  : "Starting"}
             </p>
-            <p className="mt-0.5 text-xs">No agent turn is running. Your messages remain queued.</p>
+            {startup !== "starting" ? (
+              <p className="mt-0.5 text-xs">No agent turn is running. Your messages are saved.</p>
+            ) : null}
+          </div>
+          <details className="mt-1 text-xs">
+            <summary className="cursor-pointer">Start details</summary>
+            <p className="mt-1">No agent turn is running yet.</p>
             <p className="mt-0.5 text-xs">
               {wait?.state === "pending" && next
                 ? next.getTime() <= now
                   ? "Automatic start retry is due."
-                  : `Automatic start retry at ${next.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}.`
+                  : `Automatic start retry at ${next.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}.`
                 : wait?.state === "acknowledged"
                   ? "The start request was accepted; a worker has not started the turn yet."
                   : "Start confirmation is unavailable. The next turn has not begun executing."}
             </p>
-          </div>
-          {wait && (wait.attempts > 0 || wait.lastError) ? (
-            <details className="mt-1 text-xs">
-              <summary className="cursor-pointer">Start details</summary>
-              <p className="mt-1">
-                {wait.attempts} dispatch attempt{wait.attempts === 1 ? "" : "s"} for the current
-                start request. Dispatch attempts do not mean the agent is running.
-              </p>
-              {wait.lastError ? (
-                <p className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words">
-                  Last recorded dispatch error: {wait.lastError}
+            {wait && (wait.attempts > 0 || wait.lastError) ? (
+              <>
+                <p className="mt-1">
+                  {wait.attempts} dispatch attempt{wait.attempts === 1 ? "" : "s"} for the current
+                  start request. Dispatch attempts do not mean the agent is running.
                 </p>
-              ) : null}
-            </details>
-          ) : null}
+                {wait.lastError ? (
+                  <p className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words">
+                    Last recorded dispatch error: {wait.lastError}
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+          </details>
         </div>
       </div>
     </div>

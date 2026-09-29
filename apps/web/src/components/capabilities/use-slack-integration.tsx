@@ -1,4 +1,3 @@
-import { ConnectionOwnershipDialog } from "./connection-ownership-selector";
 import {
   hasOpenGeniSlackReactionScope,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
@@ -64,6 +63,16 @@ async function memorySlackClient(client: ReturnType<typeof useAppContext>["clien
 }
 
 export const SLACK_APP_DESCRIPTION = "Mention @OpenGeni or chat with the bot in Slack.";
+const SLACK_BOT_OUTCOMES = [
+  {
+    title: "Chat with OpenGeni in Slack",
+    description: "Mention @OpenGeni in a channel or send it a direct message.",
+  },
+  {
+    title: "Start work where the conversation is",
+    description: "Replies and progress stay in the Slack thread the request came from.",
+  },
+];
 export const SLACK_LOGO_URL =
   "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png";
 const OPENGENI_REACTION_EMOJI = "genie" as const;
@@ -205,9 +214,7 @@ export function useSlackIntegration({
   const client = context.client;
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
-  const [newConnection, setNewConnection] = useState<NativeConnectRequest | null>(null);
   useEffect(() => {
-    setNewConnection(null);
     setConnectRequest(null);
   }, [workspaceId, context.accessContext.subjectId]);
   const completeConnect = useCallback(() => {
@@ -422,13 +429,15 @@ export function useSlackIntegration({
       description: "Let OpenGeni read and send Slack messages as you.",
       logoUrl: SLACK_LOGO_URL,
       authorizeLabel: "Continue to Slack",
-      ownership: personalConnection?.subjectId ? "personal" : "workspace",
+      // Slack's hosted MCP is personal-only: every member connects their own
+      // account, so there is no ownership choice. Only an existing legacy
+      // workspace-owned row is repaired as what it is.
+      ownership: personalConnection && !personalConnection.subjectId ? "workspace" : "personal",
       returnUrl: window.location.href,
       idempotencyKey: crypto.randomUUID(),
       ...(personalConnection ? { reconnectAccountId: personalConnection.id } : {}),
     };
-    if (personalConnection) setConnectRequest(request);
-    else setNewConnection(request);
+    setConnectRequest(request);
   }
 
   async function disconnectPersonal(): Promise<boolean> {
@@ -948,6 +957,7 @@ export function useSlackIntegration({
       mark: { logoSrc: SLACK_LOGO_URL, monogram: "S" },
       chip,
       connection: facts,
+      outcomes: SLACK_BOT_OUTCOMES,
       ...(botConnection && botMetadata
         ? {
             presentation: {
@@ -1102,18 +1112,6 @@ export function useSlackIntegration({
 
   const dialogs = (
     <>
-      {newConnection && (
-        <ConnectionOwnershipDialog
-          name="Slack account"
-          value={newConnection.ownership}
-          onChange={(ownership) => setNewConnection({ ...newConnection, ownership })}
-          onContinue={() => {
-            setConnectRequest(newConnection);
-            setNewConnection(null);
-          }}
-          onClose={() => setNewConnection(null)}
-        />
-      )}
       {connectRequest && (
         <NativeConnectSetup
           transport={connectTransport}

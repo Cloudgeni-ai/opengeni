@@ -73,6 +73,21 @@ never durable execution truth or proof an admission did not happen.
 
 ## Bounded export
 
+OTLP trace and protected-diagnostic resources share `service.name`,
+`deployment.environment`, `opengeni.component`, and an opaque UUID
+`service.instance.id`. The instance ID is generated once when the observability
+module loads, reused by observers in that runtime, and regenerated in a new
+process. It contains no host, pod, user, session, or workspace identity and is
+not a metric label. Call-site span attributes cannot override resource identity.
+
+When configured and nonempty, `opengeni.deployment_revision` carries the existing
+deployment revision setting on both resources. It is a bounded operator-supplied
+label, not independently attested binary provenance or `service.version`.
+Missing or empty revisions are omitted rather than invented by the exporter.
+Consumers must retain resource attributes to distinguish rollouts and runtime
+instances; the Collector must not stamp old queued spans with the current
+deployment's revision.
+
 Public traces use OTLP HTTP JSON at the existing endpoint plus `/v1/traces`.
 Each observer batches up to 32 spans, with eight queued batches and one active
 request; one additional partial batch can be held. Excess batches are dropped.
@@ -119,6 +134,28 @@ kind per API process per day). Alert on rates and on ratios such as
 rising `rate_limited` series as either a real incident or abuse. See
 `apps/web/docs/browser-analytics.md` for the browser side, the `chunk_load`
 semantics and the coverage limits.
+
+## Analytics consent
+
+The public, anonymous `POST /v1/analytics-consent` route counts answers to the
+web console's optional-analytics banner in
+`opengeni_analytics_consent_total{decision}` (`granted` or `denied`) and
+refusals in `opengeni_analytics_consent_reports_rejected_total{reason}`
+(`invalid`, `too_large`, `origin`, `rate_limited`); every series is published
+at zero on API start. The strict body is only the decision, under 128 bytes,
+enforced on the streamed body. It carries no identifier, URL or cookie (the
+browser sends it with `credentials: "omit"`), and the route writes no log line.
+The wire grammar is shared through `@opengeni/contracts/analytics-consent-report`.
+
+The browser reports a banner answer only when it changes the stored choice, so
+re-confirming from Account preferences is not counted again and the counter is a
+count of decisions, not of people. The same `Origin` rule as the error beacon
+applies, and admission is a per-decision token bucket in each API process
+(burst 60, then one per second). Read it as a ratio: the `denied` share is the
+part of the answering audience that the consent-gated providers never see.
+People who ignore the banner are missed by both PostHog and this counter, so
+compare PostHog's consented sign-ins with the server `sign_in` counter for the
+full gap. See `apps/web/docs/browser-analytics.md`.
 
 ## Protected diagnostics
 

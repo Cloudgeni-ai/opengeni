@@ -4,6 +4,7 @@ import {
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -627,6 +628,17 @@ export function RootRouteComponent() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
+  useEffect(() => {
+    const retireReconciledCreation = () => {
+      const feed = sessionEventFeedStore.getSnapshot();
+      if (!feed) return;
+      setSessionCreationHandoff((current) =>
+        creationHandoffReconciled(current, feed.events) ? null : current,
+      );
+    };
+    retireReconciledCreation();
+    return sessionEventFeedStore.subscribe(retireReconciledCreation);
+  }, [sessionEventFeedStore]);
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
@@ -744,7 +756,8 @@ export function RootRouteComponent() {
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
       pathname === "/dev/agent-topology" ||
-      pathname === "/dev/onboarding");
+      pathname === "/dev/onboarding" ||
+      pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
     pathname === "/setup-account" ||
@@ -2755,7 +2768,7 @@ export function RootRouteComponent() {
     // AppContext. The isolated account-auth popup is intentionally included.
     <Outlet />
   ) : !clientConfig && !configError ? (
-    <LoadingPanel label="Loading OpenGeni" />
+    <LoadingPanel />
   ) : configError ? (
     <ProblemPanel
       title={configError.title}
@@ -2781,9 +2794,9 @@ export function RootRouteComponent() {
       onSubmit={saveAccessKey}
     />
   ) : managedAuthRequired && authSession === undefined ? (
-    <LoadingPanel label="Checking session" />
+    <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
-    <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
+    <Suspense fallback={<LoadingPanel />}>
       <SignedOutPage>
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
@@ -2825,7 +2838,7 @@ export function RootRouteComponent() {
     // grant. Keep this after authentication but before access/onboarding gates.
     // The outer BrowserAccountsRuntime still owns broker actor transitions.
     browserAccountsConfigured && !browserAccountsEnabled ? (
-      <LoadingPanel label="Loading the selected browser account" />
+      <LoadingPanel />
     ) : (
       <PersonalSecurityProvider
         value={{
@@ -2872,7 +2885,7 @@ export function RootRouteComponent() {
         onComplete={revalidatePrincipalAccess}
       />
     ) : (
-      <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
+      <Suspense fallback={<LoadingPanel />}>
         <OrganizationOnboardingPanel
           client={client}
           billingMode={clientConfig.billingMode ?? "disabled"}
@@ -2894,7 +2907,7 @@ export function RootRouteComponent() {
       </Suspense>
     )
   ) : accessLoading || !appContext ? (
-    <LoadingPanel label="Loading workspace access" />
+    <LoadingPanel />
   ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
     <ProblemPanel
       title="No workspace access"
@@ -2927,7 +2940,7 @@ export function RootRouteComponent() {
 
   const actorFencedSurface =
     browserAccountsEnabled && !isPublicAuthRoute ? (
-      <Suspense fallback={<LoadingPanel label="Loading browser accounts" />}>
+      <Suspense fallback={<LoadingPanel />}>
         <BrowserAccountsRuntime
           bootstrapLegacySession={
             clientConfig?.managedAuthSessionSetMode === "dual" && Boolean(authSession)
@@ -2967,6 +2980,7 @@ export function RootRouteComponent() {
             analyticsAccountId={
               routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
             }
+            analyticsAccountResolved={accessContext !== null || accessError !== null}
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}

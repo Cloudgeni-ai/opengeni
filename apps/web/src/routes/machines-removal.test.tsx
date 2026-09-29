@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { RemoveEnrollmentResponse } from "@opengeni/sdk";
-import { act } from "react";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import {
@@ -43,6 +49,15 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+/** Session links are router links, so the notice renders inside a router. */
+function inRouter(node: ReactNode) {
+  const router = createRouter({
+    routeTree: createRootRoute({ component: () => node }),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  return <RouterProvider router={router} />;
+}
+
 describe("connected machine removal conflict", () => {
   test("renders every dependent session inline with direct session links", async () => {
     const container = document.createElement("div");
@@ -50,7 +65,9 @@ describe("connected machine removal conflict", () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(<MachineRemovalBlockNotice workspaceId="workspace-a" result={blocked} />);
+      root.render(
+        inRouter(<MachineRemovalBlockNotice workspaceId="workspace-a" result={blocked} />),
+      );
     });
 
     expect(container.textContent).toContain("Sessions still use this machine");
@@ -123,7 +140,9 @@ describe("connected machine removal conflict", () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(<MachineRemovalBlockNotice workspaceId="workspace-a" result={machineHome} />);
+      root.render(
+        inRouter(<MachineRemovalBlockNotice workspaceId="workspace-a" result={machineHome} />),
+      );
     });
 
     expect(container.textContent).toContain("Not safe yet");

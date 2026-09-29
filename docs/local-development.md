@@ -87,6 +87,11 @@ Turning off Connected Machines does not turn off editable artifacts. An opted-in
 relay is built before application startup, so its cold compilation does not
 compete with readiness checks on a small host.
 
+Local desktop and terminal viewers initialize their own persistent stream-signing
+secret even when Connected Machines are disabled. The launcher preserves supplied
+stream or delegation secrets; generated local/test secrets stay in the worktree's
+mode-0600 `.env` and remain stable across restarts.
+
 `bun run dev` isolates each checkout/worktree (project from the directory name,
 free host ports, loopback URL rewrite including `nats://`, `.env.runtime`
 overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless
@@ -301,6 +306,15 @@ Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
 
+Keep `OPENGENI_MODAL_IMAGE_REF` aligned with the API release's browser controller.
+The default uses the verified digest from the official desktop image publication;
+Helm's `desktop.imageRef` uses the same pin. An older controller can still speak
+protocol v1 while lacking newer actions or focused DOM reads. Those exact schema
+or route mismatches report an unsupported-controller error with an image-update
+instruction, without retrying actions or restarting a live browser. After updating
+the deployment setting, use a fresh sandbox to verify the new image; existing
+sandbox leases retain their image and open tabs.
+
 ### OpenSandbox
 
 For OpenSandbox runs, set `OPENGENI_SANDBOX_BACKEND=opensandbox`, a private
@@ -410,5 +424,6 @@ request needs.
 
 - Public clients should treat the API as the source of truth.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream`.
+- The console uses finite event batches until HTTP/2 or HTTP/3 is observed. Cross-origin APIs can hide the protocol from ResourceTiming, so missing timing information retains the bounded fallback and prevents several local tabs from exhausting HTTP/1 connections needed by browser controls.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model, tool, and sandbox boundary has been made idempotent.
 - Read [`../AGENTS.md`](../AGENTS.md) before changing the session workflow, the agent turn activity, or memory; [`run-lifecycle.md`](run-lifecycle.md) is the canonical lifecycle reference.

@@ -98,7 +98,7 @@ const chat = await og.chat({
 });
 
 const reply = await chat.send("hello"); // creates the session on the first send
-console.log(reply.text); // or String(reply)
+console.log(reply.text); // or String(reply); the answer, without progress commentary
 
 for await (const chunk of chat.stream("and then?")) {
   if (chunk.type === "text") process.stdout.write(chunk.text);
@@ -378,6 +378,33 @@ General personal-resource grants for documents, variable sets and other resource
 kinds remain available through the root/core SDK. They do not authorize native
 connected accounts.
 
+## Workspace credentials, webhooks, and sandbox image
+
+Configure these with an organization key or workspace admin session. Secrets are
+returned once; store them when you create the resource. Protocol and payloads:
+[`docs/workspace-integrations.md`](../../docs/workspace-integrations.md).
+
+```ts
+const { secret: providerSecret } = await client.putWorkspaceCredentialProvider(workspaceId, {
+  url: "https://product.example/opengeni/credentials",
+});
+const { secret: webhookSecret } = await client.createWorkspaceWebhook(workspaceId, {
+  url: "https://product.example/opengeni/events",
+  eventTypes: ["turn.completed", "turn.failed"],
+});
+
+// In your HTTP handlers, verify the raw body before parsing it:
+const { event } = await verifyWebhookEvent({ body: rawBody, headers, secret: webhookSecret });
+const request = await verifyCredentialProviderRequest({
+  body: rawBody,
+  headers,
+  secret: providerSecret,
+});
+```
+
+`listWorkspaceSandboxImages` returns the deployment's allowlisted images; set one
+with `updateWorkspaceSettings(workspaceId, { defaultSandboxImage })`.
+
 ## Personal schedules
 
 A schedule created by an authenticated human or their active agent records that
@@ -400,6 +427,18 @@ Omitting `connectionAccounts` on update preserves the selection. Passing an
 empty array clears explicit account choices without changing the schedule owner.
 Service-owned schedules retain service execution and do not acquire a human's
 personal accounts. Run history remains credential-free.
+
+A schedule freezes its connectors, accounts and (when an agent created it)
+OpenGeni tools. For the owner, `listScheduledTasks` and `getScheduledTask`
+include a read-only `policyDrift` naming what is out of date, and
+`listScheduledTaskRuns` includes `accessFailures` for runs that could not use a
+connector. `listScheduledTaskAccessAttention` lists schedules whose latest run
+failed that way, and schedules that cannot start because a chosen account can no
+longer be used (`unavailableAccounts`, with a null `runId`). A signed-in owner
+re-freezes with their current access through
+`refreshScheduledTaskAccess(workspaceId, taskId, { executionDigest, leaveOut })`,
+where the optional `leaveOut` keeps named default connectors or OpenGeni tools
+off; API keys and agents cannot. See [`docs/scheduled-task-access.md`](../../docs/scheduled-task-access.md).
 
 Deleting a task is externally idempotent and immediately removes it from live
 lists and quota, but the server retains a tombstone plus run/session/turn audit
@@ -1036,7 +1075,7 @@ Every public endpoint group has typed methods:
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |
-| Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
+| Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns`, `refreshScheduledTaskAccess`, `listScheduledTaskAccessAttention` |
 | Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |

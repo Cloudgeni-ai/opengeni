@@ -36,16 +36,23 @@ afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
 }, 30_000);
 
-test("connected panel is compact, accessible, and keeps real routing and disconnect controls", async () => {
+// The Slack integration's Capabilities page (the only page open in these tests).
+const slackPage = "[data-capability-page]";
+
+test("connected page is compact, accessible, and keeps real routing and disconnect controls", async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   const state = { installed: true, routingSaves: 0, disconnects: 0 };
   try {
     await installApi(page, state);
     await page.goto(`${baseUrl}/workspaces/${workspaceId}/plugins?integration=slack`);
-    const sheet = page.locator('[data-integration-sheet="slack"]');
+    // The legacy link opens the Slack page, not a sheet.
+    const sheet = page.locator(slackPage);
     await sheet.getByText("Connected", { exact: true }).waitFor();
-    await sheet.getByText("Where work starts", { exact: true }).waitFor();
+    expect(await sheet.locator("h1").textContent()).toBe("Slack");
+    expect(new URL(page.url()).searchParams.get("open")).toBe("integration:slack");
+    expect(await page.getByRole("dialog").count()).toBe(0);
+    await sheet.getByRole("heading", { name: "Where work starts", exact: true }).waitFor();
     expect(await sheet.getByRole("button", { name: "Reconnect", exact: true }).isVisible()).toBe(
       false,
     );
@@ -56,34 +63,30 @@ test("connected panel is compact, accessible, and keeps real routing and disconn
         theme,
       );
       await page.waitForTimeout(600);
-      const accessibility = await new AxeBuilder({ page })
-        .include('[data-integration-sheet="slack"]')
-        .analyze();
+      const accessibility = await new AxeBuilder({ page }).include(slackPage).analyze();
       expect(accessibility.violations).toEqual([]);
       await page.screenshot({ path: `${evidence}/connected-${theme}.png` });
     }
-    await sheet.getByText("Where work starts", { exact: true }).click();
     await sheet.getByRole("button", { name: "Choose channel workspaces" }).click();
     const routing = page.getByRole("dialog", { name: "Where Slack channels start work" });
     await routing.getByRole("combobox").selectOption(siblingId);
     await routing.getByRole("button", { name: "Save", exact: true }).click();
     await routing.waitFor({ state: "hidden" });
     expect(state.routingSaves).toBe(1);
-    await sheet.getByText("More options", { exact: true }).click();
-    await sheet.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await sheet.getByRole("button", { name: "More actions for Slack", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Disconnect", exact: true }).click();
     const confirmation = page.getByRole("dialog", { name: "Disconnect the OpenGeni Slack bot?" });
     await confirmation.getByText(/whole organization/).waitFor();
     expect(state.disconnects).toBe(0);
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+    await confirmation.waitFor({ state: "hidden" });
     await page.setViewportSize({ width: 360, height: 800 });
-    await sheet.getByText("Connection details", { exact: true }).click();
+    await sheet.getByRole("button", { name: /^Technical details/ }).click();
+    await sheet.getByText("Bot", { exact: true }).waitFor();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
-    expect(
-      (await new AxeBuilder({ page }).include('[data-integration-sheet="slack"]').analyze())
-        .violations,
-    ).toEqual([]);
+    expect((await new AxeBuilder({ page }).include(slackPage).analyze()).violations).toEqual([]);
     await page.screenshot({ path: `${evidence}/expanded-mobile.png` });
   } finally {
     await context.close();
@@ -96,14 +99,21 @@ test("sibling workspace finds the verified connection and opens its home setting
   try {
     await installApi(page, { installed: true, routingSaves: 0, disconnects: 0 });
     await page.goto(`${baseUrl}/workspaces/${siblingId}/plugins?integration=slack`);
-    const sheet = page.locator('[data-integration-sheet="slack"]');
+    const sheet = page.locator(slackPage);
     await sheet.getByText("Connected", { exact: true }).waitFor();
-    expect(await sheet.getByRole("button", { name: "Set up", exact: true }).count()).toBe(0);
+    expect(
+      await sheet.getByRole("button", { name: "Add OpenGeni to Slack", exact: true }).count(),
+    ).toBe(0);
     await sheet.getByRole("button", { name: "Open Slack settings" }).click();
-    await page.waitForURL(`**/workspaces/${workspaceId}/plugins?integration=slack`);
+    await page.waitForURL(
+      (url) =>
+        url.pathname === `/workspaces/${workspaceId}/plugins` &&
+        (url.searchParams.get("open") === "integration:slack" ||
+          url.searchParams.get("integration") === "slack"),
+    );
     await page
-      .locator('[data-integration-sheet="slack"]')
-      .getByText("Where work starts", { exact: true })
+      .locator(slackPage)
+      .getByRole("heading", { name: "Where work starts", exact: true })
       .waitFor();
   } finally {
     await context.close();
@@ -125,7 +135,7 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     await page.goto(
       `${baseUrl}/workspaces/${workspaceId}/capabilities?slack=error&reason=http_409`,
     );
-    const sheet = page.locator('[data-integration-sheet="slack"]');
+    const sheet = page.locator(slackPage);
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
       .waitFor();
@@ -133,6 +143,7 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     expect(redirected.pathname).toBe(`/workspaces/${workspaceId}/plugins`);
     expect(redirected.searchParams.get("slack")).toBe("error");
     expect(redirected.searchParams.get("reason")).toBe("http_409");
+    expect(redirected.searchParams.get("open")).toBe("integration:slack");
     state.connectionsReady = new Promise<void>((resolve) => {
       releaseConnections = resolve;
     });
@@ -140,7 +151,7 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
       .waitFor();
-    const setup = sheet.getByRole("button", { name: "Set up", exact: true });
+    const setup = sheet.getByRole("button", { name: "Add OpenGeni to Slack", exact: true });
     await setup.waitFor();
     expect(await setup.isDisabled()).toBe(true);
     releaseConnections();
@@ -151,9 +162,9 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
       )
       .waitFor();
     expect(await setup.count()).toBe(0);
-    await sheet.getByRole("button", { name: "Dismiss setup message" }).click();
+    await sheet.getByRole("button", { name: "Dismiss", exact: true }).click();
     expect(new URL(page.url()).searchParams.has("slack")).toBe(false);
-    await sheet.getByRole("button", { name: "Set up", exact: true }).waitFor();
+    await sheet.getByRole("button", { name: "Add OpenGeni to Slack", exact: true }).waitFor();
   } finally {
     releaseConnections();
     await context.close();

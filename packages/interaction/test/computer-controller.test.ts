@@ -168,6 +168,37 @@ describe("Computer interaction contracts", () => {
 });
 
 describe("ComputerInteractionController", () => {
+  test("replays computer receipts through durable storage without repeating native input", async () => {
+    const records = new Map<
+      string,
+      ReturnType<ComputerInteractionController["journalSnapshot"]>[number]
+    >();
+    let reads = 0;
+    let dispatches = 0;
+    const controller = new ComputerInteractionController({
+      computerSessionId,
+      controllerGeneration,
+      onJournalRecord: (record) => {
+        records.set(record.operationId, structuredClone(record));
+      },
+      loadJournalRecord: (id) => {
+        reads++;
+        return records.get(id) ?? null;
+      },
+      driver: driver(new Map([["window:42", target()]]), async () => {
+        dispatches++;
+        return observation(target());
+      }),
+    });
+    const receipt = await controller.run(command(1));
+    await controller.waitForIdle();
+    expect(await controller.run(command(1))).toEqual(receipt);
+    expect(reads).toBe(1);
+    records.delete(operationId(1));
+    expect(() => controller.run(command(1))).toThrow("unavailable");
+    expect(dispatches).toBe(1);
+  });
+
   test("uses the shared idempotent journal and target-local queues", async () => {
     const targets = new Map([
       ["window:42", target()],

@@ -54,6 +54,7 @@ import {
   sanitizeRaceRequest,
   sanitizeRaceResult,
 } from "./browser-account-race-diagnostics";
+import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
@@ -1646,32 +1647,6 @@ function logoutAllActorFenceResponseProblem(
   return exactShape && exactTiming
     ? null
     : `unexpected logout-all actor fence: ${JSON.stringify({ input, response })}`;
-}
-
-function exactLogoutAllSessionListSearch(search: string): boolean {
-  // Retain the pre-page API shape during a rolling upgrade. The current rail
-  // owns exactly three finite session pages: active roots, archived roots, and
-  // the complete pins projection. Reject cursors, searches, duplicate keys,
-  // and every other query rather than treating any session-list 401 as benign.
-  if (search === "") return true;
-  const params = new URLSearchParams(search);
-  const keys = [...params.keys()];
-  if (new Set(keys).size !== keys.length) return false;
-  const exactSingleton = (name: string, value: string): boolean => {
-    const values = params.getAll(name);
-    return values.length === 1 && values[0] === value;
-  };
-  if (!exactSingleton("view", "page")) return false;
-  const isActiveRoots =
-    keys.length === 3 && exactSingleton("limit", "50") && exactSingleton("parentSessionId", "null");
-  const isArchivedRoots =
-    keys.length === 4 &&
-    exactSingleton("limit", "50") &&
-    exactSingleton("parentSessionId", "null") &&
-    exactSingleton("archivedOnly", "true");
-  const isPins =
-    keys.length === 3 && exactSingleton("limit", "1") && exactSingleton("pinsOnly", "true");
-  return isActiveRoots || isArchivedRoots || isPins;
 }
 
 function exactBoundedWorkspaceLiveStreamSearch(search: string): boolean {

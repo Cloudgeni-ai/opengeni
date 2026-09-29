@@ -93,10 +93,27 @@ async function mount(context: AppContextValue) {
       button!.click();
     });
   };
+  const edit = async (content: string) => {
+    const textarea = document.body.querySelector("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), "value")?.set?.call(
+        textarea,
+        content,
+      );
+      // happy-dom does not route the input event through React's tracker; call
+      // the element's own change handler the way React would.
+      const key = Object.keys(textarea).find((name) => name.startsWith("__reactProps$"));
+      const props = key
+        ? (textarea as unknown as Record<string, { onChange?: (event: unknown) => void }>)[key]
+        : undefined;
+      props?.onChange?.({ target: textarea, currentTarget: textarea });
+    });
+  };
   return {
     container: document.body,
     render,
     click,
+    edit,
     async dispose() {
       await act(async () => root.unmount());
       container.remove();
@@ -109,14 +126,17 @@ test("Skills list loads metadata first and saves the full edited folder without 
   const view = await mount(context);
   try {
     expect(calls.map((call) => call.method)).toEqual(["list"]);
-    await view.click("example");
+    await view.click("Example");
     expect(view.container.querySelector("textarea")?.value).toBe(record.files[0]!.content);
-    await view.click("Save Skill");
+    expect(view.container.textContent).not.toContain("Save skill");
+    const edited = `${record.files[0]!.content}\nMore`;
+    await view.edit(edited);
+    await view.click("Save skill");
     expect(calls.find((call) => call.method === "save")?.request).toMatchObject({
       skillId: record.id,
       expectedRevisionId: record.activeRevisionId,
       expectedScopeVersion: 1,
-      files: record.files,
+      files: [{ ...record.files[0]!, content: edited }, record.files[1]!],
       deletions: [],
     });
     expect(view.container.textContent).toContain("Skill saved and active.");
@@ -139,8 +159,9 @@ test("a save finishing after workspace navigation cannot read or display old-wor
   const { context, calls } = fixture({ saveWorkspaceSkill: () => pending });
   const view = await mount(context);
   try {
-    await view.click("example");
-    await view.click("Save Skill");
+    await view.click("Example");
+    await view.edit("changed");
+    await view.click("Save skill");
     await view.render("two");
     const readCount = calls.filter((call) => call.method === "read").length;
     await act(async () =>
@@ -165,9 +186,9 @@ test("workspace readers can inspect Skill files without edit controls", async ()
   const { context } = fixture({}, false);
   const view = await mount(context);
   try {
-    await view.click("example");
+    await view.click("Example");
     expect(view.container.querySelector("textarea")?.disabled).toBe(true);
-    expect(view.container.textContent).not.toContain("Save Skill");
+    expect(view.container.textContent).not.toContain("Save skill");
     expect(view.container.textContent).not.toContain("Add text file");
   } finally {
     await view.dispose();
@@ -188,7 +209,7 @@ test("catalog pagination appends metadata without opening Skill files", async ()
   try {
     await view.click("Load more Skills");
     expect(cursors).toEqual([undefined, "page-two"]);
-    expect(view.container.textContent).toContain("example");
+    expect(view.container.textContent).toContain("Example");
     expect(view.container.textContent).toContain("Another Skill");
     expect(view.container.textContent).not.toContain("Load more Skills");
     expect(calls.filter((call) => call.method === "read")).toHaveLength(0);
@@ -226,7 +247,7 @@ test("installed shortcuts use Skill icons and truthful active/pending/inactive l
       "Installed",
       "Pending changes",
       "Pending changes",
-      "Not active · disabled",
+      "Inactive",
     ]);
     expect(rows[1]!.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
     expect(rows[2]!.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
@@ -237,32 +258,32 @@ test("installed shortcuts use Skill icons and truthful active/pending/inactive l
   }
 });
 
-test("editor has a labelled shared dialog and restores focus to its catalog opener", async () => {
+test("a skill opens as a page with a back link that restores focus to its catalog opener", async () => {
   const { context } = fixture();
   const view = await mount(context);
   try {
     const opener = view.container.querySelector<HTMLButtonElement>(
       ".og-connection-installed button",
     )!;
-    await view.click("example");
-    const dialog = view.container.querySelector('[role="dialog"]')!;
-    expect(opener.getAttribute("aria-label")).toContain("example");
-    expect(document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent).toBe(
-      "example",
-    );
-    expect(dialog.className).toContain("sm:max-w-[42rem]");
-    expect(dialog.className).toContain("sm:top-1/2");
-    expect(dialog.querySelector("textarea")).not.toBeNull();
-    await view.click("Close");
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    await view.click("Example");
+    const page = view.container.querySelector("[data-capability-page]")!;
+    expect(opener.getAttribute("aria-label")).toContain("Example");
+    expect(page.querySelector("h1")?.textContent).toBe("Example");
     expect(view.container.querySelector('[role="dialog"]')).toBeNull();
+    expect(page.querySelector("textarea")).not.toBeNull();
+    const back = [...page.querySelectorAll("button")].find(
+      (node) => node.textContent === "Skills",
+    )!;
+    await act(async () => back.click());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(view.container.querySelector("[data-capability-page]")).toBeNull();
     expect(document.activeElement).toBe(opener);
   } finally {
     await view.dispose();
   }
 });
 
-test("save errors stay accessible inside the dialog without dropping the folder", async () => {
+test("save errors stay accessible inside the page without dropping the folder", async () => {
   const { context } = fixture({
     async saveWorkspaceSkill() {
       throw new Error("Save denied by workspace policy");
@@ -270,20 +291,21 @@ test("save errors stay accessible inside the dialog without dropping the folder"
   });
   const view = await mount(context);
   try {
-    await view.click("example");
-    await view.click("Save Skill");
-    const dialog = view.container.querySelector('[role="dialog"]')!;
-    expect(dialog.querySelector('[role="alert"]')?.textContent).toBe(
+    await view.click("Example");
+    await view.edit("changed");
+    await view.click("Save skill");
+    const page = view.container.querySelector("[data-capability-page]")!;
+    expect(page.querySelector('[role="alert"]')?.textContent).toBe(
       "Save denied by workspace policy",
     );
     expect(view.container.querySelector("section > [role='alert']")).toBeNull();
-    expect(dialog.querySelector("textarea")?.value).toBe(record.files[0]!.content);
+    expect(page.querySelector("textarea")?.value).toBe("changed");
   } finally {
     await view.dispose();
   }
 });
 
-test("pending saves are announced inside the dialog without claiming activation", async () => {
+test("pending saves are announced inside the page without claiming activation", async () => {
   const { context } = fixture({
     async saveWorkspaceSkill() {
       return { skillId: record.id, outcome: "pending" };
@@ -291,11 +313,12 @@ test("pending saves are announced inside the dialog without claiming activation"
   });
   const view = await mount(context);
   try {
-    await view.click("example");
-    await view.click("Save Skill");
-    expect(view.container.querySelector('[role="dialog"] [role="status"]')?.textContent).toBe(
-      "Saved for approval; not active yet.",
-    );
+    await view.click("Example");
+    await view.edit("changed");
+    await view.click("Save skill");
+    expect(
+      view.container.querySelector('[data-capability-page] [role="status"]')?.textContent,
+    ).toBe("Saved for approval; not active yet.");
     expect(view.container.textContent).not.toContain("Skill saved and active.");
   } finally {
     await view.dispose();
@@ -332,7 +355,7 @@ test("history keeps inactive revisions read-only and routes approval and restore
   });
   const view = await mount(context);
   try {
-    await view.click("example");
+    await view.click("Example");
     for (const [revisionId, label, operation] of [
       ["pending", "Approve this revision", "approve"],
       ["historical", "Restore as a new revision", "restore"],
@@ -343,7 +366,7 @@ test("history keeps inactive revisions read-only and routes approval and restore
         history.dispatchEvent(new Event("change", { bubbles: true }));
       });
       expect(view.container.querySelector("textarea")?.disabled).toBe(true);
-      expect(view.container.textContent).not.toContain("Save Skill");
+      expect(view.container.textContent).not.toContain("Save skill");
       await view.click(label!);
       expect(mutations.at(-1)).toMatchObject({
         operation,
@@ -372,9 +395,9 @@ test("workspace readers cannot approve inactive revisions or broaden their scope
   );
   const view = await mount(context);
   try {
-    await view.click("example");
+    await view.click("Example");
     expect(view.container.textContent).not.toContain("Approve this revision");
-    expect(view.container.textContent).not.toContain("Save Skill");
+    expect(view.container.textContent).not.toContain("Save skill");
     expect(
       view.container.querySelector<HTMLSelectElement>('[aria-label="Skill scope"]')?.disabled,
     ).toBe(true);
@@ -391,10 +414,10 @@ test("a delayed open cannot reveal old-workspace files after switching workspace
   const { context } = fixture({ readWorkspaceSkill: () => pending });
   const view = await mount(context);
   try {
-    await view.click("example");
+    await view.click("Example");
     await view.render("two");
     await act(async () => resolve(record));
-    expect(view.container.querySelector('[role="dialog"]')).toBeNull();
+    expect(view.container.querySelector("[data-capability-page]")).toBeNull();
     expect(view.container.textContent).toContain("No skills yet.");
   } finally {
     await view.dispose();
@@ -411,7 +434,7 @@ test("scope changes keep the existing authority/version guard and report failure
   });
   const view = await mount(context);
   try {
-    await view.click("example");
+    await view.click("Example");
     const scope = view.container.querySelector<HTMLSelectElement>('[aria-label="Skill scope"]')!;
     expect([...scope.options].map((option) => option.value)).toEqual(["user", "workspace"]);
     await act(async () => {
@@ -425,7 +448,7 @@ test("scope changes keep the existing authority/version guard and report failure
         request: { scope: "user", expectedScopeVersion: 1, reason: "Change skill scope" },
       },
     ]);
-    expect(view.container.querySelector('[role="dialog"] [role="alert"]')?.textContent).toBe(
+    expect(view.container.querySelector('[data-capability-page] [role="alert"]')?.textContent).toBe(
       "Scope change denied",
     );
     expect(scope.value).toBe("workspace");

@@ -25,6 +25,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Roadmap | `docs/roadmap.md` | `README.md` links; issues carry discussion. |
 | Standalone product integration, organization keys/workspaces, and external Skill ownership | `docs/product-integration.md` | `README.md`, package READMEs, the Northstar example, and both integration Skills link here; `packages/sdk/README.md` owns typed method details, while `docs/embedding-workbench.md` owns the optional workbench. |
 | Advanced in-process embedding & ports | `docs/embedding.md` | `README.md` and `CONTRIBUTING.md` should not present it as the default customer path. |
+| Workspace credential provider, webhooks, MCP call identity, and default sandbox image | `docs/workspace-integrations.md` | `docs/product-integration.md`, `docs/credentials.md`, `docs/embedding.md`, and `packages/sdk/README.md` should link instead of restating the protocol or signature scheme. |
 | Shared connection UI and conversation setup | `docs/connection-presentation.md` | Console and SDK discovery, OAuth details, personal consent, and shared controls. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
@@ -46,6 +47,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Personal GitHub identity, repository authority, local setup, and propagation | `docs/personal-github.md` | `docs/github-app.md`, `docs/deployment.md`, API/runtime/UI copy should link instead of restating token custody or grant semantics. |
 | OpenGeni Review Bot PR-review automation | `docs/pr-review.md` | `docs/github-app.md`, architecture, SDK, and UI copy should link instead of restating provider permissions, delivery semantics, or exact-head authority. |
 | Google Drive connection, scheduled source sync, and release readiness | `docs/google-drive.md` | Capabilities UI, connector code, and deployment guides should link instead of restating OAuth scope, explicit enablement, bounded sync/retry behavior, release gates, or ACL/citation boundaries. |
+| Scheduled task access drift, owner refresh, and failed-access notices | `docs/scheduled-task-access.md` | Schedules UI copy, `docs/agent-session-authority.md`, and `AGENTS.md` should link instead of restating the refresh authority or the notice semantics. |
 | OpenGeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
 | Social connectors (X / Reddit) | `docs/social-connectors.md` | `docs/architecture.md`, capability UI copy and marketing guidance should link instead of restating OAuth endpoints, scopes, or token-handling rules. |
 | Fiken connector (accounting) | `docs/fiken.md` | Capabilities UI copy and architecture should link instead of restating token verification, company scoping, or the single-concurrent-request rule. |

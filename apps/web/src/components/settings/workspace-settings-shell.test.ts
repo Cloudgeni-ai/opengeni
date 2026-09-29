@@ -5,7 +5,6 @@ import { createRoot } from "react-dom/client";
 
 import type { WorkspaceManagementLocation } from "./workspace-settings-shell";
 
-const nextWorkspaceId = "22222222-2222-4222-8222-222222222222";
 const fallbackWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const navigate = mock((_options: unknown) => undefined);
 const resetSessionView = mock(() => undefined);
@@ -24,30 +23,34 @@ mock.module("@/context", () => ({
 }));
 
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => createElement("a", null, children),
-  useNavigate: () => navigate,
-}));
-
-const workspaceSwitcherModule = await import("@/components/rail/workspace-switcher");
-
-mock.module("@/components/rail/workspace-switcher", () => ({
-  ...workspaceSwitcherModule,
-  WorkspaceSwitcherMenu: ({
-    workspaceId,
-    onSelect,
+  Link: ({
+    children,
+    to,
+    params,
+    search: _search,
+    ...props
   }: {
-    workspaceId: string;
-    onSelect: (workspaceId: string) => void;
+    children?: ReactNode;
+    to: string;
+    params?: { workspaceId?: string };
+    search?: unknown;
   }) =>
     createElement(
-      "button",
-      {
-        type: "button",
-        "aria-label": `Workspace selector for ${workspaceId}`,
-        onClick: () => onSelect(nextWorkspaceId),
-      },
-      "Switch workspace",
+      "a",
+      { ...props, href: to.replace("$workspaceId", params?.workspaceId ?? "") },
+      children,
     ),
+  useNavigate: () => navigate,
+  useRouterState: ({ select }: { select: (state: unknown) => unknown }) =>
+    select({ location: { search: {} } }),
+}));
+
+mock.module("@/components/rail/workspace-switcher", () => ({
+  WorkspaceSwitcherMenu: () => createElement("button", { type: "button" }, "Switch workspace"),
+}));
+
+mock.module("@/components/rail/workspace-paused-banner", () => ({
+  WorkspacePausedBanner: () => null,
 }));
 
 GlobalRegistrator.register();
@@ -84,14 +87,19 @@ async function renderShell(
   await act(async () => {
     root.render(
       createElement(
-        WorkspaceManagementShell,
-        {
-          workspaceId,
-          organizationName: "CloudGeni",
-          location,
-          ...overrides,
-        } as ComponentProps<typeof WorkspaceManagementShell>,
-        createElement("p", null, "Settings content"),
+        // Match the application-owned main landmark around the settings shell.
+        "main",
+        null,
+        createElement(
+          WorkspaceManagementShell,
+          {
+            workspaceId,
+            organizationName: "CloudGeni",
+            location,
+            ...overrides,
+          } as ComponentProps<typeof WorkspaceManagementShell>,
+          createElement("p", null, "Settings content"),
+        ),
       ),
     );
   });
@@ -104,54 +112,65 @@ async function renderShell(
   };
 }
 
-describe("workspace management navigation", () => {
-  test("shows Memory consistently and limits Insights navigation to admins", async () => {
-    const member = await renderShell({ kind: "settings", section: "general" });
-    try {
-      expect(member.container.textContent).toContain("Memory");
-      expect(member.container.textContent).not.toContain("Insights");
-    } finally {
-      await member.unmount();
-    }
-
+describe("workspace settings rail", () => {
+  test("lists settings plus the Agents and Insights dashboards; no Memory, Capabilities or Danger zone", async () => {
     workspacePermissions = ["workspace:admin"];
-    const admin = await renderShell({ kind: "settings", section: "general" });
+    const view = await renderShell({ kind: "settings", section: null });
     try {
-      expect(admin.container.textContent).toContain("Insights");
-      expect(admin.container.textContent).toContain("Memory");
-    } finally {
-      await admin.unmount();
-    }
-  });
-
-  test("keeps Agent Knowledge out of the settings sidebar", async () => {
-    const view = await renderShell({ kind: "settings", section: "learning" });
-    try {
-      expect(view.container.textContent).toContain("Agent learning");
-      expect(view.container.textContent).not.toContain("Agent Knowledge");
+      const text = view.container.textContent ?? "";
+      for (const label of [
+        "General",
+        "Access",
+        "Models",
+        "API keys",
+        "Variable sets",
+        "Sandbox environments",
+        "Machines",
+        "CloudGeni",
+        "Workspace activity",
+        "Agents",
+        "Insights",
+      ]) {
+        expect(text).toContain(label);
+      }
+      for (const label of ["Members", "Memory", "Danger zone", "Capabilities"]) {
+        expect(text).not.toContain(label);
+      }
     } finally {
       await view.unmount();
     }
   });
 
-  test("keeps settings and management destinations in one shell", () => {
+  test("hides Insights from people who are not workspace admins", async () => {
+    workspacePermissions = ["sessions:create"];
+    const view = await renderShell({ kind: "settings", section: null });
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Agents");
+      expect(text).not.toContain("Insights");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("settings, the Agents and Insights dashboards and runtime pages open in settings mode", () => {
     expect(workspaceManagementLocation(`${base}/settings`, workspaceId, "api-keys")).toEqual({
       kind: "settings",
       section: "api-keys",
     });
-
-    for (const route of ["agents", "insights", "memory", "variable-sets", "rigs", "machines"]) {
+    expect(workspaceManagementLocation(`${base}/settings`, workspaceId)).toEqual({
+      kind: "settings",
+      section: null,
+    });
+    for (const route of ["agents", "insights", "variable-sets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
-
     expect(workspaceManagementLocation(`${base}/rigs/rig-123`, workspaceId)).toEqual({
       kind: "page",
       target: "/workspaces/$workspaceId/rigs",
     });
-  });
-
-  test("does not absorb ordinary workspace routes into management", () => {
     for (const route of [
+      "memory",
       "sessions",
       "plugins",
       "documents",
@@ -159,70 +178,29 @@ describe("workspace management navigation", () => {
       "schedules",
       "artifacts",
       "priority",
+      "rigs-archive",
     ]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).toBeNull();
     }
   });
 
-  test("normalizes unknown and legacy settings searches to General", () => {
-    expect(workspaceSettingsSectionFromSearch(undefined)).toBe("general");
-    expect(workspaceSettingsSectionFromSearch("permissions")).toBe("general");
+  test("maps older sections to the page that holds them now", () => {
+    expect(workspaceSettingsSectionFromSearch(undefined)).toBeNull();
+    expect(workspaceSettingsSectionFromSearch("permissions")).toBeNull();
     expect(workspaceSettingsSectionFromSearch("models")).toBe("models");
+    expect(workspaceSettingsSectionFromSearch("members")).toBe("access");
+    expect(workspaceSettingsSectionFromSearch("danger")).toBe("general");
   });
 
-  test("keeps organization settings as quiet secondary navigation", () => {
+  test("links to organization settings at the bottom of the settings rail", () => {
     expect(shellSource).toContain('to="/workspaces/$workspaceId/organization"');
     expect(shellSource).toContain("Organization settings for ${organizationName}");
-    expect(shellSource).toContain("Workspace settings");
-    expect(shellSource).toContain("{organizationName}");
-    expect(shellSource).not.toContain("Organization settings</span>");
+    expect(shellSource).toContain('label="Workspace settings"');
   });
 
-  test("renders the shared selector and preserves the settings section when switching", async () => {
-    const rendered = await renderShell({ kind: "settings", section: "danger" });
-    try {
-      const selector = rendered.container.querySelector<HTMLButtonElement>(
-        `button[aria-label="Workspace selector for ${workspaceId}"]`,
-      );
-      expect(selector?.textContent).toBe("Switch workspace");
-
-      await act(async () => selector?.click());
-
-      expect(resetSessionView).toHaveBeenCalledTimes(1);
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/workspaces/$workspaceId/settings",
-        params: { workspaceId: nextWorkspaceId },
-        search: { section: "danger" },
-      });
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
-  test("preserves the management destination when switching", async () => {
-    const rendered = await renderShell({
-      kind: "page",
-      target: "/workspaces/$workspaceId/rigs",
-    });
-    try {
-      const selector = rendered.container.querySelector<HTMLButtonElement>(
-        `button[aria-label="Workspace selector for ${workspaceId}"]`,
-      );
-      await act(async () => selector?.click());
-
-      expect(resetSessionView).toHaveBeenCalledTimes(1);
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/workspaces/$workspaceId/rigs",
-        params: { workspaceId: nextWorkspaceId },
-      });
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
-  test("keeps the managed workspace identity and an accessible workspace switcher", async () => {
+  test("an organization admin without workspace access sees General and Access only", async () => {
     const rendered = await renderShell(
-      { kind: "settings", section: "members" },
+      { kind: "settings", section: null },
       {
         organizationManagementOnly: true,
         organizationSettingsWorkspaceId: fallbackWorkspaceId,
@@ -230,23 +208,38 @@ describe("workspace management navigation", () => {
       },
     );
     try {
-      expect(rendered.container.textContent).toContain("Managed without content access");
-      expect(rendered.container.textContent).toContain("Organization management");
-      expect(rendered.container.textContent).not.toContain("Agent tools");
-
-      const selector = rendered.container.querySelector<HTMLButtonElement>(
-        `button[aria-label="Workspace selector for ${fallbackWorkspaceId}"]`,
-      );
-      await act(async () => selector?.click());
-
-      expect(resetSessionView).toHaveBeenCalledTimes(1);
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/workspaces/$workspaceId/settings",
-        params: { workspaceId: nextWorkspaceId },
-        search: { section: "members" },
-      });
+      const text = rendered.container.textContent ?? "";
+      expect(text).toContain("Managed without content access");
+      expect(text).toContain("General");
+      expect(text).toContain("Access");
+      expect(text).not.toContain("API keys");
+      expect(text).not.toContain("Variable sets");
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("Agents keeps the settings rail, with Agents current and a way back to sessions", async () => {
+    workspacePermissions = ["workspace:admin"];
+    const view = await renderShell({ kind: "page", target: "/workspaces/$workspaceId/agents" });
+    try {
+      const rail = view.container.querySelector('nav[aria-label="Workspace settings"]')!;
+      expect(rail).not.toBeNull();
+      expect(rail.querySelector('a[aria-current="page"]')?.textContent).toBe("Agents");
+      const back = Array.from(rail.querySelectorAll("a")).find(
+        (link) => link.textContent === "Back to sessions",
+      );
+      expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
+      // The dashboard brings its own page; the shell adds no settings header.
+      const content = view.container.querySelector('section[aria-label="Agents"]');
+      expect(content).not.toBeNull();
+      expect(content?.querySelector("h1")).toBeNull();
+      expect(content?.textContent).toContain("Settings content");
+      expect(content?.contains(rail)).toBe(false);
+      expect(content?.closest("main")).not.toBeNull();
+      expect(view.container.querySelectorAll('main, [role="main"]').length).toBe(1);
+    } finally {
+      await view.unmount();
     }
   });
 });

@@ -263,8 +263,9 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   },
   "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
-    // pending event, producer-side supersession event, goal.resumed
-    inserts: 3,
+    // pending event, producer-side supersession event, consumed-on-arrival
+    // cancellation, goal.resumed
+    inserts: 4,
     contract: "canonical",
   },
   "packages/db/src/index.ts#appendSessionEvents": { inserts: 1, contract: "canonical" },
@@ -460,6 +461,17 @@ const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
     "cancelSessionSubtreeInTransaction",
   ],
 };
+
+const DEV_SEED_PATH = "scripts/dev-seed-design-preview.ts";
+const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
+
+/** The DEV-only seed may only write to this worktree's loopback dev stack. */
+function expectDevSeedGuards(source: string): void {
+  expect(source).toContain('if (!flag("--yes"))');
+  expect(source).toContain("if (!LOOPBACK.has(url.hostname)) fail(");
+  expect(source).toContain("if (url.port !== runtime.OPENGENI_API_PORT)");
+  expect(source).toContain("set_config('opengeni.session_activity_gate_state', 'finalized', true)");
+}
 
 function productionTypeScriptFiles(): string[] {
   const files: string[] = [];
@@ -969,6 +981,14 @@ describe("session_events writer inventory", () => {
           expect(callers).toEqual(["packages/db/src/migrate.ts"]);
           return;
         }
+        if (key === DEV_SEED_CONVERSATION_WRITER) {
+          // The DEV-only design-preview seed writes fixture history into the
+          // local dev stack through the migrations role, outside the runtime's
+          // Drizzle handle. It replays the full open -> finalized gate itself.
+          // Pin its local-only guards; do not exempt any other writer.
+          expectDevSeedGuards(source);
+          return;
+        }
         const body = enclosing.node.body;
         if (!body) {
           violations.push(`${key} has no function body`);
@@ -1001,7 +1021,10 @@ describe("session_events writer inventory", () => {
         (path) => relative(repoRoot, path).replaceAll("\\", "/") !== "packages/db/src/database.ts",
       )
       .filter((path) => readFileSync(path, "utf8").includes("opengeni.session_activity_gate_"))
-      .map((path) => relative(repoRoot, path).replaceAll("\\", "/"));
+      .map((path) => relative(repoRoot, path).replaceAll("\\", "/"))
+      // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
+      .filter((path) => path !== DEV_SEED_PATH);
+    expectDevSeedGuards(readFileSync(join(repoRoot, DEV_SEED_PATH), "utf8"));
     expect(violations).toEqual([]);
   });
 
@@ -1118,7 +1141,11 @@ describe("session_events writer inventory", () => {
         }
         if (isTaggedTemplateExpression(node)) {
           const sqlText = sourceFile.source.slice(nodeStart(node.quasi), node.quasi.end);
-          if (/\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText)) {
+          if (
+            /\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText) &&
+            // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
+            `${file}#${namedTopLevelFunction(node)?.name}` !== DEV_SEED_CONVERSATION_WRITER
+          ) {
             rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
         }

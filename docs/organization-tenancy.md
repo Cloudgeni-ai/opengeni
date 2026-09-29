@@ -1224,7 +1224,16 @@ subject and causal human from the standard context GUCs, writes a
 `variable_set.materialized` audit event with actor kind `session_attach` and
 the live session authority tuple from the exact locked session row, and an
 old image that sets no subject records the explicit `service:session`
-sentinel rather than nothing.
+sentinel rather than nothing. Since migration 0531 that lane selects from the
+same candidate sets as an agent turn of the same session: the session's own
+selection plus the defaults of its frozen Sandbox Environment version (never a
+later version's defaults). Its authorization stays its own and is not
+identical to the turn's: a personal set still needs the attaching human as
+owner with a live session or always `variable_set.use` grant (a turn instead
+uses its accepted attempt snapshot), and the session-status and workspace
+checks are unchanged. Any other set is a 42501 denial with its denial fact,
+which the terminal, Files, Git and viewer routes answer as a 403 rather than a
+500.
 
 Signed object-storage URLs are the remaining deliberately-bounded bearer
 surface: provider-native signing has no revocation, so revocation prevents

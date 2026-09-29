@@ -228,3 +228,69 @@ test("local model MCP projection carries SDK correlation to its existing lifecyc
     await prepared.close();
   }
 });
+
+test("attempt MCP calls advertise the trusted turn identity in _meta.opengeni", async () => {
+  const seen: unknown[] = [];
+  const transports: WebStandardStreamableHTTPServerTransport[] = [];
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const server = new McpServer({ name: "identity-meta", version: "1.0.0" });
+      server.registerTool("whoami", { inputSchema: {} }, async (_input, extra) => {
+        seen.push(extra._meta?.opengeni);
+        return { content: [{ type: "text" as const, text: "ok" }] };
+      });
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
+      transports.push(transport);
+      await server.connect(transport);
+      return transport.handleRequest(request);
+    },
+  });
+  const settings = testSettings({
+    sandboxBackend: "none",
+    mcpServers: [{ id: "identity", url: `http://127.0.0.1:${provider.port}/mcp` }],
+  });
+  const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "identity" }], {
+    ...scope,
+    initiatingHumanSubjectId: "user:alice",
+  });
+  try {
+    const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+    const tool = (await agent.getMcpTools(new RunContext())).find(
+      (candidate) => candidate.type === "function" && candidate.name === "identity__whoami",
+    );
+    if (!tool || tool.type !== "function") throw new Error("MCP tool missing");
+    await tool.invoke(new RunContext(), "{}", { toolCall: { callId: "call-whoami" } } as never);
+    const environment = prepared.attemptToolEnvironment;
+    if (!environment) throw new Error("attempt tool environment missing");
+    const entry = environment.catalog.entries.find(
+      (candidate) => candidate.modelName === "identity__whoami",
+    );
+    await environment.gateway.call(
+      {
+        operationId: crypto.randomUUID(),
+        catalogDigest: environment.catalog.digest,
+        identity: entry!.identity,
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "worker:test" },
+      },
+      { transportMeta: { opengeni: { workspaceId: "spoofed" } } },
+    );
+    const expected = {
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      attemptId: scope.attemptId,
+      initiatingHumanSubjectId: "user:alice",
+    };
+    expect(seen).toEqual([expected, expected]);
+  } finally {
+    await prepared.close();
+    for (const transport of transports) await transport.close();
+    provider.stop(true);
+  }
+});

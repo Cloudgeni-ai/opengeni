@@ -643,6 +643,7 @@ jobs:
             'x86_64-unknown-linux-musl:opengeni-agent-x86_64-unknown-linux-musl' \
             'aarch64-unknown-linux-musl:opengeni-agent-aarch64-unknown-linux-musl' \
             'universal-apple-darwin:opengeni-agent-universal-apple-darwin' \
+            'universal-apple-darwin-app:OpenGeni-Agent.app.zip' \
             'x86_64-pc-windows-msvc:opengeni-agent-x86_64-pc-windows-msvc.exe' \
             'aarch64-pc-windows-msvc:opengeni-agent-aarch64-pc-windows-msvc.exe'
           do

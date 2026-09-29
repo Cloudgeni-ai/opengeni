@@ -6,7 +6,8 @@ import { defineConfig } from "tsup";
 //
 // Every @opengeni/* specifier stays external except the dependency-free,
 // client-safe policy leaves. Bundle these exact leaves so browser
-// display titles, site paths, and MCP endpoint checks share implementations without making
+// display titles, browser storage modes, site paths, MCP endpoint checks, and the
+// workspace-integration signature scheme share implementations without making
 // the contracts package runtime reachable from the ordinary SDK root. Keeping
 // every other workspace edge external remains load-bearing for the publish
 // closure guard: a stray server import stays visible in dist.
@@ -44,9 +45,11 @@ export default defineConfig({
   clean: true,
   external: [/^@opengeni\//],
   noExternal: [
+    "@opengeni/contracts/browser-storage",
     "@opengeni/contracts/mcp-endpoint",
     "@opengeni/contracts/session-titles",
     "@opengeni/contracts/site-session-http",
     "@opengeni/contracts/plugin-discovery",
+    "@opengeni/contracts/workspace-integration-wire",
   ],
 });

@@ -30,6 +30,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
+const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const CONNECTOR_ACCOUNTS_E2E = "test/e2e/connector-accounts.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
@@ -42,16 +43,38 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SESSION_SIDEBAR_E2E = "test/e2e/session-sidebar.browser.e2e.ts";
 const SESSION_SKILL_REVIEW_E2E = "test/e2e/session-skill-review.browser.e2e.ts";
 const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
 const SETUP_ACCOUNT_TOKEN_E2E = "test/e2e/setup-account-token.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
+const TIMELINE_EXCHANGE_FOLD_BROWSER_E2E = "test/e2e/timeline-exchange-fold.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("loading/startup is CI-discovered for its web, React, SDK and test-helper dependencies", () => {
+    expect(discoverTestFiles().e2e).toContain(SESSION_LOADING_STARTUP_E2E);
+    expect(usesBrowserRunner(SESSION_LOADING_STARTUP_E2E)).toBe(true);
+    for (const path of [
+      SESSION_LOADING_STARTUP_E2E,
+      "apps/web/src/context.tsx",
+      "apps/web/src/lib/session-startup.ts",
+      "packages/react/src/components/session-status.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(SESSION_LOADING_STARTUP_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_LOADING_STARTUP_E2E);
+    }
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${SESSION_LOADING_STARTUP_E2E}"`,
+    );
+  });
   test("session Skill review follows its web and shared dependencies without widening leaf plans", () => {
     for (const path of [
       SESSION_SKILL_REVIEW_E2E,
@@ -249,7 +272,9 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
+      SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
@@ -458,12 +483,14 @@ describe("fail-closed change impact", () => {
       "packages/react/demo/timeline-collapsed-history-test-harness.tsx",
       TIMELINE_SCROLL_BROWSER_E2E,
       TIMELINE_TIP_FOLLOW_BROWSER_E2E,
+      TIMELINE_EXCHANGE_FOLD_BROWSER_E2E,
     ]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.browserAcceptanceLanes).toContain("interaction");
       expect(plan.e2eTests).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
       expect(plan.e2eTests).not.toContain(TIMELINE_TIP_FOLLOW_BROWSER_E2E);
+      expect(plan.e2eTests).not.toContain(TIMELINE_EXCHANGE_FOLD_BROWSER_E2E);
     }
   });
 
@@ -507,6 +534,36 @@ describe("fail-closed change impact", () => {
     expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
       COMPACT_SESSION_VIEW_E2E,
     );
+  });
+
+  test("session sidebar coverage follows web fixtures and shared dependencies without widening browserd plans", () => {
+    for (const path of [
+      "apps/web/src/components/rail/session-list.tsx",
+      "apps/web/src/lib/session-group-window.ts",
+      "apps/web/test/session-sidebar-context.ts",
+      "apps/web/test/session-sidebar-fixture.tsx",
+      "apps/web/test/session-sidebar-preview.html",
+      "apps/web/test/session-sidebar-preview.vite.config.ts",
+      "apps/web/test/session-sidebar-tsconfig.json",
+      "packages/react/src/hooks/use-workspace-sessions.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+      SESSION_SIDEBAR_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(SESSION_SIDEBAR_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_SIDEBAR_E2E);
+      expect(plan.integrationTests, path).not.toContain(SESSION_SIDEBAR_E2E);
+    }
+    expect(usesBrowserRunner(SESSION_SIDEBAR_E2E)).toBe(true);
+    expect(discoverTestFiles().e2e).toContain(SESSION_SIDEBAR_E2E);
+    expect(OPT_IN_TESTS[SESSION_SIDEBAR_E2E]).toBeUndefined();
+    expect(createImpactPlan(["bun.lock"]).e2eTests).toContain(SESSION_SIDEBAR_E2E);
+
+    const browserd = createImpactPlan(["packages/browserd/src/index.ts"]);
+    expect(browserd.mode).toBe("focused");
+    expect(browserd.e2eTests).not.toContain(SESSION_SIDEBAR_E2E);
   });
 
   test("failed-session recovery follows its real route and shared dependencies without widening leaf plans", () => {
@@ -693,7 +750,9 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
+      SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
@@ -711,6 +770,8 @@ describe("fail-closed change impact", () => {
     expect(OPT_IN_TESTS[TIMELINE_SCROLL_BROWSER_E2E]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain(TIMELINE_TIP_FOLLOW_BROWSER_E2E);
     expect(OPT_IN_TESTS[TIMELINE_TIP_FOLLOW_BROWSER_E2E]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain(TIMELINE_EXCHANGE_FOLD_BROWSER_E2E);
+    expect(OPT_IN_TESTS[TIMELINE_EXCHANGE_FOLD_BROWSER_E2E]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain("test/e2e/organization-onboarding-acceptance.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/organization-onboarding-acceptance.e2e.ts"]).toContain(
       "onboarding",

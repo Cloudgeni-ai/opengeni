@@ -587,6 +587,36 @@ describe("durable session tool-policy updates", () => {
     expect(firstBus.published.length + secondBus.published.length).toBe(1);
   }, 180_000);
 
+  test("strips a now-disallowed first-party tool instead of failing a connector save", async () => {
+    if (!available) return;
+    const owner = await workspace("disabled-first-party-echo");
+    const created = await session(firstDb, { ...owner, tools: [OPENGENI] });
+    const restricted = testSettings({
+      mcpServers: settings.mcpServers,
+      allowedFirstPartyMcpTools: DEFAULT_FIRST_PARTY_MCP_TOOLS.filter(
+        (tool) => tool !== "memory_search",
+      ),
+    });
+
+    const updated = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus(), restricted),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      {
+        mode: "explicit",
+        tools: [OPENGENI, DOCS],
+        firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        expectedVersion: 1,
+      },
+    );
+
+    expect(updated.tools).toEqual([OPENGENI, DOCS]);
+    expect(updated.firstPartyMcpTools).not.toContain("memory_search");
+    expect(updated.firstPartyMcpTools).toEqual(
+      DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((tool) => tool !== "memory_search"),
+    );
+  }, 180_000);
+
   test("does not expose a session from another workspace through the update path", async () => {
     if (!available) return;
     const firstOwner = await workspace("tenant-a");

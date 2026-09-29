@@ -122,6 +122,34 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
   if (remaining.size > 0) {
     throw new ConnectionAccountSelectionError(
       "An attached connector account is unavailable. Review its connection settings.",
+      {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: (input.selections ?? [])
+          .filter((selection) =>
+            remaining.has(JSON.stringify([selection.serverId, selection.connectionId])),
+          )
+          .map((selection) => {
+            const server = input.servers.find((candidate) => candidate.id === selection.serverId);
+            // Only inspect the caller's already-authorized inventory. Never look
+            // up an unavailable account globally merely to improve an error.
+            const connection = input.connections.find(
+              (candidate) => candidate.id === selection.connectionId,
+            );
+            return {
+              serverId: selection.serverId,
+              connectionId: selection.connectionId,
+              reason:
+                !server?.connectionRef || server.connectionRef.authoritySource === "host"
+                  ? ("connector_unavailable" as const)
+                  : !connection
+                    ? ("account_not_visible" as const)
+                    : connection.status !== "active"
+                      ? ("account_inactive" as const)
+                      : ("account_mismatch" as const),
+            };
+          }),
+      },
     );
   }
   return McpConnectionAccountBindings.parse(

@@ -1,4 +1,7 @@
 import { RollingActivity } from "../timeline/rolling-activity";
+import { formatElapsed } from "../timeline/turn-summary";
+import { ActivityNoteTextContext } from "../timeline/activity-rail";
+import { timelineGroupContainsPresentedImage } from "../timeline/presented-image";
 import {
   isTimelineSearchTarget,
   TimelineSearchRevealContext,
@@ -8,11 +11,7 @@ import {
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
-import { parseSandboxFileArtifactReceipt } from "@opengeni/sdk";
-import { unwrapMcpOutput } from "../timeline/parsers";
 import { compactionSkipSubtitle } from "../timeline/compaction-copy";
-import { isRetainedImageContentType } from "../timeline/retained-image";
-import { mcpToolLeaf } from "../timeline/tool-display-name";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -23,6 +22,7 @@ import { dequal } from "dequal/lite";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
+  ArrowUpIcon,
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
@@ -39,7 +39,7 @@ import {
   TriangleAlertIcon,
   XCircleIcon,
 } from "lucide-react";
-import type { ComponentType } from "react";
+import type { ComponentType, CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Collapsible } from "radix-ui";
 import {
@@ -111,6 +111,7 @@ import {
   type VideoArtifactPlaybackLoader,
   type ToolRegistry,
   type TurnSummaryOptions,
+  type TurnSummaryStatus,
   type UserMessageItem,
   type FoldRestingState,
   type WorkerCompletionItem,
@@ -249,6 +250,9 @@ export type MessageTimelineProps = {
    * scrolls the in-memory window.
    */
   onJumpToLatest?: (() => void | Promise<void>) | undefined;
+  /** Resolve the newest durable user message and load its bounded window.
+   * Wire useSessionEvents().jumpToLatestQuestion for unloaded history. */
+  onJumpToLatestQuestion?: (() => Promise<number | null>) | undefined;
   /** Host-owned content appended after timeline groups, such as startup progress. */
   trailingState?: ReactNode | undefined;
   emptyState?: ReactNode | undefined;
@@ -287,6 +291,8 @@ const PIN_THRESHOLD_PX = 48;
  * line-sized streaming movement.
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
+/** Breathing room above the question when following stops at an answer. */
+const QUESTION_NAV_MARGIN_PX = 12;
 /**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
@@ -410,6 +416,38 @@ function isNearBottom(node: HTMLElement): boolean {
   return gap < Math.min(PIN_THRESHOLD_PX, maxScroll);
 }
 
+/** Content-space top of a timeline group, or null when it is not mounted. */
+function contentTopOf(node: HTMLElement, groupKey: string): number | null {
+  const element = node.querySelector(`[data-og-group-key="${cssEscapeAttribute(groupKey)}"]`);
+  if (!(element instanceof HTMLElement)) {
+    return null;
+  }
+  return element.getBoundingClientRect().top - node.getBoundingClientRect().top + node.scrollTop;
+}
+
+/** The question the reader is inside of, once its start has scrolled out of view. */
+type QuestionNav = { key: string | null };
+
+/** How far a question's start must be above the viewport before navigation shows. */
+const QUESTION_NAV_HIDDEN_PX = 24;
+
+function readQuestionNav(node: HTMLElement): QuestionNav | null {
+  const view = node.getBoundingClientRect();
+  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
+  const prompt = prompts.at(-1);
+  const key = prompt?.dataset.ogGroupKey;
+  if (!prompt || !key) return null;
+  const top = prompt.getBoundingClientRect().top;
+  if (top >= view.top - QUESTION_NAV_HIDDEN_PX && top < view.bottom) {
+    return null;
+  }
+  return { key };
+}
+
+function sameQuestionNav(a: QuestionNav | null, b: QuestionNav | null): boolean {
+  return a === b || (!!a && !!b && a.key === b.key);
+}
+
 /** Escape a value for use inside a CSS attribute selector. */
 function cssEscapeAttribute(value: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
@@ -458,6 +496,7 @@ export function MessageTimeline({
   loadingNewer = false,
   onLoadNewer,
   onJumpToLatest,
+  onJumpToLatestQuestion,
   trailingState,
   emptyState,
   className,
@@ -581,7 +620,11 @@ export function MessageTimeline({
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
-  const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
+  const readableTurns = turnSummary?.rolling === true;
+  const allGroups = useMemo(
+    () => groupTimeline(resolvedItems, { readableTurns }),
+    [resolvedItems, readableTurns],
+  );
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
     for (const item of resolvedItems) {
@@ -622,6 +665,12 @@ export function MessageTimeline({
   );
   const underfillRetryReadyRef = useRef(false);
   const resizeFollowRafRef = useRef<number | null>(null);
+  const questionNavFrameRef = useRef<number | null>(null);
+  const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
+  const [questionTarget, setQuestionTarget] = useState<number | null>(null);
+  const [questionPending, setQuestionPending] = useState(false);
+  const [questionError, setQuestionError] = useState<string | null>(null);
+  const questionRequestRef = useRef(0);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
@@ -1157,6 +1206,80 @@ export function MessageTimeline({
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
+  const scheduleQuestionNav = useCallback(() => {
+    if (!readableTurns || questionNavFrameRef.current != null) {
+      return;
+    }
+    questionNavFrameRef.current = requestFrame(() => {
+      questionNavFrameRef.current = null;
+      const node = scrollRef.current;
+      const next = hasNewer
+        ? onJumpToLatestQuestion
+          ? { key: null }
+          : null
+        : node
+          ? (readQuestionNav(node) ??
+            (onJumpToLatestQuestion && !node.querySelector("[data-og-prompt]")
+              ? { key: null }
+              : null))
+          : null;
+      setQuestionNav((current) => (sameQuestionNav(current, next) ? current : next));
+    });
+  }, [readableTurns, hasNewer, onJumpToLatestQuestion]);
+  useEffect(
+    () => () => {
+      if (questionNavFrameRef.current != null) {
+        cancelFrame(questionNavFrameRef.current);
+        questionNavFrameRef.current = null;
+      }
+    },
+    [],
+  );
+  const jumpToQuestion = (key: string) => {
+    const node = scrollRef.current;
+    const top = node ? contentTopOf(node, key) : null;
+    if (!node || top === null) {
+      return;
+    }
+    // Explicit reader navigation: leave the tip and park the question on top.
+    releasePinFromReader();
+    wantPinRef.current = false;
+    disclosureKeepsUnpinnedRef.current = false;
+    writeScrollTop(node, Math.max(0, top - QUESTION_NAV_MARGIN_PX));
+    // Hand keyboard/accessibility focus to the actual destination. This also
+    // gives native scroll anchoring the new question rather than an old work
+    // row when the bounded context subsequently gains a later history page.
+    node
+      .querySelector<HTMLElement>(`[data-og-group-key="${cssEscapeAttribute(key)}"]`)
+      ?.focus({ preventScroll: true });
+    syncScrollBaseline(node);
+    scheduleQuestionNav();
+  };
+  const jumpToLatestQuestion = async () => {
+    if (!onJumpToLatestQuestion) {
+      if (!hasNewer && questionNav?.key) jumpToQuestion(questionNav.key);
+      return;
+    }
+    const request = ++questionRequestRef.current;
+    releasePinFromReader();
+    wantPinRef.current = false;
+    setQuestionPending(true);
+    setQuestionError(null);
+    try {
+      const sequence = await onJumpToLatestQuestion();
+      if (request === questionRequestRef.current) setQuestionTarget(sequence);
+    } catch (reason) {
+      if (request === questionRequestRef.current)
+        setQuestionError(
+          reason instanceof Error && reason.name === "LatestQuestionQueuedError"
+            ? "The latest question is in the prompt queue."
+            : "Could not load the latest question. Try again.",
+        );
+    } finally {
+      if (request === questionRequestRef.current) setQuestionPending(false);
+    }
+  };
+
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
     requestOlderIfUnderfilled as (node: HTMLElement, now?: number) => void,
   );
@@ -1372,7 +1495,21 @@ export function MessageTimeline({
         }
       }
     };
-    if (pendingJumpToStartRef.current && firstItemChanged) {
+    const questionGroup =
+      questionTarget === null
+        ? undefined
+        : groups.find(
+            ({ group }) =>
+              group.kind === "item" &&
+              group.item.kind === "user-message" &&
+              (group.item.sourceEvents?.some((source) => source.sequence === questionTarget) ||
+                group.item.annotationSource?.sequence === questionTarget),
+          );
+    if (questionGroup) {
+      // Exact navigation wins over prepend correction on the same commit.
+      jumpToQuestion(questionGroup.key);
+      setQuestionTarget(null);
+    } else if (pendingJumpToStartRef.current && firstItemChanged) {
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
       pendingJumpToStartRef.current = false;
@@ -1450,6 +1587,7 @@ export function MessageTimeline({
     if (prepended && !pinnedRef.current && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
       rearmOlderPrefetchAfterLeavingTop(node);
     }
+    scheduleQuestionNav();
     previousFirstItemIdRef.current = firstItemId;
     previousScrollHeightRef.current = node.scrollHeight;
     syncScrollBaseline(node);
@@ -1806,6 +1944,7 @@ export function MessageTimeline({
     if (!node) {
       return;
     }
+    scheduleQuestionNav();
     const previousTop = lastScrollTopRef.current;
     const previousMaxScroll = lastMaxScrollRef.current;
     const nextTop = node.scrollTop;
@@ -1978,7 +2117,15 @@ export function MessageTimeline({
             <EntranceAnimationProvider value={false}>
               <TooltipProvider delayDuration={400}>
                 <TimelineAnnotationSourceRootContext.Provider value={scrollRef}>
-                  <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+                  <div
+                    className={cn("og-root relative flex min-h-0 flex-col", className)}
+                    // Sticky insets start at the scroller's padded content edge
+                    // (pt-16). Subtract that padding, then reserve 3.5rem for the
+                    // floating question action, including its touch hit target.
+                    style={
+                      { "--og-work-header-top": questionNav ? "-0.5rem" : "-4rem" } as CSSProperties
+                    }
+                  >
                     {onAnnotate ? (
                       <Suspense fallback={null}>
                         <TimelineAnnotationSelection
@@ -2073,7 +2220,14 @@ export function MessageTimeline({
                                 transition={{ duration: 0.15, ease: "easeOut" }}
                                 data-og-loading-older=""
                                 aria-live="polite"
-                                className="pointer-events-none absolute inset-x-0 -top-11 z-10 flex justify-center"
+                                className={cn(
+                                  "pointer-events-none absolute inset-x-0 -top-11 z-10 flex",
+                                  // The scrolling history control and fixed question
+                                  // action must never share the same pointer region.
+                                  questionNav
+                                    ? "max-w-[calc(50%-0.5rem)] justify-start"
+                                    : "justify-center",
+                                )}
                               >
                                 {loadingOlder || loadingOldest ? (
                                   <span className={LOADING_CHIP_CLASS}>
@@ -2244,6 +2398,39 @@ export function MessageTimeline({
                       </Suspense>
                     ) : null}
 
+                    <AnimatePresence>
+                      {questionNav ? (
+                        <motion.div
+                          key="question-nav"
+                          initial={{ opacity: 0, y: -6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -6 }}
+                          transition={{ duration: 0.15, ease: "easeOut" }}
+                          data-og-question-nav=""
+                          className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-end px-4 sm:px-6"
+                        >
+                          <div className="pointer-events-auto inline-flex max-w-[calc(50%-0.5rem)] items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
+                            <button
+                              type="button"
+                              data-og-jump-to-question=""
+                              onClick={() => void jumpToLatestQuestion()}
+                              disabled={questionPending}
+                              aria-busy={questionPending}
+                              title={questionError ?? undefined}
+                              className="inline-flex min-w-0 items-center gap-1.5 px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
+                            >
+                              <ArrowUpIcon aria-hidden className="size-3.5" />
+                              Latest question
+                            </button>
+                            {questionError && (
+                              <span role="status" className="px-2 text-og-xs">
+                                {questionError}
+                              </span>
+                            )}
+                          </div>
+                        </motion.div>
+                      ) : null}
+                    </AnimatePresence>
                     <AnimatePresence>
                       {loadingNewer ? (
                         <motion.div
@@ -2574,18 +2761,27 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         ? 1
         : 0;
   const content = (
-    <TimelineGroupView
-      {...behavior}
-      group={group}
-      foldLiveCluster={isAgentProgress(nextGroup)}
-      startupDismissed={startupDismissed}
-      trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
-      contextCompactionCount={contextCompactionCount > 0 ? contextCompactionCount : undefined}
-    />
+    <ActivityNoteTextContext.Provider value={behavior.renderMessageText ?? null}>
+      <TimelineGroupView
+        {...behavior}
+        group={group}
+        foldLiveCluster={isAgentProgress(nextGroup)}
+        startupDismissed={startupDismissed}
+        trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+        contextCompactionCount={contextCompactionCount > 0 ? contextCompactionCount : undefined}
+      />
+    </ActivityNoteTextContext.Provider>
   );
   return (
     <GenieLoadingOptionsContext.Provider value={behavior.genieLoading}>
-      <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
+      <div
+        data-og-timeline-group-anchor=""
+        data-og-group-key={groupKey}
+        data-og-prompt={
+          group.kind === "item" && group.item.kind === "user-message" ? "" : undefined
+        }
+        tabIndex={group.kind === "item" && group.item.kind === "user-message" ? -1 : undefined}
+      >
         <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
           <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
             <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
@@ -2600,6 +2796,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
                     key={
                       !startupDismissed &&
                       group.kind === "activity" &&
+                      !group.work?.details?.length &&
                       group.items.every(
                         (item) =>
                           item.kind === "startup-phase" ||
@@ -2736,7 +2933,65 @@ const TimelineGroupView = memo(function TimelineGroupView({
     (group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle);
   switch (group.kind) {
     case "activity":
+      if (group.work) {
+        const end = group.work.responseStartedAt ?? group.work.endedAt;
+        const status: TurnSummaryStatus = end
+          ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
+          : group.work.waiting
+            ? { kind: "waiting", ...group.work.waiting }
+            : {
+                kind: "working",
+                since: group.work.startedAt,
+                preview: containsPresentedImage ? undefined : (
+                  <RollingActivity
+                    items={group.items}
+                    toolRegistry={toolRegistry}
+                    showCount={false}
+                  />
+                ),
+              };
+        return (
+          <TurnSummary
+            key={containsPresentedImage ? "primary-image" : "work"}
+            items={group.items}
+            status={status}
+            outcome={group.outcome}
+            failureText={group.failureText}
+            foldKey={group.id}
+            defaultOpen={containsPresentedImage || group.outcome === "failed" ? true : undefined}
+            facets={turnSummary?.facets}
+            contextCompactionCount={compactedLandmarkCount(group.work.details)}
+          >
+            <TurnRailFrame>
+              <ActivityRail
+                items={group.items}
+                bare
+                toolRegistry={toolRegistry}
+                onOpenSession={onOpenSession}
+                onMemoryClick={onMemoryClick}
+                loadRetainedScreenshot={loadRetainedScreenshot}
+                loadRetainedArtifact={loadRetainedArtifact}
+              />
+              {renderFoldedGroups(group.work.details, {
+                renderMessageActions,
+                renderMessageText,
+                onOpenSession,
+                onMemoryClick,
+                onReconnect,
+                renderAuthNeeded,
+                resolveProviderLogo,
+                toolRegistry,
+                loadRetainedScreenshot,
+                loadRetainedArtifact,
+                loadVideoArtifactPlayback,
+                turnSummary,
+              })}
+            </TurnRailFrame>
+          </TurnSummary>
+        );
+      }
       // Preparation is one quiet surface, not a fold with eight technical steps.
+      // A later turn of the same exchange keeps its status row instead.
       if (
         !startupDetails &&
         !insideTurn &&
@@ -2761,6 +3016,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
       }
       if (
         turnSummary?.rolling &&
+        insideTurn &&
         !startupDetails &&
         !hasRememberedImageFold &&
         group.items.filter((item) => item.kind !== "startup-phase").length === 1
@@ -2900,58 +3156,28 @@ const TimelineGroupView = memo(function TimelineGroupView({
         )
       )
         return <ActivityRail items={activityItems} startupActive={false} bare />;
-      // Second-layer chips only when there are natural multi-cluster seams —
-      // otherwise the outer turn chip alone is enough ("N steps" wrapping one
-      // more "N steps" was the redundant double fold).
-      const nestClusters = foldableActivityClusterCount(group.groups) >= 2;
       const turnCopyText = collectTurnCopyText(group.groups, trailingAgentText);
-      const body = group.groups.map((child) => {
-        const key = timelineGroupKey(child);
-        return (
-          <TimelineGroupRenderBoundary
-            key={key}
-            resetKeys={[
-              child,
-              renderMessageActions,
-              renderMessageText,
-              onOpenSession,
-              onMemoryClick,
-              onReconnect,
-              renderAuthNeeded,
-              resolveProviderLogo,
-              toolRegistry,
-              loadRetainedScreenshot,
-              loadRetainedArtifact,
-              loadVideoArtifactPlayback,
-              turnSummary,
-            ]}
-          >
-            <TimelineGroupView
-              group={child}
-              renderMessageActions={renderMessageActions}
-              renderMessageText={renderMessageText}
-              onOpenSession={onOpenSession}
-              onMemoryClick={onMemoryClick}
-              onReconnect={onReconnect}
-              renderAuthNeeded={renderAuthNeeded}
-              resolveProviderLogo={resolveProviderLogo}
-              toolRegistry={toolRegistry}
-              loadRetainedScreenshot={loadRetainedScreenshot}
-              loadRetainedArtifact={loadRetainedArtifact}
-              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-              turnSummary={turnSummary}
-              insideTurn
-              nestClusterChips={nestClusters}
-            />
-          </TimelineGroupRenderBoundary>
-        );
+      const body = renderFoldedGroups(group.groups, {
+        renderMessageActions,
+        renderMessageText,
+        onOpenSession,
+        onMemoryClick,
+        onReconnect,
+        renderAuthNeeded,
+        resolveProviderLogo,
+        toolRegistry,
+        loadRetainedScreenshot,
+        loadRetainedArtifact,
+        loadVideoArtifactPlayback,
+        turnSummary,
       });
+      const durationMs = durationBetween(group.startedAt, group.endedAt);
       return (
         <TurnSummary
           items={activityItems}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
-          durationMs={durationBetween(group.startedAt, group.endedAt)}
+          durationMs={durationMs}
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
           foldKey={group.id}
@@ -2987,6 +3213,62 @@ const TimelineGroupView = memo(function TimelineGroupView({
       );
   }
 });
+
+type FoldedGroupBehavior = {
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  toolRegistry: ToolRegistry;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
+  turnSummary?: TurnSummaryOptions | undefined;
+};
+
+/** Children of a folded turn or exchange, each on the shared rail. */
+function renderFoldedGroups(groups: readonly TimelineGroup[], behavior: FoldedGroupBehavior) {
+  // Second-layer chips only when there are natural multi-cluster seams:
+  // otherwise the outer turn chip alone is enough ("N steps" wrapping one
+  // more "N steps" was the redundant double fold).
+  const nestClusters = foldableActivityClusterCount(groups) >= 2;
+  return groups.map((child) => (
+    <TimelineGroupRenderBoundary
+      key={timelineGroupKey(child)}
+      resetKeys={[
+        child,
+        behavior.renderMessageActions,
+        behavior.renderMessageText,
+        behavior.onOpenSession,
+        behavior.onMemoryClick,
+        behavior.onReconnect,
+        behavior.renderAuthNeeded,
+        behavior.resolveProviderLogo,
+        behavior.toolRegistry,
+        behavior.loadRetainedScreenshot,
+        behavior.loadRetainedArtifact,
+        behavior.loadVideoArtifactPlayback,
+        behavior.turnSummary,
+      ]}
+    >
+      <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />
+    </TimelineGroupRenderBoundary>
+  ));
+}
+
+function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
+  return groups.filter(
+    (group) =>
+      group.kind === "item" &&
+      group.item.kind === "context-compaction" &&
+      group.item.phase === "compacted",
+  ).length;
+}
 
 /**
  * Body under a turn/activity chip. Remount flashes are gated by the timeline
@@ -3048,33 +3330,15 @@ function timelineGroupContainsAuthNeeded(group: TimelineGroup): boolean {
   }
 }
 
-/** Deliberately published images are primary output, not incidental screenshots. */
-function timelineGroupContainsPresentedImage(group: TimelineGroup): boolean {
-  switch (group.kind) {
-    case "item":
-      return false;
-    case "activity":
-      return group.items.some((item) => {
-        if (item.kind !== "tool-call") return false;
-        const name = mcpToolLeaf(item.name);
-        if (name === "generate_image" || name === "image_generation_call") return true;
-        if (item.status !== "complete" || name !== "sandbox_file_publish") return false;
-        const output = unwrapMcpOutput(item.output);
-        if (output.isError) return false;
-        const receipt = parseSandboxFileArtifactReceipt(output.text);
-        return receipt !== null && isRetainedImageContentType(receipt.artifact.contentType);
-      });
-    case "turn":
-      return group.groups.some(timelineGroupContainsPresentedImage);
-  }
-}
-
 function timelineGroupItemIds(group: TimelineGroup): string[] {
   switch (group.kind) {
     case "item":
       return [group.item.id];
     case "activity":
-      return group.items.map((item) => item.id);
+      return [
+        ...(group.work?.details ?? []).flatMap(timelineGroupItemIds),
+        ...group.items.map((item) => item.id),
+      ];
     case "turn":
       return group.groups.flatMap(timelineGroupItemIds);
   }
@@ -3101,7 +3365,7 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
     item) can sit after the ACTIVE cluster, which must never fold mid-work. */
 function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
   return group.items.every((item) => {
-    if (item.kind === "reasoning") {
+    if (item.kind === "reasoning" || item.kind === "agent-message") {
       return !item.streaming;
     }
     // Memory writes and fleet observations are discrete, already-settled events.
@@ -3123,11 +3387,11 @@ function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number 
   return count;
 }
 
-function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
+function flattenActivityItems(groups: readonly TimelineGroup[]): ActivityItem[] {
   const items: ActivityItem[] = [];
   for (const group of groups) {
     if (group.kind === "activity") {
-      items.push(...group.items);
+      items.push(...flattenActivityItems(group.work?.details ?? []), ...group.items);
     } else if (group.kind === "turn") {
       items.push(...flattenActivityItems(group.groups));
     }
@@ -3143,6 +3407,18 @@ function collectAgentMessageText(groups: readonly TimelineGroup[]): string {
       const text = group.item.text.trim();
       if (text.length > 0) {
         parts.push(text);
+      }
+    } else if (group.kind === "activity") {
+      // Commentary folded into clusters is still the assistant's own prose.
+      const nested = collectAgentMessageText(group.work?.details ?? []);
+      if (nested.length > 0) {
+        parts.push(nested);
+      }
+      for (const item of group.items) {
+        const text = item.kind === "agent-message" ? item.text.trim() : "";
+        if (text.length > 0) {
+          parts.push(text);
+        }
       }
     } else if (group.kind === "turn") {
       const nested = collectAgentMessageText(group.groups);
@@ -3164,6 +3440,9 @@ function collectTurnIdsFromGroups(groups: readonly TimelineGroup[]): Set<string>
         ids.add(turnId);
       }
     } else if (group.kind === "activity") {
+      for (const nested of collectTurnIdsFromGroups(group.work?.details ?? [])) {
+        ids.add(nested);
+      }
       for (const item of group.items) {
         if (item.turnId) {
           ids.add(item.turnId);
@@ -3808,7 +4087,11 @@ function WorkerCompletionRow({
   );
 }
 
-function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt: string } }) {
+function SessionStatusRow({
+  item,
+}: {
+  item: { status: SessionStatus; occurredAt: string; resolvedAt?: string };
+}) {
   const enter = useEntranceAnimation();
   const meta = SESSION_STATUS_META[item.status];
   return (
@@ -3821,8 +4104,9 @@ function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt:
     >
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
-        <StatusDot status={item.status} className="size-1" />
-        {meta.label.toLowerCase()} · {formatRelativeTime(item.occurredAt)}
+        {item.resolvedAt ? null : <StatusDot status={item.status} className="size-1" />}
+        {item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} ·{" "}
+        {formatRelativeTime(item.resolvedAt ?? item.occurredAt)}
       </span>
       <span className="h-px flex-1 bg-og-border" />
     </div>
@@ -3930,7 +4214,7 @@ function MachineInputBatchRow({
   }
   const singleSummary = single ? cleanMachineInputSummary(single.summary) : "";
   const showCollapsedSummary =
-    single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
+    !item.compact && single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
 
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
@@ -4099,14 +4383,8 @@ function NoticeRow({ item }: { item: NoticeItem }) {
             aria-hidden
             className="size-3.5 transition-transform group-open:rotate-90"
           />
-          <span>
-            Wait recorded ·{" "}
-            <time dateTime={item.occurredAt}>
-              {new Date(item.occurredAt).toLocaleString(undefined, {
-                dateStyle: "medium",
-                timeStyle: "short",
-              })}
-            </time>
+          <span title={new Date(item.occurredAt).toLocaleString()}>
+            {recordedWaitSummary(item)}
           </span>
         </summary>
         <p className="mt-1 whitespace-pre-wrap break-words pl-5 text-og-fg-muted">{item.text}</p>
@@ -4116,7 +4394,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   const tone =
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
-      : item.tone === "waiting"
+      : item.tone === "waiting" && !item.resolvedAt
         ? WAITING_PILL_CLASS
         : NEUTRAL_PILL;
   return (
@@ -4126,25 +4404,17 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-og-menu",
         tone,
       )}
-      role={item.recordedOutcome ? "note" : "status"}
-      data-og-recorded-outcome={item.recordedOutcome ? "wait" : undefined}
+      role="status"
     >
       <TriangleAlertIcon
         className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
       />
       <div className="min-w-0 flex-1">
-        {item.recordedOutcome ? (
-          <p className="mb-1 text-og-control font-medium">
-            Wait recorded{" "}
-            <time dateTime={item.occurredAt}>
-              {new Date(item.occurredAt).toLocaleString(undefined, {
-                dateStyle: "medium",
-                timeStyle: "short",
-              })}
-            </time>
-          </p>
-        ) : null}
-        <span className="whitespace-pre-wrap break-words">{item.text}</span>
+        <span className="whitespace-pre-wrap break-words">
+          {item.resolvedAt && item.text.startsWith("Approval needed")
+            ? "Approval was needed."
+            : item.text}
+        </span>
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
@@ -4165,6 +4435,41 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         </a>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * "Waited for 2 agents · 3m 5s" once later input ended the wait, otherwise
+ * "Waiting for 2 agents · since 10:32" (with the date on a later day). The
+ * reason stays behind the disclosure.
+ */
+function recordedWaitSummary(item: NoticeItem): ReactNode {
+  const agents = item.waitingAgents ?? 0;
+  const target = agents > 0 ? ` for ${agents} ${agents === 1 ? "agent" : "agents"}` : "";
+  const waitedMs = item.waitEndedAt
+    ? durationBetween(item.occurredAt, item.waitEndedAt)
+    : undefined;
+  if (waitedMs !== undefined) {
+    return (
+      <>
+        Waited{target} ·{" "}
+        <time dateTime={`PT${Math.floor(waitedMs / 1000)}S`}>{formatElapsed(waitedMs)}</time>
+      </>
+    );
+  }
+  // An open wait is historical once its day has passed; keep its date visible.
+  const started = new Date(item.occurredAt);
+  const sameDay = started.toDateString() === new Date().toDateString();
+  return (
+    <>
+      {item.waitEndedAt ? "Waited" : "Waiting"}
+      {target} · since{" "}
+      <time dateTime={item.occurredAt}>
+        {sameDay
+          ? formatClockTime(item.occurredAt)
+          : started.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+      </time>
+    </>
   );
 }
 

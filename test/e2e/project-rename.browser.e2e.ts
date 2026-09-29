@@ -49,9 +49,47 @@ afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
 });
 
-async function capture(name: string) {
-  if (screenshots) await page.screenshot({ path: `${screenshots}/${name}.png`, fullPage: true });
+async function capture(name: string, fullPage = true) {
+  if (screenshots) await page.screenshot({ path: `${screenshots}/${name}.png`, fullPage });
 }
+
+test("folders disclose four at a time independently of their cached pages", async () => {
+  const redesign = page.getByRole("group", { name: "Website redesign", exact: true });
+  const bugfixes = page.getByRole("group", { name: "Bugfixes", exact: true });
+  const defaultFolder = page.getByRole("group", { name: "Default", exact: true });
+  await redesign.getByText("Website redesign kickoff").waitFor();
+  await bugfixes.getByText("Bugfix conversation 4").waitFor();
+  await defaultFolder.getByText("Default conversation 4").waitFor();
+  expect(await bugfixes.locator("a[data-session-row]").count()).toBe(4);
+  expect(await defaultFolder.locator("a[data-session-row]").count()).toBe(4);
+  expect(await bugfixes.getByText("Bugfix conversation 5").count()).toBe(0);
+  for (let shown = 4; shown < 55; shown += 4) {
+    await bugfixes.getByRole("button", { name: /^Show \d+ more sessions in Bugfixes$/ }).click();
+    await bugfixes.getByText(`Bugfix conversation ${Math.min(shown + 4, 55)}`).waitFor();
+  }
+  await bugfixes.getByText("Bugfix conversation 55").waitFor();
+  expect(await defaultFolder.locator("a[data-session-row]").count()).toBe(4);
+  for (let shown = 4; shown < 65; shown += 4) {
+    await defaultFolder
+      .getByRole("button", { name: /^Show \d+ more sessions in Default$/ })
+      .click();
+    await defaultFolder.getByText(`Default conversation ${Math.min(shown + 4, 65)}`).waitFor();
+  }
+  await defaultFolder.getByText("Default conversation 65").waitFor();
+  expect(await page.evaluate(() => (window as any).renameQa.pageCalls)).toEqual(
+    expect.arrayContaining([
+      { channelId: "project-qa", cursor: undefined, limit: 50 },
+      { channelId: "00000000-0000-4000-8000-000000000002", cursor: "50", limit: 50 },
+      { channelId: null, cursor: "50", limit: 50 },
+    ]),
+  );
+  await bugfixes.getByRole("button", { name: "Bugfixes", exact: true }).click();
+  await capture("project-folders-independent-pages", false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture("project-folders-mobile", false);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  expect(pageErrors).toEqual([]);
+}, 30_000);
 
 test("production project menu renames, guards saves, and preserves failed drafts", async () => {
   const open = async (name: string) => {
@@ -105,5 +143,24 @@ test("production project menu renames, guards saves, and preserves failed drafts
     },
   ]);
   await capture("project-rename-success");
+  expect(pageErrors).toEqual([]);
+}, 30_000);
+
+test("an off-page project keeps its first-page retry visible", async () => {
+  await page.evaluate(() => {
+    sessionStorage.setItem("rename-qa-fail-channel-page", "00000000-0000-4000-8000-000000000002");
+  });
+  await page.reload();
+  const bugfixes = page.getByRole("group", { name: "Bugfixes", exact: true });
+  const retry = bugfixes.getByRole("button", { name: "Retry sessions in Bugfixes" });
+  await retry.waitFor();
+  expect(await bugfixes.getByText("Bugfix conversation 1").count()).toBe(0);
+  await capture("project-folders-first-page-retry", false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture("project-folders-first-page-retry-mobile", false);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await retry.click();
+  await bugfixes.getByText("Bugfix conversation 4").waitFor();
+  expect(await bugfixes.locator("a[data-session-row]").count()).toBe(4);
   expect(pageErrors).toEqual([]);
 }, 30_000);

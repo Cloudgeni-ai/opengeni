@@ -10,6 +10,7 @@ import {
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
 } from "./permissions";
+import { workspaceMemberAccessRole } from "./workspace-access-levels";
 
 describe("workspace member permission groups", () => {
   test("members can discover connections without gaining connection administration", () => {
@@ -142,5 +143,29 @@ describe("Personal workspace settings", () => {
         memberships: [{ ...self.memberships[0]!, personalWorkspaceId: "different-workspace" }],
       }),
     ).toBe(false);
+  });
+});
+
+describe("workspace member access roles", () => {
+  test("names the workspace owner and marks divergent grants as custom", () => {
+    expect(
+      workspaceMemberAccessRole(
+        { role: "owner", permissions: ["workspace:admin"] },
+        workspaceAccessLevels,
+      ),
+    ).toBe("owner");
+    const member = workspaceAccessLevels.find((level) => level.role === "member")!;
+    expect(
+      workspaceMemberAccessRole(
+        { role: "member", permissions: [...member.permissions].reverse() },
+        workspaceAccessLevels,
+      ),
+    ).toBe("member");
+    expect(
+      workspaceMemberAccessRole(
+        { role: "member", permissions: ["workspace:read"] },
+        workspaceAccessLevels,
+      ),
+    ).toBe("custom");
   });
 });

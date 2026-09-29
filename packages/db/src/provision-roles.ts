@@ -1602,6 +1602,20 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- The trial-credit kill switch setter is operator-only (migration owner).
+    -- Reprovisioning repairs any accidental runtime or PUBLIC grant.
+    IF to_regprocedure(
+      format('%I.set_verified_signup_trial_credits_enabled(boolean,text,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_verified_signup_trial_credits_enabled(boolean, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_verified_signup_trial_credits_enabled(boolean, text, text) FROM %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -2091,6 +2105,9 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
       REVOKE ALL (backend_pid, transaction_id, data_schema) ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_live_modal_sandbox_leases() FROM PUBLIC;
+      IF to_regprocedure('opengeni_private.list_pending_modal_provider_creates()') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM PUBLIC;
+      END IF;
     END IF;
     IF to_regclass('opengeni_private.sandbox_recovery_rollout') IS NOT NULL THEN
       -- Migration may precede this role's creation. Converge only read access;
@@ -2100,6 +2117,13 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
       REVOKE ALL (singleton, consent_enabled, release_evidence) ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.sandbox_recovery_rollout TO %I', ${literal(role)});
+    END IF;
+    IF to_regclass('opengeni_private.verified_signup_trial_switch_revisions') IS NOT NULL THEN
+      -- Read-only for the operator gauge. Only the owner-only audited setter
+      -- appends revisions; runtime identities and PUBLIC never write them.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.verified_signup_trial_switch_revisions TO %I', ${literal(role)});
     END IF;
     IF to_regclass('opengeni_private.organization_usage_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
@@ -2119,6 +2143,23 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.slack_file_upload_operations') IS NOT NULL THEN
+      -- Ordinary RLS repositories own the upload CAS, not owner capabilities.
+      -- Never allow deletion/truncation to erase its durable completion fence.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.slack_file_upload_operations FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.slack_file_upload_operations FROM PUBLIC;
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE opengeni_private.slack_file_upload_operations TO %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.guard_slack_file_upload_operation() FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.guard_slack_file_upload_operation() FROM PUBLIC', ${literal(schema)});
+    END IF;
+    IF to_regclass('opengeni_private.scheduled_slack_bot_messages') IS NOT NULL THEN
+      -- Prepared scheduled bot posts are reachable only through their two
+      -- capabilities, so a saved destination can never be rewritten directly.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.prepare_scheduled_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,text,text,text) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.read_scheduled_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',

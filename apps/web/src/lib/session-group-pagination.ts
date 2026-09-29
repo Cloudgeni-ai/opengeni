@@ -54,6 +54,19 @@ export type SessionPaginationGroup =
       kind: "archived";
     };
 
+/** Each project (including Default) owns a cursor independent of workspace recency. */
+export function sessionPaginationProjectGroup(
+  channelId: string | null,
+  label: string,
+): Extract<SessionPaginationGroup, { kind: "channel" }> {
+  return {
+    key: `channel:${channelId ?? "default"}`,
+    label,
+    kind: "channel",
+    channelId,
+  };
+}
+
 export type SessionPaginationBrowseFilter = {
   creator: CreatorIdentity | null;
   dateField: SessionBrowseDateField;

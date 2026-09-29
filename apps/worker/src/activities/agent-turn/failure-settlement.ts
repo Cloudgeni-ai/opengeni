@@ -7,6 +7,7 @@ import {
   quarantineCodexCredentialForLease,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
+  recheckCodexCredentialPlan,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
   readLease,
@@ -26,10 +27,19 @@ import {
 import { TurnExecutionPolicyDefinitionMismatchError, type Settings } from "@opengeni/config";
 import {
   classifyCodexEncryptedArtifactRejection,
+  classifyCodexEntitlementRejection,
   classifyCodexUsageLimitError,
   isCodexTransportError,
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
+import {
+  assessCodexPlanEntitlement,
+  codexAccountDisplayLabel,
+  codexPlanEntitlementFailurePayload,
+  codexRequestRejectedFailurePayload,
+  type CodexPlanEntitlementFailurePayload,
+  type CodexRequestRejectedFailurePayload,
+} from "./codex-plan-entitlement";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import type {
@@ -57,6 +67,7 @@ import {
   codexCredentialCooldownUntil,
   classifyCodexCredentialFailure,
   codexUsageLimitFailurePayload,
+  type CodexCredentialFailure,
 } from "./errors";
 import { selectRejectedProviderArtifactHistoryIds } from "./history";
 import { waitForTurnFinalizerStep, turnFinalizerCancellationSignal } from "./quiescence";
@@ -122,7 +133,7 @@ type CodexCapacityWaitFailurePayload = {
  * recover the same durable turn immediately.
  */
 export function codexDefinitiveFailureDisposition(input: {
-  failureKind: "auth" | "forbidden" | "rate_limit" | "quota";
+  failureKind: CodexCredentialFailure["kind"];
   rotationEnabled: boolean;
   pinDisposition: "manual" | "sharded" | "clearStale" | "unpinned";
   decisionKind: "active" | "allCapped" | "none";
@@ -136,6 +147,17 @@ export function codexDefinitiveFailureDisposition(input: {
     input.decisionCredentialId !== null &&
     input.decisionCredentialId !== input.servingCredentialId;
   if (alternateAvailable) return "failover";
+  // A plan that no longer includes the model does not recover by itself, and
+  // a manual pin or rotation-off pointer names exactly that account. Only a
+  // rotation-on pool whose OTHER accounts are temporarily capped is worth a
+  // durable wait; everything else fails the turn with typed copy.
+  if (input.failureKind === "plan_entitlement") {
+    return input.decisionKind === "allCapped" &&
+      input.rotationEnabled &&
+      input.pinDisposition !== "manual"
+      ? "wait"
+      : "terminal";
+  }
   if (
     input.failureKind === "quota" ||
     input.failureKind === "rate_limit" ||
@@ -167,12 +189,23 @@ export function codexCredentialFailoverLimit(
 
 /** Build the durable waiter payload without collapsing quota refusals into 403. */
 export function codexCapacityWaitFailurePayload(input: {
-  failureKind: "auth" | "forbidden" | "rate_limit" | "quota";
+  failureKind: CodexCredentialFailure["kind"];
   usageLimit: { resetsInSeconds: number | null } | null;
   cooldownSeconds: number | null;
   detail: string;
   allAccounts: boolean;
+  planEntitlement?: CodexPlanEntitlementFailurePayload | null;
 }): CodexCapacityWaitFailurePayload {
+  if (input.failureKind === "plan_entitlement") {
+    return {
+      error:
+        input.planEntitlement?.error ??
+        "The serving ChatGPT account's plan does not include this model. OpenGeni is waiting for another connected account to become available.",
+      code: "codex_plan_entitlement",
+      detail: input.detail,
+      retryable: false,
+    };
+  }
   if (input.failureKind === "quota") {
     return codexUsageLimitFailurePayload(
       input.usageLimit ?? { resetsInSeconds: input.cooldownSeconds },
@@ -380,13 +413,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       throw recoveryError;
     }
   }
-  // A managed-home session can start directly on a Connected Machine without
-  // creating or leasing its cloud home. If sandbox_attach/sandbox_swap then
-  // clears the durable pointer to home, the commit is valid but this exact
-  // attempt cannot serve a later home operation. Preserve the completed attach
+  // A route change can require a different home, filesystem root, or native
+  // capability set than this attempt established. Preserve the completed attach
   // and every preceding model/tool receipt, close only the unresolved suffix,
   // and continue the SAME logical turn in a fresh attempt. That next attempt
-  // starts from the now-null pointer and establishes home normally.
+  // starts from the committed pointer and establishes its route normally.
   const routeTransitionCode = sandboxRouteTransitionCode(error);
   if (routeTransitionCode && recoveryTurnId && eventing.publish && eventing.turnStartedPublished) {
     try {
@@ -410,7 +441,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult({ status: "cancelled" });
       }
       if (recovery.action !== "recovering") {
-        throw new Error("Home sandbox route transition could not recover the current turn");
+        throw new Error("Sandbox route transition could not recover the current turn");
       }
       acknowledgeRecoveryQuiescence();
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
@@ -718,10 +749,107 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // 5xx does not classify here and therefore cannot consume another
   // subscription or duplicate a side effect.
   const usageLimit = isCodexTransportError(error) ? classifyCodexUsageLimitError(error) : null;
-  const codexCredentialFailure =
+  let codexCredentialFailure: CodexCredentialFailure | null =
     billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId
       ? classifyCodexCredentialFailure(error)
       : null;
+  // Plan entitlement evidence (an explicit plan refusal, or an HTTP 400 with no
+  // body) is ambiguous until the serving account's CURRENT plan is re-read. A
+  // proven loss becomes a definitive `plan_entitlement` refusal for this model
+  // only and walks the pool through the same checkpointed failover below; an
+  // unexplained rejection stays terminal with typed copy. Nothing retries the
+  // rejected request itself.
+  let codexTerminalFailure:
+    | CodexPlanEntitlementFailurePayload
+    | CodexRequestRejectedFailurePayload
+    | null = null;
+  let codexPlanEntitlement: {
+    modelId: string;
+    planType: string | null;
+    planObserved: boolean;
+    credentialVersion: number | null;
+    waitPayload: CodexPlanEntitlementFailurePayload;
+  } | null = null;
+  const codexEntitlementRejection =
+    billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId && !codexCredentialFailure
+      ? classifyCodexEntitlementRejection(error)
+      : null;
+  if (
+    codexEntitlementRejection &&
+    providerTurn.effectiveCodexCredentialId &&
+    eventing.publish &&
+    attempt.turnId &&
+    eventing.turnStartedPublished &&
+    leases.codex.holderId &&
+    leases.codex.generation !== null
+  ) {
+    const servingCredentialId = providerTurn.effectiveCodexCredentialId;
+    const servingAccount = (
+      await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId).catch(() => [])
+    ).find((account) => account.id === servingCredentialId);
+    const accountLabel = codexAccountDisplayLabel(servingAccount);
+    const recheck = await recheckCodexCredentialPlan(
+      db,
+      settings,
+      input.workspaceId,
+      servingCredentialId,
+      {
+        turnId: attempt.turnId,
+        holderId: leases.codex.holderId,
+        generation: leases.codex.generation,
+      },
+    ).catch(() => null);
+    const modelId = providerTurn.codexProductModelId ?? null;
+    const assessment = recheck
+      ? assessCodexPlanEntitlement(codexEntitlementRejection, recheck, modelId)
+      : codexEntitlementRejection.evidence === "plan_entitlement"
+        ? {
+            kind: "entitlement_lost" as const,
+            planType: servingAccount?.planType ?? null,
+            planObserved: false,
+            planChanged: false,
+            credentialVersion: null,
+          }
+        : { kind: "unexplained" as const, planType: null };
+    observability.incrementCounter({
+      name: "opengeni_codex_plan_rechecks_total",
+      help: "Codex plan re-checks after an entitlement-shaped rejection, by outcome.",
+      labels: {
+        workspace_key: codexWorkspaceKey,
+        evidence: codexEntitlementRejection.evidence,
+        outcome: assessment.kind,
+        source: recheck?.source ?? "none",
+      },
+    });
+    if (assessment.kind === "entitlement_lost") {
+      const payloadInput = {
+        accountLabel,
+        // Name a plan only when the provider just reported it; a recorded
+        // plan may be the very one that changed.
+        planType: assessment.planObserved ? assessment.planType : null,
+        planChanged: assessment.planChanged,
+        modelId,
+        rejection: codexEntitlementRejection,
+      };
+      codexTerminalFailure = codexPlanEntitlementFailurePayload(payloadInput);
+      if (modelId) {
+        codexCredentialFailure = { kind: "plan_entitlement", cooldownSeconds: null };
+        codexPlanEntitlement = {
+          modelId,
+          planType: assessment.planType,
+          planObserved: assessment.planObserved,
+          credentialVersion: assessment.credentialVersion,
+          waitPayload: codexPlanEntitlementFailurePayload({ ...payloadInput, waiting: true }),
+        };
+      }
+    } else {
+      codexTerminalFailure = codexRequestRejectedFailurePayload({
+        accountLabel,
+        planType: recheck?.planType ?? null,
+        rejection: codexEntitlementRejection,
+      });
+    }
+  }
   if (
     codexCredentialFailure &&
     providerTurn.effectiveCodexCredentialId &&
@@ -785,10 +913,14 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           }
         : null;
       const cooldownUntil = codexCredentialCooldownUntil(codexCredentialFailure, serving, now);
+      // A plan re-check may itself have rotated tokens (same family, version
+      // CAS-advanced by this holder); fence the quarantine on that version.
+      const quarantineCredentialVersion =
+        codexPlanEntitlement?.credentialVersion ?? providerTurn.effectiveCodexCredentialVersion;
       const quarantineResult =
         leases.codex.holderId &&
         leases.codex.generation !== null &&
-        providerTurn.effectiveCodexCredentialVersion !== null
+        quarantineCredentialVersion !== null
           ? await quarantineCodexCredentialForLease(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -801,7 +933,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
               dispatchId: attempt.dispatchId,
               expectedRedispatches: attempt.redispatchesAtDispatch,
               credentialId: providerTurn.effectiveCodexCredentialId,
-              credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+              credentialVersion: quarantineCredentialVersion,
               holderId: leases.codex.holderId,
               generation: leases.codex.generation,
               maxFailovers: providerTurn.codexCredentialFailoverLimit,
@@ -818,11 +950,18 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
                         status: "error",
                         lastError: "model request was forbidden for this credential",
                       }
-                    : {
-                        kind: "cooldown",
-                        until: cooldownUntil!,
-                        cooldownKind: codexCredentialFailure.kind,
-                      },
+                    : codexCredentialFailure.kind === "plan_entitlement"
+                      ? {
+                          kind: "plan_entitlement",
+                          modelId: codexPlanEntitlement!.modelId,
+                          planType: codexPlanEntitlement!.planType,
+                          planObserved: codexPlanEntitlement!.planObserved,
+                        }
+                      : {
+                          kind: "cooldown",
+                          until: cooldownUntil!,
+                          cooldownKind: codexCredentialFailure.kind,
+                        },
             })
           : null;
       if (
@@ -963,6 +1102,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           rotationStrategy: acceptedPolicy.rotationStrategy,
           existingCredentialId: null,
           failedCredentialIds: [providerTurn.effectiveCodexCredentialId],
+          ...(providerTurn.codexProductModelId
+            ? { modelId: providerTurn.codexProductModelId }
+            : {}),
           policyScope: null,
           unavailableDiagnostics: [],
         },
@@ -1121,9 +1263,10 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         const capacityAccounts = policyCredentialId
           ? accounts.filter((account) => account.id === policyCredentialId)
           : accounts;
-        const authoritativeResetAt = exactProviderReset
-          ? (authoritativeCodexCapacityResetAt(capacityAccounts, now) ?? cooldownUntil)
-          : null;
+        const authoritativeResetAt =
+          exactProviderReset || codexCredentialFailure.kind === "plan_entitlement"
+            ? (authoritativeCodexCapacityResetAt(capacityAccounts, now) ?? cooldownUntil)
+            : null;
         const allAccounts =
           acceptedPolicy.rotationEnabled &&
           pinDisposition !== "manual" &&
@@ -1139,6 +1282,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
                 : String(error)
               : "the same accepted turn is waiting for eligible credential capacity",
           allAccounts,
+          planEntitlement: codexPlanEntitlement?.waitPayload ?? null,
         });
         const evaluated = await armAndReconcileCodexCapacityWait(
           { db, bus },
@@ -1152,6 +1296,8 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             goalId: activeGoal?.id ?? null,
             goalVersion: activeGoal?.version ?? null,
             earliestResetAt: authoritativeResetAt,
+            // plan_entitlement waits only on OTHER capped accounts, so it keeps
+            // their reset/bounded-refresh cadence rather than a mutation-only wait.
             resetKind: authoritativeResetAt
               ? "authoritative"
               : codexCredentialFailure.kind === "auth" ||
@@ -1512,9 +1658,10 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   let failure = (
     earlyDefinitionMismatch
       ? { error: error.message, code: error.code, retryable: true }
-      : agentRunFailurePayload(error, {
+      : (codexTerminalFailure ??
+        agentRunFailurePayload(error, {
           isCodexTurn: billingState.isCodexTurn,
-        })
+        }))
   ) as ReturnType<typeof agentRunFailurePayload>;
   if (
     attempt.turnId &&

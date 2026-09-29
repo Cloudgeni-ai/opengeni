@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   BrowserSession as BrowserSessionSchema,
+  EPHEMERAL_CHROMIUM_DRIVER_ID,
   ComputerSession as ComputerSessionSchema,
 } from "@opengeni/contracts";
 import type {
@@ -35,6 +36,109 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("attached Chrome discovery never loads unrelated workspace inventories", async () => {
+    const bridge = {
+      enrollmentId: randomUUID(),
+      state: "online" as const,
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount: 0,
+      lastSeenAt: now,
+    };
+    const requests: unknown[] = [];
+    const unexpected = async () => {
+      throw new Error("Unrelated workspace inventory must not be loaded");
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: unexpected,
+        listComputerSessions: unexpected,
+        listBrowserIdentities: unexpected,
+        listAttachedBrowsers: async (workspace, options) => {
+          requests.push({ workspace, options });
+          return { revision: 42, bridges: [bridge], devices: [] };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    for (const includeDisconnectedDevices of [undefined, true]) {
+      const result = await definitions[0]!.execute(
+        { scope: "attached_browsers", includeDisconnectedDevices },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual({
+        browserRevision: 42,
+        computerRevision: 42,
+        identityRevision: 42,
+        attachedBrowserRevision: 42,
+        browsers: [],
+        computers: [],
+        identities: [],
+        attachedBrowserBridges: [bridge],
+        attachedBrowsers: [],
+      });
+    }
+    expect(requests).toEqual([
+      { workspace: workspaceId, options: { includeDisconnected: false } },
+      { workspace: workspaceId, options: { includeDisconnected: true } },
+    ]);
+  });
+
+  test("browser reuse never crosses explicit ephemeral and private profile modes", async () => {
+    for (const requestedMode of ["private_profile", "ephemeral_context"] as const) {
+      const createRequests: Array<Record<string, unknown>> = [];
+      const other = discoveredBrowserSession(randomUUID(), sessionId);
+      other.headless = true;
+      other.driverId =
+        requestedMode === "private_profile" ? EPHEMERAL_CHROMIUM_DRIVER_ID : "chromium";
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [other] }),
+          createBrowserSession: async (_workspaceId, request) => {
+            createRequests.push(request as unknown as Record<string, unknown>);
+            return { session: { lifecycle: "starting" } } as never;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      await definitions[0]!.execute(
+        {
+          headless: true,
+          ...(requestedMode === "ephemeral_context" ? { storageMode: requestedMode } : {}),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(createRequests).toHaveLength(1);
+      expect(createRequests[0]?.storageMode).toBe(
+        requestedMode === "ephemeral_context" ? requestedMode : undefined,
+      );
+    }
+  });
+
+  test("explicit browser selection rejects a storage-mode mismatch before using targets", async () => {
+    const session = discoveredBrowserSession(browserSessionId, sessionId);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ getBrowserSession: async () => session }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+    await expect(
+      definitions[0]!.execute(
+        { browserSessionId, storageMode: "ephemeral_context" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toThrow("storage mode does not match");
+  });
+
   test("opens managed Chromium headed by default for supported human sign-in", async () => {
     let createRequest: Record<string, unknown> | null = null;
     const definitions = createInteractionAttemptToolDefinitions({

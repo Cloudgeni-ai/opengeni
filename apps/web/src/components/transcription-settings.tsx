@@ -1,4 +1,4 @@
-import { Loader2Icon, MicIcon } from "lucide-react";
+import { Loader2Icon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { type AppContextValue, useAppContext } from "@/context";
@@ -8,7 +8,10 @@ import {
   resolveWorkspaceVoiceInputEnabled,
 } from "@opengeni/sdk";
 import { cn } from "@/lib/utils";
-import { Select } from "@/components/ui/select";
+import { RowSelect } from "@/components/settings/row-select";
+import type { SelectOption } from "@/components/ui/select-menu";
+import { SettingRow } from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
 
 export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "supergrok-subscription": "SuperGrok subscription",
@@ -17,7 +20,7 @@ export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "azure-openai": "Azure OpenAI · Azure billing",
 };
 
-/** Dense preference row used by workspace settings (no outer card). */
+/** The Voice input row of Settings > General > New session defaults. */
 export function VoiceInputPreferenceRow({
   workspaceId,
   canManage,
@@ -58,7 +61,7 @@ export function VoiceInputPreferences({
 
   const preferences = workspace?.settings.voiceInput as WorkspaceVoiceInputSettings | undefined;
   const providers = capability?.providers ?? [];
-  const selected = preferences?.preferredProvider ?? "";
+  const selected = preferences?.preferredProvider ?? null;
   const fallbackEnabled = preferences?.fallbackEnabled ?? true;
 
   async function save(patch: Partial<WorkspaceVoiceInputSettings>, message: string) {
@@ -75,78 +78,102 @@ export function VoiceInputPreferences({
       }
     } catch {
       if (context.ownsWorkspaceInvocation(workspaceId, acceptedTransition))
-        toast.error("Couldn’t update voice input settings");
+        toast.error("Couldn't update voice input");
     } finally {
       setSaving(false);
     }
   }
 
+  const reason = !available
+    ? "This deployment has no transcription provider. Your operator can add one."
+    : !canManage
+      ? "Only workspace admins can change this."
+      : undefined;
+  const options: SelectOption<string>[] = [
+    {
+      value: AUTOMATIC,
+      label: "Automatic",
+      description: "Uses the first provider that's available.",
+      ...(providers[0] ? { meta: voiceInputProviderLabels[providers[0]] } : {}),
+    },
+    ...(selected && !providers.includes(selected)
+      ? [
+          {
+            value: selected,
+            label: voiceInputProviderLabels[selected],
+            disabled: true,
+            disabledReason: "No longer available on this deployment.",
+          },
+        ]
+      : []),
+    ...providers.map((provider) => ({
+      value: provider,
+      label: voiceInputProviderLabels[provider],
+    })),
+  ];
+
   return (
-    <>
-      <PreferenceToggleRow
-        icon={<MicIcon className="size-3.5 text-brand" />}
-        label="Voice input"
-        description={
-          available
-            ? "Record a short message and add its transcription to the composer draft."
-            : "Not configured by this deployment operator."
-        }
-        checked={enabled}
-        disabled={!canManage || saving || !available}
-        saving={saving}
-        control={
-          providers.length > 0 ? (
-            <Select
-              aria-label="Default transcription provider"
-              value={selected}
-              disabled={!canManage || saving || !available}
-              onChange={(event) =>
-                void save(
-                  {
-                    preferredProvider: (event.currentTarget.value ||
-                      null) as VoiceInputProviderId | null,
-                  },
-                  "Default transcription provider updated",
-                )
-              }
-              className="h-7 w-52 py-0 text-xs"
-            >
-              <option value="">Automatic · {voiceInputProviderLabels[providers[0]!]}</option>
-              {selected && !providers.includes(selected) ? (
-                <option value={selected} disabled>
-                  {voiceInputProviderLabels[selected]} · unavailable
-                </option>
-              ) : null}
-              {providers.map((provider) => (
-                <option key={provider} value={provider}>
-                  {voiceInputProviderLabels[provider]}
-                </option>
-              ))}
-            </Select>
-          ) : null
-        }
-        onToggle={() =>
-          void save(
-            { enabled: !enabled },
-            !enabled ? "Voice input enabled" : "Voice input disabled",
-          )
-        }
-      />
-      {providers.length > 1 ? (
-        <PreferenceToggleRow
-          label="Automatic transcription fallback"
-          description="Try another configured provider if unavailable or access is rejected. Its billing applies."
-          wrapDescription
-          checked={fallbackEnabled}
-          disabled={!canManage || saving || !enabled}
-          onToggle={() =>
-            void save({ fallbackEnabled: !fallbackEnabled }, "Transcription fallback updated")
+    <SettingRow
+      label="Voice input"
+      description="Record a short message and add its transcript to the draft."
+      control={
+        <Switch
+          checked={enabled && available}
+          pending={saving}
+          disabled={Boolean(reason)}
+          disabledReason={reason}
+          onCheckedChange={(next) =>
+            void save(
+              { enabled: next },
+              next ? "Voice input is on for new sessions" : "Voice input is off for new sessions",
+            )
           }
         />
+      }
+    >
+      {enabled && available && providers.length > 1 ? (
+        <>
+          <SettingRow
+            label="Transcription provider"
+            description="Who transcribes, and which plan pays for it."
+            controlWidth="select"
+            control={
+              <RowSelect
+                options={options}
+                value={selected ?? AUTOMATIC}
+                disabled={!canManage || saving}
+                onValueChange={(next) =>
+                  void save(
+                    {
+                      preferredProvider: next === AUTOMATIC ? null : (next as VoiceInputProviderId),
+                    },
+                    "Transcription provider saved",
+                  )
+                }
+              />
+            }
+          />
+          <SettingRow
+            label="Try another provider if one fails"
+            description="Uses the next provider when one is down or refuses. Its billing applies."
+            control={
+              <Switch
+                checked={fallbackEnabled}
+                disabled={!canManage || saving}
+                disabledReason={canManage ? undefined : "Only workspace admins can change this."}
+                onCheckedChange={(next) =>
+                  void save({ fallbackEnabled: next }, "Transcription fallback saved")
+                }
+              />
+            }
+          />
+        </>
       ) : null}
-    </>
+    </SettingRow>
   );
 }
+
+const AUTOMATIC = "automatic";
 
 /** Shared dense toggle row for workspace preference lists. */
 export function PreferenceToggleRow(props: {
@@ -199,20 +226,5 @@ export function PreferenceToggleRow(props: {
         />
       </button>
     </div>
-  );
-}
-
-/** @deprecated Name retained while callers migrate to VoiceInputPreferenceRow. */
-export function TranscriptionSettingsSection({
-  workspaceId,
-  canManage,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-}) {
-  return (
-    <section className="rounded-lg border border-border bg-surface px-3 py-1">
-      <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManage} />
-    </section>
   );
 }
