@@ -542,7 +542,7 @@ export function ComputerViewer({
               type="button"
               onClick={createError ? createComputer : () => void refreshRegistry()}
               disabled={creating || registry.refreshing}
-              className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-40"
+              className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
             >
               {creating || registry.refreshing ? (
                 <LoaderCircleIcon className="size-3.5 animate-spin" />

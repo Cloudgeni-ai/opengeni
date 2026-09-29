@@ -402,7 +402,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
                   className={cn(
                     "h-7 rounded-md px-2.5 text-xs font-medium transition-colors",
                     filter === value
-                      ? "bg-fg text-bg"
+                      ? "bg-selection text-fg"
                       : "text-fg-muted hover:bg-surface-2 hover:text-fg",
                   )}
                 >

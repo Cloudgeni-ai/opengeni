@@ -408,12 +408,16 @@ function WorkspaceGeneralSettings({
 
       <NativeIdentityLinkAccounts workspaceId={workspaceId} />
 
-      <DangerZone
-        workspaceName={activeWorkspace.name}
-        canDelete={canDeleteWorkspace}
-        isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
-        onDelete={deleteWorkspace}
-      />
+      {/* A personal workspace belongs to its person's membership and is never
+          deleted from here, so its settings show no delete section at all. */}
+      {personal ? null : (
+        <DangerZone
+          workspaceName={activeWorkspace.name}
+          canDelete={canDeleteWorkspace}
+          isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
+          onDelete={deleteWorkspace}
+        />
+      )}
     </SectionStack>
   );
 }
@@ -625,17 +629,20 @@ export function DangerZone(props: {
         `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, variable sets, knowledge, files and API keys.`
       }
       action={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={Boolean(disabledReason)}
-          onClick={() => setOpen(true)}
-          className="text-danger hover:text-danger pointer-coarse:h-11"
-        >
-          <Trash2Icon aria-hidden="true" />
-          Delete
-        </Button>
+        // When something blocks the delete, the description says what and who
+        // can fix it; a ghosted button next to it would only read as broken.
+        disabledReason ? undefined : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setOpen(true)}
+            className="text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+          >
+            <Trash2Icon aria-hidden="true" />
+            Delete
+          </Button>
+        )
       }
     >
       {disabledReason ? null : (

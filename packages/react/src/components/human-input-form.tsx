@@ -585,7 +585,7 @@ function HumanInputRequestForm({
         <button
           type="submit"
           disabled={busy}
-          className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-40"
+          className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
         >
           {busy ? messages.submitting : resolvedSubmitLabel}
         </button>

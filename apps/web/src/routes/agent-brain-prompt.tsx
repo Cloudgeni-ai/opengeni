@@ -248,7 +248,7 @@ export function AgentKnowledgePrompt({
       <div>
         <button
           type="submit"
-          className="rounded-md border border-primary-border bg-primary text-primary-foreground hover:bg-primary-hover px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded-md border border-primary-border bg-primary text-primary-foreground hover:bg-primary-hover px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
           disabled={!canSubmit}
         >
           {starting ? "Starting…" : copy.button}

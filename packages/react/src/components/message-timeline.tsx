@@ -4582,7 +4582,7 @@ function AuthNeededRow({
             disabled={busy}
             className={cn(
               PRIMARY_ACTION_CLASS,
-              "transition-colors hover:bg-og-primary-hover disabled:opacity-40 pointer-coarse:min-h-9",
+              "transition-colors hover:bg-og-primary-hover disabled:opacity-50 pointer-coarse:min-h-9",
             )}
           >
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />

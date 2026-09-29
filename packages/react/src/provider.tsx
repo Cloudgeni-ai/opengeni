@@ -339,7 +339,7 @@ function ApiContractMismatchScreen({ mismatch }: { mismatch: OpenGeniApiContract
         </p>
         <button
           type="button"
-          className="mt-5 inline-flex h-9 items-center rounded-md bg-og-fg px-3 text-og-menu font-medium text-og-bg"
+          className="mt-5 inline-flex h-9 items-center rounded-md border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover px-3 text-og-menu font-medium"
           onClick={() => window.location.reload()}
         >
           Reload now

@@ -1808,7 +1808,7 @@ function CalendarGrid({
                     className={cn(
                       "relative mx-auto grid size-9 place-items-center rounded-[10px] text-sm tabular-nums transition-colors duration-[120ms]",
                       selected
-                        ? "bg-brand-strong font-medium text-brand-fg"
+                        ? "border border-primary-border bg-primary font-medium text-primary-foreground"
                         : past
                           ? "cursor-not-allowed text-fg-subtle"
                           : "text-fg hover:bg-surface-2",

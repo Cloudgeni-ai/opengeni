@@ -274,7 +274,7 @@ function ConnectModelsPanel(props: {
       {props.href ? (
         <a
           href={props.href}
-          className="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-og-md bg-og-fg text-og-control font-medium text-og-surface-1 outline-hidden transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+          className="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover text-og-control font-medium outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40"
         >
           {props.messages.connectAction}
           <ArrowRightIcon className="size-3.5" aria-hidden />
