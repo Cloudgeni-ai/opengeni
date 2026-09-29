@@ -257,6 +257,70 @@ describe("readable timeline browser regression", () => {
     }, 60_000);
   }
 
+  for (const width of [320, 390, 1280]) {
+    test(`history controls keep separate real pointer targets at ${width}px`, async () => {
+      const page = await openHarness("history", width, width < 600);
+      try {
+        await page.evaluate(() => {
+          const driver = window.exchangeFoldHarness!;
+          driver.showWindow(driver.indexOf("user.message")[1]!, driver.total);
+        });
+        const scroller = page.locator("[data-og-timeline-scroller]");
+        await page.waitForFunction(() => {
+          const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
+          return (
+            !!node && node.style.visibility !== "hidden" && node.scrollHeight > node.clientHeight
+          );
+        });
+        await scroller.hover();
+        await page.mouse.wheel(0, -20000);
+        const start = page.locator("[data-og-jump-to-start]");
+        const latest = page.locator("[data-og-jump-to-question]");
+        await start.waitFor({ state: "visible" });
+        await latest.waitFor({ state: "visible" });
+        await page.waitForTimeout(200);
+        const targets = await page.evaluate(() => {
+          const startButton = document.querySelector<HTMLElement>("[data-og-jump-to-start]")!;
+          const latestButton = document.querySelector<HTMLElement>("[data-og-jump-to-question]")!;
+          const a = startButton.getBoundingClientRect();
+          const b = latestButton.getBoundingClientRect();
+          const clickable = (element: HTMLElement, bounds: DOMRect) =>
+            element.contains(
+              document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+            );
+          return {
+            separate:
+              a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top,
+            start: clickable(startButton, a),
+            latest: clickable(latestButton, b),
+          };
+        });
+        expect(targets).toEqual({ separate: true, start: true, latest: true });
+        expect(await latest.count()).toBe(1);
+        const directory = process.env.TIMELINE_NAVIGATION_PREVIEW_DIR;
+        if (directory) {
+          mkdirSync(directory, { recursive: true });
+          await page.screenshot({ path: `${directory}/navigation-${width}-dark.png` });
+          await page.getByRole("button", { name: "Dark", exact: true }).click();
+          await nextPaint(page);
+          await page.waitForTimeout(250);
+          await page.screenshot({ path: `${directory}/navigation-${width}-light.png` });
+        }
+        await start.click();
+        await page.waitForFunction(() =>
+          document.querySelector("[data-og-prompt]")?.textContent?.includes("Question 1:"),
+        );
+        await latest.click();
+        await page.waitForFunction(() =>
+          document.activeElement?.textContent?.includes("Question 4:"),
+        );
+        expect((await sample(page)).following).toBe(false);
+      } finally {
+        await page.context().close();
+      }
+    }, 20_000);
+  }
+
   test("one Latest question button targets the newest user message from an older bounded window", async () => {
     const page = await openHarness("history");
     try {

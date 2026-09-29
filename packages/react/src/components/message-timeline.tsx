@@ -2220,7 +2220,14 @@ export function MessageTimeline({
                                 transition={{ duration: 0.15, ease: "easeOut" }}
                                 data-og-loading-older=""
                                 aria-live="polite"
-                                className="pointer-events-none absolute inset-x-0 -top-11 z-10 flex justify-center"
+                                className={cn(
+                                  "pointer-events-none absolute inset-x-0 -top-11 z-10 flex",
+                                  // The scrolling history control and fixed question
+                                  // action must never share the same pointer region.
+                                  questionNav
+                                    ? "max-w-[calc(50%-0.5rem)] justify-start"
+                                    : "justify-center",
+                                )}
                               >
                                 {loadingOlder || loadingOldest ? (
                                   <span className={LOADING_CHIP_CLASS}>
@@ -2400,9 +2407,9 @@ export function MessageTimeline({
                           exit={{ opacity: 0, y: -6 }}
                           transition={{ duration: 0.15, ease: "easeOut" }}
                           data-og-question-nav=""
-                          className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center"
+                          className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-end px-4 sm:px-6"
                         >
-                          <div className="pointer-events-auto inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
+                          <div className="pointer-events-auto inline-flex max-w-[calc(50%-0.5rem)] items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
                             <button
                               type="button"
                               data-og-jump-to-question=""
@@ -2410,7 +2417,7 @@ export function MessageTimeline({
                               disabled={questionPending}
                               aria-busy={questionPending}
                               title={questionError ?? undefined}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
+                              className="inline-flex min-w-0 items-center gap-1.5 px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
                             >
                               <ArrowUpIcon aria-hidden className="size-3.5" />
                               Latest question
