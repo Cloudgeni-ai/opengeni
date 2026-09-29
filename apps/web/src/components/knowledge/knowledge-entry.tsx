@@ -67,7 +67,6 @@ import {
   KNOWLEDGE_PICKABLE_KINDS,
   KNOWLEDGE_SCOPE_LABEL,
   KNOWLEDGE_SOURCE_LABEL,
-  knowledgeKindIcon,
 } from "./knowledge-labels";
 import {
   EntryList,
@@ -610,7 +609,7 @@ function EntryPageContent({
         className="min-w-0"
       >
         <DetailPageHeader
-          leading={knowledgeKindIcon(entry.kind) ? <KindTile kind={entry.kind} /> : null}
+          leading={<KindTile kind={entry.kind} />}
           title={entry.title}
           chips={
             <>

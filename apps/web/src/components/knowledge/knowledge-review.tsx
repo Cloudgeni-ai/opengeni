@@ -7,12 +7,10 @@ import type {
   SkillSummary,
 } from "@opengeni/sdk";
 import {
-  ArrowLeftIcon,
+  ArrowUpRightIcon,
   BookOpenIcon,
-  CalendarClockIcon,
-  CheckIcon,
+  CheckCheckIcon,
   InboxIcon,
-  MessageSquareIcon,
   ScrollTextIcon,
   WandSparklesIcon,
   type LucideIcon,
@@ -24,29 +22,38 @@ import { toast } from "sonner";
 import { notifyKnowledgeReviewUpdated } from "@/components/rail/use-knowledge-review-indicator";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import { DiffView } from "@/components/ui/diff-view";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Field, TextArea, TextInput } from "@/components/ui/field";
 import { InAppHelpLink } from "@/components/in-app-help-link";
-import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { InlineHelp } from "@/components/ui/inline-help";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { inAppClick } from "@/lib/in-app-click";
 import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { RelativeTime } from "@/components/ui/relative-time";
+import { Skeleton } from "@/components/ui/skeleton";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { ToolbarSummary } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { canManageWorkspaceSettings, hasAccountPermission } from "@/lib/permissions";
 
 import { errorText } from "./knowledge-data";
-import { KNOWLEDGE_KIND_LABEL } from "./knowledge-labels";
+import { Markdown } from "./knowledge-markdown";
+import { KNOWLEDGE_KIND_LABEL, KNOWLEDGE_SCOPE_LABEL } from "./knowledge-labels";
 import { firstReviewableEntry } from "./knowledge-review-order";
 
 /* ----------------------------------------------------------------------------
-   Review: changes agents proposed while Learning is set to Review first,
-   grouped by the chat or schedule that made them. One DiffView for
-   knowledge, instructions and skills, and Approve and next. On narrow widths
-   the list and the change take turns.
+   Review: changes agents proposed while Learning is set to Review first.
+   One flat list, one row per change (what it is, where it came from, when).
+   A row opens the change's own page: the proposal as it reads, where it came
+   from, and one action row (Reject, Edit, Approve and next). Approving moves
+   straight on to the next change; after the last one you are back on the
+   list.
    -------------------------------------------------------------------------- */
 
 type ReviewKind = "knowledge" | "instruction" | "skill";
@@ -271,101 +278,48 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
   };
 }
 
-/* ------------------------------------------------------------------ view */
+/* ------------------------------------------------------------------ flow */
 
-function OriginLink({
-  workspaceId,
-  origin,
-  inline = false,
-}: {
-  workspaceId: string;
-  origin: Origin;
-  inline?: boolean;
-}) {
-  const navigate = useNavigate();
-  const href =
-    origin.kind === "chat"
-      ? `/workspaces/${workspaceId}/sessions/${origin.sessionId}`
-      : origin.kind === "schedule"
-        ? `/workspaces/${workspaceId}/schedules?taskId=${origin.taskId}`
-        : null;
-  const unnamed = origin.kind === "chat" && origin.unnamed;
-  const word = unnamed
-    ? null
-    : origin.kind === "chat"
-      ? "chat"
-      : origin.kind === "schedule"
-        ? "schedule"
-        : null;
-  const name = href ? (
-    <a
-      href={href}
-      onClick={inAppClick(() => void navigate({ href }))}
-      className="min-w-0 truncate rounded-[4px] font-medium text-fg underline-offset-2 hover:underline"
-    >
-      {origin.name}
-    </a>
-  ) : (
-    <span className="min-w-0 truncate font-medium text-fg">{origin.name}</span>
-  );
-  if (inline) {
-    return word ? (
-      <>
-        {word} {name}
-      </>
-    ) : (
-      name
-    );
-  }
-  const Icon =
-    origin.kind === "chat"
-      ? MessageSquareIcon
-      : origin.kind === "schedule"
-        ? CalendarClockIcon
-        : InboxIcon;
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
-      <Icon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
-      {word ? <span className="shrink-0">{word === "chat" ? "Chat" : "Schedule"}</span> : null}
-      {unnamed ? <span className="shrink-0">From</span> : null}
-      {name}
-    </span>
-  );
+export interface ReviewFlow {
+  /** What still waits: the queue without the changes decided here. */
+  items: ReviewItem[];
+  /** The change whose page is open, or null. */
+  selected: ReviewItem | null;
+  /** A change was approved or rejected: hide it and move on if it was open. */
+  decided: (item: ReviewItem) => void;
+  /** Several at once (Approve all from one chat). */
+  decidedMany: (items: ReviewItem[]) => void;
+  /** A change another one depends on was decided from that change's page. */
+  prerequisiteDone: (entryId: string, revisionId: string) => void;
 }
 
-export interface ReviewTabProps {
-  workspaceId: string;
-  queue: ReviewQueue;
-  learningLine: string;
-  onOpenLearning: () => void;
-  onOpenEntry: (id: string) => void;
-  onChanged: () => void;
-}
-
-export function ReviewTab({
-  workspaceId,
+/**
+ * Which change is open and what has been decided. Decided changes stay hidden
+ * until a refetch no longer lists that exact revision: a refetch that started
+ * before the decision still carries it and must not bring it back, while a
+ * renewed proposal (a new revision) shows again.
+ */
+export function useReviewFlow({
   queue,
-  learningLine,
-  onOpenLearning,
-  onOpenEntry,
+  openKey,
+  open,
   onChanged,
-}: ReviewTabProps) {
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [showDetail, setShowDetail] = useState(false);
-  // Decided items, by key and the exact revision decided. They stay hidden
-  // until a refetch no longer lists that revision: a refetch that started
-  // before the decision still carries it and must not bring it back.
+}: {
+  queue: ReviewQueue;
+  /** The open change's key, from the URL or local state. */
+  openKey: string | null;
+  /** Open a change's page (a key) or go back to the list (null). */
+  open: (key: string | null, options: { replace: boolean }) => void;
+  onChanged: () => void;
+}): ReviewFlow {
   const [hidden, setHidden] = useState<ReadonlyMap<string, string>>(new Map());
-  const isHidden = (item: ReviewItem) => hidden.get(item.key) === reviewItemRevision(item);
-  const items = queue.items.filter((item) => !isHidden(item));
-  const selected = items.find((item) => item.key === selectedKey) ?? items[0] ?? null;
-  const selectedRef = useRef<string | null>(null);
-  selectedRef.current = selected?.key ?? null;
-  const groups = queue.groups
-    .map((group) => ({ ...group, items: group.items.filter((item) => !isHidden(item)) }))
-    .filter((group) => group.items.length > 0);
-  // Reviewed items leave the list at once; the queue refetches behind them,
-  // and a decided revision is forgotten once the queue no longer lists it.
+  // The page being left after a decision stays on screen until the next one
+  // opens, so moving on never flashes "already reviewed".
+  const [leaving, setLeaving] = useState<string | null>(null);
+  const items = useMemo(
+    () => queue.items.filter((item) => hidden.get(item.key) !== reviewItemRevision(item)),
+    [queue.items, hidden],
+  );
   useEffect(
     () =>
       setHidden((prior) => {
@@ -379,233 +333,384 @@ export function ReviewTab({
       }),
     [queue.items],
   );
+  useEffect(() => {
+    if (leaving && openKey !== leaving) setLeaving(null);
+  }, [openKey, leaving]);
 
-  const next = (current: ReviewItem) => {
-    const index = items.findIndex((item) => item.key === current.key);
-    const following = items[index + 1] ?? items[index - 1] ?? null;
-    setHidden((prior) => new Map(prior).set(current.key, reviewItemRevision(current)));
-    // A decision that completes after the reviewer opened another change
-    // must not move them off it; only a decision on what is open advances.
-    const open = selectedRef.current;
-    if (open === current.key) {
-      setSelectedKey(following?.key ?? null);
-      if (!following) setShowDetail(false);
-    } else if (open) {
-      setSelectedKey(open);
+  const latest = useRef({ items, openKey, open, onChanged });
+  latest.current = { items, openKey, open, onChanged };
+
+  const decidedMany = useCallback((decided: ReviewItem[]) => {
+    const { items: list, openKey: current, open: go, onChanged: changed } = latest.current;
+    const keys = new Set(decided.map((item) => item.key));
+    setHidden((prior) => {
+      const next = new Map(prior);
+      for (const item of decided) next.set(item.key, reviewItemRevision(item));
+      return next;
+    });
+    // Only a decision on the change that is open moves the reviewer on: one
+    // that completes after they opened another change leaves them there.
+    if (current && keys.has(current)) {
+      const index = list.findIndex((item) => item.key === current);
+      const following =
+        list.slice(index + 1).find((item) => !keys.has(item.key)) ??
+        list
+          .slice(0, Math.max(index, 0))
+          .reverse()
+          .find((item) => !keys.has(item.key)) ??
+        null;
+      setLeaving(current);
+      go(following?.key ?? null, { replace: true });
     }
     notifyKnowledgeReviewUpdated();
-    onChanged();
-  };
-
-  // A prerequisite decided from another change's pane is listed on its own
-  // too: hide it now and refetch, so nothing advances onto a decided proposal.
-  const prerequisiteDone = (entryId: string, revisionId: string) => {
+    changed();
+  }, []);
+  const decided = useCallback((item: ReviewItem) => decidedMany([item]), [decidedMany]);
+  const prerequisiteDone = useCallback((entryId: string, revisionId: string) => {
     setHidden((prior) => new Map(prior).set(`knowledge:${entryId}`, revisionId));
-    onChanged();
-  };
+    latest.current.onChanged();
+  }, []);
 
-  const help = (
-    <InlineHelp icon>
-      {learningLine} <HelpLink onClick={onOpenLearning}>Change it</HelpLink>
-    </InlineHelp>
+  const selected = openKey
+    ? (items.find((item) => item.key === openKey) ??
+      (openKey === leaving ? (queue.items.find((item) => item.key === openKey) ?? null) : null))
+    : null;
+  return { items, selected, decided, decidedMany, prerequisiteDone };
+}
+
+/* ------------------------------------------------------------------ list */
+
+const WHEN_COLUMNS: RowListColumn[] = [
+  { id: "when", label: "Proposed", width: 112, align: "end", hideLabel: true },
+];
+
+/** The type in words: "Requirement" for knowledge, "Instructions", "Skill". */
+function reviewTypeLabel(item: ReviewItem): string {
+  return item.kind === "knowledge"
+    ? KNOWLEDGE_KIND_LABEL[item.entry.revision.kind]
+    : KIND_LABEL[item.kind];
+}
+
+/** "From chat Migrate billing…", as plain text for a row. */
+function originText(origin: Origin): string | null {
+  if (origin.kind === "chat") return origin.unnamed ? "From a chat" : `From chat ${origin.name}`;
+  if (origin.kind === "schedule") return `From schedule ${origin.name}`;
+  return null;
+}
+
+function ReviewTile({ kind }: { kind: ReviewKind }) {
+  const Icon = KIND_ICON[kind];
+  return <LogoTile icon={<Icon />} name={KIND_LABEL[kind]} />;
+}
+
+export interface ReviewListProps {
+  items: ReviewItem[];
+  queue: Pick<ReviewQueue, "loading" | "error" | "partial" | "reload">;
+  onOpen: (item: ReviewItem) => void;
+  /** A link per row, so a change can be opened in a new tab. */
+  hrefFor?: (item: ReviewItem) => string;
+  /** Why the list is empty, in one sentence (it depends on Learning). */
+  emptyDescription: string;
+  onOpenLearning?: () => void;
+}
+
+/** Every change waiting for review, one row each. */
+export function ReviewList({
+  items,
+  queue,
+  onOpen,
+  hrefFor,
+  emptyDescription,
+  onOpenLearning,
+}: ReviewListProps) {
+  const retry = (
+    <Button type="button" size="sm" variant="outline" onClick={queue.reload}>
+      Try again
+    </Button>
   );
-
-  const shell = (content: ReactNode) => (
-    <div className="@container/review flex min-w-0 flex-col gap-4 pt-6">
-      {help}
-      {queue.error && items.length ? (
+  if (queue.loading) {
+    return (
+      <RowList label="Changes waiting for review" columns={WHEN_COLUMNS} flush busy>
+        <ListRowSkeleton count={3} />
+      </RowList>
+    );
+  }
+  if (queue.error && !items.length) {
+    return (
+      <Notice
+        tone="failed"
+        title="Couldn't load the changes waiting for review"
+        action={retry}
+        actionLayout="responsive"
+      >
+        {queue.error}
+      </Notice>
+    );
+  }
+  if (!items.length) {
+    return (
+      <EmptyState
+        variant="page"
+        icon={<InboxIcon />}
+        title="You're all caught up"
+        description={emptyDescription}
+        action={
+          onOpenLearning ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onOpenLearning}
+              className="pointer-coarse:h-11"
+            >
+              Learning settings
+            </Button>
+          ) : undefined
+        }
+      />
+    );
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      {queue.error ? (
         <Notice
           tone="failed"
           title="Some changes couldn't be loaded"
-          action={
-            <Button type="button" size="sm" variant="outline" onClick={queue.reload}>
-              Try again
-            </Button>
-          }
+          action={retry}
           actionLayout="responsive"
         >
           {queue.error}
         </Notice>
       ) : null}
-      {content}
-    </div>
-  );
-
-  if (queue.loading) {
-    return shell(
-      <RowList label="Changes waiting for review" busy>
-        <ListRowSkeleton count={3} />
-      </RowList>,
-    );
-  }
-  if (queue.error && !items.length) {
-    return shell(
-      <Notice
-        tone="failed"
-        title="Couldn't load the changes waiting for review"
-        action={
-          <Button type="button" size="sm" variant="outline" onClick={queue.reload}>
-            Try again
-          </Button>
-        }
-        actionLayout="responsive"
-      >
-        {queue.error}
-      </Notice>,
-    );
-  }
-  if (!selected) {
-    return shell(
-      <EmptyState
-        variant="page"
-        icon={<InboxIcon />}
-        title="You're all caught up"
-        description="When agents propose knowledge, instruction or skill changes, they wait here for your OK."
-      />,
-    );
-  }
-
-  const list = (narrow: boolean) => (
-    <div className="flex min-w-0 flex-col gap-5">
-      {groups.map((group) => (
-        <section key={group.key} aria-label={`From ${group.origin.name}`} className="min-w-0">
-          <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-1.5 text-xs leading-4.5 text-fg-muted">
-            <OriginLink workspaceId={workspaceId} origin={group.origin} />
-            {group.batch && group.items.length > 1 ? (
-              <ApproveAll
-                workspaceId={workspaceId}
-                items={group.items}
-                onDone={() => {
-                  setHidden((prior) => {
-                    const done = new Map(prior);
-                    for (const item of group.items) done.set(item.key, reviewItemRevision(item));
-                    return done;
-                  });
-                  notifyKnowledgeReviewUpdated();
-                  onChanged();
-                }}
-              />
-            ) : null}
-          </div>
-          <RowList label={`Changes from ${group.origin.name}`}>
-            {group.items.map((item) => {
-              const Icon = KIND_ICON[item.kind];
-              return (
-                <ListRow
-                  key={item.key}
-                  leading={<LogoTile icon={<Icon />} name={KIND_LABEL[item.kind]} />}
-                  title={item.title}
-                  meta={[
-                    // Knowledge says which kind ("Decision"), in words like the Library.
-                    item.kind === "knowledge"
-                      ? KNOWLEDGE_KIND_LABEL[item.entry.revision.kind]
-                      : KIND_LABEL[item.kind],
-                    item.createdAt ? <RelativeTime key="at" date={item.createdAt} /> : null,
-                  ].filter(Boolean)}
-                  selected={!narrow && item.key === selected.key}
-                  onOpen={() => {
-                    setSelectedKey(item.key);
-                    setShowDetail(true);
-                  }}
-                  indicator={narrow ? "open" : undefined}
-                />
-              );
-            })}
-          </RowList>
-        </section>
-      ))}
+      <RowList label="Changes waiting for review" columns={WHEN_COLUMNS} flush>
+        {items.map((item) => {
+          const href = hrefFor?.(item);
+          const archive = item.kind === "knowledge" && item.entry.revision.change === "archive";
+          return (
+            <ListRow
+              key={item.key}
+              leading={<ReviewTile kind={item.kind} />}
+              title={item.title}
+              meta={[reviewTypeLabel(item), originText(item.origin)].filter(
+                (part): part is string => Boolean(part),
+              )}
+              status={
+                archive ? (
+                  <StatusBadge variant="dot" tone="neutral">
+                    Archive request
+                  </StatusBadge>
+                ) : undefined
+              }
+              cells={item.createdAt ? { when: <RelativeTime date={item.createdAt} /> } : {}}
+              indicator="open"
+              {...(href
+                ? {
+                    href,
+                    linkProps: {
+                      onClick: inAppClick(() => onOpen(item)),
+                    },
+                  }
+                : { onOpen: () => onOpen(item) })}
+            />
+          );
+        })}
+      </RowList>
       {queue.partial ? (
-        <p className="px-3 text-xs text-fg-muted">
+        <ToolbarSummary>
           More changes are waiting. They show up here as you work through these.
-        </p>
+        </ToolbarSummary>
       ) : null}
     </div>
   );
+}
 
-  const detail = (
-    <ReviewDetail
-      key={selected.key}
-      workspaceId={workspaceId}
-      item={selected}
-      remaining={items.length}
-      onDone={() => next(selected)}
-      onPrerequisiteDone={prerequisiteDone}
-      onOpenEntry={onOpenEntry}
+/* ------------------------------------------------------------------ tab */
+
+export interface ReviewTabProps {
+  workspaceId: string;
+  queue: ReviewQueue;
+  emptyDescription: string;
+  onOpenLearning?: () => void;
+  onOpenEntry: (id: string) => void;
+  onChanged: () => void;
+}
+
+/**
+ * The list and each change's page in one place, with the open change kept in
+ * local state. The Knowledge page keeps it in the URL instead and draws the
+ * page itself; this is the same flow for embedding and tests.
+ */
+export function ReviewTab({
+  workspaceId,
+  queue,
+  emptyDescription,
+  onOpenLearning,
+  onOpenEntry,
+  onChanged,
+}: ReviewTabProps) {
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const flow = useReviewFlow({
+    queue,
+    openKey,
+    open: (key) => setOpenKey(key),
+    onChanged,
+  });
+  if (openKey) {
+    return (
+      <ReviewItemPage
+        workspaceId={workspaceId}
+        flow={flow}
+        loading={queue.loading}
+        onBack={() => setOpenKey(null)}
+        onOpenEntry={onOpenEntry}
+      />
+    );
+  }
+  return (
+    <ReviewList
+      items={flow.items}
+      queue={queue}
+      onOpen={(item) => setOpenKey(item.key)}
+      emptyDescription={emptyDescription}
+      {...(onOpenLearning ? { onOpenLearning } : {})}
     />
   );
-
-  return shell(
-    <>
-      <div className="hidden min-w-0 grid-cols-[minmax(0,320px)_minmax(0,1fr)] items-start gap-6 @[760px]/review:grid">
-        {list(false)}
-        <div className="min-w-0">{detail}</div>
-      </div>
-      <div className="min-w-0 @[760px]/review:hidden">
-        {showDetail ? (
-          <div className="flex min-w-0 flex-col gap-3">
-            <button
-              type="button"
-              onClick={() => setShowDetail(false)}
-              className="inline-flex w-fit items-center gap-1.5 rounded-[6px] text-sm font-medium text-fg-muted transition-colors duration-[120ms] hover:text-fg pointer-coarse:min-h-11"
-            >
-              <ArrowLeftIcon aria-hidden="true" className="size-4" />
-              All changes ({items.length})
-            </button>
-            {detail}
-          </div>
-        ) : (
-          list(true)
-        )}
-      </div>
-    </>,
-  );
 }
 
-function ApproveAll({
-  workspaceId,
-  items,
-  onDone,
-}: {
+/* --------------------------------------------------------------- page */
+
+export interface ReviewItemPageProps {
   workspaceId: string;
-  items: ReviewItem[];
-  onDone: () => void;
-}) {
-  const { client } = useAppContext();
-  const [busy, setBusy] = useState(false);
-  const knowledge = items.flatMap((item) => (item.kind === "knowledge" ? [item.entry] : []));
+  flow: ReviewFlow;
+  /** The queue is still loading, so a missing change may yet appear. */
+  loading: boolean;
+  onBack: () => void;
+  onOpenEntry: (id: string) => void;
+}
+
+/** One change waiting for review, on its own page with a back link to the list. */
+export function ReviewItemPage({
+  workspaceId,
+  flow,
+  loading,
+  onBack,
+  onOpenEntry,
+}: ReviewItemPageProps) {
+  const item = flow.selected;
+  const back = { label: "Review", onClick: onBack };
+  if (!item) {
+    return (
+      <DetailPage back={back}>
+        {loading ? (
+          <PageSkeleton />
+        ) : (
+          <EmptyState
+            variant="page"
+            icon={<InboxIcon />}
+            title="This change isn't waiting any more"
+            description="Someone may have approved or rejected it already, or the agent replaced it with a newer one."
+            action={
+              <Button type="button" onClick={onBack} className="pointer-coarse:h-11">
+                Back to Review
+              </Button>
+            }
+          />
+        )}
+      </DetailPage>
+    );
+  }
+  const batchId = item.kind === "knowledge" ? item.batch.id : null;
+  const batch = batchId
+    ? flow.items.filter((each) => each.kind === "knowledge" && each.batch.id === batchId)
+    : [];
   return (
-    <button
-      type="button"
-      disabled={busy}
-      onClick={() => {
-        setBusy(true);
-        void client
-          .reviewKnowledgeEntries(workspaceId, {
-            entries: knowledge.slice(0, 100).map((entry) => ({
-              operationId: crypto.randomUUID(),
-              entryId: entry.id,
-              revisionId: entry.revision.id,
-              expectedVersion: entry.version,
-              decision: "approve" as const,
-            })),
-          })
-          .then(() => {
-            toast(`Approved ${knowledge.length} changes`);
-            onDone();
-          })
-          .catch((reason: unknown) =>
-            toast.error("Couldn't approve them all", { description: errorText(reason) }),
-          )
-          .finally(() => setBusy(false));
-      }}
-      className="shrink-0 rounded-[6px] font-medium text-brand underline-offset-2 hover:underline disabled:opacity-60 pointer-coarse:min-h-11"
-    >
-      {busy ? "Approving…" : `Approve all ${knowledge.length}`}
-    </button>
+    <DetailPage back={back}>
+      <ReviewDetail
+        key={item.key}
+        workspaceId={workspaceId}
+        item={item}
+        remaining={flow.items.length}
+        batch={batch.length > 1 ? batch : []}
+        onDone={() => flow.decided(item)}
+        onBatchDone={flow.decidedMany}
+        onPrerequisiteDone={flow.prerequisiteDone}
+        onOpenEntry={onOpenEntry}
+      />
+    </DetailPage>
   );
 }
 
-/* --------------------------------------------------------------- detail */
+function PageSkeleton() {
+  return (
+    <div aria-busy="true" className="flex min-w-0 flex-col gap-8">
+      <span role="status" className="sr-only">
+        Loading the change
+      </span>
+      <div className="flex items-start gap-4">
+        <Skeleton className="size-10 rounded-[10px] bg-surface-2" />
+        <div className="flex min-w-0 flex-1 flex-col gap-2 pt-1">
+          <Skeleton className="h-5 w-2/5 rounded-full bg-surface-2" />
+          <Skeleton className="h-3.5 w-1/3 rounded-full bg-surface-2" />
+        </div>
+      </div>
+      <BodySkeleton />
+    </div>
+  );
+}
+
+function BodySkeleton() {
+  return (
+    <div aria-hidden="true" className="flex flex-col gap-2.5">
+      {["w-4/5", "w-3/5", "w-2/3"].map((width) => (
+        <Skeleton key={width} className={`h-3.5 rounded-full bg-surface-2 ${width}`} />
+      ))}
+    </div>
+  );
+}
+
+/** "From chat <Migrate billing…>" with the chat or schedule as a link. */
+function OriginLink({ workspaceId, origin }: { workspaceId: string; origin: Origin }) {
+  const navigate = useNavigate();
+  if (origin.kind === "none") return null;
+  const href =
+    origin.kind === "chat"
+      ? `/workspaces/${workspaceId}/sessions/${origin.sessionId}`
+      : `/workspaces/${workspaceId}/schedules?taskId=${origin.taskId}`;
+  const unnamed = origin.kind === "chat" && origin.unnamed;
+  const link = (
+    <a
+      href={href}
+      onClick={inAppClick(() => void navigate({ href }))}
+      className="rounded-[4px] text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
+    >
+      {unnamed ? "a chat" : origin.name}
+    </a>
+  );
+  return (
+    <span>
+      {unnamed ? "From " : origin.kind === "chat" ? "From chat " : "From schedule "}
+      {link}
+    </span>
+  );
+}
+
+/** Knowledge text as it reads: paragraphs, line breaks kept. */
+function PlainText({ text }: { text: string }) {
+  const paragraphs = text
+    .replace(/\r\n?/g, "\n")
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return (
+    <div className="flex min-w-0 flex-col gap-3 text-sm leading-6 break-words text-fg">
+      {paragraphs.map((paragraph, index) => (
+        // oxlint-disable-next-line react/no-array-index-key -- paragraphs of one static text
+        <p key={index} className="whitespace-pre-wrap">
+          {paragraph}
+        </p>
+      ))}
+    </div>
+  );
+}
 
 type Loaded =
   | {
@@ -632,18 +737,25 @@ function skillText(record: SkillRecord): string {
     .join("\n\n");
 }
 
+type Pending = "approve" | "reject" | "all" | null;
+
 function ReviewDetail({
   workspaceId,
   item,
   remaining,
+  batch,
   onDone,
+  onBatchDone,
   onPrerequisiteDone,
   onOpenEntry,
 }: {
   workspaceId: string;
   item: ReviewItem;
   remaining: number;
+  /** Knowledge from the same chat or schedule, when there is more than this one. */
+  batch: ReviewItem[];
   onDone: () => void;
+  onBatchDone: (items: ReviewItem[]) => void;
   onPrerequisiteDone: (entryId: string, revisionId: string) => void;
   onOpenEntry: (id: string) => void;
 }) {
@@ -651,7 +763,7 @@ function ReviewDetail({
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<Pending>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
@@ -737,8 +849,12 @@ function ReviewDetail({
     };
   }, [client, workspaceId, itemIdentity, retry]);
 
-  const act = async (run: () => Promise<unknown>, message: string) => {
-    setBusy(true);
+  const act = async (
+    kind: Exclude<Pending, null>,
+    run: () => Promise<unknown>,
+    message: string,
+  ) => {
+    setPending(kind);
     setActionError(null);
     try {
       await run();
@@ -755,7 +871,7 @@ function ReviewDetail({
     } catch (reason) {
       if (alive.current) setActionError(errorText(reason));
     } finally {
-      if (alive.current) setBusy(false);
+      if (alive.current) setPending(null);
     }
   };
 
@@ -764,6 +880,7 @@ function ReviewDetail({
     if (loaded.kind === "knowledge") {
       const record = loaded.record;
       void act(
+        decision,
         () =>
           client.reviewKnowledgeEntry(workspaceId, {
             operationId: crypto.randomUUID(),
@@ -781,6 +898,7 @@ function ReviewDetail({
       );
     } else if (loaded.kind === "instruction" && item.kind === "instruction") {
       void act(
+        decision,
         () =>
           client.reviewAgentInstruction(workspaceId, {
             operationId: crypto.randomUUID(),
@@ -804,6 +922,7 @@ function ReviewDetail({
         reason: `${decision === "approve" ? "Approved" : "Rejected"} in Knowledge review`,
       };
       void act(
+        decision,
         () =>
           decision === "approve"
             ? client.approveWorkspaceSkill(workspaceId, skill.id, request)
@@ -817,242 +936,257 @@ function ReviewDetail({
     }
   };
 
-  const Icon = KIND_ICON[item.kind];
-  const origin = (
-    <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-      <MetaChip variant="outline">{KIND_LABEL[item.kind]}</MetaChip>
-      <span className="min-w-0">
-        {item.origin.kind === "none" ? null : (
-          <>
-            From <OriginLink workspaceId={workspaceId} origin={item.origin} inline />
-          </>
-        )}
-        {item.createdAt ? (
-          <>
-            {item.origin.kind === "none" ? "Proposed " : " · "}
-            <RelativeTime date={item.createdAt} inSentence={item.origin.kind === "none"} />
-          </>
-        ) : null}
-      </span>
-    </span>
-  );
+  const approveBatch = () => {
+    const entries = batch.flatMap((each) => (each.kind === "knowledge" ? [each.entry] : []));
+    setPending("all");
+    setActionError(null);
+    void client
+      .reviewKnowledgeEntries(workspaceId, {
+        entries: entries.slice(0, 100).map((entry) => ({
+          operationId: crypto.randomUUID(),
+          entryId: entry.id,
+          revisionId: entry.revision.id,
+          expectedVersion: entry.version,
+          decision: "approve" as const,
+        })),
+      })
+      .then(() => {
+        toast(`Approved ${entries.length} changes`);
+        onBatchDone(batch);
+      })
+      .catch((reason: unknown) => {
+        if (alive.current) setActionError(errorText(reason));
+      })
+      .finally(() => {
+        if (alive.current) setPending(null);
+      });
+  };
 
-  if (loadError) {
-    return (
-      <Notice
-        tone="failed"
-        title="Couldn't load this change"
-        action={
-          <Button type="button" size="sm" variant="outline" onClick={() => setRetry((n) => n + 1)}>
-            Try again
-          </Button>
-        }
-        actionLayout="responsive"
-      >
-        {item.kind === "instruction"
-          ? `Approving is off until the current instructions load, so nothing is replaced unseen. ${loadError}`
-          : loadError}
-      </Notice>
-    );
-  }
-  if (!loaded) {
-    return <DiffView loading title={item.title} meta={origin} />;
-  }
+  /* ---------------------------------------------------------- header */
 
-  const record = loaded.kind === "knowledge" ? loaded.record : null;
+  const record = loaded?.kind === "knowledge" ? loaded.record : null;
   const archiveRequest = record?.revision.change === "archive";
-  const removal = loaded.kind === "skill" && Boolean(loaded.record.removalOperationId);
-  const title = loaded.kind === "knowledge" ? loaded.record.revision.entry.title : item.title;
-  const before = loaded.kind === "instruction" ? (loaded.before ?? "") : loaded.before;
-  const after =
-    loaded.kind === "knowledge"
-      ? archiveRequest
-        ? ""
-        : loaded.record.revision.entry.content
-      : loaded.kind === "instruction" && item.kind === "instruction"
-        ? item.item.content
-        : loaded.kind === "skill"
-          ? removal
-            ? ""
-            : skillText(loaded.record)
-          : "";
-  const canEditFirst = loaded.kind === "knowledge" && !archiveRequest;
-  const approveLabel = removal
-    ? "Delete skill…"
-    : archiveRequest
-      ? remaining > 1
-        ? "Archive and next"
-        : "Archive"
-      : remaining > 1
-        ? "Approve and next"
-        : "Approve";
-
-  if (editing && record) {
-    return (
-      <div className="flex min-w-0 flex-col gap-4 rounded-[14px] border border-border bg-surface p-4">
-        <div className="flex min-w-0 items-start gap-3">
-          <LogoTile size="md" icon={<Icon />} />
-          <div className="min-w-0">
-            <p className="text-sm leading-5 font-semibold text-fg">Edit before approving</p>
-            <p className="text-xs leading-4.5 text-fg-muted">
-              Your edit is what gets saved. The agent's version stays in History.
-            </p>
-          </div>
-        </div>
-        <Field label="Title">
-          <TextInput
-            value={draftTitle}
-            maxLength={1024}
-            onChange={(event) => setDraftTitle(event.target.value)}
-          />
-        </Field>
-        <Field label="What agents should know" error={draftError ?? undefined}>
-          <TextArea
-            rows={7}
-            value={draft}
-            onChange={(event) => {
-              setDraft(event.target.value);
-              setDraftError(null);
-            }}
-          />
-        </Field>
-        {actionError ? (
-          <p role="alert" className="text-sm text-danger">
-            {actionError}
-          </p>
+  const removal = loaded?.kind === "skill" && Boolean(loaded.record.removalOperationId);
+  const title = record ? record.revision.entry.title : item.title;
+  const busy = pending !== null;
+  const canEditFirst = loaded?.kind === "knowledge" && !archiveRequest;
+  const approveLabel =
+    pending === "approve"
+      ? removal
+        ? "Deleting…"
+        : "Approving…"
+      : removal
+        ? "Delete skill"
+        : archiveRequest
+          ? remaining > 1
+            ? "Archive and next"
+            : "Archive"
+          : remaining > 1
+            ? "Approve and next"
+            : "Approve";
+  const batchFrom =
+    item.origin.kind === "chat"
+      ? " from this chat"
+      : item.origin.kind === "schedule"
+        ? " from this schedule"
+        : "";
+  const menuItems =
+    record || batch.length > 1 ? (
+      <>
+        {record ? (
+          <DropdownMenuItem onSelect={() => onOpenEntry(record.id)}>
+            <ArrowUpRightIcon />
+            Open entry
+          </DropdownMenuItem>
         ) : null}
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={busy}
-            onClick={() => setEditing(false)}
-            className="pointer-coarse:h-11"
-          >
-            Cancel
-          </Button>
-          <Button
-            type="button"
+        {batch.length > 1 ? (
+          <DropdownMenuItem disabled={busy} onSelect={approveBatch}>
+            <CheckCheckIcon />
+            {`Approve all ${batch.length}${batchFrom}`}
+          </DropdownMenuItem>
+        ) : null}
+      </>
+    ) : null;
+  const actions =
+    loaded && !editing ? (
+      <>
+        <RowButton disabled={busy} onClick={() => decide("reject")}>
+          {pending === "reject" ? "Rejecting…" : "Reject"}
+        </RowButton>
+        {canEditFirst && record ? (
+          <RowButton
             disabled={busy}
             onClick={() => {
-              if (!draftTitle.trim() || (!draft.trim() && record.revision.entry.kind !== "group")) {
-                setDraftError("The change can't be empty. Reject it instead.");
-                return;
-              }
-              decide("approve", { title: draftTitle.trim(), content: draft.trim() });
+              setDraftTitle(record.revision.entry.title);
+              setDraft(record.revision.entry.content);
+              setDraftError(null);
+              setActionError(null);
+              setEditing(true);
             }}
-            className="pointer-coarse:h-11"
           >
-            <CheckIcon aria-hidden="true" />
-            {busy ? "Saving…" : "Save and approve"}
-          </Button>
-        </div>
-      </div>
+            Edit
+          </RowButton>
+        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant={removal ? "destructive" : "default"}
+          disabled={busy}
+          onClick={() => (removal ? setConfirmDelete(true) : decide("approve"))}
+          className="rounded-[10px] pointer-coarse:h-11"
+        >
+          {approveLabel}
+        </Button>
+        {menuItems ? <MoreMenu label={`More actions for ${title}`}>{menuItems}</MoreMenu> : null}
+      </>
+    ) : null;
+
+  const header = (
+    <DetailPageHeader
+      leading={<ReviewTile kind={item.kind} />}
+      title={title}
+      // Type, scope and time first; the chat or schedule it came from last,
+      // since its name is the part that runs long.
+      meta={[
+        reviewTypeLabel(item),
+        item.kind === "knowledge" && item.entry.scope !== "workspace"
+          ? KNOWLEDGE_SCOPE_LABEL[item.entry.scope]
+          : null,
+        item.createdAt ? (
+          <span key="at">
+            proposed <RelativeTime date={item.createdAt} inSentence />
+          </span>
+        ) : null,
+        item.origin.kind === "none" ? null : (
+          <OriginLink key="origin" workspaceId={workspaceId} origin={item.origin} />
+        ),
+      ]}
+      actions={actions}
+    />
+  );
+
+  /* ------------------------------------------------------------ body */
+
+  let body: ReactNode;
+  if (loadError) {
+    body = (
+      <DetailSection>
+        <Notice
+          tone="failed"
+          title="Couldn't load this change"
+          action={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setRetry((value) => value + 1)}
+            >
+              Try again
+            </Button>
+          }
+          actionLayout="responsive"
+        >
+          {item.kind === "instruction"
+            ? `Approving is off until the current instructions load, so nothing is replaced unseen. ${loadError}`
+            : loadError}
+        </Notice>
+      </DetailSection>
+    );
+  } else if (!loaded) {
+    body = (
+      <DetailSection>
+        <span role="status" className="sr-only">
+          Loading the change
+        </span>
+        <BodySkeleton />
+      </DetailSection>
+    );
+  } else if (editing && record) {
+    body = (
+      <DetailSection
+        title="Edit before approving"
+        description="What you save is what agents use. The agent's version stays in History."
+      >
+        <form
+          className="flex max-w-[640px] min-w-0 flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!draftTitle.trim() || (!draft.trim() && record.revision.entry.kind !== "group")) {
+              setDraftError("The change can't be empty. Reject it instead.");
+              return;
+            }
+            decide("approve", { title: draftTitle.trim(), content: draft.trim() });
+          }}
+        >
+          <Field label="Title">
+            <TextInput
+              value={draftTitle}
+              maxLength={1024}
+              onChange={(event) => setDraftTitle(event.target.value)}
+            />
+          </Field>
+          <Field label="What agents should know" error={draftError ?? undefined}>
+            <TextArea
+              rows={8}
+              value={draft}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setDraftError(null);
+              }}
+            />
+          </Field>
+          {actionError ? (
+            <p role="alert" className="text-sm text-danger">
+              {actionError}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setEditing(false)}
+              className="pointer-coarse:h-11"
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy} className="pointer-coarse:h-11">
+              {busy ? "Saving…" : "Save and approve"}
+            </Button>
+          </div>
+        </form>
+      </DetailSection>
+    );
+  } else {
+    body = (
+      <>
+        {actionError ? (
+          <DetailSection>
+            <Notice tone="failed" title="Couldn't save your decision" live="assertive">
+              {actionError}
+            </Notice>
+          </DetailSection>
+        ) : null}
+        <ProposalBody
+          workspaceId={workspaceId}
+          item={item}
+          loaded={loaded}
+          archiveRequest={Boolean(archiveRequest)}
+          removal={removal}
+        />
+      </>
     );
   }
 
   return (
-    <div className="flex min-w-0 flex-col gap-3">
-      {loaded.kind === "knowledge" && loaded.requiredFor ? (
-        <Notice tone="waiting" title="Review this first">
+    <>
+      {header}
+      {loaded?.kind === "knowledge" && loaded.requiredFor ? (
+        <Notice tone="waiting" title="Review this first" className="mt-6">
           “{loaded.requiredFor}” depends on this change, so it comes first.
         </Notice>
       ) : null}
-      {archiveRequest ? (
-        <Notice tone="muted" title="An agent asked to archive this">
-          Agents stop using it once you approve. You can restore it later.
-        </Notice>
-      ) : null}
-      {removal ? (
-        <Notice tone="failed" title="An agent asked to delete this skill">
-          Approving deletes the skill and all its versions. This can't be undone.
-        </Notice>
-      ) : null}
-      <DiffView
-        before={before}
-        after={after}
-        format={loaded.kind === "knowledge" ? "text" : "markdown"}
-        title={
-          record ? (
-            <button
-              type="button"
-              onClick={() => onOpenEntry(record.id)}
-              className="rounded-[4px] text-left underline-offset-2 hover:underline"
-            >
-              {title}
-            </button>
-          ) : (
-            title
-          )
-        }
-        meta={
-          <span className="flex min-w-0 flex-col gap-1">
-            {origin}
-            {loaded.kind === "knowledge" &&
-            loaded.beforeTitle &&
-            loaded.beforeTitle !== loaded.record.revision.entry.title ? (
-              <span>Renamed from “{loaded.beforeTitle}”</span>
-            ) : null}
-          </span>
-        }
-        emptyMessage="The text doesn't change. Only its details, like collections or sources, do."
-      />
-      {loaded.kind === "instruction" && item.kind === "instruction" && item.item.reason ? (
-        <InlineHelp icon>Why: {item.item.reason}</InlineHelp>
-      ) : null}
-      {loaded.kind === "skill" && !removal ? (
-        <InlineHelp icon>
-          Approving adds it to Skills in{" "}
-          <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
-            Capabilities
-          </InAppHelpLink>
-          , where you can change it later.
-        </InlineHelp>
-      ) : null}
-      {actionError ? (
-        <p role="alert" className="text-sm text-danger">
-          {actionError}
-        </p>
-      ) : null}
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={busy}
-          onClick={() => decide("reject")}
-          className="text-fg-muted pointer-coarse:h-11"
-        >
-          Reject
-        </Button>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-          {canEditFirst && record ? (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={busy}
-              onClick={() => {
-                setDraftTitle(record.revision.entry.title);
-                setDraft(record.revision.entry.content);
-                setDraftError(null);
-                setEditing(true);
-              }}
-              className="pointer-coarse:h-11"
-            >
-              Edit first
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant={removal ? "destructive" : "default"}
-            disabled={busy}
-            onClick={() => (removal ? setConfirmDelete(true) : decide("approve"))}
-            className="pointer-coarse:h-11"
-          >
-            {removal ? null : <CheckIcon aria-hidden="true" />}
-            {busy ? "Saving…" : approveLabel}
-          </Button>
-        </div>
-      </div>
+      <DetailPageBody className="mt-2">{body}</DetailPageBody>
       {removal ? (
         <DestructiveConfirm
           open={confirmDelete}
@@ -1071,6 +1205,113 @@ function ReviewDetail({
           }}
         />
       ) : null}
-    </div>
+    </>
+  );
+}
+
+/** The proposal as it reads: new text plainly, a change with what differs marked. */
+function ProposalBody({
+  workspaceId,
+  item,
+  loaded,
+  archiveRequest,
+  removal,
+}: {
+  workspaceId: string;
+  item: ReviewItem;
+  loaded: Loaded;
+  archiveRequest: boolean;
+  removal: boolean;
+}) {
+  const markdown = loaded.kind !== "knowledge";
+  const before = loaded.kind === "instruction" ? (loaded.before ?? "") : loaded.before;
+  const after =
+    loaded.kind === "knowledge"
+      ? loaded.record.revision.entry.content
+      : loaded.kind === "instruction" && item.kind === "instruction"
+        ? item.item.content
+        : loaded.kind === "skill"
+          ? skillText(loaded.record)
+          : "";
+  const read = (text: string) => (markdown ? <Markdown text={text} /> : <PlainText text={text} />);
+
+  // Asking to remove something: say so, and show what goes away as it reads.
+  if (archiveRequest || removal) {
+    return (
+      <DetailSection
+        title={archiveRequest ? "What agents know now" : "What the skill says now"}
+        description={
+          archiveRequest
+            ? "An agent asked to archive this. Agents stop using it once you approve, and you can restore it later."
+            : "An agent asked to delete this skill. Approving deletes it and all its versions. This can't be undone."
+        }
+      >
+        {before.trim() ? (
+          read(before)
+        ) : (
+          <p className="text-sm text-fg-muted">There's no text to show.</p>
+        )}
+      </DetailSection>
+    );
+  }
+
+  const renamed =
+    loaded.kind === "knowledge" &&
+    loaded.beforeTitle &&
+    loaded.beforeTitle !== loaded.record.revision.entry.title
+      ? loaded.beforeTitle
+      : null;
+  const fresh = !before.trim();
+  const sectionTitle = fresh
+    ? loaded.kind === "knowledge"
+      ? "What agents will know"
+      : loaded.kind === "instruction"
+        ? "New instructions"
+        : "What the skill says"
+    : "What changes";
+
+  return (
+    <>
+      <DetailSection
+        title={sectionTitle}
+        description={
+          fresh
+            ? undefined
+            : `${renamed ? `Renamed from “${renamed}”. ` : ""}Added text is highlighted and removed text is struck through.`
+        }
+      >
+        {fresh ? (
+          read(after)
+        ) : (
+          <DiffView
+            before={before}
+            after={after}
+            variant="prose"
+            format={markdown ? "markdown" : "text"}
+            bare
+            hideStats
+            label={`Changes to ${item.title}`}
+            className="[&>div]:px-0 [&>div]:py-0 [&>p]:px-0"
+            emptyMessage="The text doesn't change. Only its details, like collections or sources, do."
+          />
+        )}
+      </DetailSection>
+      {loaded.kind === "instruction" && item.kind === "instruction" && item.item.reason ? (
+        <DetailSection title="Why">
+          <p className="text-sm leading-6 text-fg">{item.item.reason}</p>
+        </DetailSection>
+      ) : null}
+      {loaded.kind === "skill" ? (
+        <DetailSection>
+          <InlineHelp icon>
+            Approving adds it to Skills in{" "}
+            <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
+              Capabilities
+            </InAppHelpLink>
+            , where you can change it later.
+          </InlineHelp>
+        </DetailSection>
+      ) : null}
+    </>
   );
 }

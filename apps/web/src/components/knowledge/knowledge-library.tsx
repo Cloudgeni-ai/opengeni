@@ -10,7 +10,6 @@ import {
   BrainCircuitIcon,
   Building2Icon,
   FileTextIcon,
-  FolderIcon,
   FolderTreeIcon,
   LinkIcon,
   ListIcon,
@@ -25,7 +24,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
@@ -186,11 +185,16 @@ export function ScopeTag({ scope }: { scope: KnowledgeEntryScope }) {
   );
 }
 
-/** A folder for collections and a file for files; other kinds have no tile. */
+/** A folder for collections, a file for files, and one entry tile for every other kind. */
 export function KindTile({ kind }: { kind: KnowledgeEntryKind }) {
   const Icon = knowledgeKindIcon(kind);
-  return Icon ? <LogoTile icon={<Icon />} name={KNOWLEDGE_KIND_LABEL[kind]} /> : null;
+  return <LogoTile icon={<Icon />} name={KNOWLEDGE_KIND_LABEL[kind]} />;
 }
+
+/** The date column every knowledge list ends with, before the ⋯ menu. */
+export const ENTRY_COLUMNS: RowListColumn[] = [
+  { id: "updated", label: "Updated", width: 112, align: "end", hideLabel: true },
+];
 
 export interface EntryRowActions {
   canEdit: (entry: KnowledgeEntrySummary) => boolean;
@@ -224,27 +228,32 @@ export function EntryRow({
   status?: "archived" | "rejected";
 }) {
   const editable = actions.canEdit(entry);
+  const state = status
+    ? status === "archived"
+      ? "Archived"
+      : "Rejected"
+    : entry.revision.change === "archive"
+      ? "Archive requested"
+      : null;
   return (
     <ListRow
-      leading={
-        knowledgeKindIcon(entry.revision.kind) ? <KindTile kind={entry.revision.kind} /> : null
-      }
+      leading={<KindTile kind={entry.revision.kind} />}
       title={entry.revision.title}
       titleAddon={<ScopeTag scope={entry.scope} />}
-      description={describe(entry, searching)}
+      // One quiet line: the type in words, where it came from, then the text.
       meta={[
         KNOWLEDGE_KIND_LABEL[entry.revision.kind],
-        <span key="updated">
-          updated <RelativeTime date={entry.updatedAt} inSentence />
-        </span>,
         sourceLine(entry),
-        entry.revision.change === "archive" ? "Archive requested" : null,
-        status ? (
-          <StatusBadge key="status" variant="dot" tone="neutral">
-            {status === "archived" ? "Archived" : "Rejected"}
+        describe(entry, searching),
+      ].filter((part): part is string => Boolean(part))}
+      status={
+        state ? (
+          <StatusBadge variant="dot" tone="neutral">
+            {state}
           </StatusBadge>
-        ) : null,
-      ].filter(Boolean)}
+        ) : undefined
+      }
+      cells={{ updated: <RelativeTime date={entry.updatedAt} /> }}
       onOpen={() => actions.onOpen(entry)}
       menu={
         <>
@@ -293,7 +302,7 @@ export function EntryList({
   searching,
   status,
   busy,
-  flush,
+  flush = true,
 }: {
   label: string;
   entries: KnowledgeEntrySummary[];
@@ -301,11 +310,11 @@ export function EntryList({
   searching?: boolean;
   status?: "archived" | "rejected";
   busy?: boolean;
-  /** Inside a page section: line up with the section title. */
+  /** Tiles and titles line up with the page's edge (the default). */
   flush?: boolean;
 }) {
   return (
-    <RowList label={label} busy={busy} flush={flush}>
+    <RowList label={label} busy={busy} flush={flush} columns={ENTRY_COLUMNS}>
       {entries.map((entry) => (
         <EntryRow
           key={entry.id}
@@ -394,7 +403,7 @@ export function LibraryTab({
     );
   } else if (list.loading && list.entries.length === 0) {
     body = (
-      <RowList label="Knowledge" busy>
+      <RowList label="Knowledge" columns={ENTRY_COLUMNS} flush busy>
         <ListRowSkeleton count={5} />
       </RowList>
     );
@@ -649,7 +658,7 @@ function CollectionsLayout({
   const loose = roots.entries.filter((entry) => entry.revision.kind !== "group");
   if ((groups.loading && !groups.entries.length) || (roots.loading && !roots.entries.length)) {
     return (
-      <RowList label="Knowledge" busy>
+      <RowList label="Knowledge" columns={ENTRY_COLUMNS} flush busy>
         <ListRowSkeleton count={5} />
       </RowList>
     );
@@ -741,28 +750,27 @@ function GroupHeading({
 }) {
   const label = (
     <>
-      <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
       <span className="min-w-0 truncate">{name}</span>
       {count !== null ? (
-        <span className="tabular-nums">
+        <span className="font-normal text-fg-subtle tabular-nums">
           {count}
           {more ? "+" : ""}
         </span>
       ) : null}
     </>
   );
+  const className =
+    "flex min-w-0 items-center gap-2 pb-1 text-left text-sm leading-5 font-medium text-fg";
   return onOpen ? (
     <button
       type="button"
       onClick={onOpen}
-      className="flex min-w-0 items-center gap-2 rounded-[6px] px-3 pb-1.5 text-left text-xs leading-4.5 font-medium text-fg-subtle transition-colors duration-[120ms] hover:text-fg pointer-coarse:min-h-11"
+      className={`${className} rounded-[6px] underline-offset-4 hover:underline pointer-coarse:min-h-11`}
     >
       {label}
     </button>
   ) : (
-    <div className="flex min-w-0 items-center gap-2 px-3 pb-1.5 text-xs leading-4.5 font-medium text-fg-subtle">
-      {label}
-    </div>
+    <h3 className={className}>{label}</h3>
   );
 }
 
@@ -790,11 +798,11 @@ function CollectionSection({
         onOpen={() => actions.onOpen(group)}
       />
       {members.loading && !rows.length ? (
-        <RowList label={group.revision.title} busy>
+        <RowList label={group.revision.title} columns={ENTRY_COLUMNS} flush busy>
           <ListRowSkeleton count={1} />
         </RowList>
       ) : members.error && !rows.length ? (
-        <p role="alert" className="border-t border-border px-3 py-3 text-sm text-danger">
+        <p role="alert" className="py-3 text-sm text-danger">
           {errorText(members.error)}{" "}
           <button type="button" className="underline" onClick={members.reload}>
             Try again
@@ -803,9 +811,7 @@ function CollectionSection({
       ) : rows.length ? (
         <EntryList label={group.revision.title} entries={rows} actions={actions} />
       ) : (
-        <p className="border-t border-border px-3 py-3 text-sm text-fg-muted">
-          Empty. Add entries to it from their Edit page.
-        </p>
+        <p className="py-3 text-sm text-fg-muted">Empty. Add entries to it from their Edit page.</p>
       )}
       {members.subCursor || members.cursor ? (
         <div className="mt-3 flex flex-wrap gap-2">
