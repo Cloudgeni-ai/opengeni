@@ -216,3 +216,28 @@ describe("managed auth OAuth transaction state", () => {
     expect(isolated.request.headers.has("x-forwarded-user")).toBe(false);
   });
 });
+
+describe("managed user allowlist", () => {
+  for (const provider of ["credential", "google", "github"]) {
+    test(`rejects unlisted ${provider} signup and admits listed signup`, () => {
+      const settings = {
+        environment: "production" as const,
+        allowedUserEmails: ["staff@example.com"],
+      };
+      expect(
+        managedAuthUserCreateAdmission(
+          settings,
+          { email: "outsider@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBe(false);
+      expect(
+        managedAuthUserCreateAdmission(
+          settings,
+          { email: "STAFF@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBeUndefined();
+    });
+  }
+});

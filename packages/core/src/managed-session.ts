@@ -1,3 +1,4 @@
+import { managedUserEmailAllowed } from "@opengeni/config";
 import type { Context } from "hono";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { Database } from "@opengeni/db";
@@ -68,7 +69,37 @@ const managedActorAdmissionByRequest = new WeakMap<Request, ManagedAuthActorAdmi
  * Programmatic callers must explicitly request and forward the returned cookie
  * headers; the HTTP handler does this automatically, but direct API calls do not.
  */
-export async function getManagedSession(
+const managedUserAllowlists = new WeakMap<ManagedAuth, readonly string[]>();
+
+/** Bind admission to this auth instance, including all session-set modes. */
+export function configureManagedUserAdmission(
+  auth: ManagedAuth,
+  emails: readonly string[] | undefined,
+): void {
+  if (emails === undefined) managedUserAllowlists.delete(auth);
+  else managedUserAllowlists.set(auth, [...emails]);
+}
+
+export async function getManagedSession(...args: Parameters<typeof resolveManagedSession>) {
+  const session = await resolveManagedSession(...args);
+  assertManagedUserAdmission(args[1], session?.user);
+  return session;
+}
+
+export function assertManagedUserAdmission(
+  auth: ManagedAuth,
+  user: { email: string; emailVerified: boolean } | null | undefined,
+): void {
+  const emails = managedUserAllowlists.get(auth);
+  if (
+    user &&
+    emails !== undefined &&
+    (!user.emailVerified || !managedUserEmailAllowed(emails, user.email))
+  )
+    throw new HTTPException(403, { message: "Account is not permitted on this deployment" });
+}
+
+async function resolveManagedSession(
   c: Context,
   auth: ManagedAuth,
   options?: {
