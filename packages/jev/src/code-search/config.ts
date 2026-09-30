@@ -109,6 +109,8 @@ export interface CodeSearchConfig {
     triage: boolean;
     /** A file the identifiers lead to with at most this many lines is tiled whole. */
     tileNewMaxLines: number;
+    /** New symbol-hit windows checked per already-selected file. */
+    windowsPerFile: number;
   };
   change: {
     /** "Must change together": judge the declarations of the most relevant files against the question. */
@@ -268,6 +270,7 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     maxNewFilesSelected: 6,
     triage: false,
     tileNewMaxLines: 300,
+    windowsPerFile: 3,
   },
   change: {
     enabled: true,

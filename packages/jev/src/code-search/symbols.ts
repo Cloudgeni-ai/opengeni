@@ -39,6 +39,9 @@ const KEYWORDS = new Set(
   ).split(/\s+/),
 );
 
+/** Lines longer than this are skipped by symbol extraction. */
+export const MAX_SYMBOL_LINE = 1500;
+
 const COMMENT = /^\s*(\/\/|\*|\/\*|#(?!\[)|--)/;
 
 /** Declared names on one line (declarations, methods, object-property functions). */
@@ -64,7 +67,8 @@ export function extractSymbols(lines: string[]): SymbolOccurrence[] {
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (COMMENT.test(line)) continue;
+    // generated or minified lines carry no useful declarations, and some patterns below are superlinear
+    if (line.length > MAX_SYMBOL_LINE || COMMENT.test(line)) continue;
     // import { a, b as c } from "m" (possibly over several lines)
     if (
       /^\s*(?:import\b[^'"(]*|export\s+(?:type\s+)?)\{[^}]*$/.test(line) &&

@@ -666,6 +666,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       selected: selected.map((i) => cands[i]!.path),
     });
   })();
+  // observed here so an abort before the Promise.all below never leaves an unhandled rejection
+  symbolsP.catch(() => {});
 
   // ---- 3. wave 2: windows + verification
   ts = performance.now();
@@ -950,34 +952,47 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     const symHits = [...c.hitLines.values()].filter((h) => h.kws.some((k) => kws[k]?.symbol));
     if (!symHits.length) continue;
     // a small file the identifiers lead to is tiled whole, like the small relevant files of wave 2
-    const ws =
-      isNew && lines.length <= cfg.symbols.tileNewMaxLines
-        ? tileFile(
-            lines,
-            symHits.map((h) => h.line),
-            langOf(c.path),
-            cfg,
-            renderFor(c.path),
-          ).slice(0, cfg.wave2.tileMaxWindows)
-        : rankFileWindows(
-            lines,
-            isNew ? [...c.hitLines.values()] : symHits,
-            kws,
-            langOf(c.path),
-            cfg,
-            renderFor(c.path),
-          )
-            .filter((x) => !overlapsEvidenceEarly(c.path, x))
-            .slice(0, isNew ? cfg.wave2.windowsPerFile : 3);
+    const tile = isNew && lines.length <= cfg.symbols.tileNewMaxLines;
+    let all: Window[];
+    if (tile) {
+      all = tileFile(
+        lines,
+        symHits.map((h) => h.line),
+        langOf(c.path),
+        cfg,
+        renderFor(c.path),
+      );
+      for (const t of all) t.score = scoreWindow(lines, t, kws, cfg.recall.hitCountWeight);
+      all.sort((x, y) => y.score - x.score || x.start - y.start);
+    } else {
+      all = rankFileWindows(
+        lines,
+        isNew ? [...c.hitLines.values()] : symHits,
+        kws,
+        langOf(c.path),
+        cfg,
+        renderFor(c.path),
+      ).filter((x) => !overlapsEvidenceEarly(c.path, x));
+    }
+    const limit = tile
+      ? cfg.wave2.tileMaxWindows
+      : isNew
+        ? cfg.wave2.windowsPerFile
+        : cfg.symbols.windowsPerFile;
+    const ws = all.slice(0, limit);
+    if (all.length > ws.length)
+      cuts.push(
+        `symbol regions in ${c.path} (limit ${limit}): not checked ${rangesText(all.slice(limit).map((x) => [x.start, x.end]))}`,
+      );
     if (isNew && lines.length <= cfg.symbols.tileNewMaxLines) symbolTiled.push(c.path);
     for (const x of ws.sort((a, b) => a.start - b.start)) makePassage(c.path, x, 0);
   }
-  const symbolItems = passageItems.slice(symbolItemsStart);
+  // change-together passages made above are verified in the same round as the symbol windows
+  const symbolItems = [...changeNew, ...passageItems.slice(symbolItemsStart)];
   emit("symbol_windows", {
     tiled: symbolTiled,
     passages: symbolItems.map((p) => ({ id: p.id, path: p.path, start: p.start, end: p.end })),
   });
-  if (changeNew.length) applyScores(await judge.scorePassages(changeNew, ctx, "change_defs"));
   mark("wave2", ts);
   emit("change", {
     judged: changeDecls.map((d) => ({
@@ -1260,7 +1275,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   ts = performance.now();
   const cpt = cfg.pack.charsPerToken;
   const totalChars = Math.floor(budgetTokens * cpt);
-  const headerReserve = 520 + subQuestions.reduce((s, q) => s + q.length + 8, 0);
+  const headerReserve = 700 + subQuestions.reduce((s, q) => s + q.length + 8, 0);
   const footerReserve = Math.floor(totalChars * cfg.pack.footerShare);
   const packOpts = (fillMin?: number) => ({
     subQuestions,
@@ -1315,12 +1330,32 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       .filter((x) => x.p >= Math.min(thr.T3, 0.35))
       .sort((a, b) => b.p - a.p)
       .slice(0, cfg.wave3.maxLeadsFollowed);
-    const added = await followLeads(nextLeads, defsForLeads);
+    // the adaptive round only improves a complete pack: a Jev failure here keeps the first pack and rating
+    let added = 0;
+    try {
+      if (nextLeads.length) added = await followLeads(nextLeads, defsForLeads);
+    } catch (error) {
+      if (
+        signal.aborted ||
+        !(error instanceof JevUnavailableError || error instanceof JevRequestError)
+      )
+        throw error;
+      adaptive.push(`follow-up round failed: ${error.message.slice(0, 120)}`);
+    }
     adaptive.push(
       `rating ${r2(firstRating)}: followed ${nextLeads.length} more leads (${added} passages)`,
     );
+    const firstStatus = status;
     body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
-    await check(body);
+    if (added > 0) {
+      await check(body);
+      if (statusCheckError) {
+        // keep the valid first rating; the failed recheck is reported, not propagated to the breaker
+        status = { ...firstStatus };
+        statusCheckError = undefined;
+        refilled = true;
+      }
+    } else refilled = true;
   } else if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.fillBelowRating) {
     const before = body.included.length;
     body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
@@ -1391,6 +1426,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     }))
     .sort((a, b) => b.score - a.score);
   ts = performance.now();
+  // keyword notes only feed the footer: a failure there never fails the search
   const keywords = await keywordNotes({
     session,
     keywords: rec.keywords,
@@ -1404,6 +1440,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     ],
     cfg,
     excludeArgs: exArgs,
+  }).catch((error: unknown) => {
+    if (signal.aborted) throw error;
+    return [];
   });
   mark("vocab", ts);
   const widenedNote = prefixNote(rec);

@@ -98,7 +98,8 @@ export async function keywordNotes(o: KeywordNotesInput): Promise<KeywordNote[]>
       "-e",
       pattern,
       "--",
-      ...o.suggestFrom,
+      // workspace-relative paths; one starting with "-" would read as a flag (and the allowlists refuse it)
+      ...o.suggestFrom.map((p) => (p.startsWith("-") ? `./${p}` : p)),
     ],
     { allowFailure: true },
   );
