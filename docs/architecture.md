@@ -303,6 +303,12 @@ them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
 port; it cannot grant access that OpenGeni denied.
 
+API-key service assertions freeze service-only turn provenance separately from
+the key's unchanged authorization. They never coexist with an external user
+assertion or borrow that user's personal resources. Pure scheduled occurrences
+use their accepted task's service provenance; generated session creation keeps
+the scheduler attribution used by recovery fences.
+
 The managed personal-workspace owner receives a closed permission projection
 that includes `capabilities:manage`, so they can configure their own Plugins,
 Integrations, and Codex subscription without receiving the `workspace:admin`
@@ -638,7 +644,11 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
    execution and authority snapshots, then invokes `@opengeni/runtime`.
 7. Runtime builds the model/tool environment and lazily establishes the
    selected provisioned sandbox or Connected Machine when an operation needs
-   compute.
+   compute. Managed repository resources without an explicit OpenGeni connection
+   materialize through the existing clone hook after run credentials are
+   provisioned; the renewable provider store supplies exact-host Git credentials.
+   Explicit connection-bound clones retain platform credentials. Connected
+   Machines skip both platform credential delivery and repository cloning.
 8. Worker events are appended durably before best-effort live publication.
    The API's SSE stream replays and gap-fills from Postgres.
 
