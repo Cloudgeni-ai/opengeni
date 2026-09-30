@@ -252,14 +252,18 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
     data && selected
       ? organizationUsageRows({
           shared: [...data.workspaces, ...pages.flatMap((page) => page.workspaces)],
-          personal: data.personalWorkspaces,
+          // An older API replica omits the Personal fields; the SDK does not
+          // apply the contract defaults, so treat them as absent here.
+          personal: data.personalWorkspaces ?? [],
           selected,
           members: directory?.members.value ?? [],
           youMembershipId: directory?.you?.id ?? null,
           accessContext,
         })
       : [];
-  const unlistedPersonal = data ? data.personalWorkspaceCount - data.personalWorkspaces.length : 0;
+  const unlistedPersonal = data
+    ? Math.max(0, (data.personalWorkspaceCount ?? 0) - (data.personalWorkspaces?.length ?? 0))
+    : 0;
   const openInsights = (workspaceId: string) => {
     const back = currentPageReturnTo("Billing & usage");
     void navigate({
