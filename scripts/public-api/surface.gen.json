@@ -5047,6 +5047,19 @@
     },
     {
       "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/agent",
+      "sdk": [
+        "OpenGeniClient.updateSessionAgent"
+      ],
+      "request": [
+        "UpdateSessionAgentRequest"
+      ],
+      "response": [
+        "Session"
+      ]
+    },
+    {
+      "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/archive",
       "sdk": [
         "OpenGeniClient.updateSessionArchive"
@@ -6825,6 +6838,7 @@
       "sandbox.operation.completed",
       "sandbox.operation.failed",
       "sandbox.operation.started",
+      "session.agent.updated",
       "session.command.backgrounded",
       "session.command.finished",
       "session.context.cleared",
@@ -7096,6 +7110,87 @@
         "$.role": "string?"
       }
     },
+    "AgentCapabilities": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\",\"2\"]",
+        "$|0": "const=[\"\\\"all\\\"\"]",
+        "$|1": "const=[\"\\\"none\\\"\"]",
+        "$|2": "object",
+        "$|2.artifacts": "boolean?",
+        "$|2.browser": "boolean?",
+        "$|2.from": "ref(AgentCapabilityStartingPoint)!",
+        "$|2.goals": "boolean?",
+        "$|2.humanInput": "boolean?",
+        "$|2.knowledge": "boolean?",
+        "$|2.media": "boolean?",
+        "$|2.schedules": "boolean?",
+        "$|2.skills": "ref(AgentSkillsCapability)?",
+        "$|2.subagents": "boolean?",
+        "$|2.webSearch": "boolean?",
+        "$|2.workspaceAdmin": "boolean?",
+        "$|2.workspaceConnectors": "boolean?",
+        "$|2.workspaceFiles": "boolean?"
+      }
+    },
+    "AgentCapabilityId": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"schedules\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
+      }
+    },
+    "AgentCapabilityStartingPoint": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"all\\\"\",\"\\\"none\\\"\"]"
+      }
+    },
+    "AgentConfigRequest": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(AgentCapabilities)?",
+        "$.identity": "string? null",
+        "$.instructions": "string?",
+        "$.renderer": "ref(AgentRenderer)?"
+      }
+    },
+    "AgentEffectiveTools": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(ResolvedAgentCapabilities)!",
+        "$.mcpServers": "array!",
+        "$.mcpServers[]": "object",
+        "$.mcpServers[].capability": "union!=[\"0\",\"1\",\"2\"]",
+        "$.mcpServers[].capability|0": "ref(AgentCapabilityId)",
+        "$.mcpServers[].capability|1": "const=[\"\\\"runtime\\\"\"]",
+        "$.mcpServers[].capability|2": "const=[\"\\\"product\\\"\"]",
+        "$.mcpServers[].id": "string!",
+        "$.mcpServers[].toolsKnown": "boolean!",
+        "$.tools": "array!",
+        "$.tools[]": "object",
+        "$.tools[].capability": "union!=[\"0\",\"1\"]",
+        "$.tools[].capability|0": "ref(AgentCapabilityId)",
+        "$.tools[].capability|1": "const=[\"\\\"runtime\\\"\"]",
+        "$.tools[].name": "string!",
+        "$.tools[].source": "enum!=[\"\\\"first_party\\\"\",\"\\\"hosted\\\"\",\"\\\"runtime\\\"\"]",
+        "$.unavailable": "array!",
+        "$.unavailable[]": "ref(AgentCapabilityId)"
+      }
+    },
     "AgentInstructionReceipt": {
       "io": [
         "output"
@@ -7204,6 +7299,27 @@
         "$.ownerKey": "string!",
         "$.settings": "ref(AgentLearningOverrides)!",
         "$.version": "integer!"
+      }
+    },
+    "AgentRenderer": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"markdown\\\"\",\"\\\"opengeni\\\"\"]"
+      }
+    },
+    "AgentSkillsCapability": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\",\"2\"]",
+        "$|0": "const=[\"\\\"read\\\"\"]",
+        "$|1": "const=[\"\\\"manage\\\"\"]",
+        "$|2": "const=[\"false\"]"
       }
     },
     "AgentTopologyPageResponse": {
@@ -7356,7 +7472,7 @@
         "$.providerDomain": "string!",
         "$.revisionId": "string!",
         "$.serverId": "string!",
-        "$.source": "ref(IntegrationSource)!",
+        "$.source": "ref(IntegrationSourceProjection)!",
         "$.sourceUrl": "string! null",
         "$.tools": "array!",
         "$.tools[]": "ref(ApiIntegrationToolPreview)",
@@ -7848,6 +7964,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.firstPartyMcpPermissions": "array?",
@@ -9044,6 +9161,14 @@
       ],
       "shape": {
         "$": "object",
+        "$.agentConfig": "object!",
+        "$.agentConfig.capabilities": "array!",
+        "$.agentConfig.capabilities[]": "object",
+        "$.agentConfig.capabilities[].available": "boolean!",
+        "$.agentConfig.capabilities[].id": "ref(AgentCapabilityId)!",
+        "$.agentConfig.capabilities[].reason": "string?",
+        "$.agentConfig.defaultForNewSessions": "boolean!",
+        "$.agentConfig.enabled": "boolean!",
         "$.allowedModels": "array!",
         "$.allowedModels[]": "string",
         "$.allowedReasoningEfforts": "array!",
@@ -10696,6 +10821,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.agentAccess": "enum?=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
         "$.agentLearning": "ref(AgentLearningOverrides)?",
         "$.bundledSkillIds": "array?",
@@ -10770,6 +10896,7 @@
         "$.activeTurnId": "string! null",
         "$.activelyWorking": "boolean!",
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
+        "$.agent": "ref(ResolvedAgentConfig)! null",
         "$.agentAccess": "enum!=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
         "$.archiveVersion": "integer!",
         "$.archived": "boolean!",
@@ -10798,6 +10925,7 @@
         "$.effectiveControl": "ref(EffectiveSessionControl)!",
         "$.effectiveMaxNestedAgentDepth": "integer!",
         "$.effectiveToolPolicy": "ref(SessionEffectiveToolPolicy)?",
+        "$.effectiveTools": "ref(AgentEffectiveTools)? null",
         "$.environmentId": "string! null",
         "$.failureDiagnostics": "object? null",
         "$.failureDiagnostics.eventId": "string!",
@@ -12993,6 +13121,30 @@
         "$.metric": "string!"
       }
     },
+    "InlineOpenApiDocumentSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.baseUrl": "string?",
+        "$.document": "string!",
+        "$.kind": "const!=[\"\\\"openapi_document\\\"\"]",
+        "$.sourceKey": "string!"
+      }
+    },
+    "InlineOpenApiDocumentSourceEcho": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.baseUrl": "string?",
+        "$.documentSha256": "string!",
+        "$.kind": "const!=[\"\\\"openapi_document\\\"\"]",
+        "$.sourceKey": "string!"
+      }
+    },
     "InsightsBillingPath": {
       "io": [
         "output"
@@ -13226,6 +13378,8 @@
         "$": "object",
         "$.allowedTools": "array?",
         "$.allowedTools[]": "string",
+        "$.autoApprovedTools": "array?",
+        "$.autoApprovedTools[]": "string",
         "$.connectionId": "string?",
         "$.displayName": "string?",
         "$.expectedContentSha256": "string!",
@@ -13233,7 +13387,7 @@
         "$.expectedRevisionId": "string!",
         "$.instanceKey": "string?",
         "$.ownership": "ref(ConnectionOwnership)?",
-        "$.source": "ref(IntegrationSource)!"
+        "$.source": "ref(IntegrationSourceInput)!"
       }
     },
     "InstallLibrarySkillRequest": {
@@ -13521,7 +13675,6 @@
     },
     "IntegrationSource": {
       "io": [
-        "input",
         "output"
       ],
       "shape": {
@@ -13541,6 +13694,54 @@
         "$|kind=auto.baseUrl": "string?",
         "$|kind=auto.kind": "const!=[\"\\\"auto\\\"\"]",
         "$|kind=auto.url": "string!"
+      }
+    },
+    "IntegrationSourceInput": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"kind=auto\",\"kind=definition\",\"kind=graphql\",\"kind=openapi\",\"kind=openapi_document\"]",
+        "$|kind=definition": "object",
+        "$|kind=definition.definitionId": "string!",
+        "$|kind=definition.kind": "const!=[\"\\\"definition\\\"\"]",
+        "$|kind=openapi": "object",
+        "$|kind=openapi.baseUrl": "string?",
+        "$|kind=openapi.kind": "const!=[\"\\\"openapi\\\"\"]",
+        "$|kind=openapi.url": "string!",
+        "$|kind=graphql": "object",
+        "$|kind=graphql.endpoint": "string!",
+        "$|kind=graphql.kind": "const!=[\"\\\"graphql\\\"\"]",
+        "$|kind=graphql.name": "string?",
+        "$|kind=auto": "object",
+        "$|kind=auto.baseUrl": "string?",
+        "$|kind=auto.kind": "const!=[\"\\\"auto\\\"\"]",
+        "$|kind=auto.url": "string!",
+        "$|kind=openapi_document": "ref(InlineOpenApiDocumentSource)"
+      }
+    },
+    "IntegrationSourceProjection": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"kind=auto\",\"kind=definition\",\"kind=graphql\",\"kind=openapi\",\"kind=openapi_document\"]",
+        "$|kind=definition": "object",
+        "$|kind=definition.definitionId": "string!",
+        "$|kind=definition.kind": "const!=[\"\\\"definition\\\"\"]",
+        "$|kind=openapi": "object",
+        "$|kind=openapi.baseUrl": "string?",
+        "$|kind=openapi.kind": "const!=[\"\\\"openapi\\\"\"]",
+        "$|kind=openapi.url": "string!",
+        "$|kind=graphql": "object",
+        "$|kind=graphql.endpoint": "string!",
+        "$|kind=graphql.kind": "const!=[\"\\\"graphql\\\"\"]",
+        "$|kind=graphql.name": "string?",
+        "$|kind=auto": "object",
+        "$|kind=auto.baseUrl": "string?",
+        "$|kind=auto.kind": "const!=[\"\\\"auto\\\"\"]",
+        "$|kind=auto.url": "string!",
+        "$|kind=openapi_document": "ref(InlineOpenApiDocumentSourceEcho)"
       }
     },
     "InteractionAssociation": {
@@ -15295,6 +15496,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.agentLearning": "ref(AgentLearningOverrides)?",
         "$.excludedMcpServerIds": "array?",
         "$.excludedMcpServerIds[]": "string",
@@ -16604,7 +16806,7 @@
         "$": "object",
         "$.connectionId": "string?",
         "$.ownership": "ref(ConnectionOwnership)?",
-        "$.source": "ref(IntegrationSource)!"
+        "$.source": "ref(IntegrationSourceInput)!"
       }
     },
     "PreviewOrganizationUserSetupRequest": {
@@ -17042,6 +17244,51 @@
         "$": "object",
         "$.variableSets": "array!",
         "$.variableSets[]": "ref(VariableSetAttachmentMetadata)"
+      }
+    },
+    "ResolvedAgentCapabilities": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.artifacts": "boolean!",
+        "$.browser": "boolean!",
+        "$.goals": "boolean!",
+        "$.humanInput": "boolean!",
+        "$.knowledge": "boolean!",
+        "$.media": "boolean!",
+        "$.schedules": "boolean!",
+        "$.skills": "ref(AgentSkillsCapability)!",
+        "$.subagents": "boolean!",
+        "$.webSearch": "boolean!",
+        "$.workspaceAdmin": "boolean!",
+        "$.workspaceConnectors": "boolean!",
+        "$.workspaceFiles": "boolean!"
+      }
+    },
+    "ResolvedAgentConfig": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(ResolvedAgentCapabilities)!",
+        "$.from": "ref(AgentCapabilityStartingPoint)!",
+        "$.identity": "string! null",
+        "$.renderer": "ref(AgentRenderer)!",
+        "$.source": "ref(ResolvedAgentConfigSource)!",
+        "$.unavailable": "array!",
+        "$.unavailable[]": "ref(AgentCapabilityId)",
+        "$.version": "const!=[\"1\"]"
+      }
+    },
+    "ResolvedAgentConfigSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"deployment_default\\\"\",\"\\\"inherited\\\"\",\"\\\"legacy_conversion\\\"\",\"\\\"request\\\"\",\"\\\"workspace_default\\\"\"]"
       }
     },
     "ResourceRef": {
@@ -17689,6 +17936,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
         "$.connectionAccounts": "array?",
@@ -17722,6 +17970,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
@@ -17935,6 +18184,7 @@
         "$.activeTurnId": "string! null",
         "$.activelyWorking": "boolean!",
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
+        "$.agent": "ref(ResolvedAgentConfig)! null",
         "$.agentAccess": "enum!=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
         "$.archiveVersion": "integer!",
         "$.archived": "boolean!",
@@ -17963,6 +18213,7 @@
         "$.effectiveControl": "ref(EffectiveSessionControl)!",
         "$.effectiveMaxNestedAgentDepth": "integer!",
         "$.effectiveToolPolicy": "ref(SessionEffectiveToolPolicy)?",
+        "$.effectiveTools": "ref(AgentEffectiveTools)? null",
         "$.environmentId": "string! null",
         "$.failureDiagnostics": "object? null",
         "$.failureDiagnostics.eventId": "string!",
@@ -18289,7 +18540,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -20598,6 +20849,16 @@
         "$.variableSetId": "string? null"
       }
     },
+    "UpdateSessionAgentRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.agent": "ref(AgentConfigRequest)!",
+        "$.expectedVersion": "integer!"
+      }
+    },
     "UpdateSessionArchiveRequest": {
       "io": [
         "input"
@@ -20840,6 +21101,7 @@
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
+        "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)?",
         "$.sessionToolDefaults": "ref(WorkspaceSessionToolDefaultsPatch)?",
         "$.slackOrchestrationNotices": "ref(WorkspaceSlackOrchestrationNoticeSettings)?",
@@ -21417,6 +21679,17 @@
         "$.settings{}": "unknown",
         "$.slug": "string! null",
         "$.updatedAt": "string!"
+      }
+    },
+    "WorkspaceAgentDefaults": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(AgentCapabilities)?",
+        "$.identity": "string? null",
+        "$.renderer": "ref(AgentRenderer)?"
       }
     },
     "WorkspaceArtifact": {
@@ -22706,6 +22979,12 @@
       "ActivateWorkspaceLearningPolicyRevisionRequest": "type",
       "AddDocumentRequest": "type",
       "AddWorkspaceMemberRequest": "type",
+      "AgentCapabilities": "type",
+      "AgentCapabilityId": "type",
+      "AgentCapabilityToggles": "type",
+      "AgentConfigErrorCode": "type",
+      "AgentConfigRequest": "type",
+      "AgentEffectiveTools": "type",
       "AgentInstructionReceipt": "type",
       "AgentInstructionReviewItem": "type",
       "AgentInstructionReviewListResponse": "type",
@@ -22719,6 +22998,8 @@
       "AgentLearningOverrides": "type",
       "AgentLearningSettingsRecord": "type",
       "AgentMessageCompletedPayload": "type",
+      "AgentRenderer": "type",
+      "AgentSkillsCapability": "type",
       "AgentTextDeltaPayload": "type",
       "AgentToolCallCreatedPayload": "type",
       "AgentToolCallOutputPayload": "type",
@@ -22732,6 +23013,7 @@
       "ApiIntegrationToolPreview": "type",
       "ApiIntegrationUninstallPreview": "type",
       "ApiKey": "type",
+      "ApiKeyConnectionCredential": "type",
       "applyUrlRotation": "value",
       "ApplyWorkspaceSkillRevisionRequest": "type",
       "ApproveSlackUserLinkAccessRequest": "type",
@@ -22859,6 +23141,7 @@
       "CapabilityUnavailableReason": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
+      "ClientAgentConfig": "type",
       "ClientAuthConfig": "type",
       "ClientConfig": "type",
       "ClientModel": "type",
@@ -22970,6 +23253,7 @@
       "ComputerUseCapability": "type",
       "ConfigureOrganizationRecoveryPolicyRequest": "type",
       "ConfirmExternalIdentityLinkRequest": "type",
+      "ConnectionCredentialPlacement": "type",
       "ConnectionKind": "type",
       "ConnectionMetadata": "type",
       "ConnectionOwnership": "type",
@@ -23228,6 +23512,7 @@
       "HumanInputQuestionKind": "type",
       "HumanInputResponse": "type",
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
+      "InlineOpenApiDocumentSource": "type",
       "InsightsBillingPath": "type",
       "InsightsDepthBucket": "type",
       "InsightsFloorSession": "type",
@@ -23261,6 +23546,8 @@
       "IntegrationFacetStatus": "type",
       "IntegrationInstanceFacetsResponse": "type",
       "IntegrationSource": "type",
+      "IntegrationSourceInput": "type",
+      "IntegrationSourceProjection": "type",
       "INTERACTION_PROTOCOL_VERSION": "value",
       "InteractionAssociation": "type",
       "InteractionControlFailure": "type",
@@ -23628,6 +23915,8 @@
       "ReplacePersonalGitHubRepositorySelectionsRequest": "type",
       "ReportAuthRunRequest": "type",
       "RepositoryResourceRef": "type",
+      "ResolvedAgentCapabilities": "type",
+      "ResolvedAgentConfig": "type",
       "ResolveInteractionInterventionRequest": "type",
       "ResolveVariableSetAttachmentsRequest": "type",
       "ResolveVariableSetAttachmentsResponse": "type",
@@ -23707,6 +23996,7 @@
       "ServiceTurnInitiatorContext": "type",
       "Session": "type",
       "SESSION_EVENT_TYPES": "value",
+      "SessionApprovalRequest": "type",
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
@@ -23942,6 +24232,7 @@
       "UpdatePrReviewRepositoryBindingRequest": "type",
       "UpdateRigRequest": "type",
       "UpdateScheduledTaskRequest": "type",
+      "UpdateSessionAgentRequest": "type",
       "UpdateSessionArchiveRequest": "type",
       "UpdateSessionAttentionRequest": "type",
       "UpdateSessionChannelRequest": "type",
@@ -24005,6 +24296,7 @@
       "Workspace": "type",
       "WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS": "value",
       "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
+      "WorkspaceAgentDefaults": "type",
       "WorkspaceArtifact": "type",
       "WorkspaceArtifactContentResponse": "type",
       "WorkspaceArtifactDetailResponse": "type",
@@ -27030,6 +27322,7 @@
       "updateRig",
       "updateScheduledTask",
       "updateSession",
+      "updateSessionAgent",
       "updateSessionArchive",
       "updateSessionAttention",
       "updateSessionChannel",
