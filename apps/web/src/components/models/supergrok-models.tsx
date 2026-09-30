@@ -315,7 +315,7 @@ function SuperGrokAccountDetail({
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
+                    variant="default"
                     onClick={places.openConnect}
                     className="rounded-[10px] pointer-coarse:h-11"
                   >
@@ -571,7 +571,7 @@ export function SuperGrokConnectPage({
           />
         ) : (
           <p className="text-sm text-fg-muted">
-            xAI opens in a new tab and asks for a code, which shows here. OpenGeni never sees your
+            xAI opens in a new tab and asks for a code, which shows here. Opengeni never sees your
             password.
           </p>
         )}

@@ -19,7 +19,7 @@ import {
   withSessionActivityRlsContext,
 } from "../src";
 
-const repair = "0547_usage_allowances.sql";
+const repair = "0549_usage_allowances.sql";
 const directory = fileURLToPath(new URL("../drizzle/", import.meta.url));
 
 async function expectSqlState(action: () => Promise<unknown>, state: string) {
@@ -35,7 +35,7 @@ async function expectSqlState(action: () => Promise<unknown>, state: string) {
   ).toBe(state);
 }
 
-test("0547 attribution lifecycle does not rewrite source visibility or read private source content", async () => {
+test("0549 attribution lifecycle does not rewrite source visibility or read private source content", async () => {
   const source = await readFile(new URL(`../drizzle/${repair}`, import.meta.url), "utf8");
   expect(source).not.toMatch(/(?:ALTER|DROP|CREATE) POLICY session_visibility/iu);
   expect(source).not.toMatch(
@@ -59,11 +59,11 @@ test("0547 attribution lifecycle does not rewrite source visibility or read priv
 });
 
 test("real non-bypass owner migrates receipts while all original source policies remain byte-identical", async () => {
-  const owned = await acquireOwnerMigratedTestDatabase("0547-attribution-visibility");
+  const owned = await acquireOwnerMigratedTestDatabase("0549-attribution-visibility");
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
-      throw new Error("0547 owner-migrated PostgreSQL fixture unavailable");
-    console.warn("SKIPPED 0547 owner-migrated attribution/visibility: PostgreSQL unavailable");
+      throw new Error("0549 owner-migrated PostgreSQL fixture unavailable");
+    console.warn("SKIPPED 0549 owner-migrated attribution/visibility: PostgreSQL unavailable");
     return;
   }
   const owner = postgres(owned.ownerUrl, { max: 1 });

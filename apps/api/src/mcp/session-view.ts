@@ -611,6 +611,8 @@ export function boundSessionDetailMcp(
     tools: tools.value,
     metadata: metadata.value,
     model: modelStringProjection(session.model, 512).value,
+    reasoningEffort: session.reasoningEffort,
+    latencyMode: session.latencyMode,
     sandboxBackend: modelStringProjection(session.sandboxBackend, 128).value,
     sandboxOs: session.sandboxOs,
     sandboxGroupId: session.sandboxGroupId,

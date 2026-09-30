@@ -301,6 +301,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-model-settings.ts#setSessionModelInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
     inserts: 1,
     contract: "canonical",
@@ -464,6 +468,8 @@ const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
 
 const DEV_SEED_PATH = "scripts/dev-seed-design-preview.ts";
 const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
+// Links finished preview sessions to their seeded schedule runs (metadata only).
+const DEV_SEED_SCHEDULE_RUN_WRITER = `${DEV_SEED_PATH}#seedScheduleRuns`;
 
 /** The DEV-only seed may only write to this worktree's loopback dev stack. */
 function expectDevSeedGuards(source: string): void {
@@ -981,11 +987,13 @@ describe("session_events writer inventory", () => {
           expect(callers).toEqual(["packages/db/src/migrate.ts"]);
           return;
         }
-        if (key === DEV_SEED_CONVERSATION_WRITER) {
+        if (key === DEV_SEED_CONVERSATION_WRITER || key === DEV_SEED_SCHEDULE_RUN_WRITER) {
           // The DEV-only design-preview seed writes fixture history into the
           // local dev stack through the migrations role, outside the runtime's
-          // Drizzle handle. It replays the full open -> finalized gate itself.
-          // Pin its local-only guards; do not exempt any other writer.
+          // Drizzle handle. seedConversations replays the full open -> finalized
+          // gate itself; seedScheduleRuns only tags those finished sessions'
+          // metadata with their seeded schedule run. Pin the local-only guards;
+          // do not exempt any other writer.
           expectDevSeedGuards(source);
           return;
         }

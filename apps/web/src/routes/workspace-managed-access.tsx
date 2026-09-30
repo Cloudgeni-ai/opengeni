@@ -14,6 +14,7 @@ import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import type { RoleOption } from "@/components/ui/role-select";
 import { Section } from "@/components/ui/section";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import type { OrganizationMember, OrganizationWorkspaceAccessMember } from "@/types";
 
 import {
@@ -104,7 +105,7 @@ export function OrganizationManagedWorkspaceAccess({
       }
     } catch (caught) {
       if (added.length > 0) refresh();
-      const reason = caught instanceof Error ? caught.message : String(caught);
+      const reason = userErrorText(caught);
       throw new Error(
         added.length > 0
           ? `Added ${added.join(", ")}, but couldn't add the rest. ${reason}`
@@ -138,7 +139,7 @@ export function OrganizationManagedWorkspaceAccess({
       refresh();
     } catch (error) {
       toast.error(`Couldn't change ${managedWorkspaceMemberLabel(member)}'s role`, {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setSavingIds((ids) => ids.filter((id) => id !== member.membershipId));
@@ -159,9 +160,7 @@ export function OrganizationManagedWorkspaceAccess({
       );
     } catch (error) {
       throw new Error(
-        `Couldn't remove ${managedWorkspaceMemberLabel(removing)}. ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `Couldn't remove ${managedWorkspaceMemberLabel(removing)}. ${userErrorText(error)}`,
         { cause: error },
       );
     }

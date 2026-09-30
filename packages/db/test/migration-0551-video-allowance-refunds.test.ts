@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
-test("0548 debit recording patches compose with current 0547 declaration and settlement boundaries", async () => {
+test("0550 debit recording patches compose with current 0549 declaration and settlement boundaries", async () => {
   const initial = await readFile(
-    new URL("../drizzle/0547_usage_allowances.sql", import.meta.url),
+    new URL("../drizzle/0549_usage_allowances.sql", import.meta.url),
     "utf8",
   );
   const recording = await readFile(
-    new URL("../drizzle/0548_non_model_debit_attribution.sql", import.meta.url),
+    new URL("../drizzle/0550_non_model_debit_attribution.sql", import.meta.url),
     "utf8",
   );
   const functionBody = initial
@@ -29,7 +29,7 @@ test("0548 debit recording patches compose with current 0547 declaration and set
 
 test("video refund correction binds original ledger, keeps exact allocations and opens owner SELECT", async () => {
   const source = await readFile(
-    new URL("../drizzle/0549_video_allowance_refunds.sql", import.meta.url),
+    new URL("../drizzle/0551_video_allowance_refunds.sql", import.meta.url),
     "utf8",
   );
   expect(source).toStartWith("-- deployment-mode: rolling");

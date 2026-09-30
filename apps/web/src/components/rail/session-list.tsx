@@ -17,7 +17,6 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ChevronRightIcon,
-  Clock3Icon,
   EllipsisIcon,
   FolderIcon,
   FolderPlusIcon,
@@ -67,6 +66,7 @@ import {
 } from "@/components/ui/context-menu";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -2790,7 +2790,7 @@ export function SessionList() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-muted">
+        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
           {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
         </span>
         <Tooltip>
@@ -2802,7 +2802,7 @@ export function SessionList() {
               onClick={openSearchDialog}
               aria-label="Search sessions"
               aria-haspopup="dialog"
-              className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+              className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
             >
               <SearchIcon aria-hidden="true" className="size-3.5" />
             </Button>
@@ -2818,7 +2818,7 @@ export function SessionList() {
                 size="icon-xs"
                 aria-label="New project"
                 onClick={() => setChannelDialogOpen(true)}
-                className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
               >
                 <FolderPlusIcon className="size-3.5" />
               </Button>
@@ -2833,7 +2833,7 @@ export function SessionList() {
               variant="ghost"
               size="icon-xs"
               aria-label={browseControlsActive ? "Session view, customized" : "Session view"}
-              className="relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+              className="relative shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
             >
               <ListFilterIcon className="size-3.5" />
               {browseControlsActive ? (
@@ -3359,7 +3359,7 @@ function SessionGroupPaginationControl(
             : `${action} older sessions in ${group.label}`
         }
         onClick={() => void loadWithFocus()}
-        className="min-h-8 rounded-md px-2 text-xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
+        className="min-h-8 rounded-md px-2 text-xs font-normal text-fg-muted hover:bg-hover hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
       >
         {revealCount !== undefined
           ? loading
@@ -3503,7 +3503,7 @@ function SessionGroup(props: {
           onDragLeave={() => setSessionDragOver(false)}
           className={cn(
             sessionDragOver && "bg-accent ring-1 ring-ring",
-            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-surface-2 pointer-coarse:h-11",
+            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-hover pointer-coarse:h-11",
             props.project && "cursor-grab active:cursor-grabbing",
             props.project && props.draggedProjectId === props.project.id && "opacity-45",
             props.project &&
@@ -3529,7 +3529,19 @@ function SessionGroup(props: {
               )}
             </span>
             <span className="min-w-0 flex-1 truncate">{props.label}</span>
-            {props.showSummary !== false ? <RailTrailingMetadata summary={summary} /> : null}
+            {props.showSummary !== false ? (
+              // The row's actions sit where the summary is, on the translucent
+              // hover wash, so the summary steps aside while they show.
+              <span
+                className={cn(
+                  "inline-flex shrink-0",
+                  (props.project || props.allowNewSession !== false) &&
+                    "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
+                )}
+              >
+                <RailTrailingMetadata summary={summary} />
+              </span>
+            ) : null}
           </button>
           {props.project ? (
             <DropdownMenu>
@@ -3538,7 +3550,7 @@ function SessionGroup(props: {
                   type="button"
                   aria-label={`Actions for ${props.label}`}
                   className={cn(
-                    "absolute top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:size-9 pointer-coarse:opacity-100",
+                    "absolute top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded text-fg-subtle opacity-0 transition-opacity hover:bg-hover hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:size-9 pointer-coarse:opacity-100",
                     props.allowNewSession !== false ? "right-7" : "right-0.5",
                   )}
                 >
@@ -3547,13 +3559,13 @@ function SessionGroup(props: {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="right">
                 <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
-                  <PencilIcon aria-hidden="true" className="size-3.5" />
+                  <PencilIcon aria-hidden="true" />
                   Rename project
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
                     aria-hidden="true"
-                    className={props.project.pinned ? "size-3.5 fill-current" : "size-3.5"}
+                    className={props.project.pinned ? "size-4 fill-current" : "size-4"}
                   />
                   {props.project.pinned ? "Unpin project" : "Pin project"}
                 </DropdownMenuItem>
@@ -3562,7 +3574,7 @@ function SessionGroup(props: {
                   variant="destructive"
                   onSelect={() => props.onDeleteProject?.(props.project!)}
                 >
-                  <Trash2Icon aria-hidden="true" className="size-3.5" />
+                  <Trash2Icon aria-hidden="true" />
                   Delete project
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -3574,7 +3586,7 @@ function SessionGroup(props: {
                 <NewSessionLink
                   channelId={props.channelId}
                   aria-label={`New chat in ${props.label}`}
-                  className="absolute right-0.5 top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:right-0 pointer-coarse:size-9 pointer-coarse:opacity-100"
+                  className="absolute right-0.5 top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded text-fg-subtle opacity-0 transition-opacity hover:bg-hover hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:right-0 pointer-coarse:size-9 pointer-coarse:opacity-100"
                 >
                   <PlusIcon aria-hidden="true" className="size-3.5" />
                 </NewSessionLink>
@@ -3590,7 +3602,7 @@ function SessionGroup(props: {
           className={
             props.hideHeading
               ? "sr-only"
-              : "px-1.5 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+              : "px-1.5 pb-0.5 pt-2 text-2xs font-normal uppercase tracking-wider text-fg-muted"
           }
         >
           {props.label}
@@ -3826,7 +3838,7 @@ function TreeLoadRow({
         type="button"
         onClick={onClick}
         style={style}
-        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
+        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-muted hover:bg-hover hover:text-fg pointer-coarse:h-11"
       >
         {text}
       </button>
@@ -3890,12 +3902,18 @@ function SessionRow(props: {
   const indentStyle =
     props.depth > 0 ? { marginLeft: visualTreeDepth(props.depth) * 12 } : undefined;
 
+  // The open session is a selected row: the selection fill, full-strength
+  // text and a faint accent edge. The border is always present (transparent
+  // otherwise) so selecting a row never shifts its contents.
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
+    "group relative flex h-8 w-full items-center gap-1.5 rounded-md border py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
-    "hover:bg-surface-2",
-    props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
-    props.focused && !props.active ? "bg-surface-2/60" : "",
+    props.active
+      ? "border-brand/20 bg-selection text-fg"
+      : "border-transparent text-fg-label hover:bg-hover hover:text-fg",
+    // The roving tab stop shows the hover wash only while it holds keyboard
+    // focus; otherwise it would read as a stray hover.
+    !props.active && "has-[[data-session-focus]:focus-visible]:bg-hover",
   );
 
   const lead = (
@@ -3909,7 +3927,7 @@ function SessionRow(props: {
             event.stopPropagation();
             props.onToggleExpand();
           }}
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-subtle outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-muted outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
         >
           <ChevronRightIcon
             className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-90")}
@@ -3924,7 +3942,6 @@ function SessionRow(props: {
   if (rename.editing) {
     return (
       <div className={rowClassName}>
-        <ActiveAccent active={props.active} />
         {lead}
         <input
           ref={rename.inputRef}
@@ -3965,7 +3982,6 @@ function SessionRow(props: {
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
-          <ActiveAccent active={props.active} />
           {lead}
           <SiteOriginLink session={props.session} compact />
           <HoverCard openDelay={100} closeDelay={80}>
@@ -4116,14 +4132,13 @@ function SessionRow(props: {
           contextPinSelection.current = false;
         }}
       >
-        <ContextMenuItem className="pointer-coarse:min-h-11" onSelect={rename.startEditing}>
+        <ContextMenuItem onSelect={rename.startEditing}>
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
         {!props.session.archived ? (
           <>
             <ContextMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() => {
                 contextPinSelection.current = true;
                 void props.onPin(props.session, !props.session.pinned, "row");
@@ -4133,7 +4148,6 @@ function SessionRow(props: {
               {props.session.pinned ? "Unpin" : "Pin"}
             </ContextMenuItem>
             <ContextMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() =>
                 void props.onUpdateAttention(props.session, { unread: !props.session.unread })
               }
@@ -4146,7 +4160,6 @@ function SessionRow(props: {
               {props.session.unread ? "Mark as read" : "Mark as unread"}
             </ContextMenuItem>
             <ContextMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() =>
                 void props.onUpdateAttention(props.session, {
                   activelyWorking: !props.session.activelyWorking,
@@ -4160,7 +4173,6 @@ function SessionRow(props: {
         ) : null}
         {props.session.parentSessionId === null ? (
           <ContextMenuItem
-            className="pointer-coarse:min-h-11"
             onSelect={() => void props.onArchive(props.session, !props.session.archived)}
           >
             <ArchiveIcon className="size-4" />
@@ -4169,7 +4181,7 @@ function SessionRow(props: {
         ) : null}
         {props.session.parentSessionId === null && props.session.archived ? (
           <ContextMenuItem
-            className="pointer-coarse:min-h-11 text-status-failed"
+            variant="destructive"
             onSelect={() => props.onRequestDelete(props.session)}
           >
             <Trash2Icon className="size-4" />
@@ -4181,22 +4193,25 @@ function SessionRow(props: {
         !props.session.archived ? (
           <>
             <ContextMenuSeparator />
-            <ContextMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
-              Move to project
-            </ContextMenuLabel>
-            {[...props.channels, { id: null, name: "Default" }].map((channel) => (
-              <ContextMenuItem
-                key={channel.id ?? "default"}
-                className="pointer-coarse:min-h-11"
-                disabled={props.session.channelId === channel.id}
-                onSelect={() => {
-                  contextPinSelection.current = true;
-                  void props.onMoveToChannel(props.session, channel.id, "row");
-                }}
-              >
-                <span className="truncate">{channel.name}</span>
-              </ContextMenuItem>
-            ))}
+            <ContextMenuLabel>Move to project</ContextMenuLabel>
+            {[{ id: null, name: "Default" }, ...props.channels].map((channel) => {
+              const current = props.session.channelId === channel.id;
+              return (
+                <ContextMenuItem
+                  key={channel.id ?? "default"}
+                  aria-current={current ? "true" : undefined}
+                  onSelect={() => {
+                    if (current) return;
+                    contextPinSelection.current = true;
+                    void props.onMoveToChannel(props.session, channel.id, "row");
+                  }}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  <DropdownMenuCheck checked={current} />
+                </ContextMenuItem>
+              );
+            })}
           </>
         ) : null}
       </ContextMenuContent>
@@ -4215,18 +4230,6 @@ function sessionDescendantLabel(session: Session): string | null {
   }
   if (live > 0) return `${live} active · ${total} total`;
   return `${total} session${stats.totalDescendants === 1 && !stats.truncated ? "" : "s"}`;
-}
-
-/** The active-session accent bar shared by the row's display and edit modes. */
-function ActiveAccent({ active }: { active: boolean }) {
-  return (
-    <span
-      className={cn(
-        "absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-brand transition-opacity",
-        active ? "opacity-100" : "opacity-0",
-      )}
-    />
-  );
 }
 
 /**
@@ -4249,7 +4252,7 @@ export function RowQuickActions({
 
   return (
     <div
-      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md bg-surface-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
+      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
       data-session-quick-actions={session.id}
     >
       {canPin ? (
@@ -4351,7 +4354,6 @@ function RowActionsMenu({
         }}
       >
         <DropdownMenuItem
-          className="pointer-coarse:min-h-11"
           onSelect={onRename}
           // The menu item lives inside the row; stop the synthetic click from
           // activating the session link.
@@ -4363,7 +4365,6 @@ function RowActionsMenu({
         {!session.archived ? (
           <>
             <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() => {
                 remountSelection.current = true;
                 void onPin(session, !session.pinned, "actions");
@@ -4374,7 +4375,6 @@ function RowActionsMenu({
               {session.pinned ? "Unpin" : "Pin"}
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() => void onUpdateAttention(session, { unread: !session.unread })}
               onClick={(event) => event.stopPropagation()}
             >
@@ -4386,7 +4386,6 @@ function RowActionsMenu({
               {session.unread ? "Mark as read" : "Mark as unread"}
             </DropdownMenuItem>
             <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
               onSelect={() =>
                 void onUpdateAttention(session, { activelyWorking: !session.activelyWorking })
               }
@@ -4399,7 +4398,6 @@ function RowActionsMenu({
         ) : null}
         {session.parentSessionId === null ? (
           <DropdownMenuItem
-            className="pointer-coarse:min-h-11"
             onSelect={() => void onArchive(session, !session.archived)}
             onClick={(event) => event.stopPropagation()}
           >
@@ -4423,35 +4421,26 @@ function RowActionsMenu({
           // re-clusters ~470 KB of shared chunks into the startup bundle.
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
-              Move to project
-            </DropdownMenuLabel>
-            {channels.map((channel) => (
-              <DropdownMenuItem
-                key={channel.id}
-                className="pointer-coarse:min-h-11"
-                disabled={session.channelId === channel.id}
-                onSelect={() => {
-                  remountSelection.current = true;
-                  void onMoveToChannel(session, channel.id, "actions");
-                }}
-                onClick={(event) => event.stopPropagation()}
-              >
-                <span className="truncate">{channel.name}</span>
-              </DropdownMenuItem>
-            ))}
-            <DropdownMenuItem
-              className="pointer-coarse:min-h-11"
-              disabled={session.channelId === null}
-              onSelect={() => {
-                remountSelection.current = true;
-                void onMoveToChannel(session, null, "actions");
-              }}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <Clock3Icon className="size-4" />
-              Default
-            </DropdownMenuItem>
+            <DropdownMenuLabel>Move to project</DropdownMenuLabel>
+            {[{ id: null, name: "Default" }, ...channels].map((channel) => {
+              const current = session.channelId === channel.id;
+              return (
+                <DropdownMenuItem
+                  key={channel.id ?? "default"}
+                  aria-current={current ? "true" : undefined}
+                  onSelect={() => {
+                    if (current) return;
+                    remountSelection.current = true;
+                    void onMoveToChannel(session, channel.id, "actions");
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  <DropdownMenuCheck checked={current} />
+                </DropdownMenuItem>
+              );
+            })}
           </>
         ) : null}
       </DropdownMenuContent>
@@ -4462,7 +4451,7 @@ function RowActionsMenu({
 function EmptySessions({ archived = false }: { archived?: boolean }) {
   return (
     <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-border px-3 py-4 text-center">
-      <p className="text-xs text-fg-subtle">
+      <p className="text-xs text-fg-muted">
         {archived ? "No archived sessions" : "No sessions yet"}
       </p>
       {!archived ? (
@@ -4504,7 +4493,7 @@ export function CollapsedSessionsButton() {
             size="icon-sm"
             aria-label="Search sessions"
             onClick={() => requestSessionSearch(rail.workspaceId)}
-            className="text-fg-muted hover:text-fg"
+            className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
           </Button>
@@ -4523,7 +4512,7 @@ export function CollapsedSessionsButton() {
                 : `Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`
             }
             onClick={() => rail.setCollapsed(false)}
-            className="relative text-fg-muted hover:text-fg"
+            className="relative text-fg-label hover:text-fg"
           >
             <MessagesSquareIcon
               className={cn("size-4", firstLoad && "motion-safe:animate-pulse")}

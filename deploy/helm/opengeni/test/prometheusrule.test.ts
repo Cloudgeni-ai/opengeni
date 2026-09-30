@@ -170,7 +170,8 @@ describe("turn-capacity Prometheus alerts", () => {
     );
     const expression = alertExpression(template, "OpenGeniModalCheckpointFallbackSelected");
     expect(expression).toContain("opengeni_sandbox_checkpoint_fallback_total");
-    expect(expression).toContain('backend="modal",outcome="selected"');
+    expect(expression).toContain('backend="modal",outcome=~"selected|selected_shared"');
+    expect(expression).not.toContain("fresh_workspace");
     expect(expression).toContain("[30m]) > 0");
     expect(expression).toContain("unless");
     expect(expression).toContain("offset 30m");
@@ -184,10 +185,35 @@ describe("turn-capacity Prometheus alerts", () => {
     }
     const alert = template.slice(
       template.indexOf("        - alert: OpenGeniModalCheckpointFallbackSelected\n"),
-      template.indexOf("        - alert: OpenGeniSandboxCheckpointDeletionFailed\n"),
+      template.indexOf("        - alert: OpenGeniModalFreshWorkspaceContinuity\n"),
     );
     expect(alert).toContain("severity: warning");
     expect(alert).toContain("Selection does not prove restoration succeeded.");
+  });
+
+  test("warns separately when a lost Modal group continues on an empty workspace", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniModalFreshWorkspaceContinuity");
+    expect(expression).toContain('backend="modal",outcome="fresh_workspace"');
+    expect(expression).toContain("[30m]) > 0");
+    expect(expression).toContain("unless");
+    expect(expression).toContain("offset 30m");
+    expect(expression).toContain(
+      `opengeni:sandbox_recovery_observations_recent:fresh_max{${DEPLOYMENT_SCOPE},kind="fresh_workspace_selected"}`,
+    );
+    for (const selector of metricSelectors(expression)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(selector).not.toMatch(/workspace_id|session_id|sandbox_group_id|instance_id/);
+    }
+    const alert = template.slice(
+      template.indexOf("        - alert: OpenGeniModalFreshWorkspaceContinuity\n"),
+      template.indexOf("        - alert: OpenGeniSandboxCheckpointDeletionFailed\n"),
+    );
+    expect(alert).toContain("severity: warning");
+    expect(alert).toContain("warned every group member");
   });
 
   test("alerts on bounded runtime, tool, lifecycle, API, and recovery failures", async () => {

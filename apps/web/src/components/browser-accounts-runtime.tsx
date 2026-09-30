@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
+import { userErrorText } from "@/lib/api-error";
 import { managedAuthModeFromSearch } from "@/lib/managed-auth-url";
 import {
   browserAccountBridgeBlockersSnapshot,
@@ -146,13 +147,15 @@ export function BrowserAccountsSignedOutPanel(props: {
   function authenticate(kind: "add" | "reauth", slotId?: string) {
     popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
       onError: (error) =>
-        toast.error("Couldn't start account authentication", { description: String(error) }),
+        toast.error("Couldn't start account authentication", {
+          description: userErrorText(error),
+        }),
     });
   }
 
   function select(slotId: string) {
     void accounts.selectSlot(slotId).catch((error) => {
-      toast.error("Couldn't select that account", { description: String(error) });
+      toast.error("Couldn't select that account", { description: userErrorText(error) });
     });
   }
 
@@ -166,14 +169,14 @@ export function BrowserAccountsSignedOutPanel(props: {
       className={
         props.presentation === "embedded"
           ? "w-full"
-          : "flex flex-1 items-center justify-center px-4"
+          : "og-page-glow flex flex-1 items-center justify-center px-4"
       }
     >
       <div
         className={
           props.presentation === "embedded"
             ? "w-full"
-            : "w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
+            : "w-full max-w-sm rounded-xl border border-border bg-surface p-6 forced-colors:border-[CanvasText]"
         }
       >
         <div className="mb-4 flex items-start gap-3">
@@ -186,13 +189,13 @@ export function BrowserAccountsSignedOutPanel(props: {
                 ? "Continue your invitation"
                 : slots.length > 0
                   ? "Choose an account"
-                  : "Sign in to OpenGeni"}
+                  : "Sign in to Opengeni"}
             </Heading>
             <p className="mt-1 text-sm text-fg-subtle">
               {invitation
                 ? `Use the account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
                 : slots.length > 0
-                  ? "No browser account is active. Choose one explicitly before OpenGeni loads account data."
+                  ? "No browser account is active. Choose one explicitly before Opengeni loads account data."
                   : "Authentication opens in an isolated window so an existing account is never replaced implicitly."}
             </p>
           </div>
@@ -320,7 +323,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
     popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
       onError: (error) =>
         toast.error("Couldn't start account authentication", {
-          description: String(error),
+          description: userErrorText(error),
         }),
     });
   }
@@ -339,7 +342,9 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
     }
     void accounts
       .selectSlot(targetSlot.id)
-      .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
+      .catch((error) =>
+        toast.error("Couldn't switch accounts", { description: userErrorText(error) }),
+      );
   }
 
   async function signOutSelectedAccount(): Promise<void> {
@@ -375,11 +380,11 @@ export function BrowserAccountsLoadingGate({ children }: { children?: ReactNode 
     return (
       <ProblemPanel
         title="Browser accounts unavailable"
-        description="OpenGeni couldn't verify the active browser account. No tenant data was shown."
+        description="Opengeni couldn't verify the active browser account. No tenant data was shown."
         action={
           <Button
             type="button"
-            variant="secondary"
+            variant="outline"
             onClick={() => void accounts.refresh().catch(() => undefined)}
           >
             Try again

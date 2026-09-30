@@ -628,6 +628,6 @@ describe("verified workspace archives", () => {
         { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor },
         async () => null,
       ),
-    ).rejects.toMatchObject({ code: "archive_base64_invalid" });
+    ).rejects.toMatchObject({ code: "archive_object_missing" });
   });
 });

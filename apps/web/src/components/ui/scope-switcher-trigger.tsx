@@ -10,11 +10,16 @@ export const ScopeSwitcherTrigger = forwardRef<
   HTMLButtonElement,
   Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> & {
     label: string;
+    /** A second, quieter line under the label: the organization a workspace belongs to. */
+    meta?: string;
     icon: ReactNode;
     badge?: ReactNode;
     compact?: boolean;
   }
->(function ScopeSwitcherTrigger({ label, icon, badge, compact = false, className, ...props }, ref) {
+>(function ScopeSwitcherTrigger(
+  { label, meta, icon, badge, compact = false, className, ...props },
+  ref,
+) {
   return (
     <button
       {...props}
@@ -22,7 +27,7 @@ export const ScopeSwitcherTrigger = forwardRef<
       type="button"
       className={cn(
         "group flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand",
-        compact && "h-8 gap-1.5 py-0 pointer-coarse:h-11",
+        compact && (meta ? "min-h-8 gap-1.5 py-1" : "h-8 gap-1.5 py-0 pointer-coarse:h-11"),
         className,
       )}
     >
@@ -33,9 +38,20 @@ export const ScopeSwitcherTrigger = forwardRef<
           </AvatarFallback>
         </Avatar>
       )}
-      <span className="min-w-0 flex-1 truncate text-sm font-medium" title={label}>
-        {label}
-      </span>
+      {meta ? (
+        <span className="grid min-w-0 flex-1">
+          <span className="truncate text-sm leading-5 font-medium" title={label}>
+            {label}
+          </span>
+          <span className="truncate text-xs leading-4 text-fg-muted" title={meta}>
+            {meta}
+          </span>
+        </span>
+      ) : (
+        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={label}>
+          {label}
+        </span>
+      )}
       {badge}
       <ChevronsUpDownIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
     </button>

@@ -72,6 +72,11 @@ const MCP_DELEGATED_TOOLS: Record<
   string,
   { delegate: string; coreFile: string; coreMarker: string }
 > = {
+  session_set_model: {
+    delegate: "setSessionModel(",
+    coreFile: "packages/core/src/domain/sessions.ts",
+    coreMarker: "requireSessionAuthorization(",
+  },
   session_pause: {
     delegate: "controlAgentSessionWorkstream(",
     coreFile: "packages/core/src/application/session-commands.ts",

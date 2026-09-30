@@ -19,7 +19,6 @@ import {
 import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
-  getLatestStartedSessionTurn,
   getWorkspaceModelPolicy,
   getSessionGoal,
   materializeGoalContinuation,
@@ -67,21 +66,15 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
-    // must preserve the newest policy that actually emitted `turn.started`.
-    // Admission-rejected turns have no such event and cannot poison it.
+    // follows effective defaults: a started turn or a newer explicit settings
+    // boundary. Admission-rejected turns cannot poison that projection.
     // Kept below the goal-less fast path so a non-goal session still skips the
     // reads entirely.
     const session = await requireSession(db, input.workspaceId, input.sessionId);
-    const latestStartedTurn = await getLatestStartedSessionTurn(
-      db,
-      input.workspaceId,
-      input.sessionId,
-    );
-    const inheritedContinuationModel = latestStartedTurn?.model ?? session.model;
+    const inheritedContinuationModel = session.model;
     let continuationModel = inheritedContinuationModel;
-    const continuationReasoningEffort =
-      latestStartedTurn?.reasoningEffort ?? session.reasoningEffort;
-    const continuationLatencyMode = latestStartedTurn?.latencyMode ?? session.latencyMode;
+    const continuationReasoningEffort = session.reasoningEffort;
+    const continuationLatencyMode = session.latencyMode;
     const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
     if (
       inheritedContinuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||

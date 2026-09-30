@@ -93,6 +93,11 @@ export type WorkspaceArchiveIntegrityCode =
   | "archive_base64_invalid"
   | "archive_hash_mismatch"
   | "archive_hydration_failed"
+  /** The referenced archive object does not exist (deleted, wrong bucket or
+   * account). Never proof that the checkpoint content is corrupt. */
+  | "archive_object_missing"
+  /** This process has no archive object storage configured. */
+  | "archive_storage_unavailable"
   | "workspace_fingerprint_unavailable"
   | "workspace_changed_during_capture"
   | "workspace_fingerprint_mismatch"
@@ -272,7 +277,7 @@ export async function inlineWorkspaceArchiveForRestore(
   const object = await getObjectBytes(ref.key);
   if (!object) {
     throw new WorkspaceArchiveIntegrityError(
-      "archive_base64_invalid",
+      "archive_object_missing",
       `workspace archive object ${ref.key} is missing`,
     );
   }

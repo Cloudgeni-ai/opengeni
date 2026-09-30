@@ -1,11 +1,4 @@
-import {
-  CheckIcon,
-  PlugIcon,
-  RefreshCwIcon,
-  Loader2Icon,
-  Settings2Icon,
-  ChevronLeftIcon,
-} from "lucide-react";
+import { CheckIcon, PlugIcon, RefreshCwIcon, Loader2Icon, Settings2Icon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import {
   ConnectionAccountPicker,
@@ -18,7 +11,10 @@ import {
   ComposerMenuHeader,
   ComposerMenuSwitch,
   ComposerMenuSwitchIndicator,
+  MenuBackButton,
+  ComposerMenuRowsSkeleton,
 } from "@/components/ui/composer-menu";
+import { MENU_CHECK_CLASS, MENU_LABEL_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 import type { SessionToolSelection } from "@/components/pickers";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
@@ -63,22 +59,14 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         <ComposerMenuHeader
           title={settingsServer.name}
           leading={
-            <button
-              type="button"
-              aria-label="Back to connectors"
-              className="inline-flex size-9 items-center justify-center rounded-md focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => setSettingsId(null)}
-            >
-              <ChevronLeftIcon className="size-4" />
-            </button>
+            <MenuBackButton label="Back to connectors" onClick={() => setSettingsId(null)} />
           }
         />
-        <div className="min-h-0 overflow-y-auto overscroll-contain p-2">
-          <p className="px-2 pb-2 text-xs text-fg-muted">Connected accounts</p>
-          {accounts.loading ? (
-            <p role="status" className="p-2 text-xs text-fg-muted">
-              Loading accounts…
-            </p>
+        <div className="min-h-0 overflow-y-auto overscroll-contain">
+          <p className={MENU_LABEL_CLASS}>Connected accounts</p>
+          {accounts.loading &&
+          !accounts.groups.some((group) => group.serverId === settingsServer.id) ? (
+            <ComposerMenuRowsSkeleton rows={2} label="Loading accounts" />
           ) : null}
           <ConnectionAccountPicker
             {...accounts}
@@ -98,7 +86,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
             disabled={accounts.disabled || accounts.loading || Boolean(accounts.error)}
           />
           {accounts.error ? (
-            <p role="alert" className="p-2 text-xs text-status-failed">
+            <p role="alert" className={cn(MENU_NOTE_CLASS, "text-status-failed")}>
               {accounts.error}
             </p>
           ) : null}
@@ -133,26 +121,17 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           </div>
         }
       />
-      <div className="min-h-0 shrink overflow-y-auto overscroll-contain p-2">
-        {accounts?.loading ? (
-          <p role="status" className="px-2 py-2 text-xs text-fg-muted">
-            Loading accounts…
-          </p>
-        ) : null}
+      <div className="min-h-0 shrink overflow-y-auto overscroll-contain">
         {accounts?.error ? (
-          <p role="alert" className="px-2 py-2 text-xs text-status-failed">
+          <p role="alert" className={cn(MENU_NOTE_CLASS, "text-status-failed")}>
             {accounts.error}
           </p>
         ) : null}
         {props.loading && !connectors.length ? (
-          <p className="px-2 py-4 text-xs text-fg-muted" role="status">
-            Loading connectors…
-          </p>
+          <ComposerMenuRowsSkeleton rows={4} size="tile" label="Loading connectors" />
         ) : null}
         {!props.loading && !connectors.length ? (
-          <p className="px-2 py-4 text-xs text-fg-muted">
-            Connect an app to use it in your conversations.
-          </p>
+          <p className={MENU_NOTE_CLASS}>Connect an app to use it in your conversations.</p>
         ) : null}
         {connectors.map((server) => {
           const selected = props.selection.mcpServerIds.has(server.id);
@@ -170,7 +149,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           return (
             <div
               key={server.id}
-              className="flex min-h-16 items-center gap-1 border-b border-border px-2 py-2 last:border-b-0"
+              className="flex min-h-14 items-center gap-1 rounded-[10px] py-1.5 pl-2.5"
             >
               <div className="flex min-w-0 flex-1 items-center gap-3 pr-2">
                 <CapabilityLogo
@@ -256,7 +235,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   aria-label={`${server.name}, ${selected ? "on" : "off"} for this session`}
                   className="flex size-11 shrink-0 items-center justify-center"
                 >
-                  {selected ? <CheckIcon className="size-4 text-fg-muted" aria-hidden /> : null}
+                  {selected ? <CheckIcon className={MENU_CHECK_CLASS} aria-hidden /> : null}
                 </span>
               )}
             </div>
@@ -264,7 +243,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         })}
       </div>
       {props.error ? (
-        <p role="alert" className="px-2 py-2 text-xs text-status-failed">
+        <p role="alert" className={cn(MENU_NOTE_CLASS, "text-status-failed")}>
           {props.error}
         </p>
       ) : null}
@@ -311,7 +290,7 @@ function ConnectorAction(props: {
         aria-disabled={props.disabled || undefined}
         disabled={props.disabled}
         className={cn(
-          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm outline-none hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
+          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
           props.className,
         )}
         onClick={props.onAction}

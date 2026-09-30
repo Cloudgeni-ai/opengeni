@@ -133,7 +133,7 @@ describe("ListRow", () => {
           title="GitHub"
           description="Work on repositories, issues, and pull requests."
           disabled
-          disabledReason="GitHub isn't available on this OpenGeni server yet. An admin needs to add the GitHub App."
+          disabledReason="GitHub isn't available on this Opengeni server yet. An admin needs to add the GitHub App."
           indicator={{ kind: "unavailable", label: "Unavailable" }}
           onOpen={() => {}}
         />
@@ -196,11 +196,12 @@ describe("ListRow", () => {
     );
     const container = document.createElement("div");
     container.innerHTML = html;
-    // Every meta part leads with one hidden dot, so a wrapped line never ends on one.
+    // Every part of the one secondary line (two facts, the folded column and
+    // the narrow copy of the state) leads with one hidden dot.
     const dots = [...container.querySelectorAll('[aria-hidden="true"]')].filter(
       (node) => node.textContent === "·",
     );
-    expect(dots).toHaveLength(3);
+    expect(dots).toHaveLength(4);
     // "Needs reconnect" is announced once, through the row's name.
     const visibleCopies = [...container.querySelectorAll("*")].filter(
       (node) =>

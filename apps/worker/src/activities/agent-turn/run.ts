@@ -1153,6 +1153,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
 
           const runCredentials = await prepareRunCredentials({
+            localMcpServerIds: installedApiIntegrations.map((integration) => integration.serverId),
             input,
             settings,
             db,
@@ -1183,6 +1184,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const {
             runCredentialResolver,
+            runMcpCredentials,
             establishPolicy,
             initialRunCredentialMaterial,
             runCredentialsNote,
@@ -1306,6 +1308,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
+            runMcpCredentials,
             input,
             catalogSourceSettings,
             db,

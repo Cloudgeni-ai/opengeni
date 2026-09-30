@@ -286,6 +286,38 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
     );
     await act(async () => retry!.click());
     expect(retries).toBe(1);
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        loading={false}
+        error={Object.assign(
+          new Error("OpenGeni API 503: upstream unavailable Reference: req_503."),
+          { status: 503 },
+        )}
+      />
+    ));
+    expect(container.textContent).toContain("Couldn't load artifacts");
+    expect(container.textContent).toContain("Try again in a moment.");
+    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("req_503");
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        loading={false}
+        error={Object.assign(
+          new Error("OpenGeni API 403: missing permission: artifacts:read Reference: req_403."),
+          { status: 403 },
+        )}
+      />
+    ));
+    expect(container.textContent).toContain("You can't see artifacts here.");
+    expect(container.textContent).not.toContain("Couldn't load artifacts");
+    expect(container.textContent).not.toContain("missing permission");
+    expect(
+      Array.from(container.querySelectorAll("button")).some((button) =>
+        /retry|try again/i.test(button.textContent ?? ""),
+      ),
+    ).toBe(false);
   } finally {
     await act(async () => root.unmount());
     container.remove();

@@ -1,5 +1,5 @@
 import { acceptSessionFileAttachments } from "./session-file-attachments";
-import { withLatestStartedSessionPolicy } from "./session-execution-policy";
+import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -1885,7 +1885,7 @@ export async function submitHumanPromptInTransaction(
   }
 
   const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
-  const [session] = await withLatestStartedSessionPolicy(db, input.workspaceId, [storedSession]);
+  const [session] = await withEffectiveSessionPolicy(db, input.workspaceId, [storedSession]);
   if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(

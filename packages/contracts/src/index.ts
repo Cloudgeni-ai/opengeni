@@ -888,6 +888,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "rig_promote",
   "sessions_list",
   "session_get",
+  "session_set_model",
   "session_events",
   "session_wait",
   "command_wait",
@@ -4230,6 +4231,8 @@ export type RunCredentialsResolution =
       files?: RunCredentialFile[];
       /** Environment name to one returned relative file path. */
       fileEnvironment?: Record<string, string>;
+      /** Secret, turn-local request headers for session-attached remote MCP servers. */
+      mcp?: import("./workspace-integrations").CredentialProviderMcpHeaders[];
       /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
       expiresAt?: string | null;
       /** Partial degradation: usable material may coexist with reconnect notices. */
@@ -6535,6 +6538,16 @@ export const UpdateSessionRequest = z.object({
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
+/** Explicit future defaults, not a message, wake, or queued-turn edit. */
+export const SetSessionModelRequest = z
+  .object({
+    model: z.string().min(1).max(512),
+    reasoningEffort: ReasoningEffort,
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
+
 export const UpdateSessionVariableSetsRequest = z
   .object({
     variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS),
@@ -7071,6 +7084,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.read",
   "session.human_input.write",
   "session.title.write",
+  "session.model.write",
   "session.channel.write",
   "session.variable_sets.write",
   "session.mcp.approval_policy.write",
@@ -13270,6 +13284,7 @@ export const SessionEventType = z.enum([
   "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
+  "session.model_settings.updated",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
@@ -13509,6 +13524,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.queue.prompt.cancelled",
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
+    "session.model_settings.updated",
   ],
   terminal: [
     "turn.completed",

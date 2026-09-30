@@ -7,10 +7,10 @@ import { Button } from "@/components/ui/button";
 export const NEW_SESSION_STARTERS = [
   {
     id: "slack",
-    title: "Work with OpenGeni from Slack",
+    title: "Work with Opengeni from Slack",
     description: "Install the bot. Start tasks and follow up on the go.",
     prompt:
-      "Help me install the OpenGeni Slack bot so I can ask questions, start work, and follow up from Slack, including on my phone.",
+      "Help me install the Opengeni Slack bot so I can ask questions, start work, and follow up from Slack, including on my phone.",
   },
   {
     id: "github",
@@ -58,7 +58,7 @@ export function NewSessionStarters({
 }) {
   return (
     <section className="mt-8" aria-label="Starter suggestions">
-      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
         Suggestions
       </h2>
       <div className="grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2">
@@ -73,7 +73,7 @@ export function NewSessionStarters({
               type="button"
               variant="outline"
               disabled={disabled}
-              className="h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left"
+              className="h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left hover:bg-surface hover:hover-layer"
               onClick={() => onSelect(starter.prompt)}
             >
               {logo ? (

@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import { atlassianFailureMessage } from "@/components/capabilities/use-atlassian-integration";
 import { googleDriveFailureMessage } from "@/components/capabilities/use-google-drive-integration";
-import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
+import {
+  oauthCallbackFailureMessage,
+  oauthCallbackReasonMessage,
+} from "@/lib/oauth-callback-messages";
 
 describe("provider OAuth callback failure copy", () => {
   for (const [provider, message] of [
@@ -24,4 +27,20 @@ describe("provider OAuth callback failure copy", () => {
       expect(message("http_503")).toContain("configuration");
     });
   }
+});
+
+describe("generic OAuth callback failure copy", () => {
+  test("uses the shared copy for a known reason", () => {
+    expect(oauthCallbackFailureMessage("state_expired")).toBe(
+      oauthCallbackReasonMessage("state_expired")!,
+    );
+  });
+
+  test("keeps an unknown reason visible for support", () => {
+    expect(oauthCallbackFailureMessage("token_exchange_failed")).toBe(
+      "Couldn't connect. Please try again. Reason: token_exchange_failed.",
+    );
+    expect(oauthCallbackFailureMessage(null)).toBe("Couldn't connect. Please try again.");
+    expect(oauthCallbackFailureMessage("  ")).toBe("Couldn't connect. Please try again.");
+  });
 });

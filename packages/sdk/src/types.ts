@@ -2023,6 +2023,7 @@ export const SESSION_EVENT_TYPES = [
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
+  "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "codex.account.selection.changed",
@@ -3241,6 +3242,7 @@ export type FirstPartyMcpToolName =
   | "rig_promote"
   | "sessions_list"
   | "session_get"
+  | "session_set_model"
   | "session_events"
   | "session_wait"
   | "command_read"
@@ -5389,6 +5391,12 @@ export type SandboxRecoveryProjection = {
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
   automaticAvailable?: boolean;
+  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
+   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  automaticLane?: "checkpoint" | "fresh_workspace";
+  /** For a timed recovery wait: the earliest time a Retry or a new message can
+   * let OpenGeni decide again. Nothing proceeds by itself before then. */
+  availableAt?: string;
 };
 export type SandboxRecoveryRequest = {
   operationId: string;

@@ -17,6 +17,7 @@ import {
   ArtifactKindTile,
   useArtifactsBackLink,
 } from "@/components/artifacts/artifact-page-chrome";
+import { userErrorText } from "@/lib/api-error";
 import { saveRetainedArtifact } from "@/lib/retained-artifact-download";
 import { retainedArtifactLoadErrorPresentation } from "@/lib/retained-artifact-load-error";
 
@@ -135,8 +136,7 @@ function RetainedArtifactDetail({
       if (generation === downloads.generation)
         saveRetainedArtifact(artifact, result.bytes, filename);
     } catch (error) {
-      if (generation === downloads.generation)
-        setDownloadError(error instanceof Error ? error.message : "Download failed. Try again.");
+      if (generation === downloads.generation) setDownloadError(userErrorText(error, "Try again."));
     } finally {
       if (generation === downloads.generation) setDownloading(false);
     }
@@ -190,7 +190,16 @@ function RetainedArtifactDetail({
           <>
             {header}
             {downloadError ? (
-              <Notice tone="failed" live="assertive" className="mt-6">
+              <Notice
+                tone="failed"
+                live="assertive"
+                className="mt-6"
+                title={
+                  artifact.kind === "generated_video"
+                    ? "Couldn't open the video"
+                    : "Couldn't download the file"
+                }
+              >
                 {downloadError}
               </Notice>
             ) : null}

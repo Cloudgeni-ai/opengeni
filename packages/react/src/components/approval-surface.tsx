@@ -187,7 +187,7 @@ export function ApprovalSurface({
                   type="button"
                   disabled={busy}
                   onClick={() => void decide(approval, "approve")}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong disabled:opacity-50"
+                  className="inline-flex min-h-9 items-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition-colors hover:bg-og-primary-hover disabled:opacity-50"
                 >
                   <CheckIcon aria-hidden="true" className="size-3.5" />
                   {active === "approve" ? messages.approving : messages.approve}

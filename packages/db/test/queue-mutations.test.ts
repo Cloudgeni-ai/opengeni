@@ -27,6 +27,7 @@ import {
   peekSessionWork,
   QueueCommandConflictError,
   saveComposerDraftInTransaction,
+  setSessionModelInTransaction,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   settleSessionAttemptInterruptions,
@@ -36,6 +37,7 @@ import {
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
+import { withEffectiveSessionPolicy } from "../src/session-execution-policy";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -142,6 +144,124 @@ async function storedEvents(workspaceId: string, eventIds: string[]) {
 }
 
 describe("latest started session policy", () => {
+  test("an explicit settings boundary survives older accepted turns starting later", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const submit = (override = {}) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        submitHumanPromptInTransaction(db, {
+          accountId: value.grant.accountId,
+          workspaceId,
+          sessionId: value.session.id,
+          subjectId: value.grant.subjectId,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "follow up",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+          ...override,
+        }),
+      );
+    const old = await submit({ model: "old-model", reasoningEffort: "low" });
+    const desired = { model: "new-model", reasoningEffort: "high", latencyMode: "standard" };
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: desired.model,
+        reasoningEffort: "high",
+      }),
+    );
+    // The projection may receive a row fetched before a concurrent settings
+    // write. It must read stored defaults and the boundary in one snapshot.
+    const [projected] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      withEffectiveSessionPolicy(db, workspaceId, [value.session]),
+    );
+    expect(projected).toMatchObject(desired);
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: old.turnId,
+        payload: {},
+      },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    const inherited = await submit();
+    expect(await getSessionTurn(client.db, workspaceId, inherited.turnId)).toMatchObject(desired);
+    expect(
+      await getScheduledTargetSessionExecution(client.db, workspaceId, value.session.id),
+    ).toMatchObject(desired);
+    expect(await getSessionTurn(client.db, workspaceId, old.turnId)).toMatchObject({
+      model: "old-model",
+      reasoningEffort: "low",
+    });
+    // Approval resume replaces a turn's trigger, not its original admission.
+    const [approval] = await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      { type: "user.approvalDecision", payload: { approved: true } },
+    ]);
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .update(schema.sessionTurns)
+        .set({ triggerEventId: approval!.id })
+        .where(eq(schema.sessionTurns.id, old.turnId)),
+    );
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      { type: "turn.started", turnId: old.turnId, payload: {} },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    const [delivery] = await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "system.update.delivered",
+        payload: {},
+      },
+    ]);
+    const [automated] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .insert(schema.sessionTurns)
+        .values({
+          accountId: value.grant.accountId,
+          workspaceId,
+          sessionId: value.session.id,
+          triggerEventId: delivery!.id,
+          temporalWorkflowId: `session-${value.session.id}`,
+          status: "completed",
+          source: "system",
+          position: 100,
+          prompt: "automated occurrence",
+          model: "occurrence-only",
+          reasoningEffort: "low",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        })
+        .returning(),
+    );
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: automated!.id,
+        payload: {},
+      },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    const explicit = { model: "later-choice", reasoningEffort: "medium", latencyMode: "priority" };
+    const newer = await submit(explicit);
+    // A newly accepted choice still does not change defaults before it starts.
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: newer.turnId,
+        payload: {},
+      },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(explicit);
+  });
+
   test("projects and inherits started policy, preserving explicit and queued policies", async () => {
     const value = await fixture(3);
     const workspaceId = value.grant.workspaceId!;

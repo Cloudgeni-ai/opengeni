@@ -12,6 +12,7 @@ import { WorkspaceModelsPage } from "@/components/models/workspace-models-page";
 import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
+import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
 import {
   WorkspaceDeveloperSettings,
   WorkspaceSandboxImageRow,
@@ -35,6 +36,7 @@ import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import type { ModelsView } from "@/lib/models-route";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
 import { orgLabel } from "@/lib/org";
@@ -214,6 +216,7 @@ function OperationalWorkspaceSettingsRoute({
           client={context.client}
           workspaceId={workspaceId}
           canManage={canAdministerWorkspace}
+          personal={personal}
         />
       ) : null}
     </WorkspaceSettingsContent>
@@ -297,29 +300,33 @@ function WorkspaceGeneralSettings({
 
   return (
     <SectionStack>
-      <Section aria-label="Workspace">
+      <Section title="Details">
         <SettingRow
           label="Name"
           description={<RowValue>{activeWorkspace.name}</RowValue>}
           control={
-            <DisabledReasonTooltip
-              reason={canRename ? undefined : "Only workspace admins can rename it."}
-            >
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                aria-disabled={canRename ? undefined : "true"}
-                aria-label={`Rename workspace ${activeWorkspace.name}`}
-                onClick={() => {
-                  if (canRename) setRenaming(true);
-                }}
-                className={canRename ? "pointer-coarse:h-11" : "opacity-50 pointer-coarse:h-11"}
+            // A Personal workspace keeps its name: no button that could only
+            // say it isn't allowed.
+            personal ? undefined : (
+              <DisabledReasonTooltip
+                reason={canRename ? undefined : "Only workspace admins can rename it."}
               >
-                <PencilIcon aria-hidden="true" />
-                Rename
-              </Button>
-            </DisabledReasonTooltip>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-disabled={canRename ? undefined : "true"}
+                  aria-label={`Rename workspace ${activeWorkspace.name}`}
+                  onClick={() => {
+                    if (canRename) setRenaming(true);
+                  }}
+                  className={canRename ? "pointer-coarse:h-11" : "opacity-50 pointer-coarse:h-11"}
+                >
+                  <PencilIcon aria-hidden="true" />
+                  Rename
+                </Button>
+              </DisabledReasonTooltip>
+            )
           }
         />
         <SettingRow
@@ -384,6 +391,7 @@ function WorkspaceGeneralSettings({
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
+        <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
           workspaceId={workspaceId}
@@ -408,12 +416,16 @@ function WorkspaceGeneralSettings({
 
       <NativeIdentityLinkAccounts workspaceId={workspaceId} />
 
-      <DangerZone
-        workspaceName={activeWorkspace.name}
-        canDelete={canDeleteWorkspace}
-        isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
-        onDelete={deleteWorkspace}
-      />
+      {/* A personal workspace belongs to its person's membership and is never
+          deleted from here, so its settings show no delete section at all. */}
+      {personal ? null : (
+        <DangerZone
+          workspaceName={activeWorkspace.name}
+          canDelete={canDeleteWorkspace}
+          isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
+          onDelete={deleteWorkspace}
+        />
+      )}
     </SectionStack>
   );
 }
@@ -606,12 +618,9 @@ export function DangerZone(props: {
       }
       return ok;
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? `Couldn't delete the workspace: ${error.message}`
-          : "Couldn't delete the workspace. Try again.",
-        { cause: error },
-      );
+      throw new Error(`Couldn't delete the workspace. ${userErrorText(error, "Try again.")}`, {
+        cause: error,
+      });
     } finally {
       deleteInFlight.current = false;
     }
@@ -625,17 +634,20 @@ export function DangerZone(props: {
         `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, variable sets, knowledge, files and API keys.`
       }
       action={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={Boolean(disabledReason)}
-          onClick={() => setOpen(true)}
-          className="text-danger hover:text-danger pointer-coarse:h-11"
-        >
-          <Trash2Icon aria-hidden="true" />
-          Delete
-        </Button>
+        // When something blocks the delete, the description says what and who
+        // can fix it; a ghosted button next to it would only read as broken.
+        disabledReason ? undefined : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setOpen(true)}
+            className="text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+          >
+            <Trash2Icon aria-hidden="true" />
+            Delete
+          </Button>
+        )
       }
     >
       {disabledReason ? null : (
@@ -695,12 +707,9 @@ function OrganizationManagedWorkspaceSettings({
       refresh();
       return true;
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? `Couldn't rename the workspace: ${error.message}`
-          : "Couldn't rename the workspace. Try again.",
-        { cause: error },
-      );
+      throw new Error(`Couldn't rename the workspace. ${userErrorText(error, "Try again.")}`, {
+        cause: error,
+      });
     }
   }
 
@@ -730,15 +739,13 @@ function OrganizationManagedWorkspaceSettings({
       });
       if (followUp.status === "failed") {
         toast.warning("Workspace deleted, but the page may be out of date", {
-          description: `${
-            followUp.error instanceof Error ? followUp.error.message : String(followUp.error)
-          }. Reload to refresh your workspace access.`,
+          description: "Reload to refresh your workspace access.",
         });
       }
       return true;
     } catch (error) {
-      toast.error("Couldn't delete workspace", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't delete the workspace", {
+        description: userErrorText(error),
       });
       return false;
     }
@@ -767,7 +774,7 @@ function OrganizationManagedWorkspaceSettings({
       {accessNavigation.view ? null : <div className="mb-6">{scopeNotice}</div>}
       {section === "general" ? (
         <SectionStack>
-          <Section aria-label="Workspace">
+          <Section title="Details">
             <SettingRow
               label="Name"
               description={<RowValue>{workspace.name}</RowValue>}

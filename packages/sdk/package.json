@@ -54,6 +54,10 @@
       "types": "./src/knowledge.ts",
       "default": "./src/knowledge.ts"
     },
+    "./workspace-integrations": {
+      "types": "./src/workspace-integrations.ts",
+      "default": "./src/workspace-integrations.ts"
+    },
     "./document-authority": {
       "types": "./src/document-authority.ts",
       "default": "./src/document-authority.ts"

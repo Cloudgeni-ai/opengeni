@@ -28,7 +28,7 @@ describe("public typography token contract", () => {
       "--og-model-picker-trigger-height: 2rem",
       "--og-model-picker-menu-width: 22rem",
       "--og-model-picker-row-padding-x: 0.625rem",
-      "--og-model-picker-row-padding-y: 0.5rem",
+      "--og-model-picker-row-padding-y: 0.375rem",
       "--og-realtime-menu-width: 18rem",
     ]) {
       expect(tokens).toContain(declaration);

@@ -47,7 +47,7 @@ test("compiled light palette overrides dark defaults for root, ancestor and subt
           getComputedStyle(r.container.querySelector(".og-preview-loading")!)
             .getPropertyValue("--_og-preview-ink")
             .trim(),
-        ).toBe("#76629c");
+        ).toBe("#5f8f84");
         await r.unmount();
       }
     }

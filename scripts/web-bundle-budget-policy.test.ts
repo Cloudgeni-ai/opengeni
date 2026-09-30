@@ -72,8 +72,8 @@ describe("web bundle budget policy", () => {
       "directSessionFiles: 31",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
-      // The design-system rebuild's documented stylesheet growth.
-      "cssGzip: wholeKibEnvelope(42_744)",
+      // The neutral retheme's documented stylesheet growth.
+      "cssGzip: wholeKibEnvelope(44_100)",
     ])
       expect(source).toContain(limit);
   });

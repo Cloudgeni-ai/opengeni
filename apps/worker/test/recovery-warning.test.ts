@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { freshWorkspaceSandboxRecoveryDiscontinuity } from "@opengeni/contracts";
 import {
   recoveryAwareSessionInstructions,
   FILESYSTEM_DISCONTINUITY_PROTOCOL,
@@ -12,7 +13,7 @@ const readDiscontinuity = async () => {
 };
 
 test("the compatible worker module reconstructs the warning independently of transcript context", async () => {
-  expect(FILESYSTEM_DISCONTINUITY_PROTOCOL).toBe(2);
+  expect(FILESYSTEM_DISCONTINUITY_PROTOCOL).toBe(3);
   for (const instructions of [
     null,
     "After compaction",
@@ -64,4 +65,31 @@ test("warning fetch or parse failure prevents reaching inference", async () => {
     expect(reachedInference).toBe(false);
   }
   failure = null;
+});
+
+test("the empty-workspace variant survives every reconstruction and names the loss, not the tree", async () => {
+  const fresh = freshWorkspaceSandboxRecoveryDiscontinuity({
+    version: 1,
+    sessionId: crypto.randomUUID(),
+    sandboxGroupId: crypto.randomUUID(),
+    leaseId: crypto.randomUUID(),
+    leaseEpoch: 5,
+    workspaceGeneration: 81,
+    archiveGeneration: null,
+    lostAt: "2026-09-24T07:50:31.000Z",
+    reason: "archive_unavailable",
+  });
+  for (const instructions of [null, "After compaction", "After recovery", "Retry"]) {
+    const composed = await recoveryAwareSessionInstructions(
+      {} as never,
+      "workspace",
+      { id: "session", instructions },
+      async () => fresh,
+    );
+    expect(composed).toContain("lost at 2026-09-24T07:50:31.000Z");
+    expect(composed).toContain("new empty workspace");
+    expect(composed).toContain("do not assume they exist");
+    expect(composed).toContain("Never automatically replay prior commands");
+    if (instructions) expect(composed.startsWith(instructions)).toBe(true);
+  }
 });

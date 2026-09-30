@@ -57,7 +57,7 @@ describe("usage allowance projections and validation", () => {
   });
   test("rolling migration uses INSERT trigger, protected capabilities, no event sums", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0547_usage_allowances.sql", import.meta.url),
+      new URL("../drizzle/0549_usage_allowances.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).toContain("AFTER INSERT ON credit_ledger_entries");

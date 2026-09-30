@@ -2,7 +2,6 @@ import type { KnowledgeEntryScope, KnowledgeEntrySummary } from "@opengeni/sdk";
 import { Navigate } from "@tanstack/react-router";
 import {
   BrainCircuitIcon,
-  ChevronDownIcon,
   FolderPlusIcon,
   GraduationCapIcon,
   PlusIcon,
@@ -13,18 +12,14 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
 } from "@/components/ui/line-tabs";
+import { MoreMenu } from "@/components/ui/page-actions";
 import { PageHeader } from "@/components/ui/page-header";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
@@ -38,15 +33,17 @@ import {
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
 import {
+  IdentityPage,
   InstructionsEditPage,
   InstructionsHistoryPage,
+  InstructionsPage,
   InstructionsTab,
   useWorkspaceInstructions,
 } from "./knowledge-instructions";
 import {
   LearningPage,
   learningSummary,
-  reviewLearningLine,
+  reviewEmptyLine,
   useLearningDefaults,
 } from "./knowledge-learning";
 import {
@@ -60,14 +57,17 @@ import {
   type KnowledgeSearch,
   type KnowledgeTab,
 } from "./knowledge-navigation";
-import { ReviewTab, useReviewQueue } from "./knowledge-review";
+import { ReviewItemPage, ReviewList, useReviewFlow, useReviewQueue } from "./knowledge-review";
 import { UploadFilesDialog } from "./knowledge-upload";
 
 /* ----------------------------------------------------------------------------
-   Knowledge: one rail page with tabs Library, Instructions and Review (n).
-   Every entry, Learning, Add knowledge, Edit and History open as their own
-   pages in the content area with a back link. The URL says which one, so each
-   page can be linked and the browser's back button works.
+   Knowledge: one rail page with tabs Library, Instructions and Review (n),
+   built like every resource page: a header with one primary action (Add
+   knowledge) and a ⋯ menu, a toolbar, and flat lists of rows. Every entry,
+   each change waiting for review, the instructions, Learning, Add knowledge,
+   Edit and History open as their own pages in the content area with a back
+   link. The URL says which one, so each page can be linked and the browser's
+   back button works.
    -------------------------------------------------------------------------- */
 
 const TAB_LABEL: Record<KnowledgeTab, string> = {
@@ -142,6 +142,13 @@ export function KnowledgePage({
       : "library";
 
   const queue = useReviewQueue(workspaceId, refresh);
+  const review = useReviewFlow({
+    queue,
+    openKey: search.proposal ?? null,
+    open: (key, { replace }) =>
+      key ? nav.openProposal(key, { replace }) : nav.showTab("review", { replace }),
+    onChanged: changed,
+  });
   const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
   const mine = useLearningDefaults(workspaceId, "personal");
   const instructions = useWorkspaceInstructions(workspaceId);
@@ -202,7 +209,9 @@ export function KnowledgePage({
     ? `${search.page}:${search.entry ?? ""}`
     : search.entry
       ? `entry:${search.entry}:${search.revision ?? ""}`
-      : `tab:${tab}`;
+      : search.proposal
+        ? `proposal:${search.proposal}`
+        : `tab:${tab}`;
   const firstRender = useRef(true);
   const previousKey = useRef(pageKey);
   useLayoutEffect(() => {
@@ -266,13 +275,36 @@ export function KnowledgePage({
         />
       );
     }
+    if (search.page === "instructions") {
+      return (
+        <InstructionsPage
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          personal={personal}
+          canEdit={canEditInstructions}
+          instructions={instructions}
+          onBack={() => nav.showTab("instructions")}
+          onEdit={() => nav.openPage("edit-instructions", { view: "instructions" })}
+          onOpenHistory={() => nav.openPage("instructions-history", { view: "instructions" })}
+        />
+      );
+    }
+    if (search.page === "identity") {
+      return (
+        <IdentityPage
+          workspaceId={workspaceId}
+          canManageOrganization={canWriteOrganization}
+          onBack={() => nav.showTab("instructions")}
+        />
+      );
+    }
     if (search.page === "edit-instructions" && canEditInstructions) {
       return (
         <InstructionsEditPage
           workspaceName={workspace?.name ?? "this workspace"}
           personal={personal}
           instructions={instructions}
-          onClose={() => nav.showTab("instructions")}
+          onClose={() => nav.openPage("instructions", { view: "instructions" })}
         />
       );
     }
@@ -283,7 +315,19 @@ export function KnowledgePage({
           workspaceName={workspace?.name ?? "this workspace"}
           canEdit={canEditInstructions}
           instructions={instructions}
-          onClose={() => nav.showTab("instructions")}
+          onClose={() => nav.openPage("instructions", { view: "instructions" })}
+        />
+      );
+    }
+    if (search.proposal && tab === "review") {
+      return (
+        <ReviewItemPage
+          workspaceId={workspaceId}
+          flow={review}
+          queue={queue}
+          openKey={search.proposal}
+          onBack={() => nav.showTab("review")}
+          onOpenEntry={(id) => nav.openEntry(id, { from: "review" })}
         />
       );
     }
@@ -365,11 +409,13 @@ export function KnowledgePage({
     );
   }
 
-  const showReview = queue.count > 0 || tab === "review";
-  const summary = learningSummary(shared.modes);
+  const waiting = review.items.length;
+  const showReview = waiting > 0 || tab === "review";
+  const openLearning = withScroll(() => nav.openPage("learning", { view: tab }));
+  const showAdd = canEdit && !(tab === "library" && libraryEmpty);
 
   return (
-    <ContentPage ref={scroller} width="wide" className="max-w-[1200px] pt-6">
+    <ContentPage ref={scroller} width="standard" className="pt-6">
       <LineTabs
         value={tab}
         onValueChange={(value) => nav.showTab(value as KnowledgeTab)}
@@ -381,46 +427,40 @@ export function KnowledgePage({
           description="What your agents know and how they learn"
           actions={
             <>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={withScroll(() => nav.openPage("learning", { view: tab }))}
-                className="pointer-coarse:h-11"
-              >
-                <GraduationCapIcon aria-hidden="true" />
-                {shared.loading ? "Learning" : `Learning: ${summary}`}
-              </Button>
-              {(canEdit || canUpload) && !(tab === "library" && libraryEmpty) ? (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button type="button" className="pointer-coarse:h-11">
-                      <PlusIcon aria-hidden="true" />
-                      Add
-                      <ChevronDownIcon aria-hidden="true" className="-mr-1 opacity-80" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="min-w-48">
-                    {canEdit ? (
-                      <DropdownMenuItem onSelect={withScroll(() => nav.openPage("add"))}>
-                        <PlusIcon />
-                        Add knowledge
-                      </DropdownMenuItem>
-                    ) : null}
-                    {canUpload ? (
-                      <DropdownMenuItem onSelect={() => setUploadOpen(true)}>
-                        <UploadIcon />
-                        Upload files
-                      </DropdownMenuItem>
-                    ) : null}
-                    {canEdit ? (
-                      <DropdownMenuItem onSelect={() => setCollectionOpen(true)}>
-                        <FolderPlusIcon />
-                        New collection
-                      </DropdownMenuItem>
-                    ) : null}
-                  </DropdownMenuContent>
-                </DropdownMenu>
+              {showAdd ? (
+                <Button
+                  type="button"
+                  onClick={withScroll(() => nav.openPage("add"))}
+                  className="pointer-coarse:h-11"
+                >
+                  <PlusIcon aria-hidden="true" />
+                  Add knowledge
+                </Button>
               ) : null}
+              <MoreMenu label="More knowledge actions">
+                {canUpload && !(tab === "library" && libraryEmpty) ? (
+                  <DropdownMenuItem onSelect={() => setUploadOpen(true)}>
+                    <UploadIcon />
+                    Upload files
+                  </DropdownMenuItem>
+                ) : null}
+                {canEdit ? (
+                  <DropdownMenuItem onSelect={() => setCollectionOpen(true)}>
+                    <FolderPlusIcon />
+                    New collection
+                  </DropdownMenuItem>
+                ) : null}
+                {canEdit ? <DropdownMenuSeparator /> : null}
+                <DropdownMenuItem onSelect={openLearning}>
+                  <GraduationCapIcon />
+                  Learning
+                  {shared.loading ? null : (
+                    <span className="ml-auto pl-6 text-xs text-fg-subtle">
+                      {learningSummary(shared.modes)}
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              </MoreMenu>
             </>
           }
           tabs={
@@ -430,9 +470,9 @@ export function KnowledgePage({
               {showReview ? (
                 <LineTabsTrigger
                   value="review"
-                  count={queue.count ? `${queue.count}${queue.partial ? "+" : ""}` : undefined}
+                  count={waiting ? `${waiting}${queue.partial ? "+" : ""}` : undefined}
                   countTone="attention"
-                  countLabel={queue.count ? `${queue.count} waiting for review` : undefined}
+                  countLabel={waiting ? `${waiting} waiting for review` : undefined}
                 >
                   Review
                 </LineTabsTrigger>
@@ -457,6 +497,7 @@ export function KnowledgePage({
             onAdd={withScroll(() => nav.openPage("add"))}
             onUpload={() => setUploadOpen(true)}
             onEmptyChange={setLibraryEmpty}
+            personal={personal}
           />
         </LineTabsContent>
         <LineTabsContent value="instructions">
@@ -464,25 +505,25 @@ export function KnowledgePage({
             workspaceId={workspaceId}
             workspaceName={workspaceName}
             personal={personal}
-            canEdit={canEditInstructions}
-            canManageOrganization={canWriteOrganization}
             instructions={instructions}
-            onEdit={withScroll(() => nav.openPage("edit-instructions", { view: "instructions" }))}
-            onOpenHistory={withScroll(() =>
-              nav.openPage("instructions-history", { view: "instructions" }),
+            onOpenInstructions={withScroll(() =>
+              nav.openPage("instructions", { view: "instructions" }),
             )}
+            onOpenIdentity={withScroll(() => nav.openPage("identity", { view: "instructions" }))}
             onGoToLibrary={() => nav.showTab("library")}
           />
         </LineTabsContent>
         {showReview ? (
-          <LineTabsContent value="review">
-            <ReviewTab
-              workspaceId={workspaceId}
+          <LineTabsContent value="review" className="pt-6">
+            <ReviewList
+              items={review.items}
               queue={queue}
-              learningLine={reviewLearningLine(shared.modes)}
-              onOpenLearning={withScroll(() => nav.openPage("learning", { view: "review" }))}
-              onOpenEntry={withScroll((id: string) => nav.openEntry(id, { from: "review" }))}
-              onChanged={changed}
+              onOpen={withScroll((item: { key: string }) => nav.openProposal(item.key))}
+              hrefFor={(item) =>
+                `/workspaces/${workspaceId}/state?view=review&proposal=${encodeURIComponent(item.key)}`
+              }
+              emptyDescription={reviewEmptyLine(shared.modes)}
+              onOpenLearning={openLearning}
             />
           </LineTabsContent>
         ) : null}

@@ -72,6 +72,39 @@ beforeEach(() => {
 });
 
 describe("Integration Facet lifecycle state", () => {
+  test("a failed facet list says what to do and retries, never the raw API string", async () => {
+    let fail = true;
+    const listIntegrationFacets = mock(async () => {
+      if (fail) {
+        throw Object.assign(
+          new Error("OpenGeni API 500: facet store unavailable Reference: req-facets."),
+          { status: 500, correlationId: "req-facets" },
+        );
+      }
+      return response(binding("active", 1));
+    });
+    const client = { listIntegrationFacets } as unknown as OpenGeniBrowserClient;
+    const rendered = await renderPanel({ client });
+    try {
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => rendered.container.querySelector("[data-slot=error-message]") !== null);
+      const failure = rendered.container.querySelector("[data-slot=error-message]")!;
+      expect(failure.textContent).toContain("Couldn't load facets.");
+      expect(failure.textContent).toContain(
+        "Opengeni couldn't finish the request. Try again in a moment.",
+      );
+      expect(failure.textContent).toContain("Technical details");
+      expect(rendered.container.textContent).not.toContain("OpenGeni API 500");
+
+      fail = false;
+      await act(async () => button(rendered.container, "Try again").click());
+      await waitFor(() => rendered.container.textContent?.includes("Active") === true);
+      expect(rendered.container.querySelector("[data-slot=error-message]")).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("applies the authoritative lifecycle result without a stale list refetch", async () => {
     const active = binding("active", 1);
     const paused = binding("paused", 2);

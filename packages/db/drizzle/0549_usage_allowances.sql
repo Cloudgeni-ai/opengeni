@@ -124,6 +124,29 @@ ALTER TABLE workspace_webhooks ADD CONSTRAINT workspace_webhooks_event_types_chk
     'usage.threshold_reached','usage.exhausted','usage.period_reset'
   ]::text[]
 );
+-- Usage webhooks are emitted only by the allowance counter lifecycle below.
+-- The per-turn usage.exhausted session event is a timeline fact; never fan it
+-- out as a second, differently shaped delivery of the same webhook type.
+CREATE OR REPLACE FUNCTION opengeni_private.enqueue_workspace_webhook_deliveries_v1()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path FROM CURRENT
+AS $enqueue$
+BEGIN
+  IF NEW.type LIKE 'usage.%' THEN RETURN NULL; END IF;
+  BEGIN
+    INSERT INTO workspace_webhook_deliveries(account_id, workspace_id, webhook_id, event_id, event_type, payload)
+      SELECT webhook.account_id, webhook.workspace_id, webhook.id, NEW.id, NEW.type,
+        opengeni_private.integration_webhook_payload_v1(
+          NEW.account_id, NEW.workspace_id, NEW.id, NEW.type, NEW.session_id,
+          NEW.turn_id, NEW.sequence, NEW.occurred_at, NEW.payload)
+      FROM workspace_webhooks webhook
+      WHERE webhook.account_id = NEW.account_id AND webhook.workspace_id = NEW.workspace_id
+        AND webhook.enabled AND NEW.type = ANY(webhook.event_types)
+      ON CONFLICT(webhook_id, event_id) DO NOTHING;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'workspace webhook enqueue skipped for event %: %', NEW.id, SQLSTATE;
+  END;
+  RETURN NULL;
+END $enqueue$;
 CREATE TABLE opengeni_private.usage_allowance_capabilities (
   backend_pid integer NOT NULL,
   transaction_id xid8 NOT NULL,
@@ -539,6 +562,7 @@ BEGIN
       INSERT INTO workspace_webhook_deliveries (account_id,workspace_id,webhook_id,event_id,event_type,payload)
       SELECT p_account,p_workspace,h.id,receipt_id,'usage.period_reset',
         jsonb_build_object('id',receipt_id,'type','usage.period_reset','workspaceId',p_workspace,
+          'lane','workspace','workspace',(SELECT jsonb_build_object('id',w.id,'externalSource',w.external_source,'externalId',w.external_id) FROM workspaces w WHERE w.id=p_workspace AND w.account_id=p_account),
           'occurredAt',clock_timestamp(),'data',payload_value)
       FROM workspace_webhooks h WHERE h.workspace_id=p_workspace AND h.enabled AND 'usage.period_reset'=ANY(h.event_types)
       ON CONFLICT DO NOTHING;
@@ -579,6 +603,7 @@ BEGIN
         INSERT INTO workspace_webhook_deliveries (account_id,workspace_id,webhook_id,event_id,event_type,payload)
         SELECT p_account,p_workspace,h.id,receipt_id,event_name,
           jsonb_build_object('id',receipt_id,'type',event_name,'workspaceId',p_workspace,
+          'lane','workspace','workspace',(SELECT jsonb_build_object('id',w.id,'externalSource',w.external_source,'externalId',w.external_id) FROM workspaces w WHERE w.id=p_workspace AND w.account_id=p_account),
             'occurredAt',clock_timestamp(),'data',payload_value)
         FROM workspace_webhooks h WHERE h.workspace_id=p_workspace AND h.enabled AND event_name=ANY(h.event_types)
         ON CONFLICT DO NOTHING;
@@ -587,6 +612,7 @@ BEGIN
           INSERT INTO workspace_webhook_deliveries (account_id,workspace_id,webhook_id,event_id,event_type,payload)
           SELECT p_account,p_workspace,h.id,event_id_value,'usage.threshold_reached',
             jsonb_build_object('id',event_id_value,'type','usage.threshold_reached','workspaceId',p_workspace,
+          'lane','workspace','workspace',(SELECT jsonb_build_object('id',w.id,'externalSource',w.external_source,'externalId',w.external_id) FROM workspaces w WHERE w.id=p_workspace AND w.account_id=p_account),
               'occurredAt',clock_timestamp(),'data',payload_value)
           FROM workspace_webhooks h WHERE h.workspace_id=p_workspace AND h.enabled AND 'usage.threshold_reached'=ANY(h.event_types);
         END IF;

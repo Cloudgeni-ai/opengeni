@@ -18,7 +18,7 @@ export function SiteSessionGroupHeading({
   summary: RailAggregateStatus;
 }) {
   return (
-    <div className="flex min-h-8 items-center gap-1 rounded-md px-1 hover:bg-surface-2">
+    <div className="flex min-h-8 items-center gap-1 rounded-md px-1 hover:bg-hover">
       <button
         type="button"
         aria-label={`${expanded ? "Collapse" : "Expand"} conversations from ${origin.title}`}

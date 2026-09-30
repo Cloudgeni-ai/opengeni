@@ -689,12 +689,12 @@ spec:
           expr: |
             (
               (sum(
-                increase(opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}[30m]) > 0
+                increase(opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome=~"selected|selected_shared"}[30m]) > 0
                 or
                 (
-                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"}
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome=~"selected|selected_shared"}
                   unless
-                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="selected"} offset 30m
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome=~"selected|selected_shared"} offset 30m
                 )
               ) or vector(0))
               +
@@ -705,7 +705,30 @@ spec:
             severity: warning
           annotations:
             summary: Modal workspace recovery selected a fallback checkpoint
-            description: A prior checkpoint was selected after a durable authorization receipt. This is an operator signal even if the session later continues successfully; inspect archive selection and restore state. Selection does not prove restoration succeeded.
+            description: A prior checkpoint was selected after a durable authorization receipt, for one session or for every session sharing the sandbox (outcome selected_shared). This is an operator signal even if the session later continues successfully; inspect archive selection and restore state. Selection does not prove restoration succeeded.
+        - alert: OpenGeniModalFreshWorkspaceContinuity
+          # Same first-sample arm as the checkpoint fallback: the durable ledger
+          # keeps the signal if the deciding worker exits before a scrape.
+          expr: |
+            (
+              (sum(
+                increase(opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="fresh_workspace"}[30m]) > 0
+                or
+                (
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="fresh_workspace"}
+                  unless
+                  opengeni_sandbox_checkpoint_fallback_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal",outcome="fresh_workspace"} offset 30m
+                )
+              ) or vector(0))
+              +
+              (sum(opengeni:sandbox_recovery_observations_recent:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="fresh_workspace_selected"}) or vector(0))
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: A lost Modal sandbox group continued on an empty workspace
+            description: A definitively lost managed sandbox had no usable checkpoint, so its sessions continued on a new empty workspace after a durable decision that warned every group member. Files from before the loss are gone from the running sandbox; the previous archive and checkpoint references remain on the lease for review. Inspect why no restorable checkpoint existed (capture cadence, deadline rotation, restore failures).
         - alert: OpenGeniSandboxCheckpointDeletionFailed
           expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{state="delete_failed"} > 0
           for: 15m
