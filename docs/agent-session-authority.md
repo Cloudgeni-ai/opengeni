@@ -16,6 +16,13 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+Browser and desktop inventories apply `session.read` authorization to the chat
+that created each resource, for humans, services, API keys and agent attempts.
+This matches direct resource reads. A later observing/using association does not
+grant visibility through a different chat; missing or ambiguous creation
+associations are omitted. Authorization outages fail the list request rather
+than returning an apparently complete partial inventory.
+
 `session_get({})` resolves only the session in the authenticated exact agent
 attempt claims, then performs the same live-attempt and target authorization as
 an explicit ID. A child reads itself, never its parent or root. Sessionless,

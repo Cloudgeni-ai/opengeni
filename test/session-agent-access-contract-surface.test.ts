@@ -309,7 +309,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
     }
   });
 
-  test("browser and computer inventories are filtered through the seam for agent attempts", async () => {
+  test("browser and computer inventories use source-session access for every caller", async () => {
     for (const file of [
       "apps/api/src/routes/browser-sessions.ts",
       "apps/api/src/routes/computer-sessions.ts",
@@ -321,7 +321,8 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       );
     }
     const filter = await read("apps/api/src/interaction-agent-access.ts");
-    expect(filter).toContain("grantHasAgentAttemptAuthority(grant)");
+    expect(filter).not.toContain("grantHasAgentAttemptAuthority");
+    expect(filter).toContain('entry.relationship === "created"');
     expect(filter).toContain('operation: "session.read"');
   });
 });
