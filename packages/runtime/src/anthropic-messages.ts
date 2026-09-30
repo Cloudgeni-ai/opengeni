@@ -242,7 +242,13 @@ export function buildAnthropicRequest(
     // Anthropic searches only a bounded number of blocks before a breakpoint.
     // A large parallel tool batch can move the old request prefix outside that
     // window; explicitly retain its boundary before the latest assistant reply.
-    const lastAssistant = messages.findLastIndex((message) => message.role === "assistant");
+    let lastAssistant = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]!.role === "assistant") {
+        lastAssistant = index;
+        break;
+      }
+    }
     const previous = messages
       .slice(0, Math.max(0, lastAssistant))
       .flatMap((message) => message.content)
