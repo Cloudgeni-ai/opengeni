@@ -21,6 +21,7 @@ import {
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
+import { userErrorText } from "@/lib/api-error";
 import type { OrgOption } from "@/lib/org";
 import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
 
@@ -162,7 +163,6 @@ export function useCreateOrganizationFlow(onCreated: (workspaceId: string) => vo
       resetCreateOrganizationDraft();
     } catch (error) {
       if (!attemptIsCurrent()) return;
-      const message = error instanceof Error ? error.message : String(error);
       const outcomeUnknown = additionalOrganizationCreationOutcomeUnknown(error);
       if (attemptedState !== "committed" && !outcomeUnknown) {
         attemptedState = "draft";
@@ -175,14 +175,14 @@ export function useCreateOrganizationFlow(onCreated: (workspaceId: string) => vo
           ? "Organization created, but not opened"
           : attemptedState === "uncertain"
             ? "Creation could not be confirmed"
-            : "Failed to create organization",
+            : "Couldn't create the organization",
         {
           description:
             attemptedState === "committed"
-              ? `${message}. Try again to refresh access and open the same organization.`
+              ? "Try again to refresh access and open the same organization."
               : attemptedState === "uncertain"
-                ? `${message}. Try again to safely replay this exact request and confirm the result.`
-                : message,
+                ? "Try again to safely replay this exact request and confirm the result."
+                : userErrorText(error),
         },
       );
     } finally {

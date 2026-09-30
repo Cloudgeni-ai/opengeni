@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ComposerMobilePlus, type ComposerPlusProps } from "@/components/composer-mobile-plus";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import { composerConnectorOptions } from "@/lib/composer-connectors";
@@ -148,9 +149,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         setError(
           denied || lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision
             ? deniedMessage
-            : failure instanceof Error
-              ? failure.message
-              : "Couldn't load connectors.",
+            : `Couldn't load connectors. ${userErrorText(failure, "Try again.")}`,
         );
     } finally {
       if (live()) setLoading(false);
@@ -260,7 +259,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         scope.current.canReadConnections === true &&
         lifecycle.generation === generation
       )
-        setError(failure instanceof Error ? failure.message : "Couldn't reconnect.");
+        setError(`Couldn't reconnect. ${userErrorText(failure, "Try again.")}`);
     } finally {
       if (
         scope.current.client === client &&

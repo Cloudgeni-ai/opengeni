@@ -31,6 +31,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
+import { userErrorText } from "@/lib/api-error";
 import { repoCountLabel } from "@/lib/format";
 import { attachedManualRepositoryCount } from "@/lib/manual-repositories";
 import {
@@ -200,7 +201,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
         return openRefresh.current();
       })
       .catch((error: unknown) => {
-        if (active) setRefreshError(error instanceof Error ? error.message : String(error));
+        if (active) setRefreshError(userErrorText(error));
       });
     return () => {
       active = false;
@@ -227,7 +228,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     try {
       await props.onRefresh();
     } catch (error) {
-      setRefreshError(error instanceof Error ? error.message : String(error));
+      setRefreshError(userErrorText(error));
     } finally {
       setRefreshBusy(false);
     }
@@ -243,7 +244,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     props
       .onConfigureInstallation(installationId)
       .catch((error: unknown) =>
-        setLinkError(error instanceof Error ? error.message : "Couldn't open GitHub. Try again."),
+        setLinkError(`Couldn't open GitHub. ${userErrorText(error, "Try again.")}`),
       )
       .finally(() => setConfiguringInstallationId(null));
   }
@@ -841,7 +842,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           ) : null}
           {refreshError ? (
             <p className="px-2.5 text-xs text-status-failed" role="alert">
-              {refreshError}
+              Couldn't refresh the list. {refreshError}
             </p>
           ) : null}
           {props.newChatUrl &&
@@ -986,9 +987,7 @@ export function ScheduledTaskRepositoryPicker(props: {
         nextResource,
       ]);
     } catch (error) {
-      toast.error("Couldn't select the repository", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Couldn't select the repository", { description: userErrorText(error) });
     }
   }
 

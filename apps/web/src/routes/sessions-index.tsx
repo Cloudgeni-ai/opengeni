@@ -167,6 +167,7 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
+import { userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import {
   newSessionCreateSnapshot,
@@ -1153,9 +1154,7 @@ function SessionsIndexRouteContent({
                 const flushed = await newSessionDraft.flush();
                 if (!flushed) {
                   toast.error("Couldn't save the draft", {
-                    description:
-                      (newSessionDraft.conflict ? null : newSessionDraft.error?.message) ??
-                      "Your message is still here. Try again.",
+                    description: draftSaveFailureText(newSessionDraft),
                   });
                   return null;
                 }
@@ -1222,9 +1221,7 @@ function SessionsIndexRouteContent({
               const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
                 toast.error("Couldn't save the draft", {
-                  description:
-                    (newSessionDraft.conflict ? null : newSessionDraft.error?.message) ??
-                    "Your message is still here. Try again.",
+                  description: draftSaveFailureText(newSessionDraft),
                 });
                 return null;
               }
@@ -1801,6 +1798,12 @@ function SessionsIndexRouteContent({
       />
     </div>,
   );
+}
+
+/** A draft that didn't save: the message is kept, then what to do. */
+function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
+  if (draft.conflict || !draft.error) return "Your message is still here. Try again.";
+  return `Your message is still here. ${userErrorText(draft.error)}`;
 }
 
 // ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──

@@ -50,6 +50,7 @@ import {
 } from "@/components/organization-invitations";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
 function userInitial(label: string): string {
@@ -121,7 +122,7 @@ export function BrowserAccountMenu() {
       onSettled: restoreFocus,
       onError: (error) =>
         toast.error("Couldn't start account authentication", {
-          description: String(error),
+          description: userErrorText(error),
         }),
     });
   }
@@ -137,7 +138,9 @@ export function BrowserAccountMenu() {
       .then((settled) => {
         if (settled) restoreFocus();
       })
-      .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
+      .catch((error) =>
+        toast.error("Couldn't switch accounts", { description: userErrorText(error) }),
+      );
   }
 
   function continueInvitation(targetEmail: string) {
@@ -172,7 +175,7 @@ export function BrowserAccountMenu() {
       }
     } catch (error) {
       toast.error("Couldn't sign out this account", {
-        description: String(error),
+        description: userErrorText(error),
       });
     }
   }
@@ -183,7 +186,7 @@ export function BrowserAccountMenu() {
       if (settled) setLogoutAllOpen(false);
     } catch (error) {
       toast.error("Couldn't sign out all browser accounts", {
-        description: String(error),
+        description: userErrorText(error),
       });
     }
   }
@@ -349,7 +352,7 @@ export function BrowserAccountMenu() {
                     : accounts.refresh();
                   void retry.catch((error) =>
                     toast.error("Couldn't reconcile account state", {
-                      description: String(error),
+                      description: userErrorText(error),
                     }),
                   );
                 }}
@@ -463,7 +466,7 @@ export function BrowserAccountMenu() {
               onClick={() =>
                 void accounts.continueTransition().catch((error) =>
                   toast.error("Couldn't change accounts", {
-                    description: String(error),
+                    description: userErrorText(error),
                   }),
                 )
               }

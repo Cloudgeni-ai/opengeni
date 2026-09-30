@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
@@ -75,7 +76,9 @@ export function RailFooter() {
     onUseInvitedAccount: () => {
       void context
         .handleManagedSignOut()
-        .catch((error) => toast.error("Sign out failed", { description: String(error) }));
+        .catch((error: unknown) =>
+          toast.error("Couldn't sign out", { description: userErrorText(error) }),
+        );
     },
     onAccepted: context.revalidatePrincipalAccess,
   });
@@ -190,8 +193,8 @@ export function RailFooter() {
                     onSelect={() => {
                       void context
                         .handleManagedSignOut()
-                        .catch((error) =>
-                          toast.error("Sign out failed", { description: String(error) }),
+                        .catch((error: unknown) =>
+                          toast.error("Couldn't sign out", { description: userErrorText(error) }),
                         );
                     }}
                   >

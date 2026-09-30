@@ -249,7 +249,7 @@ test("a catalog failure and connection 403 mask cached composer account status",
     await Bun.sleep(0);
   });
   expect(composer!.servers[0]?.connectionStatus).toBe("ready");
-  expect(composer!.connectorActions?.error).toBe("Catalog unavailable");
+  expect(composer!.connectorActions?.error).toBe("Couldn't load connectors. Catalog unavailable");
 
   failure = "denied";
   await act(async () => {
