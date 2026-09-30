@@ -10,6 +10,7 @@ import {
   type AccountGrant,
   type AccessContext,
   type AccessGrant,
+  type OrganizationApiKeyAccess,
   Permission,
   type Workspace,
 } from "@opengeni/contracts";
@@ -207,6 +208,11 @@ export function accountScopedApiKeyWorkspaceAuthority(
     accountId: authority.accountId,
     permissions: [...authority.permissions],
   };
+}
+
+/** The organization access tier is derived from the stored workspace-admin wildcard. */
+export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
+  return permissions.includes("workspace:admin") ? "full" : "read";
 }
 
 /**
@@ -885,7 +891,7 @@ async function apiKeyAccessContext(
     : apiKey.permissions.filter((permission) =>
         accountScopedApiKeyAccountPermissions.has(permission),
       );
-  const context = {
+  const context: AccessContext = {
     mode,
     subjectId,
     subjectLabel: apiKey.name,
@@ -912,7 +918,7 @@ async function apiKeyAccessContext(
       : [],
     defaultAccountId: apiKey.accountId,
     defaultWorkspaceId: apiKey.workspaceId,
-  } satisfies AccessContext;
+  };
   if (service) apiKeyServiceContexts.set(context, service);
   if (apiKey.workspaceId === null && apiKey.credentialKind === "organization") {
     accountScopedApiKeyContexts.set(
@@ -926,6 +932,30 @@ async function apiKeyAccessContext(
         ),
       }),
     );
+  }
+  // Report the exact stamped authority consumed by accessGrantAuthorization,
+  // rather than re-deriving organization-key permissions from a separate rule.
+  // This projection is never an authorization input, and the asUser branch
+  // above deliberately omits it instead of advertising the service's authority.
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  const workspaceGrant =
+    apiKey.credentialKind === "workspace" ? context.workspaceGrants[0] : undefined;
+  const workspacePermissions = authority?.permissions ?? workspaceGrant?.permissions;
+  if (workspacePermissions) {
+    context.credential = {
+      kind: authority ? "organization_api_key" : "workspace_api_key",
+      ...(authority ? { access: organizationApiKeyAccess(apiKey.permissions) } : {}),
+      accountId: apiKey.accountId,
+      workspaceId: apiKey.workspaceId,
+      effectiveWorkspacePermissions: Permission.options.filter(
+        (permission) =>
+          !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
+          hasPermission(workspacePermissions, permission),
+      ),
+      note: authority
+        ? "These permissions apply to every shared workspace in this organization, not Personal workspaces. workspaceGrants need not enumerate them; accountGrants report organization-level permissions. asUser requests also require user authority."
+        : "These permissions apply only to the workspace identified by workspaceId; they grant no organization-wide workspace authority.",
+    };
   }
   return context;
 }

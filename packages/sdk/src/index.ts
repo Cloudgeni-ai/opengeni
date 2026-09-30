@@ -541,6 +541,7 @@ export {
 } from "./types";
 export type {
   AccessContext,
+  AccessCredential,
   ActivateCodexRealtimeConnectionRequest,
   AccessGrant,
   AccountGrant,
