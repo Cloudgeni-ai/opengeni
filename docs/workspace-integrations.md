@@ -6,12 +6,19 @@ across all its customers, with one secret per registration. Use the host's
 full-access organization API key for setup, not an `asUser()` client:
 
 ```ts
+import {
+  putOrganizationCredentialProvider,
+  createOrganizationWebhook,
+} from "@opengeni/sdk/workspace-integrations";
+
 const filter = { externalSource: "product:production" };
-const { secret: credentialSecret } = await client.putOrganizationCredentialProvider(
+const { secret: credentialSecret } = await putOrganizationCredentialProvider(
+  client,
   organizationId,
   { url: "https://product.example/opengeni/credentials", workspaceFilter: filter },
 );
-const { webhook, secret: webhookSecret } = await client.createOrganizationWebhook(
+const { webhook, secret: webhookSecret } = await createOrganizationWebhook(
+  client,
   organizationId,
   {
     url: "https://product.example/opengeni/events",
@@ -21,6 +28,12 @@ const { webhook, secret: webhookSecret } = await client.createOrganizationWebhoo
 );
 // Store both secrets now: they are returned only on first creation.
 ```
+
+Organization administration, individual webhook reads, and signing-secret
+rotation are opt-in functions from `@opengeni/sdk/workspace-integrations`,
+not methods on the eager `OpenGeniClient`. Pass `client` first, then the same
+organization/workspace and resource arguments. Existing browser-used workspace
+methods remain on the client.
 
 `workspaceFilter.externalSource` matches the workspace's `external_source`
 exactly (case-sensitive, no trimming; at most 200 UTF-8 bytes). Every organization
@@ -289,8 +302,9 @@ Organization endpoints receive matching non-personal workspaces' selected events
 workspace endpoints still receive their own events independently. Both gain
 the additive `workspace` routing object; turn events gain `initiatingHuman`
 when known. Pre-upgrade queued deliveries may lack these additions.
-Use `listOrganizationWebhookDeliveries` and
-`redeliverOrganizationWebhookDelivery` for organization registrations.
+Import `listOrganizationWebhookDeliveries` and
+`redeliverOrganizationWebhookDelivery` from the focused subpath for organization
+registrations; call them with `client` first.
 
 ### Management API and SDK
 
@@ -318,6 +332,12 @@ and `rotateWorkspaceWebhookSecret`. Each returns the new secret exactly once
 with `{ provider, secret }` or `{ webhook, secret }`. Rotation is immediate:
 new requests/deliveries use the new secret; there is no overlap window.
 Already-started outbound requests may still carry the previous signature.
+
+```ts
+import { rotateOrganizationWebhookSecret } from "@opengeni/sdk/workspace-integrations";
+
+const { secret } = await rotateOrganizationWebhookSecret(client, organizationId, webhookId);
+```
 
 Deliveries are enqueued inside the transaction that records the session event;
 enqueue errors are logged without aborting the turn's lifecycle transaction.

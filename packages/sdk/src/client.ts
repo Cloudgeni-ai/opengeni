@@ -35,20 +35,6 @@ import type {
 } from "./workspace-artifacts";
 import type { CreateFeedbackRequest, Feedback, FeedbackSubmissionResponse } from "./feedback";
 import type {
-  CreateOrganizationWebhookRequest,
-  CreateOrganizationWebhookResponse,
-  GetOrganizationCredentialProviderResponse,
-  ListOrganizationWebhookDeliveriesResponse,
-  ListOrganizationWebhooksResponse,
-  OrganizationWebhook,
-  OrganizationWebhookDelivery,
-  PutOrganizationCredentialProviderRequest,
-  PutOrganizationCredentialProviderResponse,
-  RotateWorkspaceCredentialProviderSecretResponse,
-  RotateOrganizationCredentialProviderSecretResponse,
-  RotateWorkspaceWebhookSecretResponse,
-  RotateOrganizationWebhookSecretResponse,
-  UpdateOrganizationWebhookRequest,
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   GetWorkspaceCredentialProviderResponse,
@@ -766,6 +752,8 @@ function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "com
 export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
+  /** Opt-in void response handling for focused helpers using the shared transport. */
+  responseType?: "json" | "void";
 };
 
 export type SharedSessionReadOptions = {
@@ -1262,143 +1250,6 @@ export class OpenGeniClient {
     await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/credential-provider`);
   }
 
-  /** Rotate immediately. Store the new secret; the old signing secret stops working. */
-  async rotateWorkspaceCredentialProviderSecret(
-    workspaceId: string,
-  ): Promise<RotateWorkspaceCredentialProviderSecretResponse> {
-    return this.requestJson(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/credential-provider/rotate-secret`,
-    );
-  }
-
-  /** Requires account:admin or a full organization key; not asUser or agent attempts. */
-  async getOrganizationCredentialProvider(
-    organizationId: string,
-  ): Promise<GetOrganizationCredentialProviderResponse> {
-    return this.requestJson(
-      "GET",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
-    );
-  }
-
-  /**
-   * Replace configuration for matching non-personal workspaces. A workspace
-   * registration overrides inheritance even when disabled. Explicit filter
-   * required: null means all non-personal workspaces. Store the first secret.
-   */
-  async putOrganizationCredentialProvider(
-    organizationId: string,
-    request: PutOrganizationCredentialProviderRequest,
-  ): Promise<PutOrganizationCredentialProviderResponse> {
-    return this.requestJson(
-      "PUT",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
-      request,
-    );
-  }
-
-  async deleteOrganizationCredentialProvider(organizationId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
-    );
-  }
-
-  async rotateOrganizationCredentialProviderSecret(
-    organizationId: string,
-  ): Promise<RotateOrganizationCredentialProviderSecretResponse> {
-    return this.requestJson(
-      "POST",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider/rotate-secret`,
-    );
-  }
-
-  async listOrganizationWebhooks(
-    organizationId: string,
-  ): Promise<ListOrganizationWebhooksResponse> {
-    return this.requestJson(
-      "GET",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks`,
-    );
-  }
-
-  /** All matching workspaces, one signing secret; account admin or full organization key. */
-  async createOrganizationWebhook(
-    organizationId: string,
-    request: CreateOrganizationWebhookRequest,
-  ): Promise<CreateOrganizationWebhookResponse> {
-    return this.requestJson(
-      "POST",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks`,
-      request,
-    );
-  }
-
-  async getOrganizationWebhook(
-    organizationId: string,
-    webhookId: string,
-  ): Promise<OrganizationWebhook> {
-    return this.requestJson(
-      "GET",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
-    );
-  }
-
-  async updateOrganizationWebhook(
-    organizationId: string,
-    webhookId: string,
-    request: UpdateOrganizationWebhookRequest,
-  ): Promise<OrganizationWebhook> {
-    return this.requestJson(
-      "PATCH",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
-      request,
-    );
-  }
-
-  async deleteOrganizationWebhook(organizationId: string, webhookId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
-    );
-  }
-
-  async rotateOrganizationWebhookSecret(
-    organizationId: string,
-    webhookId: string,
-  ): Promise<RotateOrganizationWebhookSecretResponse> {
-    return this.requestJson(
-      "POST",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
-    );
-  }
-
-  async listOrganizationWebhookDeliveries(
-    organizationId: string,
-    webhookId: string,
-    options: { limit?: number } = {},
-  ): Promise<ListOrganizationWebhookDeliveriesResponse> {
-    return this.requestJson(
-      "GET",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/deliveries`,
-      undefined,
-      options.limit !== undefined ? { limit: String(options.limit) } : {},
-    );
-  }
-
-  /** Requeue one settled delivery with a fresh attempt budget. */
-  async redeliverOrganizationWebhookDelivery(
-    organizationId: string,
-    webhookId: string,
-    deliveryId: string,
-  ): Promise<OrganizationWebhookDelivery> {
-    return this.requestJson(
-      "POST",
-      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/deliveries/${encodeURIComponent(deliveryId)}/redeliver`,
-    );
-  }
-
   async listWorkspaceWebhooks(workspaceId: string): Promise<ListWorkspaceWebhooksResponse> {
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/webhooks`);
   }
@@ -1409,10 +1260,6 @@ export class OpenGeniClient {
     request: CreateWorkspaceWebhookRequest,
   ): Promise<CreateWorkspaceWebhookResponse> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/webhooks`, request);
-  }
-
-  async getWorkspaceWebhook(workspaceId: string, webhookId: string): Promise<WorkspaceWebhook> {
-    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`);
   }
 
   async updateWorkspaceWebhook(
@@ -1429,16 +1276,6 @@ export class OpenGeniClient {
 
   async deleteWorkspaceWebhook(workspaceId: string, webhookId: string): Promise<void> {
     await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`);
-  }
-
-  async rotateWorkspaceWebhookSecret(
-    workspaceId: string,
-    webhookId: string,
-  ): Promise<RotateWorkspaceWebhookSecretResponse> {
-    return this.requestJson(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
-    );
   }
 
   async listWorkspaceWebhookDeliveries(
@@ -9029,6 +8866,13 @@ export class OpenGeniClient {
             apiErrorFromResponse(response, { method, correlationId }),
             abort.signal,
           );
+        }
+        if (options.responseType === "void") {
+          await awaitWithAbort(
+            cancelResponseBody(response, "discarding void API response"),
+            abort.signal,
+          );
+          return undefined as T;
         }
         await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
         return (await awaitWithAbort(response.json(), abort.signal)) as T;

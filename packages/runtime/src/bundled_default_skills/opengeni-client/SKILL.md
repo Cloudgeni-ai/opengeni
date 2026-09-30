@@ -224,6 +224,10 @@ Read selectively: [Product integration shapes](references/product-integration-sh
   sandbox credentials, including Git) and recognize the calling turn from the
   informational `_meta.opengeni` on MCP calls. See
   `docs/workspace-integrations.md`.
+- Organization integration administration, webhook reads and signing-secret
+  rotation use functions imported from `@opengeni/sdk/workspace-integrations`,
+  with `client` as the first argument. They are not eager client methods; see
+  [Data tools and credentials](references/data-tools-and-credentials.md).
 
 ## Choose The Credential
 

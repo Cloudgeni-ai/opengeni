@@ -310,7 +310,7 @@
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/credential-provider",
       "sdk": [
-        "OpenGeniClient.deleteOrganizationCredentialProvider"
+        "deleteOrganizationCredentialProvider"
       ],
       "request": [],
       "response": []
@@ -319,7 +319,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/credential-provider",
       "sdk": [
-        "OpenGeniClient.getOrganizationCredentialProvider"
+        "getOrganizationCredentialProvider"
       ],
       "request": [],
       "response": [
@@ -330,7 +330,7 @@
       "method": "PUT",
       "path": "/v1/organizations/:organizationId/credential-provider",
       "sdk": [
-        "OpenGeniClient.putOrganizationCredentialProvider"
+        "putOrganizationCredentialProvider"
       ],
       "request": [
         "PutOrganizationCredentialProviderRequest"
@@ -343,7 +343,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/credential-provider/rotate-secret",
       "sdk": [
-        "OpenGeniClient.rotateOrganizationCredentialProviderSecret"
+        "rotateOrganizationCredentialProviderSecret"
       ],
       "request": [],
       "response": [
@@ -792,7 +792,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/webhooks",
       "sdk": [
-        "OpenGeniClient.listOrganizationWebhooks"
+        "listOrganizationWebhooks"
       ],
       "request": [],
       "response": [
@@ -803,7 +803,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/webhooks",
       "sdk": [
-        "OpenGeniClient.createOrganizationWebhook"
+        "createOrganizationWebhook"
       ],
       "request": [
         "CreateOrganizationWebhookRequest"
@@ -816,7 +816,7 @@
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/webhooks/:webhookId",
       "sdk": [
-        "OpenGeniClient.deleteOrganizationWebhook"
+        "deleteOrganizationWebhook"
       ],
       "request": [],
       "response": []
@@ -825,7 +825,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/webhooks/:webhookId",
       "sdk": [
-        "OpenGeniClient.getOrganizationWebhook"
+        "getOrganizationWebhook"
       ],
       "request": [],
       "response": [
@@ -836,7 +836,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/webhooks/:webhookId",
       "sdk": [
-        "OpenGeniClient.updateOrganizationWebhook"
+        "updateOrganizationWebhook"
       ],
       "request": [
         "UpdateOrganizationWebhookRequest"
@@ -849,7 +849,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/webhooks/:webhookId/deliveries",
       "sdk": [
-        "OpenGeniClient.listOrganizationWebhookDeliveries"
+        "listOrganizationWebhookDeliveries"
       ],
       "request": [],
       "response": [
@@ -860,7 +860,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/webhooks/:webhookId/deliveries/:deliveryId/redeliver",
       "sdk": [
-        "OpenGeniClient.redeliverOrganizationWebhookDelivery"
+        "redeliverOrganizationWebhookDelivery"
       ],
       "request": [],
       "response": [
@@ -871,7 +871,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/webhooks/:webhookId/rotate-secret",
       "sdk": [
-        "OpenGeniClient.rotateOrganizationWebhookSecret"
+        "rotateOrganizationWebhookSecret"
       ],
       "request": [],
       "response": [
@@ -2777,7 +2777,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/credential-provider/rotate-secret",
       "sdk": [
-        "OpenGeniClient.rotateWorkspaceCredentialProviderSecret"
+        "rotateWorkspaceCredentialProviderSecret"
       ],
       "request": [],
       "response": [
@@ -6874,7 +6874,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId",
       "sdk": [
-        "OpenGeniClient.getWorkspaceWebhook"
+        "getWorkspaceWebhook"
       ],
       "request": [],
       "response": [
@@ -6920,7 +6920,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId/rotate-secret",
       "sdk": [
-        "OpenGeniClient.rotateWorkspaceWebhookSecret"
+        "rotateWorkspaceWebhookSecret"
       ],
       "request": [],
       "response": [
@@ -25360,6 +25360,68 @@
       "SITE_BROWSER_RUNTIME": "value",
       "SITE_CLIENT_SCRIPT_PATH": "value"
     },
+    "@opengeni/sdk/workspace-integrations": {
+      "createOrganizationWebhook": "value",
+      "CreateOrganizationWebhookRequest": "type",
+      "CreateOrganizationWebhookResponse": "type",
+      "CreateWorkspaceWebhookRequest": "type",
+      "CreateWorkspaceWebhookResponse": "type",
+      "CredentialProviderMcpHeaders": "type",
+      "CredentialProviderMcpMaterial": "type",
+      "CredentialProviderRequest": "type",
+      "CredentialProviderResponse": "type",
+      "deleteOrganizationCredentialProvider": "value",
+      "deleteOrganizationWebhook": "value",
+      "getOrganizationCredentialProvider": "value",
+      "GetOrganizationCredentialProviderResponse": "type",
+      "getOrganizationWebhook": "value",
+      "GetWorkspaceCredentialProviderResponse": "type",
+      "getWorkspaceWebhook": "value",
+      "InitiatingHuman": "type",
+      "IntegrationWorkspaceFilter": "type",
+      "listOrganizationWebhookDeliveries": "value",
+      "ListOrganizationWebhookDeliveriesResponse": "type",
+      "listOrganizationWebhooks": "value",
+      "ListOrganizationWebhooksResponse": "type",
+      "ListWorkspaceWebhookDeliveriesResponse": "type",
+      "ListWorkspaceWebhooksResponse": "type",
+      "OPENGENI_DELIVERY_ID_HEADER": "value",
+      "OPENGENI_EVENT_ID_HEADER": "value",
+      "OPENGENI_SIGNATURE_HEADER": "value",
+      "OPENGENI_WEBHOOK_HEADERS": "value",
+      "OpenGeniSignatureError": "value",
+      "OrganizationCredentialProvider": "type",
+      "OrganizationWebhook": "type",
+      "OrganizationWebhookDelivery": "type",
+      "putOrganizationCredentialProvider": "value",
+      "PutOrganizationCredentialProviderRequest": "type",
+      "PutOrganizationCredentialProviderResponse": "type",
+      "PutWorkspaceCredentialProviderRequest": "type",
+      "PutWorkspaceCredentialProviderResponse": "type",
+      "redeliverOrganizationWebhookDelivery": "value",
+      "rotateOrganizationCredentialProviderSecret": "value",
+      "RotateOrganizationCredentialProviderSecretResponse": "type",
+      "rotateOrganizationWebhookSecret": "value",
+      "RotateOrganizationWebhookSecretResponse": "type",
+      "rotateWorkspaceCredentialProviderSecret": "value",
+      "RotateWorkspaceCredentialProviderSecretResponse": "type",
+      "rotateWorkspaceWebhookSecret": "value",
+      "RotateWorkspaceWebhookSecretResponse": "type",
+      "signOpenGeniPayload": "value",
+      "updateOrganizationWebhook": "value",
+      "UpdateOrganizationWebhookRequest": "type",
+      "UpdateWorkspaceWebhookRequest": "type",
+      "verifyCredentialProviderRequest": "value",
+      "verifyOpenGeniSignature": "value",
+      "verifyWebhookEvent": "value",
+      "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
+      "WorkspaceCredentialProvider": "type",
+      "WorkspaceSandboxImages": "type",
+      "WorkspaceWebhook": "type",
+      "WorkspaceWebhookDelivery": "type",
+      "WorkspaceWebhookEvent": "type",
+      "WorkspaceWebhookEventType": "type"
+    },
     "@opengeni/react": {
       "ActivityDisclosure": "value",
       "ActivityDisclosureProps": "type",
@@ -27011,7 +27073,6 @@
       "createOrganizationApiKey",
       "createOrganizationInvitation",
       "createOrganizationProviderCustomModel",
-      "createOrganizationWebhook",
       "createOrganizationWorkspace",
       "createPreferenceRegistryProposal",
       "createRetainedArtifactDownloadUrl",
@@ -27039,9 +27100,7 @@
       "deleteEnvironmentVariable",
       "deleteGoal",
       "deleteOrganizationApiKey",
-      "deleteOrganizationCredentialProvider",
       "deleteOrganizationProviderCustomModel",
-      "deleteOrganizationWebhook",
       "deleteOrganizationWorkspace",
       "deleteQueueItem",
       "deleteRig",
@@ -27132,13 +27191,11 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
-      "getOrganizationCredentialProvider",
       "getOrganizationModelProviderConnection",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationUsageSummary",
       "getOrganizationUsageWorkspacePage",
-      "getOrganizationWebhook",
       "getPreferenceRegistry",
       "getPreferenceRegistryFullContent",
       "getPreferenceRegistrySummary",
@@ -27178,7 +27235,6 @@
       "getWorkspaceModelCatalog",
       "getWorkspaceRealtimeModelCatalog",
       "getWorkspaceState",
-      "getWorkspaceWebhook",
       "gitDiff",
       "gitLog",
       "gitReadBatch",
@@ -27250,8 +27306,6 @@
       "listOrganizationProviderCustomModels",
       "listOrganizationSessions",
       "listOrganizationSuperGrokAccounts",
-      "listOrganizationWebhookDeliveries",
-      "listOrganizationWebhooks",
       "listOwnConnectionAccounts",
       "listOwnFeedback",
       "listPersonalGitHubRepositories",
@@ -27331,7 +27385,6 @@
       "publishBrowserRevision",
       "publishSandboxFileArtifact",
       "publishWorkspaceArtifactVersion",
-      "putOrganizationCredentialProvider",
       "putOrganizationWorkspaceMember",
       "putWorkspaceCredentialProvider",
       "readBrowserClipboard",
@@ -27340,7 +27393,6 @@
       "readWorkspaceSkill",
       "reconnectPersonalGitHub",
       "recoverSandbox",
-      "redeliverOrganizationWebhookDelivery",
       "redeliverWorkspaceWebhookDelivery",
       "refreshCodexUsage",
       "refreshScheduledTaskAccess",
@@ -27381,10 +27433,6 @@
       "rollbackGoalRevision",
       "rollbackWorkspaceArtifact",
       "rollbackWorkspaceInstructionPolicyRevision",
-      "rotateOrganizationCredentialProviderSecret",
-      "rotateOrganizationWebhookSecret",
-      "rotateWorkspaceCredentialProviderSecret",
-      "rotateWorkspaceWebhookSecret",
       "saveAgentLearningSettings",
       "saveAtlassianSources",
       "saveBrowserDownload",
@@ -27467,7 +27515,6 @@
       "updateOrganizationMember",
       "updateOrganizationName",
       "updateOrganizationRetentionPolicy",
-      "updateOrganizationWebhook",
       "updateOrganizationWorkspace",
       "updateOrganizationWorkspaceSettings",
       "updateRig",

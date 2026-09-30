@@ -5,6 +5,24 @@ import {
   verifyOpenGeniSignature,
 } from "@opengeni/contracts/workspace-integration-wire";
 import type { CredentialProviderRequest, WorkspaceWebhookEvent } from "@opengeni/contracts";
+import type { OpenGeniClient } from "./client";
+import type {
+  CreateOrganizationWebhookRequest,
+  CreateOrganizationWebhookResponse,
+  GetOrganizationCredentialProviderResponse,
+  ListOrganizationWebhookDeliveriesResponse,
+  ListOrganizationWebhooksResponse,
+  OrganizationWebhook,
+  OrganizationWebhookDelivery,
+  PutOrganizationCredentialProviderRequest,
+  PutOrganizationCredentialProviderResponse,
+  RotateWorkspaceCredentialProviderSecretResponse,
+  RotateOrganizationCredentialProviderSecretResponse,
+  RotateWorkspaceWebhookSecretResponse,
+  RotateOrganizationWebhookSecretResponse,
+  UpdateOrganizationWebhookRequest,
+  WorkspaceWebhook,
+} from "@opengeni/contracts";
 
 export type {
   CreateOrganizationWebhookRequest,
@@ -134,3 +152,179 @@ export const OPENGENI_WEBHOOK_HEADERS = {
   eventId: OPENGENI_EVENT_ID_HEADER,
   deliveryId: OPENGENI_DELIVERY_ID_HEADER,
 } as const;
+
+/** Server-side integration administration is opt-in, outside the eager browser client. */
+export async function getOrganizationCredentialProvider(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+): Promise<GetOrganizationCredentialProviderResponse> {
+  return client.requestJson(
+    "GET",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
+  );
+}
+
+/** Replace configuration; explicit filter required. Store the first returned signing secret. */
+export async function putOrganizationCredentialProvider(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  request: PutOrganizationCredentialProviderRequest,
+): Promise<PutOrganizationCredentialProviderResponse> {
+  return client.requestJson(
+    "PUT",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
+    request,
+  );
+}
+
+export async function deleteOrganizationCredentialProvider(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+): Promise<void> {
+  await client.requestJson<void>(
+    "DELETE",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
+    undefined,
+    {},
+    { responseType: "void" },
+  );
+}
+
+export async function listOrganizationWebhooks(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+): Promise<ListOrganizationWebhooksResponse> {
+  return client.requestJson(
+    "GET",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks`,
+  );
+}
+
+/** Create a webhook and return its signing secret once. */
+export async function createOrganizationWebhook(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  request: CreateOrganizationWebhookRequest,
+): Promise<CreateOrganizationWebhookResponse> {
+  return client.requestJson(
+    "POST",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks`,
+    request,
+  );
+}
+
+export async function getOrganizationWebhook(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  webhookId: string,
+): Promise<OrganizationWebhook> {
+  return client.requestJson(
+    "GET",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
+  );
+}
+
+export async function updateOrganizationWebhook(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  webhookId: string,
+  request: UpdateOrganizationWebhookRequest,
+): Promise<OrganizationWebhook> {
+  return client.requestJson(
+    "PATCH",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
+    request,
+  );
+}
+
+export async function deleteOrganizationWebhook(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  webhookId: string,
+): Promise<void> {
+  await client.requestJson<void>(
+    "DELETE",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
+    undefined,
+    {},
+    { responseType: "void" },
+  );
+}
+
+export async function listOrganizationWebhookDeliveries(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  webhookId: string,
+  options: { limit?: number } = {},
+): Promise<ListOrganizationWebhookDeliveriesResponse> {
+  return client.requestJson(
+    "GET",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/deliveries`,
+    undefined,
+    options.limit !== undefined ? { limit: String(options.limit) } : {},
+  );
+}
+
+/** Requeue a settled delivery with a fresh attempt budget. */
+export async function redeliverOrganizationWebhookDelivery(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  webhookId: string,
+  deliveryId: string,
+): Promise<OrganizationWebhookDelivery> {
+  return client.requestJson(
+    "POST",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/deliveries/${encodeURIComponent(deliveryId)}/redeliver`,
+  );
+}
+
+export async function getWorkspaceWebhook(
+  client: Pick<OpenGeniClient, "requestJson">,
+  workspaceId: string,
+  webhookId: string,
+): Promise<WorkspaceWebhook> {
+  return client.requestJson("GET", `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`);
+}
+
+/** Rotate immediately. Store the new secret; the old signing secret stops working. */
+export async function rotateWorkspaceCredentialProviderSecret(
+  client: Pick<OpenGeniClient, "requestJson">,
+  workspaceId: string,
+): Promise<RotateWorkspaceCredentialProviderSecretResponse> {
+  return client.requestJson(
+    "POST",
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/credential-provider/rotate-secret`,
+  );
+}
+
+export async function rotateOrganizationCredentialProviderSecret(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+): Promise<RotateOrganizationCredentialProviderSecretResponse> {
+  return client.requestJson(
+    "POST",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider/rotate-secret`,
+  );
+}
+
+export async function rotateOrganizationWebhookSecret(
+  client: Pick<OpenGeniClient, "requestJson">,
+  organizationId: string,
+  webhookId: string,
+): Promise<RotateOrganizationWebhookSecretResponse> {
+  return client.requestJson(
+    "POST",
+    `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
+  );
+}
+
+export async function rotateWorkspaceWebhookSecret(
+  client: Pick<OpenGeniClient, "requestJson">,
+  workspaceId: string,
+  webhookId: string,
+): Promise<RotateWorkspaceWebhookSecretResponse> {
+  return client.requestJson(
+    "POST",
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
+  );
+}
