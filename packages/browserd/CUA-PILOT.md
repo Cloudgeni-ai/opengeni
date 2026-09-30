@@ -1,6 +1,6 @@
 # CUA desktop pilot
 
-Experimental, source-run macOS adapter for `@trycua/cua-driver` 0.30.4. **Not ready
+Experimental macOS adapter for `@trycua/cua-driver` 0.30.4. **Not ready
 for deployment or replacing the native backend.** The native backend remains the
 default. Browsers, attached Chrome, browser profiles and browser input are unchanged.
 
@@ -20,6 +20,7 @@ From this package, run:
 bun run typecheck
 bun test test/cua-backend.test.ts
 OPENGENI_CUA_E2E=1 bun test test/cua-computer.e2e.test.ts
+OPENGENI_CUA_PACKAGING_E2E=1 bun test test/cua-runtime-packaging.e2e.test.ts
 ```
 
 The live test compiles a disposable AppKit window, verifies text replacement,
@@ -27,6 +28,10 @@ semantic clicks, replay without a second click, PNG streaming, pixel clicks and
 repeated scrolling. Input is checked against the fixture's independently written
 state. Only its own window is closed. The test also characterizes the following
 known failures; a passing characterization is **not** full adoption acceptance.
+Run it on an unlocked desktop. The packaging test needs no desktop permissions:
+it compiles the actual SDK loader, reads permission status from the staged native
+library, then removes the adjacent SDK and verifies that no ambient installation
+can replace it. The macOS native CI leg runs that test and stages both architectures.
 
 ## Remaining acceptance gaps
 
@@ -40,8 +45,12 @@ known failures; a passing characterization is **not** full adoption acceptance.
   input. The adapter reports unsupported. Foreground delivery needs integration
   with OpenGeni's explicit desktop focus/control behavior and independent testing.
 - **Compiled releases:** the SDK's platform-library resolver cannot find its
-  native package from Bun's compiled virtual filesystem. Native assets need
-  canonical packaging and signing before this backend can ship. Source mode works.
+  native package inside Bun's compiled virtual filesystem. `stage-cua-runtime.ts`
+  bundles its unmodified JavaScript and stages the pinned native package with its
+  notices. Signed native bytes join the existing immutable embedded helper
+  generation, and compiled controllers load that adjacent SDK. Source mode uses
+  the normal pinned package. Canonical release CI and signed application acceptance
+  remain required; packaging alone does not resolve the live-viewer failure.
 - App launch, whole-desktop capture, clipboard, native hover and foreground focus
   are not yet exposed. Linux and Windows have not been accepted through this adapter.
 
