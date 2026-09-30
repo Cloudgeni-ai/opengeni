@@ -11099,7 +11099,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // provider store path before this command starts; Git performs exact-host
   // matching in that store. No matching entry means an anonymous fetch.
   '  repository_credential_source="${6:-connection}"',
-  "  git() {",
+  "  repository_git() {",
   '    if [ "$repository_credential_source" = provider ]; then',
   '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
   '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
@@ -11118,8 +11118,8 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
   // the mount path before the repo exists). Subpath extracts are not git repos —
   // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
   '        echo "Repository resource already present at $target"',
   "        return 0",
   "      fi",
@@ -11133,7 +11133,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  rm -rf "$tmp"',
   // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
   // (set -eu would exit before any cleanup).
-  '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+  '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
@@ -11144,15 +11144,15 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // remote set-head` only accepts a branch that the fetch materialized under
   // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
   // must not turn a successful fetch into a failed clone.
-  '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-  '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+  '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+  '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
   "  fi",
-  '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   "    exit 1",
   "  fi",
-  '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+  '  if [ -n "$expected_commit" ] && [ "$(repository_git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
   '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
   '    rm -rf "$tmp"',
   "    exit 1",
@@ -11179,7 +11179,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // accept it; a non-empty non-repo survivor here is a mount point the manifest
   // re-filled — install into it by content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
   '        rm -rf "$tmp"',
   '        echo "Repository resource already present at $target"',
   "        return 0",
@@ -11189,7 +11189,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   "    else",
   '      mv "$tmp" "$target"',
   "    fi",
-  '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+  '    repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
   "  fi",
   '  if [ ! -e "$target" ]; then',
   '    echo "Repository resource was not materialized at $target" >&2',

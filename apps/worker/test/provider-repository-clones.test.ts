@@ -51,8 +51,23 @@ describe("provider credentials for repository resource clones", () => {
     const commands: string[] = [];
     const events: unknown[] = [];
     try {
+      const realGit = Bun.which("git");
+      if (!realGit) throw new Error("Git is required for the provider clone fixture");
       const bin = join(root, "fake-bin");
       await mkdir(bin);
+      const realChmod = Bun.which("chmod");
+      if (!realChmod) throw new Error("chmod is required for the provider clone fixture");
+      // Enforce BSD option parsing even on Linux, where GNU chmod accepts the
+      // old mode-before-"--" spelling. Never put token data in diagnostics.
+      await writeFile(
+        join(bin, "chmod"),
+        [
+          "#!/usr/bin/env sh",
+          'if [ "${2:-}" = -- ]; then exit 64; fi',
+          'exec "$OPENGENI_FIXTURE_CHMOD" "$@"',
+        ].join("\n"),
+        { mode: 0o755 },
+      );
       // Exercise Git's real credential machinery, but never contact a network.
       // The fake fetch persists only the outcome, not the supplied credential.
       await writeFile(
@@ -67,20 +82,20 @@ describe("provider credentials for repository resource clones", () => {
           "done",
           'if [ "${1:-}" = -C ] && [ "${3:-}" = fetch ]; then',
           '  target="$2"',
-          '  uri=$(/usr/bin/git -C "$target" remote get-url origin)',
+          '  uri=$("$OPENGENI_FIXTURE_GIT" -C "$target" remote get-url origin)',
           '  host="${uri#https://}"; host="${host%%/*}"',
           '  expected="${EXPECTED_PASSWORD:-}"',
-          '  credential=$(printf "protocol=https\\nhost=%s\\n\\n" "$host" | eval "/usr/bin/git $prefix credential fill" 2>/dev/null || :)',
+          '  credential=$(printf "protocol=https\\nhost=%s\\n\\n" "$host" | eval \'"$OPENGENI_FIXTURE_GIT" \' "$prefix credential fill" 2>/dev/null || :)',
           '  if [ -n "$expected" ]; then',
           '    printf "%s\\n" "$credential" | grep -Fx "password=$expected" >/dev/null || { echo "credential mismatch" >&2; exit 1; }',
           '  elif printf "%s\\n" "$credential" | grep "^password=." >/dev/null; then',
           '    echo "unexpected credential on anonymous clone" >&2; exit 1',
           "  fi",
-          '  /usr/bin/git -C "$target" -c user.name=fixture -c user.email=fixture@example.test commit --allow-empty -m fixture >/dev/null',
-          '  /usr/bin/git -C "$target" rev-parse HEAD > "$target/.git/FETCH_HEAD"',
+          '  "$OPENGENI_FIXTURE_GIT" -C "$target" -c user.name=fixture -c user.email=fixture@example.test commit --allow-empty -m fixture >/dev/null',
+          '  "$OPENGENI_FIXTURE_GIT" -C "$target" rev-parse HEAD > "$target/.git/FETCH_HEAD"',
           "  exit 0",
           "fi",
-          'eval "exec /usr/bin/git $prefix \\"\\$@\\""',
+          'eval \'exec "$OPENGENI_FIXTURE_GIT" \' "$prefix" \'"$@"\'',
         ].join("\n"),
         { mode: 0o755 },
       );
@@ -100,9 +115,17 @@ describe("provider credentials for repository resource clones", () => {
         );
       }
       const raw = hostShellSession(root, {
-        env: { PATH: `${bin}:${process.env.PATH}`, GIT_ASKPASS: join(root, "askpass") },
+        shell: "bash",
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          GIT_ASKPASS: join(root, "askpass"),
+          OPENGENI_FIXTURE_GIT: realGit,
+          OPENGENI_FIXTURE_CHMOD: realChmod,
+        },
         rewriteCommand: (cmd) => {
           commands.push(cmd);
+          // FileEnvironment is encoded in the staged env file, so keep its
+          // real production root. The unique session id isolates that tree.
           return cmd
             .replaceAll("/workspace", root)
             .replaceAll("/etc/profile.d", join(root, "profile.d"));
@@ -122,10 +145,13 @@ describe("provider credentials for repository resource clones", () => {
       async function clone(resource: Repository, password: string) {
         const session = withRunCredentialsSession(
           hostShellSession(root, {
+            shell: "bash",
             env: {
               PATH: `${bin}:${process.env.PATH}`,
               GIT_ASKPASS: join(root, "askpass"),
               EXPECTED_PASSWORD: password,
+              OPENGENI_FIXTURE_GIT: realGit,
+              OPENGENI_FIXTURE_CHMOD: realChmod,
             },
             rewriteCommand: (cmd) => {
               commands.push(cmd);
@@ -154,10 +180,13 @@ describe("provider credentials for repository resource clones", () => {
       await clone({ ...repository, mountPath: "repos/renewed" }, "provider-secret-two");
       const cli = withRunCredentialsSession(
         hostShellSession(root, {
+          shell: "bash",
           cwd: join(root, "repos/renewed"),
           env: {
             PATH: `${join(root, ".opengeni/bin")}:${bin}:${process.env.PATH}`,
             EXPECTED_PASSWORD: "provider-secret-two",
+            OPENGENI_FIXTURE_GIT: realGit,
+            OPENGENI_FIXTURE_CHMOD: realChmod,
           },
         }),
         scope.sessionId,
@@ -170,7 +199,7 @@ describe("provider credentials for repository resource clones", () => {
         "stale-platform-token",
       );
       const selected = await cli.exec({
-        cmd: "printf 'protocol=https\\nhost=github.com\\npath=acme/infra\\n\\n' | /usr/bin/git credential fill",
+        cmd: "printf 'protocol=https\\nhost=github.com\\npath=acme/infra\\n\\n' | \"$OPENGENI_FIXTURE_GIT\" credential fill",
       });
       expect(selected.exitCode).toBe(0);
       expect(selected.stdout).toContain("password=provider-secret-two");
@@ -201,10 +230,13 @@ describe("provider credentials for repository resource clones", () => {
         );
         const providerCli = withRunCredentialsSession(
           hostShellSession(root, {
+            shell: "bash",
             cwd: join(root, mountPath),
             env: {
               PATH: `${join(root, ".opengeni/bin")}:${bin}:${process.env.PATH}`,
               EXPECTED_PASSWORD: password,
+              OPENGENI_FIXTURE_GIT: realGit,
+              OPENGENI_FIXTURE_CHMOD: realChmod,
             },
           }),
           scope.sessionId,
@@ -212,7 +244,13 @@ describe("provider credentials for repository resource clones", () => {
         expect((await providerCli.exec({ cmd: `${tool} --version` })).exitCode).toBe(0);
       }
       const noProvider = hostShellSession(root, {
-        env: { PATH: `${bin}:${process.env.PATH}`, GIT_ASKPASS: join(root, "askpass") },
+        shell: "bash",
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          GIT_ASKPASS: join(root, "askpass"),
+          OPENGENI_FIXTURE_GIT: realGit,
+          OPENGENI_FIXTURE_CHMOD: realChmod,
+        },
         rewriteCommand: (cmd) =>
           cmd.replaceAll("/workspace", root).replaceAll("/etc/profile.d", join(root, "profile.d")),
       });
