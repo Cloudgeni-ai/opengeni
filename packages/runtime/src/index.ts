@@ -95,6 +95,8 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  resolveAgentToolFamilies,
+  type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
   type AttemptToolResult as AttemptToolResultValue,
@@ -1997,6 +1999,10 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Null/omitted retains the historical tool and provider request surface. */
+  agentConfig?: ResolvedAgentConfig | null;
+  /** Durable router use survives capability and tool-policy changes. */
+  toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -2720,6 +2726,10 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  if (resolveAgentToolFamilies(options.agentConfig).skills === false) {
+    const { skillActivations: _disabledActivations, ...withoutSkills } = options;
+    options = { ...withoutSkills, skillCatalog: [] };
+  }
   if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
     throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
   }
@@ -2761,7 +2771,12 @@ export function buildOpenGeniAgent(
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
   // resolved provider's api/window/web-search instead.
-  const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
+  const toolFamilies = resolveAgentToolFamilies(options.agentConfig, {
+    hasSkills: (skillCatalog?.length ?? 0) > 0,
+    webSearch: options.hostedWebSearch ?? settings.webSearchEnabled,
+    humanInput: options.humanInputEnabled !== false,
+  });
+  const hostedWebSearch = toolFamilies.webSearch;
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send
@@ -2783,11 +2798,11 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
-  if (options.imageGeneration?.kind === "native_hosted") {
+  if (toolFamilies.media && options.imageGeneration?.kind === "native_hosted") {
     hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
   }
   const providerImageGenerationTool =
-    options.imageGeneration?.kind === "provider_adapter"
+    toolFamilies.media && options.imageGeneration?.kind === "provider_adapter"
       ? agentTool({
           name: "generate_image",
           description:
@@ -2804,84 +2819,85 @@ export function buildOpenGeniAgent(
           },
         })
       : null;
-  const videoGenerationCapabilityTool = options.videoGeneration
-    ? agentTool({
-        name: "get_video_generation_capabilities",
-        description:
-          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
-        parameters: GetVideoGenerationCapabilitiesToolInput,
-        errorFunction: null,
-        execute: async () => {
-          const adapter = options.videoGeneration;
-          if (!adapter) throw new Error("Video-generation capability changed during execution");
-          return await adapter.capabilities();
-        },
-      })
-    : null;
-  const videoGenerationTool = options.videoGeneration
-    ? agentTool({
-        name: "generate_video",
-        description:
-          "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
-        parameters: GenerateVideoToolInput,
-        errorFunction: null,
-        execute: async (input, _context, details) => {
-          const toolCallId = details?.toolCall?.callId;
-          if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
-          const adapter = options.videoGeneration;
-          if (!adapter) throw new Error("Video-generation adapter changed during execution");
-          return await adapter.execute(input, { toolCallId });
-        },
-      })
-    : null;
-  const humanInputTool =
-    options.humanInputEnabled === false
-      ? null
-      : agentTool({
-          name: HUMAN_INPUT_TOOL_NAME,
+  const videoGenerationCapabilityTool =
+    toolFamilies.media && options.videoGeneration
+      ? agentTool({
+          name: "get_video_generation_capabilities",
           description:
-            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
-          parameters: RequestHumanInputToolInput,
-          needsApproval: true,
-          inputGuardrails: [
-            {
-              name: "validate_human_input_request",
-              run: async ({ toolCall }) => {
-                let input: unknown;
-                try {
-                  input = JSON.parse(toolCall.arguments);
-                } catch {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                  );
-                }
-                if (!RequestHumanInputToolInput.safeParse(input).success) {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                  );
-                }
-                return ToolGuardrailFunctionOutputFactory.allow();
-              },
-            },
-          ],
-          // A missing/mismatched durable response is a protocol integrity failure,
-          // not model-visible tool output the agent may reason past.
+            "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
+          parameters: GetVideoGenerationCapabilitiesToolInput,
           errorFunction: null,
-          execute: (_input, _context, details) => {
-            const settled = options.humanInputResponse;
-            if (!settled) {
-              throw new Error("Human-input tool resumed without a durable response");
-            }
-            const resumedCallId = details?.toolCall?.callId;
-            if (resumedCallId && resumedCallId !== settled.toolCallId) {
-              throw new Error("Human-input response does not belong to the resumed tool call");
-            }
-            return JSON.stringify({
-              requestId: settled.requestId,
-              ...settled.response,
-            });
+          execute: async () => {
+            const adapter = options.videoGeneration;
+            if (!adapter) throw new Error("Video-generation capability changed during execution");
+            return await adapter.capabilities();
           },
-        });
+        })
+      : null;
+  const videoGenerationTool =
+    toolFamilies.media && options.videoGeneration
+      ? agentTool({
+          name: "generate_video",
+          description:
+            "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
+          parameters: GenerateVideoToolInput,
+          errorFunction: null,
+          execute: async (input, _context, details) => {
+            const toolCallId = details?.toolCall?.callId;
+            if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
+            const adapter = options.videoGeneration;
+            if (!adapter) throw new Error("Video-generation adapter changed during execution");
+            return await adapter.execute(input, { toolCallId });
+          },
+        })
+      : null;
+  const humanInputTool = !toolFamilies.humanInput
+    ? null
+    : agentTool({
+        name: HUMAN_INPUT_TOOL_NAME,
+        description:
+          "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
+        parameters: RequestHumanInputToolInput,
+        needsApproval: true,
+        inputGuardrails: [
+          {
+            name: "validate_human_input_request",
+            run: async ({ toolCall }) => {
+              let input: unknown;
+              try {
+                input = JSON.parse(toolCall.arguments);
+              } catch {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                );
+              }
+              if (!RequestHumanInputToolInput.safeParse(input).success) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                );
+              }
+              return ToolGuardrailFunctionOutputFactory.allow();
+            },
+          },
+        ],
+        // A missing/mismatched durable response is a protocol integrity failure,
+        // not model-visible tool output the agent may reason past.
+        errorFunction: null,
+        execute: (_input, _context, details) => {
+          const settled = options.humanInputResponse;
+          if (!settled) {
+            throw new Error("Human-input tool resumed without a durable response");
+          }
+          const resumedCallId = details?.toolCall?.callId;
+          if (resumedCallId && resumedCallId !== settled.toolCallId) {
+            throw new Error("Human-input response does not belong to the resumed tool call");
+          }
+          return JSON.stringify({
+            requestId: settled.requestId,
+            ...settled.response,
+          });
+        },
+      });
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
@@ -2890,7 +2906,9 @@ export function buildOpenGeniAgent(
     ...(humanInputTool ? [humanInputTool] : []),
   ];
   const embeddedSkillReadTool =
-    !hostSuppliedSkillCatalog && skillComposition.artifacts.length > 0
+    toolFamilies.allowsFunctionTool("skill_read") &&
+    !hostSuppliedSkillCatalog &&
+    skillComposition.artifacts.length > 0
       ? agentTool({
           name: "skill_read",
           description:
@@ -3151,11 +3169,13 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport = options.lazyToolTransport;
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
   if (!transport) return;
   const enabled =
     transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled) return;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
@@ -3185,6 +3205,8 @@ function maybeInstallLazyToolTransport(
       }
       return identities;
     },
+    options.agentConfig != null,
+    options.toolRouterInHistory === true,
   );
 }
 

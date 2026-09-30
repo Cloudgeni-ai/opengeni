@@ -439,13 +439,11 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
 export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIES;
 
 /** Skill tools that only read installed Skills (`skills: "read"`). */
-export const AGENT_SKILL_READ_TOOL_NAMES = [
-  "skill_read",
-  "skill_search",
-  "skill_checkout",
-] as const;
+export const AGENT_SKILL_READ_TOOL_NAMES = ["skill_read"] as const;
 /** Skill tools that change Skills (`skills: "manage"` only). */
 export const AGENT_SKILL_MANAGE_TOOL_NAMES = [
+  "skill_search",
+  "skill_checkout",
   "skill_save",
   "skill_install",
   "skill_publish",
@@ -462,6 +460,95 @@ export const AGENT_BUILTIN_MCP_SERVER_CAPABILITIES = {
 
 export function firstPartyMcpToolCapability(tool: FirstPartyMcpToolName): AgentToolCapability {
   return FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+}
+
+/** Availability narrows configuration; it never grants a disabled capability. */
+export type AgentToolEnvironment = {
+  /** Explicit product MCPs are independent of ambient workspace connectors. */
+  productServerIds?: ReadonlySet<string>;
+  unavailable?: readonly AgentCapabilityId[];
+  hasSkills?: boolean;
+  webSearch?: boolean;
+  humanInput?: boolean;
+  media?: boolean;
+  hasDeferredTools?: boolean;
+  routerInHistory?: boolean;
+};
+
+export const AGENT_RUNTIME_MECHANIC_TOOL_NAMES = [
+  "wait_for_input",
+  "command_read",
+  "command_wait",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+/**
+ * The one turn-time capability gate. Null means the historical attachment
+ * rules, including unconditional Skill tools and router. Resource-derived
+ * sandbox tools, product MCPs and runtime mechanics are never toggled.
+ */
+export function resolveAgentToolFamilies(
+  config: ResolvedAgentConfig | null | undefined,
+  environment: AgentToolEnvironment = {},
+) {
+  const enabled = (id: AgentCapabilityId): boolean =>
+    !config ||
+    (agentCapabilityEnabled(config.capabilities, id) &&
+      !config.unavailable.includes(id) &&
+      !environment.unavailable?.includes(id));
+  const webSearch = enabled("webSearch") && environment.webSearch !== false;
+  const humanInput = enabled("humanInput") && environment.humanInput !== false;
+  const media = enabled("media") && environment.media !== false;
+  const skills = !config ? "manage" : enabled("skills") ? config.capabilities.skills : false;
+  const allowsFirstPartyTool = (name: FirstPartyMcpToolName): boolean => {
+    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
+    return owner === "runtime" || enabled(owner);
+  };
+  return {
+    webSearch,
+    humanInput,
+    media,
+    subagents: enabled("subagents"),
+    skills,
+    router:
+      !config || environment.hasDeferredTools === true || environment.routerInHistory === true,
+    allowsFirstPartyTool,
+    firstPartyTools(names: readonly FirstPartyMcpToolName[]): FirstPartyMcpToolName[] {
+      return !config
+        ? [...names]
+        : [
+            ...new Set([
+              ...names.filter(allowsFirstPartyTool),
+              ...AGENT_RUNTIME_MECHANIC_TOOL_NAMES,
+            ]),
+          ];
+    },
+    allowsFunctionTool(name: string): boolean {
+      if (!config) return true;
+      const owner = (AGENT_FUNCTION_TOOL_CAPABILITIES as Record<string, AgentFunctionToolClass>)[
+        name
+      ];
+      if (!owner || owner === "sandbox" || owner === "runtime") return true;
+      if (owner === "webSearch") return webSearch;
+      if (owner === "humanInput") return humanInput;
+      if (owner === "media") return media;
+      if (owner === "skills") {
+        return (
+          skills === "manage" ||
+          (skills === "read" && name === "skill_read" && environment.hasSkills === true)
+        );
+      }
+      return enabled(owner);
+    },
+    allowsMcpServer(id: string): boolean {
+      if (!config) return true;
+      const owner = (AGENT_BUILTIN_MCP_SERVER_CAPABILITIES as Record<string, AgentToolCapability>)[
+        id
+      ];
+      return owner
+        ? owner === "runtime" || enabled(owner)
+        : environment.productServerIds?.has(id) === true || enabled("workspaceConnectors");
+    },
+  };
 }
 
 export function firstPartyMcpToolsForCapability(
@@ -1172,7 +1259,13 @@ export function agentConfigToolRefs(input: AgentConfigToolRefsInput): {
   const builtinOff = (id: string) => (id === "files" && filesOff) || (id === "docs" && docsOff);
   const isWorkspaceConnector = (id: string) =>
     id !== "opengeni" && id !== "files" && id !== "docs" && !input.productServerIds.has(id);
-  let tools = input.tools.filter((tool) => !builtinOff(tool.id));
+  let tools = input.tools
+    .filter((tool) => !builtinOff(tool.id))
+    .map((tool) =>
+      config.from === "none" && input.productServerIds.has(tool.id) && tool.eager === undefined
+        ? { ...tool, eager: true }
+        : tool,
+    );
   let toolPolicy: SessionToolPolicy = { ...input.toolPolicy };
   if (connectorsOff) {
     tools = tools.filter((tool) => !isWorkspaceConnector(tool.id));
@@ -1187,6 +1280,7 @@ export function agentConfigToolRefs(input: AgentConfigToolRefsInput): {
   }
   if (
     tools.length === input.tools.length &&
+    tools.every((tool, index) => tool === input.tools[index]) &&
     JSON.stringify(toolPolicy) === JSON.stringify(input.toolPolicy)
   ) {
     return { tools: [...input.tools], toolPolicy: input.toolPolicy };
@@ -1270,8 +1364,9 @@ export function agentConfigDeploymentLimitsFromAllowlist(
 
 export type AgentEffectiveToolEntry = {
   name: string;
-  capability: AgentCapabilityId | "runtime";
-  source: "first_party" | "runtime" | "hosted";
+  capability: AgentCapabilityId | "runtime" | "sandbox" | "product";
+  source: "first_party" | "runtime" | "hosted" | "sandbox" | "mcp";
+  visibility?: "upfront" | "search";
 };
 
 export type AgentEffectiveMcpServerEntry = {
@@ -1288,9 +1383,15 @@ export const AgentEffectiveTools = z
       .array(
         z
           .object({
-            name: z.string().min(1).max(128),
-            capability: z.union([AgentCapabilityId, z.literal("runtime")]),
-            source: z.enum(["first_party", "runtime", "hosted"]),
+            name: z.string().min(1).max(512),
+            capability: z.union([
+              AgentCapabilityId,
+              z.literal("runtime"),
+              z.literal("sandbox"),
+              z.literal("product"),
+            ]),
+            source: z.enum(["first_party", "runtime", "hosted", "sandbox", "mcp"]),
+            visibility: z.enum(["upfront", "search"]).optional(),
           })
           .strict(),
       )
@@ -1311,10 +1412,8 @@ export const AgentEffectiveTools = z
 export type AgentEffectiveTools = z.infer<typeof AgentEffectiveTools>;
 
 /**
- * Capability-level projection of what a configured session can use. It lists
- * the first-party selection and the capability-owned function tools; sandbox
- * tools and search-router presence depend on the turn and are not listed.
- * Product MCP server tool lists are unknown until a turn lists them.
+ * Project known model tools through the same turn-time gates. External MCP
+ * schemas are never guessed: their server stays toolsKnown:false until listed.
  */
 export function projectAgentEffectiveTools(input: {
   config: ResolvedAgentConfig;
@@ -1322,38 +1421,49 @@ export function projectAgentEffectiveTools(input: {
   mcpServerIds: readonly string[];
   /** Servers attached to the session itself; other non-built-in ids are workspace connectors. */
   productServerIds: ReadonlySet<string>;
+  environment?: AgentToolEnvironment;
+  runtimeToolNames?: readonly AgentFunctionToolName[];
+  hostedToolNames?: readonly AgentFunctionToolName[];
+  sandboxToolNames?: readonly AgentFunctionToolName[];
+  routerToolNames?: readonly AgentFunctionToolName[];
+  /** Raw first-party names; other entries use model-facing names. */
+  upfrontToolNames?: ReadonlySet<string>;
+  firstPartyModelNames?: ReadonlyMap<FirstPartyMcpToolName, string>;
 }): AgentEffectiveTools {
   const { capabilities } = input.config;
-  const tools: AgentEffectiveToolEntry[] = input.firstPartyMcpTools.map((tool) => ({
-    name: tool,
-    capability: FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool],
-    source: "first_party",
-  }));
+  const families = resolveAgentToolFamilies(input.config, {
+    ...input.environment,
+    productServerIds: input.productServerIds,
+  });
+  const tools: AgentEffectiveToolEntry[] = input.firstPartyMcpTools
+    .filter(families.allowsFirstPartyTool)
+    .map((tool) => ({
+      name: input.firstPartyModelNames?.get(tool) ?? `opengeni__${tool}`,
+      capability: FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool],
+      source: "first_party",
+      visibility: input.upfrontToolNames?.has(tool) ? "upfront" : "search",
+    }));
   const functionTool = (name: AgentFunctionToolName, source: AgentEffectiveToolEntry["source"]) => {
     const owner = AGENT_FUNCTION_TOOL_CAPABILITIES[name];
-    if (owner === "sandbox") return;
-    tools.push({ name, capability: owner, source });
+    if (!families.allowsFunctionTool(name)) return;
+    tools.push({
+      name,
+      capability: owner,
+      source,
+      visibility:
+        input.upfrontToolNames?.has(name) || source === "sandbox" || source === "hosted"
+          ? "upfront"
+          : "search",
+    });
   };
-  if (capabilities.webSearch) functionTool("web_search", "hosted");
-  if (capabilities.humanInput) functionTool("request_human_input", "runtime");
-  if (capabilities.subagents) functionTool("list_models", "runtime");
-  if (capabilities.skills !== false) {
-    for (const name of AGENT_SKILL_READ_TOOL_NAMES) functionTool(name, "runtime");
-  }
-  if (capabilities.skills === "manage") {
-    for (const name of AGENT_SKILL_MANAGE_TOOL_NAMES) functionTool(name, "runtime");
-  }
-  if (capabilities.media) {
-    for (const name of [
-      "generate_image",
-      "generate_video",
-      "get_video_generation_capabilities",
-    ] as const) {
-      functionTool(name, "runtime");
-    }
-  }
+  for (const name of input.hostedToolNames ?? []) functionTool(name, "hosted");
+  for (const name of input.runtimeToolNames ?? []) functionTool(name, "runtime");
+  for (const name of input.sandboxToolNames ?? []) functionTool(name, "sandbox");
+  if (families.router)
+    for (const name of input.routerToolNames ?? []) functionTool(name, "runtime");
   const builtin = AGENT_BUILTIN_MCP_SERVER_CAPABILITIES as Record<string, AgentToolCapability>;
   const mcpServers: AgentEffectiveMcpServerEntry[] = [...new Set(input.mcpServerIds)]
+    .filter(families.allowsMcpServer)
     .sort()
     .map((id) => ({
       id,
@@ -1362,8 +1472,25 @@ export function projectAgentEffectiveTools(input: {
       toolsKnown: id === "opengeni",
     }));
   return {
-    capabilities: { ...capabilities },
-    unavailable: [...input.config.unavailable],
+    capabilities: {
+      ...capabilities,
+      webSearch: families.webSearch,
+      humanInput: families.humanInput,
+      media: families.media,
+    },
+    unavailable: [
+      ...new Set([
+        ...input.config.unavailable,
+        ...AGENT_CAPABILITY_IDS.filter(
+          (id) =>
+            agentCapabilityEnabled(capabilities, id) &&
+            (input.environment?.unavailable?.includes(id) ||
+              (id === "webSearch" && !families.webSearch) ||
+              (id === "humanInput" && !families.humanInput) ||
+              (id === "media" && !families.media)),
+        ),
+      ]),
+    ],
     tools,
     mcpServers,
   };

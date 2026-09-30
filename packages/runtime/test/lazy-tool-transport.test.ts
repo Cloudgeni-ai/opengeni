@@ -178,6 +178,70 @@ async function runStreamed(
   return result;
 }
 
+test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
+  "configured %s router requires deferred tools and survives prior exposure",
+  async (transport) => {
+    const agent = agentWith(firstPartyTool("request_human_input", "Human input"));
+    const runtime = installLazyToolRuntime(
+      agent,
+      transport,
+      new Set(),
+      undefined,
+      new Set(),
+      new Set(),
+      undefined,
+      true,
+    );
+    const names = async () =>
+      (await agent.getAllTools({} as never)).map((tool) =>
+        tool.type === "function" ? tool.name : tool.providerData?.type,
+      );
+    expect(await names()).toEqual(["request_human_input"]);
+    agent.tools.push(firstPartyTool("generate_video", "Deferred video"));
+    expect(await names()).toContain("tool_list");
+    agent.tools.pop();
+    expect(await names()).toContain("tool_list");
+    expect(runtime.inspectSearchableTools()).toEqual([]);
+
+    const restored = agentWith(firstPartyTool("request_human_input", "Human input"));
+    installLazyToolRuntime(
+      restored,
+      transport,
+      new Set(),
+      undefined,
+      new Set(),
+      new Set(),
+      undefined,
+      true,
+      true,
+    );
+    expect(
+      (await restored.getAllTools({} as never)).some(
+        (tool) => tool.type === "function" && tool.name === "tool_list",
+      ),
+    ).toBe(true);
+  },
+);
+
+test("configured router does not expose an empty deferred server", async () => {
+  const agent = agentWith(firstPartyTool("request_human_input", "Human input"));
+  installLazyToolRuntime(
+    agent,
+    "generic_dispatch",
+    new Set(["empty"]),
+    Promise.resolve(),
+    new Set(["empty"]),
+    new Set(),
+    undefined,
+    true,
+  );
+  expect(
+    (await agent.getAllTools({} as never)).map((tool) =>
+      tool.type === "function" ? tool.name : tool.providerData?.type,
+    ),
+  ).toEqual(["request_human_input"]);
+});
+
 describe("query-independent tool discovery", () => {
   test("multi-byte listing pages stay byte-bounded and exhaust the catalog without gaps", async () => {
     const names = Array.from({ length: 85 }, (_, i) => `records__${String(i).padStart(3, "0")}`);

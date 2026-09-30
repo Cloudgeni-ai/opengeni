@@ -35088,6 +35088,38 @@ export async function getSessionTurnXaiProviderAccountAuthoritySnapshot(
   );
 }
 
+/** Internal metadata projection; never infer a frozen turn actor from its creator. */
+export async function getSessionTurnMediaAuthority(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+) {
+  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        subjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+        xai: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurns.id, turnId),
+        ),
+      )
+      .limit(1);
+    return row
+      ? {
+          subjectId: row.subjectId ?? row.initiatorSubjectId,
+          xai: XaiProviderAccountAuthoritySnapshotV1.parse(row.xai),
+        }
+      : null;
+  });
+}
+
 export async function getSessionTurnPersonalConnectionDelegations(
   db: Database,
   workspaceId: string,
@@ -42059,6 +42091,31 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
         };
       }),
   );
+}
+
+/** Historical router exposure is a protocol fact, not renewed tool authority. */
+export async function sessionHasToolRouterHistory(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  return withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ id: schema.sessionHistoryItems.id })
+      .from(schema.sessionHistoryItems)
+      .where(
+        and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+          sql`(
+          ${schema.sessionHistoryItems.item}->>'type' IN ('tool_search_call', 'tool_search_output')
+          OR (${schema.sessionHistoryItems.item}->>'type' = 'function_call'
+            AND ${schema.sessionHistoryItems.item}->>'name' IN ('tool_search', 'tool_list', 'tool_invoke'))
+        )`,
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  });
 }
 
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */

@@ -17,6 +17,7 @@ import {
   noneAgentCapabilities,
   projectAgentEffectiveTools,
   resolveAgentConfig,
+  resolveAgentToolFamilies,
   resolveAgentConfigUpdate,
   resolveWorkspaceAgentDefaults,
   resolveWorkspaceDefaultAgentIdentity,
@@ -382,7 +383,7 @@ describe("write-through", () => {
     ).toEqual({
       tools: [
         { kind: "mcp", id: "opengeni" },
-        { kind: "mcp", id: "acme" },
+        { kind: "mcp", id: "acme", eager: true },
       ],
       toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
     });
@@ -397,6 +398,23 @@ describe("write-through", () => {
         }),
       ),
     ).toBe("agent_config_conflict");
+  });
+
+  test("none product tools default upfront without overriding explicit search visibility", () => {
+    const refs: ToolRef[] = [
+      { kind: "mcp", id: "acme" },
+      { kind: "mcp", id: "explicit-search", eager: false },
+    ];
+    const input = {
+      tools: refs,
+      toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+      productServerIds: new Set(refs.map((ref) => ref.id)),
+    };
+    expect(agentConfigToolRefs({ ...input, config: none }).tools).toEqual([
+      { kind: "mcp", id: "acme", eager: true },
+      refs[1]!,
+    ]);
+    expect(agentConfigToolRefs({ ...input, config: all }).tools).toEqual(refs);
   });
 });
 
@@ -526,6 +544,19 @@ describe("workspace defaults helpers", () => {
 });
 
 describe("effective tools projection", () => {
+  test("unknown workspace connectors cannot bypass none but explicit product tools survive", () => {
+    const config = resolve({ request: { capabilities: "none" } }).config!;
+    const families = resolveAgentToolFamilies(config, { productServerIds: new Set(["acme"]) });
+    expect(families.allowsMcpServer("stale-workspace-connector")).toBe(false);
+    expect(families.allowsMcpServer("acme")).toBe(true);
+    expect(families.allowsMcpServer("files")).toBe(false);
+    expect(resolveAgentToolFamilies(null).allowsMcpServer("stale-workspace-connector")).toBe(true);
+    expect(families.firstPartyTools([])).toEqual([
+      "wait_for_input",
+      "command_read",
+      "command_wait",
+    ]);
+  });
   test("lists capability tools and classifies servers", () => {
     const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;
     const projection = projectAgentEffectiveTools({
@@ -533,20 +564,30 @@ describe("effective tools projection", () => {
       firstPartyMcpTools: ["wait_for_input"],
       mcpServerIds: ["opengeni", "acme", "github"],
       productServerIds: new Set(["acme"]),
+      environment: { hasSkills: true },
+      runtimeToolNames: [
+        "request_human_input",
+        "skill_read",
+        "generate_image",
+        "generate_video",
+        "get_video_generation_capabilities",
+      ],
+      upfrontToolNames: new Set(["request_human_input", "skill_read"]),
     });
     expect(projection.tools.map((tool) => tool.name)).toEqual([
-      "wait_for_input",
+      "opengeni__wait_for_input",
       "request_human_input",
       "skill_read",
-      "skill_search",
-      "skill_checkout",
       "generate_image",
       "generate_video",
       "get_video_generation_capabilities",
     ]);
+    expect(projection.tools.find((tool) => tool.name === "skill_read")?.visibility).toBe("upfront");
+    expect(projection.tools.find((tool) => tool.name === "generate_video")?.visibility).toBe(
+      "search",
+    );
     expect(projection.mcpServers).toEqual([
       { id: "acme", capability: "product", toolsKnown: false },
-      { id: "github", capability: "workspaceConnectors", toolsKnown: false },
       { id: "opengeni", capability: "runtime", toolsKnown: true },
     ]);
   });

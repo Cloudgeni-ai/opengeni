@@ -1,5 +1,6 @@
 import { getSessionAuthorityProjection, readActiveSandbox } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   assertModelConnectionAllowsTurn,
@@ -781,8 +782,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               credentialId: providerTurn.effectiveXaiCredentialId,
               authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
               hostedSearch: {
-                webSearch: runSettings.webSearchEnabled,
-                xSearch: runSettings.webSearchEnabled,
+                webSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
+                xSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
               nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
