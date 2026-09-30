@@ -2,11 +2,11 @@
 -- One idle rule contains legacy retained commands. When every session of a
 -- Modal sandbox group has been unused for the configured window, the reaper
 -- enrolls the commands that alone keep the box warm into the existing
--- capture -> terminate -> settle drain. Expand only: pre-0541 workers keep
+-- capture -> terminate -> settle drain. Expand only: pre-0546 workers keep
 -- calling the unchanged list_unobservable_command_drain_candidates(integer)
 -- with their own predicates, so they see no new candidates and take no extra
 -- workspace-control locks. A later contract migration may drop that function
--- once no pre-0541 worker remains.
+-- once no pre-0546 worker remains.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
@@ -32,6 +32,62 @@ CREATE TRIGGER sandbox_lease_holders_changed
     OR OLD.viewer_holders IS DISTINCT FROM NEW.viewer_holders
   )
   EXECUTE FUNCTION opengeni_private.stamp_sandbox_lease_holders_changed();
+
+-- Truthful containment reason for the drain's settlement notice, recorded at
+-- enrollment ('idle_containment' | 'provider_deadline_containment'). A lease
+-- enrolled by a pre-0546 worker has none and settles with neutral loss wording.
+-- It never outlives the enrollment it describes.
+ALTER TABLE sandbox_leases ADD COLUMN command_containment_reason text;
+ALTER TABLE sandbox_leases ADD CONSTRAINT sandbox_leases_command_containment_reason_check
+  CHECK (command_containment_reason IS NULL
+    OR command_containment_reason IN ('idle_containment', 'provider_deadline_containment'));
+CREATE FUNCTION opengeni_private.clear_command_containment_reason()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+  -- Runs after sandbox_clear_unobservable_command_drain (name order).
+  IF NEW.unobservable_command_drain_ids IS NULL THEN
+    NEW.command_containment_reason := NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION opengeni_private.clear_command_containment_reason() FROM PUBLIC;
+CREATE TRIGGER sandbox_command_containment_reason_clear
+  BEFORE UPDATE ON sandbox_leases FOR EACH ROW
+  EXECUTE FUNCTION opengeni_private.clear_command_containment_reason();
+
+-- The SECURITY DEFINER inventory below runs as the FORCE-RLS table owner under
+-- the session-tenancy inventory capability. Grant that capability SELECT on the
+-- activity tables its screen reads, exactly as 0345/0391 did for leases,
+-- holders, processes and sessions. Inventory-only: the fenced owner policies
+-- remain the sole mutation path.
+DO $containment_inventory_policies$
+DECLARE
+  target_schema text := pg_catalog.current_schema();
+  target_schema_oid oid := pg_catalog.current_schema()::pg_catalog.regnamespace;
+  migration_owner text := current_user;
+  table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'session_turns',
+    'session_turn_attempts',
+    'sandbox_workspace_mutation_admissions',
+    'session_system_updates',
+    'session_goals'
+  ] LOOP
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY session_tenancy_fence_inventory_read ON %I.%I '
+        || 'FOR SELECT USING ('
+        || '%I.session_tenancy_fence_owner_policy_active('
+        || 'current_user::text, %L::text, %s::oid, workspace_id, true))',
+      target_schema,
+      table_name,
+      target_schema,
+      migration_owner,
+      target_schema_oid
+    );
+  END LOOP;
+END
+$containment_inventory_policies$;
 
 -- Inventory only, independent of command health. It returns enrolled drains,
 -- rotating leases, and leases whose only holders are legacy processes and whose
@@ -90,6 +146,25 @@ BEGIN
                   WHERE owned.lease_id = lease.id AND owned.state = 'active'
                     AND owned.session_id = member.id))
                 AND (
+                  -- An input wait holds until its deadline; idleness counts
+                  -- from the wait's end.
+                  member.input_wait_until >= idle_before
+                  -- Unclaimed machine input that will start a turn.
+                  OR EXISTS (
+                    SELECT 1 FROM %1$I.session_system_updates pending_update
+                    WHERE pending_update.workspace_id = member.workspace_id
+                      AND pending_update.session_id = member.id
+                      AND pending_update.state = 'pending'
+                      AND (pending_update.kind IN ('scheduled_occurrence', 'goal_continuation',
+                          'agent_message', 'agent_steer_instruction', 'session_wait_timeout',
+                          'media_generation_result')
+                        OR (pending_update.kind IN ('child_terminal_result', 'child_requires_action')
+                          AND EXISTS (
+                            SELECT 1 FROM %1$I.session_goals goal
+                            WHERE goal.workspace_id = member.workspace_id
+                              AND goal.session_id = member.id AND goal.status = 'active')))
+                  )
+                  OR
                   EXISTS (
                     SELECT 1 FROM %1$I.session_turns turn
                     WHERE turn.workspace_id = member.workspace_id AND turn.session_id = member.id

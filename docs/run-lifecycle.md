@@ -1944,7 +1944,8 @@ holders are removed before the epoch advances. Each linked background command
 gets its `session.command.finished` event and typed result input in that same
 transaction; the transaction takes the session-event prefix (workspace control,
 workspace, session) before any blocker or lease row, and only when such a
-command exists. Terminal processes and every
+command exists; if a command was linked in the gap before the blockers were
+locked, it rolls back and retries (bounded) rather than lock a session late. Terminal processes and every
 other epoch/provider remain untouched. During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
 fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
@@ -2178,10 +2179,14 @@ workspace control fence and the process -> admission -> lease row locks:
   the lease: no open turn (`queued`, `running`, `requires_action`, `recovering`,
   `waiting_capacity`, which includes a pending approval or human-input request),
   no non-closed attempt, no pending quiescence (unsettled interruption or
-  undrained attempt writer), and no held `wait_for_input`. The agent registers
-  that wait for background work it is deliberately waiting on, so such a command
-  is not abandoned; it keeps running, and only the provider-deadline backstop can
-  stop it. An expired wait no longer holds;
+  undrained attempt writer), no `wait_for_input` that has not been superseded,
+  and no unclaimed machine input that will start a turn (pending immediate
+  system updates other than command results; child lifecycle notices only with
+  an active goal). The agent registers that wait for background work it is
+  deliberately waiting on, so such a command is not abandoned; it keeps running,
+  and only the provider-deadline backstop can stop it. A wait past its deadline
+  still blocks until its timeout settlement retires it, and the inventory counts
+  idleness from the wait's end;
 - the group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`
   (default 30 minutes; it must exceed the idle grace and, when explicit, stay
   below the rotation lead, and it must leave the reaper period plus the drain
@@ -2189,7 +2194,11 @@ workspace control fence and the process -> admission -> lease row locks:
   newest attempt close, turn finish, lease holder-set change, and admission or
   settlement on the lease epoch must all be older than the window. Migration
   0546 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
-  writer changes the holder counters. Process age is never a fact.
+  writer changes the holder counters, and gives the SECURITY DEFINER inventory
+  inventory-only read policies on the turn, attempt, admission, system-update
+  and goal tables so its screen sees them as the FORCE-RLS owner. Process age is
+  never a fact. A derived default window that cannot fit these bounds leaves
+  idle containment off (deadline rule only) rather than failing boot.
 
 A holder or writer that committed first is seen and refuses enrollment; a later
 one observes the requested rotation and is fenced until the successor box.
@@ -2198,8 +2207,10 @@ Capture excludes only enrolled parent admissions and holders; checkpoint
 publication, termination, cold commit and durable wake remain owned by the
 existing drain, and the box is terminated immediately after capture, so the
 archive is the final state. The cold commit settles each still-active enrolled
-command `lost` with reason `idle_containment` (`provider_deadline_containment`
-on a deadline rotation), never an exit code. In the same transaction it appends
+command `lost` with the reason recorded on the lease at enrollment
+(`idle_containment`, or `provider_deadline_containment` on a deadline rotation),
+never an exit code; a drain enrolled by a pre-0546 worker records none and
+settles as plain `provider_instance_lost`. In the same transaction it appends
 `session.command.finished`, the typed `background_command_result` input and
 `system.update.pending`, exactly as ordinary exit/loss proof does. The notice
 names the command, says nobody used the session for N minutes and nothing was

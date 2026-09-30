@@ -50779,10 +50779,10 @@ type LostProviderBlockerScope = {
  * an active process in the exact lost-provider scope. Call it before the
  * process/admission/PTY/lease locks so terminal command delivery keeps the
  * canonical control -> session -> process -> admission -> lease order. */
-async function lockLostProviderCommandSessionsTx(
+async function linkedLostProviderCommandSessionIdsTx(
   tx: Database,
   input: LostProviderBlockerScope,
-): Promise<void> {
+): Promise<string[]> {
   const sessions = await rawRows<{ session_id: string }>(
     tx,
     sql`
@@ -50800,14 +50800,56 @@ async function lockLostProviderCommandSessionsTx(
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
         and command.state in ('running', 'stopping')
+      order by command.session_id
     `,
   );
-  if (!sessions.length) return;
-  await lockSessionEventWriteRows(tx, {
-    workspaceId: input.workspaceId,
-    controlLock: "share",
-    sessionIds: sessions.map((row) => row.session_id),
-  });
+  return sessions.map((row) => row.session_id);
+}
+
+async function lockLostProviderCommandSessionsTx(
+  tx: Database,
+  input: LostProviderBlockerScope,
+): Promise<Set<string>> {
+  const sessionIds = await linkedLostProviderCommandSessionIdsTx(tx, input);
+  if (sessionIds.length) {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds,
+    });
+  }
+  return new Set(sessionIds);
+}
+
+class LostProviderCommandSessionsChangedError extends Error {
+  readonly name = "LostProviderCommandSessionsChangedError";
+}
+
+/** Re-read the linked sessions once every blocker and the lease are locked.
+ * A command adopted in the gap before the process locks would otherwise make
+ * delivery lock its session after process/admission/lease rows, inverting the
+ * canonical order; abort that transaction and retry instead. */
+async function assertLostProviderCommandSessionsLockedTx(
+  tx: Database,
+  input: LostProviderBlockerScope,
+  locked: ReadonlySet<string>,
+): Promise<void> {
+  const current = await linkedLostProviderCommandSessionIdsTx(tx, input);
+  if (current.some((sessionId) => !locked.has(sessionId))) {
+    throw new LostProviderCommandSessionsChangedError(
+      "A background command was linked to the lost provider while its sessions were being locked",
+    );
+  }
+}
+
+async function withLostProviderCommandSessionRetry<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof LostProviderCommandSessionsChangedError) || attempt >= 3) throw error;
+    }
+  }
 }
 
 async function settleExactLostProviderWorkspaceBlockersTx(
@@ -51014,123 +51056,132 @@ export async function markWarmLeaseInstanceLost(
   const backgroundCommandEvents: SessionEvent[] = [];
   // Settling a linked command appends its terminal event and agent input, so
   // the loss commit runs inside the session activity gate.
-  const result = await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const observedRows = await tx.execute<LeaseRow>(sql`
+  const result = await withLostProviderCommandSessionRetry(async () => {
+    backgroundCommandEvents.length = 0;
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          const observedRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
         `);
-        const observed = observedRows[0];
-        if (
-          !observed ||
-          observed.liveness !== "warm" ||
-          Number(observed.lease_epoch) !== input.expectedEpoch ||
-          observed.instance_id !== input.expectedInstanceId ||
-          (input.expectedBackend !== undefined && observed.backend !== input.expectedBackend)
-        ) {
-          return {
-            status: "stale" as const,
-            lease: observed ? mapLeaseRow(observed) : null,
-          };
-        }
+          const observed = observedRows[0];
+          if (
+            !observed ||
+            observed.liveness !== "warm" ||
+            Number(observed.lease_epoch) !== input.expectedEpoch ||
+            observed.instance_id !== input.expectedInstanceId ||
+            (input.expectedBackend !== undefined && observed.backend !== input.expectedBackend)
+          ) {
+            return {
+              status: "stale" as const,
+              lease: observed ? mapLeaseRow(observed) : null,
+            };
+          }
 
-        const blockerScope = {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          leaseId: observed.id,
-          sandboxGroupId: input.sandboxGroupId,
-          lostEpoch: input.expectedEpoch,
-          lostBackend: observed.backend,
-          lostInstanceId: input.expectedInstanceId,
-        };
-        await lockLostProviderCommandSessionsTx(tx, blockerScope);
-        await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
-        const currentRows = await tx.execute<LeaseRow>(sql`
+          const blockerScope = {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            leaseId: observed.id,
+            sandboxGroupId: input.sandboxGroupId,
+            lostEpoch: input.expectedEpoch,
+            lostBackend: observed.backend,
+            lostInstanceId: input.expectedInstanceId,
+          };
+          const lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+          await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+          const currentRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
         `);
-        const current = currentRows[0];
-        if (
-          !current ||
-          current.id !== observed.id ||
-          current.liveness !== "warm" ||
-          Number(current.lease_epoch) !== input.expectedEpoch ||
-          current.instance_id !== input.expectedInstanceId ||
-          current.backend !== observed.backend
-        ) {
-          return {
-            status: "stale" as const,
-            lease: current ? mapLeaseRow(current) : null,
+          const current = currentRows[0];
+          if (
+            !current ||
+            current.id !== observed.id ||
+            current.liveness !== "warm" ||
+            Number(current.lease_epoch) !== input.expectedEpoch ||
+            current.instance_id !== input.expectedInstanceId ||
+            current.backend !== observed.backend
+          ) {
+            return {
+              status: "stale" as const,
+              lease: current ? mapLeaseRow(current) : null,
+            };
+          }
+
+          await assertLostProviderCommandSessionsLockedTx(tx, blockerScope, lockedCommandSessions);
+          const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
+            deliverCommandResults: {
+              idleContainmentMinutes: null,
+              events: backgroundCommandEvents,
+            },
+          });
+
+          const observedAt = new Date().toISOString();
+          const before = recoveryStateFromLeaseRow(current);
+          const continuity = dockerContinuityRecoveryFromLeaseRow(
+            current,
+            input.expectedInstanceId,
+          );
+          const archiveStatus = before.archive.status;
+          const archiveComplete = hasCompleteWorkspaceArchive(current);
+          const restoreStatus: SandboxRestoreStatus =
+            continuity || (archiveStatus === "available" && archiveComplete)
+              ? "pending"
+              : archiveStatus === "available" ||
+                  archiveStatus === "unverified" ||
+                  archiveStatus === "invalid"
+                ? "degraded"
+                : "unrecoverable";
+          const workspaceStatus: SandboxWorkspaceReadiness =
+            restoreStatus === "pending"
+              ? "not_ready"
+              : restoreStatus === "degraded"
+                ? "degraded"
+                : "unrecoverable";
+          const recovery: SandboxRecoveryState = {
+            provider: {
+              status: "missing",
+              instanceId: current.instance_id,
+              observedAt,
+              ...(input.diagnostic ? { diagnostic: input.diagnostic.slice(0, 160) } : {}),
+            },
+            archive: before.archive,
+            restore: {
+              status: restoreStatus,
+              rematerializationId: null,
+              selectedRevision:
+                restoreStatus === "pending" ? (before.archive.current?.revision ?? null) : null,
+              startedAt: null,
+              completedAt: null,
+              ...(restoreStatus === "degraded"
+                ? {
+                    failureCode:
+                      archiveStatus === "available"
+                        ? "archive_generation_mismatch"
+                        : "archive_unverified",
+                    retryable: false,
+                  }
+                : restoreStatus === "unrecoverable"
+                  ? { failureCode: "archive_unavailable", retryable: false }
+                  : {}),
+            },
+            workspace: {
+              status: workspaceStatus,
+              verifiedRevision: null,
+              verifiedAt: null,
+            },
+            ...(continuity ? { continuity } : {}),
           };
-        }
-
-        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
-          deliverCommandResults: { idleContainmentMinutes: null, events: backgroundCommandEvents },
-        });
-
-        const observedAt = new Date().toISOString();
-        const before = recoveryStateFromLeaseRow(current);
-        const continuity = dockerContinuityRecoveryFromLeaseRow(current, input.expectedInstanceId);
-        const archiveStatus = before.archive.status;
-        const archiveComplete = hasCompleteWorkspaceArchive(current);
-        const restoreStatus: SandboxRestoreStatus =
-          continuity || (archiveStatus === "available" && archiveComplete)
-            ? "pending"
-            : archiveStatus === "available" ||
-                archiveStatus === "unverified" ||
-                archiveStatus === "invalid"
-              ? "degraded"
-              : "unrecoverable";
-        const workspaceStatus: SandboxWorkspaceReadiness =
-          restoreStatus === "pending"
-            ? "not_ready"
-            : restoreStatus === "degraded"
-              ? "degraded"
-              : "unrecoverable";
-        const recovery: SandboxRecoveryState = {
-          provider: {
-            status: "missing",
-            instanceId: current.instance_id,
-            observedAt,
-            ...(input.diagnostic ? { diagnostic: input.diagnostic.slice(0, 160) } : {}),
-          },
-          archive: before.archive,
-          restore: {
-            status: restoreStatus,
-            rematerializationId: null,
-            selectedRevision:
-              restoreStatus === "pending" ? (before.archive.current?.revision ?? null) : null,
-            startedAt: null,
-            completedAt: null,
-            ...(restoreStatus === "degraded"
-              ? {
-                  failureCode:
-                    archiveStatus === "available"
-                      ? "archive_generation_mismatch"
-                      : "archive_unverified",
-                  retryable: false,
-                }
-              : restoreStatus === "unrecoverable"
-                ? { failureCode: "archive_unavailable", retryable: false }
-                : {}),
-          },
-          workspace: {
-            status: workspaceStatus,
-            verifiedRevision: null,
-            verifiedAt: null,
-          },
-          ...(continuity ? { continuity } : {}),
-        };
-        const coldResumeState = recoveryResumeState(current, recovery);
-        const coldResumeStateJson = JSON.stringify(coldResumeState);
-        const updatedRows = await tx.execute<LeaseRow>(sql`
+          const coldResumeState = recoveryResumeState(current, recovery);
+          const coldResumeStateJson = JSON.stringify(coldResumeState);
+          const updatedRows = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness = 'cold',
             instance_id = null,
@@ -51161,20 +51212,21 @@ export async function markWarmLeaseInstanceLost(
           where id = ${current.id}
           returning *
         `);
-        const updated = updatedRows[0];
-        if (!updated) {
-          throw new Error(`Warm sandbox lease vanished while retiring instance ${current.id}`);
-        }
-        if (updated && current.rotation_requested_at !== null) {
-          await wakeSandboxLifecycleWaitersTx(tx, input);
-        }
-        return {
-          status: "marked" as const,
-          lease: mapLeaseRow(updated),
-          settlement,
-        };
-      }),
-  );
+          const updated = updatedRows[0];
+          if (!updated) {
+            throw new Error(`Warm sandbox lease vanished while retiring instance ${current.id}`);
+          }
+          if (updated && current.rotation_requested_at !== null) {
+            await wakeSandboxLifecycleWaitersTx(tx, input);
+          }
+          return {
+            status: "marked" as const,
+            lease: mapLeaseRow(updated),
+            settlement,
+          };
+        }),
+    );
+  });
   return result.status === "marked" && backgroundCommandEvents.length
     ? { ...result, backgroundCommandEvents }
     : result;
@@ -51293,81 +51345,84 @@ export async function reconcileColdLostLeaseInstanceBlockers(
   };
   // Settling a linked command appends its terminal event and agent input, as
   // the automatic loss transaction does, so apply runs in the activity gate.
-  return await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const database = await readColdLostDatabasePostureTx(tx);
-        const observedRows = await readColdLostSnapshotRowsTx(tx, previewInput);
-        const observedPreview = evaluateColdLostSnapshot(previewInput, observedRows, database, {
-          requireReadOnly: false,
-        });
-        if (observedPreview.previewId !== input.expectedPreviewId) {
-          return { status: "stale" as const, preview: observedPreview };
-        }
-        if (observedPreview.status !== "eligible") {
-          return { status: "blocked" as const, preview: observedPreview };
-        }
-        const observed = observedRows.lease!;
+  return await withLostProviderCommandSessionRetry(async () => {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          const database = await readColdLostDatabasePostureTx(tx);
+          const observedRows = await readColdLostSnapshotRowsTx(tx, previewInput);
+          const observedPreview = evaluateColdLostSnapshot(previewInput, observedRows, database, {
+            requireReadOnly: false,
+          });
+          if (observedPreview.previewId !== input.expectedPreviewId) {
+            return { status: "stale" as const, preview: observedPreview };
+          }
+          if (observedPreview.status !== "eligible") {
+            return { status: "blocked" as const, preview: observedPreview };
+          }
+          const observed = observedRows.lease!;
 
-        const blockerScope = {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          leaseId: observed.id,
-          sandboxGroupId: input.sandboxGroupId,
-          lostEpoch: input.expectedLostEpoch,
-          lostBackend: observed.backend,
-          lostInstanceId: input.expectedLostInstanceId,
-        };
-        await lockLostProviderCommandSessionsTx(tx, blockerScope);
-        await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
-        const currentRows = await tx.execute<LeaseRow>(sql`
+          const blockerScope = {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            leaseId: observed.id,
+            sandboxGroupId: input.sandboxGroupId,
+            lostEpoch: input.expectedLostEpoch,
+            lostBackend: observed.backend,
+            lostInstanceId: input.expectedLostInstanceId,
+          };
+          const lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+          await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+          const currentRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
         `);
-        const current = currentRows[0];
-        if (!current || current.id !== observed.id) {
+          const current = currentRows[0];
+          if (!current || current.id !== observed.id) {
+            const currentSnapshotRows = await readColdLostSnapshotRowsTx(tx, previewInput);
+            return {
+              status: "stale" as const,
+              preview: evaluateColdLostSnapshot(previewInput, currentSnapshotRows, database, {
+                requireReadOnly: false,
+              }),
+            };
+          }
           const currentSnapshotRows = await readColdLostSnapshotRowsTx(tx, previewInput);
-          return {
-            status: "stale" as const,
-            preview: evaluateColdLostSnapshot(previewInput, currentSnapshotRows, database, {
-              requireReadOnly: false,
-            }),
-          };
-        }
-        const currentSnapshotRows = await readColdLostSnapshotRowsTx(tx, previewInput);
-        const currentPreview = evaluateColdLostSnapshot(
-          previewInput,
-          currentSnapshotRows,
-          database,
-          { requireReadOnly: false },
-        );
-        if (currentPreview.previewId !== input.expectedPreviewId) {
-          return { status: "stale" as const, preview: currentPreview };
-        }
-        if (currentPreview.status !== "eligible") {
-          return { status: "blocked" as const, preview: currentPreview };
-        }
+          const currentPreview = evaluateColdLostSnapshot(
+            previewInput,
+            currentSnapshotRows,
+            database,
+            { requireReadOnly: false },
+          );
+          if (currentPreview.previewId !== input.expectedPreviewId) {
+            return { status: "stale" as const, preview: currentPreview };
+          }
+          if (currentPreview.status !== "eligible") {
+            return { status: "blocked" as const, preview: currentPreview };
+          }
 
-        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
-          deliverCommandResults: { idleContainmentMinutes: null, events: [] },
-        });
-        const refreshedRows = await tx.execute<LeaseRow>(sql`
+          await assertLostProviderCommandSessionsLockedTx(tx, blockerScope, lockedCommandSessions);
+          const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
+            deliverCommandResults: { idleContainmentMinutes: null, events: [] },
+          });
+          const refreshedRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases where id = ${current.id}
         `);
-        const refreshed = refreshedRows[0];
-        if (!refreshed) throw new Error("Cold sandbox lease vanished during reconciliation");
-        return {
-          status: "reconciled" as const,
-          lease: mapLeaseRow(refreshed),
-          settlement,
-        };
-      }),
-  );
+          const refreshed = refreshedRows[0];
+          if (!refreshed) throw new Error("Cold sandbox lease vanished during reconciliation");
+          return {
+            status: "reconciled" as const,
+            lease: mapLeaseRow(refreshed),
+            settlement,
+          };
+        }),
+    );
+  });
 }
 
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
@@ -52570,17 +52625,62 @@ async function sandboxGroupIdleForCommandContainmentTx(
         .orderBy(schema.sessions.id)
     : [];
   for (const session of sessions) {
+    // A wait blocks until it is superseded: past its deadline it still awaits
+    // the typed timeout settlement, which starts a turn.
+    const wait = await sessionInputWaitStateTx(tx, input.workspaceId, session.id, session);
     if (
+      wait.disposition === "held" ||
+      wait.disposition === "timeout" ||
       (await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
         sessionId: session.id,
       })) ||
-      (await sessionInputWaitStateTx(tx, input.workspaceId, session.id, session)).disposition ===
-        "held"
+      (await hasPendingTurnStartingSystemUpdateTx(tx, input.workspaceId, session.id))
     )
       return false;
   }
   return true;
+}
+
+/** Unclaimed machine input that will start a turn in an idle session: every
+ * immediate kind except terminal command results (held for the next turn) and
+ * child lifecycle notices, which wake only a parent with an active goal (a
+ * held wait already blocks on its own). */
+async function hasPendingTurnStartingSystemUpdateTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const pending = await tx
+    .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+      ),
+    );
+  const immediate = pending
+    .map(({ kind }) => kind as SessionSystemUpdateKind)
+    .filter(
+      (kind) =>
+        SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind] === "immediate" &&
+        kind !== "background_command_result",
+    );
+  if (immediate.some((kind) => !isChildLifecycleSystemUpdateKind(kind))) return true;
+  if (!immediate.length) return false;
+  const [goal] = await tx
+    .select({ status: schema.sessionGoals.status })
+    .from(schema.sessionGoals)
+    .where(
+      and(
+        eq(schema.sessionGoals.workspaceId, workspaceId),
+        eq(schema.sessionGoals.sessionId, sessionId),
+      ),
+    )
+    .limit(1);
+  return goal?.status === "active";
 }
 
 /** The deadline backstop's owner test is the idle rule's: a closed turn owner
@@ -52626,7 +52726,7 @@ export async function enrollRetainedCommandContainment(
     workspaceId: string;
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
-    idleCommandContainmentMs?: number;
+    idleCommandContainmentMs?: number | undefined;
   },
 ): Promise<CommandContainmentEnrollment | null> {
   const screened = await withRlsContext(db, input, async (tx) => {
@@ -52790,6 +52890,11 @@ export async function enrollRetainedCommandContainment(
     if (!mode) return null;
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+        command_containment_reason = ${
+          mode === "deadline"
+            ? DEADLINE_COMMAND_CONTAINMENT_REASON
+            : IDLE_COMMAND_CONTAINMENT_REASON
+        },
         liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
         rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
       where id = ${lease.id}
@@ -52817,7 +52922,7 @@ export async function reapStaleLeaseHoldersGlobal(
     idleGraceMs: number;
     /** Whole-group idle window for legacy retained-command containment.
      * Omitted: only the provider-deadline rule may enroll commands. */
-    idleCommandContainmentMs?: number;
+    idleCommandContainmentMs?: number | undefined;
     onCommandContainment?: (outcome: CommandContainmentInspection) => void;
     onCommandContainmentError?: (error: unknown) => void;
   },
@@ -53202,33 +53307,35 @@ export async function confirmDrainCold(
      *  clean cold lease that can expose an empty replacement. */
     providerMissingBeforeCapture?: boolean;
     /** The idle window named in contained commands' agent notice. */
-    idleCommandContainmentMs?: number;
+    idleCommandContainmentMs?: number | undefined;
   },
 ): Promise<{ wentCold: boolean; backgroundCommandEvents?: SessionEvent[] }> {
   const backgroundCommandEvents: SessionEvent[] = [];
   // Settling a command appends its terminal session event and agent input, so
   // the cold commit runs inside the session activity gate.
-  const result = await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        // draining->cold: the box is terminated, so EVERY live-box field is cleared
-        // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
-        // nulled — if the reaper PERSISTED a /workspace snapshot onto it
-        // (persistDrainSnapshot folds the archive at resume_state.sessionState.
-        // workspaceArchive BEFORE this CAS, in the SAME sweep), nulling it here would
-        // immediately destroy the snapshot the next cold-restore must replay — the
-        // file-persistence bug. So we PRESERVE a MINIMAL archive-only envelope
-        // `{ backendId, sessionState: { workspaceArchive } }` (dropping the dead box's
-        // providerState/sandboxId — the box is gone, resume-by-id would only fail) and
-        // KEEP resume_backend_id so cold-restore knows which client to hydrate with.
-        // No archive (a non-persisted drain, or a 'none'/tar config that stored none)
-        // -> resume_state is nulled as before. The archive then rides the COLD lease's
-        // resume_state until the next spawner reads + hydrates it; it is re-superseded
-        // (GC'd) on the next drain and finally cleared on workspace teardown.
-        const observedRows = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+  const result = await withLostProviderCommandSessionRetry(async () => {
+    backgroundCommandEvents.length = 0;
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          // draining->cold: the box is terminated, so EVERY live-box field is cleared
+          // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
+          // nulled — if the reaper PERSISTED a /workspace snapshot onto it
+          // (persistDrainSnapshot folds the archive at resume_state.sessionState.
+          // workspaceArchive BEFORE this CAS, in the SAME sweep), nulling it here would
+          // immediately destroy the snapshot the next cold-restore must replay — the
+          // file-persistence bug. So we PRESERVE a MINIMAL archive-only envelope
+          // `{ backendId, sessionState: { workspaceArchive } }` (dropping the dead box's
+          // providerState/sandboxId — the box is gone, resume-by-id would only fail) and
+          // KEEP resume_backend_id so cold-restore knows which client to hydrate with.
+          // No archive (a non-persisted drain, or a 'none'/tar config that stored none)
+          // -> resume_state is nulled as before. The archive then rides the COLD lease's
+          // resume_state until the next spawner reads + hydrates it; it is re-superseded
+          // (GC'd) on the next drain and finally cleared on workspace teardown.
+          const observedRows = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
             (reaper_hold_id is not null and reaper_hold_until > now())
               as reaper_hold_active
@@ -53236,39 +53343,41 @@ export async function confirmDrainCold(
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
         `);
-        const observed = observedRows[0];
-        if (
-          !observed ||
-          observed.liveness !== "draining" ||
-          observed.reaper_hold_active ||
-          (observed.refcount !== 0 && !observed.unobservable_command_drain_ids?.length) ||
-          Number(observed.lease_epoch) !== input.expectedEpoch ||
-          observed.archive_capture_id !== (input.expectedCaptureId ?? null)
-        ) {
-          return { wentCold: false };
-        }
-        const blockerScope =
-          (input.providerMissingBeforeCapture || observed.unobservable_command_drain_ids?.length) &&
-          observed.instance_id
-            ? {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                leaseId: observed.id,
-                sandboxGroupId: input.sandboxGroupId,
-                lostEpoch: input.expectedEpoch,
-                lostBackend: observed.backend,
-                lostInstanceId: observed.instance_id,
-              }
-            : null;
-        // Provider loss settles process/admission/PTY rows before taking the
-        // lease lock, matching the canonical session -> blocker -> lease lock
-        // order used by retained-process settlement. Revalidate the lease after
-        // locking the entire exact provider-owned blocker set.
-        if (blockerScope) {
-          await lockLostProviderCommandSessionsTx(tx, blockerScope);
-          await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
-        }
-        const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+          const observed = observedRows[0];
+          if (
+            !observed ||
+            observed.liveness !== "draining" ||
+            observed.reaper_hold_active ||
+            (observed.refcount !== 0 && !observed.unobservable_command_drain_ids?.length) ||
+            Number(observed.lease_epoch) !== input.expectedEpoch ||
+            observed.archive_capture_id !== (input.expectedCaptureId ?? null)
+          ) {
+            return { wentCold: false };
+          }
+          const blockerScope =
+            (input.providerMissingBeforeCapture ||
+              observed.unobservable_command_drain_ids?.length) &&
+            observed.instance_id
+              ? {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  leaseId: observed.id,
+                  sandboxGroupId: input.sandboxGroupId,
+                  lostEpoch: input.expectedEpoch,
+                  lostBackend: observed.backend,
+                  lostInstanceId: observed.instance_id,
+                }
+              : null;
+          // Provider loss settles process/admission/PTY rows before taking the
+          // lease lock, matching the canonical session -> blocker -> lease lock
+          // order used by retained-process settlement. Revalidate the lease after
+          // locking the entire exact provider-owned blocker set.
+          let lockedCommandSessions: ReadonlySet<string> = new Set();
+          if (blockerScope) {
+            lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
+            await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+          }
+          const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
             (reaper_hold_id is not null and reaper_hold_until > now())
               as reaper_hold_active
@@ -53277,133 +53386,139 @@ export async function confirmDrainCold(
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
         `);
-        const row = locked[0];
-        if (
-          !row ||
-          row.id !== observed.id ||
-          row.liveness !== "draining" ||
-          row.reaper_hold_active ||
-          (row.refcount !== 0 && !row.unobservable_command_drain_ids?.length) ||
-          Number(row.lease_epoch) !== input.expectedEpoch ||
-          row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
-          (blockerScope && row.instance_id !== blockerScope.lostInstanceId) ||
-          (blockerScope && row.backend !== blockerScope.lostBackend)
-        ) {
-          return { wentCold: false };
-        }
-        if (blockerScope) {
-          // Enrolled commands are contained only when this drain published the
-          // current checkpoint before stopping the box; otherwise the truthful
-          // reason is provider loss and no saved-workspace claim is made.
-          const contained =
-            !input.providerMissingBeforeCapture &&
-            row.archive_capture_published_at !== null &&
-            row.unobservable_command_drain_ids?.length
-              ? row.unobservable_command_drain_ids
-              : [];
-          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
-            containment: {
-              processIds: contained,
-              reason:
-                row.rotation_reason === "provider_deadline"
-                  ? DEADLINE_COMMAND_CONTAINMENT_REASON
-                  : IDLE_COMMAND_CONTAINMENT_REASON,
-            },
-            deliverCommandResults: {
-              idleContainmentMinutes:
-                input.idleCommandContainmentMs === undefined
-                  ? null
-                  : Math.max(1, Math.round(input.idleCommandContainmentMs / 60_000)),
-              events: backgroundCommandEvents,
-            },
-          });
-        }
-        const current = recoveryStateFromLeaseRow(row);
-        const hasArchive = current.archive.status !== "none";
-        const archiveComplete = hasCompleteWorkspaceArchive(row);
-        const now = new Date().toISOString();
-        const lateArchiveCapture =
-          input.providerMissingBeforeCapture &&
-          row.archive_capture_id !== null &&
-          row.archive_capture_provider_request_id !== null &&
-          row.archive_capture_generation !== null &&
-          row.archive_capture_published_at === null &&
-          row.instance_id !== null
-            ? {
-                version: 1 as const,
-                captureId: row.archive_capture_id,
-                providerRequestId: row.archive_capture_provider_request_id,
-                sourceLeaseId: row.id,
-                sourceLeaseEpoch: Number(row.lease_epoch),
-                sourceInstanceId: row.instance_id,
-                sourceWorkspaceGeneration: Number(row.archive_capture_generation),
-                recordedAt: now,
-              }
-            : null;
-        const restoreStatus: SandboxRestoreStatus =
-          current.archive.status === "available" && archiveComplete
-            ? "pending"
-            : hasArchive
-              ? "degraded"
-              : input.providerMissingBeforeCapture
-                ? "unrecoverable"
-                : "not_required";
-        const recovery: SandboxRecoveryState = {
-          provider: {
-            status: input.providerMissingBeforeCapture ? "missing" : "not_created",
-            instanceId: input.providerMissingBeforeCapture ? row.instance_id : null,
-            observedAt: now,
-            ...(input.providerMissingBeforeCapture
-              ? { diagnostic: "provider_not_found_before_workspace_capture" }
-              : {}),
-          },
-          archive: current.archive,
-          restore: {
-            status: restoreStatus,
-            rematerializationId: null,
-            selectedRevision: current.archive.current?.revision ?? null,
-            startedAt: null,
-            completedAt: now,
-            ...(restoreStatus === "degraded"
+          const row = locked[0];
+          if (
+            !row ||
+            row.id !== observed.id ||
+            row.liveness !== "draining" ||
+            row.reaper_hold_active ||
+            (row.refcount !== 0 && !row.unobservable_command_drain_ids?.length) ||
+            Number(row.lease_epoch) !== input.expectedEpoch ||
+            row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
+            (blockerScope && row.instance_id !== blockerScope.lostInstanceId) ||
+            (blockerScope && row.backend !== blockerScope.lostBackend)
+          ) {
+            return { wentCold: false };
+          }
+          if (blockerScope) {
+            // Enrolled commands are contained only when this drain published the
+            // current checkpoint before stopping the box; otherwise the truthful
+            // reason is provider loss and no saved-workspace claim is made.
+            // A pre-0546 enrollment records no reason: settle it as plain loss.
+            const reason = row.command_containment_reason;
+            const contained =
+              !input.providerMissingBeforeCapture &&
+              row.archive_capture_published_at !== null &&
+              (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
+                reason === DEADLINE_COMMAND_CONTAINMENT_REASON) &&
+              row.unobservable_command_drain_ids?.length
+                ? row.unobservable_command_drain_ids
+                : [];
+            await assertLostProviderCommandSessionsLockedTx(
+              tx,
+              blockerScope,
+              lockedCommandSessions,
+            );
+            await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
+              containment: {
+                processIds: contained,
+                reason: typeof reason === "string" ? reason : LOST_PROVIDER_PROCESS_REASON,
+              },
+              deliverCommandResults: {
+                idleContainmentMinutes:
+                  input.idleCommandContainmentMs === undefined
+                    ? null
+                    : Math.max(1, Math.round(input.idleCommandContainmentMs / 60_000)),
+                events: backgroundCommandEvents,
+              },
+            });
+          }
+          const current = recoveryStateFromLeaseRow(row);
+          const hasArchive = current.archive.status !== "none";
+          const archiveComplete = hasCompleteWorkspaceArchive(row);
+          const now = new Date().toISOString();
+          const lateArchiveCapture =
+            input.providerMissingBeforeCapture &&
+            row.archive_capture_id !== null &&
+            row.archive_capture_provider_request_id !== null &&
+            row.archive_capture_generation !== null &&
+            row.archive_capture_published_at === null &&
+            row.instance_id !== null
               ? {
-                  failureCode:
-                    current.archive.status === "available"
-                      ? "archive_generation_mismatch"
-                      : "archive_unverified",
-                  retryable: false,
+                  version: 1 as const,
+                  captureId: row.archive_capture_id,
+                  providerRequestId: row.archive_capture_provider_request_id,
+                  sourceLeaseId: row.id,
+                  sourceLeaseEpoch: Number(row.lease_epoch),
+                  sourceInstanceId: row.instance_id,
+                  sourceWorkspaceGeneration: Number(row.archive_capture_generation),
+                  recordedAt: now,
                 }
-              : restoreStatus === "unrecoverable"
-                ? { failureCode: "archive_unavailable", retryable: false }
+              : null;
+          const restoreStatus: SandboxRestoreStatus =
+            current.archive.status === "available" && archiveComplete
+              ? "pending"
+              : hasArchive
+                ? "degraded"
+                : input.providerMissingBeforeCapture
+                  ? "unrecoverable"
+                  : "not_required";
+          const recovery: SandboxRecoveryState = {
+            provider: {
+              status: input.providerMissingBeforeCapture ? "missing" : "not_created",
+              instanceId: input.providerMissingBeforeCapture ? row.instance_id : null,
+              observedAt: now,
+              ...(input.providerMissingBeforeCapture
+                ? { diagnostic: "provider_not_found_before_workspace_capture" }
                 : {}),
-          },
-          workspace: {
-            status:
-              restoreStatus === "pending"
-                ? "not_ready"
-                : restoreStatus === "degraded"
-                  ? "degraded"
-                  : restoreStatus === "unrecoverable"
-                    ? "unrecoverable"
-                    : "unknown",
-            verifiedRevision: null,
-            verifiedAt: null,
-          },
-          ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
-        };
-        const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
-        const resumeStateJson = preserveRecovery
-          ? JSON.stringify(archiveOnlyResumeState(row, recovery))
-          : null;
-        // Migration 0184 also enforces exact teardown ownership at the table
-        // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
-        // Set the receipt transaction-locally only after the locked row passed
-        // every CAS guard; the trigger compares it with OLD.archive_capture_id.
-        if (input.expectedCaptureId) {
-          await tx.execute(
-            sql`select set_config('opengeni.sandbox_drain_capture_id', ${input.expectedCaptureId}, true)`,
-          );
-        }
-        const rows = await tx.execute<{ id: string }>(sql`
+            },
+            archive: current.archive,
+            restore: {
+              status: restoreStatus,
+              rematerializationId: null,
+              selectedRevision: current.archive.current?.revision ?? null,
+              startedAt: null,
+              completedAt: now,
+              ...(restoreStatus === "degraded"
+                ? {
+                    failureCode:
+                      current.archive.status === "available"
+                        ? "archive_generation_mismatch"
+                        : "archive_unverified",
+                    retryable: false,
+                  }
+                : restoreStatus === "unrecoverable"
+                  ? { failureCode: "archive_unavailable", retryable: false }
+                  : {}),
+            },
+            workspace: {
+              status:
+                restoreStatus === "pending"
+                  ? "not_ready"
+                  : restoreStatus === "degraded"
+                    ? "degraded"
+                    : restoreStatus === "unrecoverable"
+                      ? "unrecoverable"
+                      : "unknown",
+              verifiedRevision: null,
+              verifiedAt: null,
+            },
+            ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
+          };
+          const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
+          const resumeStateJson = preserveRecovery
+            ? JSON.stringify(archiveOnlyResumeState(row, recovery))
+            : null;
+          // Migration 0184 also enforces exact teardown ownership at the table
+          // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
+          // Set the receipt transaction-locally only after the locked row passed
+          // every CAS guard; the trigger compares it with OLD.archive_capture_id.
+          if (input.expectedCaptureId) {
+            await tx.execute(
+              sql`select set_config('opengeni.sandbox_drain_capture_id', ${input.expectedCaptureId}, true)`,
+            );
+          }
+          const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'cold',
           instance_id = null,
@@ -53439,39 +53554,40 @@ export async function confirmDrainCold(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
-        if (rows.length > 0 && input.providerMissingBeforeCapture) {
-          const eventId = crypto.randomUUID();
-          await tx.insert(schema.auditEvents).values(
-            withLosslessContentWriteVersion(
-              {
-                id: eventId,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                subjectId: "opengeni:sandbox-reaper",
-                action: "sandbox.provider_missing_before_capture",
-                targetType: "sandbox_group",
-                targetId: input.sandboxGroupId,
-                metadata: {
-                  leaseId: row.id,
-                  leaseEpoch: input.expectedEpoch,
-                  workspaceGeneration: Number(row.workspace_generation),
-                  archiveGeneration:
-                    row.archive_generation === null ? null : Number(row.archive_generation),
+          if (rows.length > 0 && input.providerMissingBeforeCapture) {
+            const eventId = crypto.randomUUID();
+            await tx.insert(schema.auditEvents).values(
+              withLosslessContentWriteVersion(
+                {
+                  id: eventId,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  subjectId: "opengeni:sandbox-reaper",
+                  action: "sandbox.provider_missing_before_capture",
+                  targetType: "sandbox_group",
+                  targetId: input.sandboxGroupId,
+                  metadata: {
+                    leaseId: row.id,
+                    leaseEpoch: input.expectedEpoch,
+                    workspaceGeneration: Number(row.workspace_generation),
+                    archiveGeneration:
+                      row.archive_generation === null ? null : Number(row.archive_generation),
+                  },
                 },
-              },
-              "metadata",
-              "metadataCodecVersion",
-            ),
-          );
-          await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
+                "metadata",
+                "metadataCodecVersion",
+              ),
+            );
+            await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
             ${eventId}::uuid, 'provider_missing_before_capture')`);
-        }
-        if (rows.length > 0 && row.rotation_requested_at !== null) {
-          await wakeSandboxLifecycleWaitersTx(tx, input);
-        }
-        return { wentCold: rows.length > 0 };
-      }),
-  );
+          }
+          if (rows.length > 0 && row.rotation_requested_at !== null) {
+            await wakeSandboxLifecycleWaitersTx(tx, input);
+          }
+          return { wentCold: rows.length > 0 };
+        }),
+    );
+  });
   return backgroundCommandEvents.length ? { ...result, backgroundCommandEvents } : result;
 }
 

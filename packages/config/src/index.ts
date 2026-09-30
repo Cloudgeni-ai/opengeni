@@ -1226,7 +1226,7 @@ const SettingsSchema = z.object({
   // plus this window plus the drain capture budget must fit before it.
   // getSettings derives the unset default between those two for short-lived
   // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
-  sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().default(1_800_000),
+  sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().optional(),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
   // that dies any other way (Modal's hard creation-time timeout on a session
@@ -3694,14 +3694,23 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
           }) -
           1
         : Number.POSITIVE_INFINITY;
-    settings.sandboxIdleCommandContainmentMs = Math.max(
-      settings.sandboxIdleGraceMs + 1,
-      Math.min(
-        1_800_000,
-        Math.floor((settings.sandboxIdleGraceMs + settings.sandboxRotationLeadMs) / 2),
-        modalIdleCeilingMs,
-      ),
+    const derived = Math.min(
+      1_800_000,
+      Math.floor((settings.sandboxIdleGraceMs + settings.sandboxRotationLeadMs) / 2),
+      modalIdleCeilingMs,
     );
+    // A derived value never fails validation: with no room above the idle
+    // grace, idle containment stays off and only the deadline rule applies.
+    if (derived > settings.sandboxIdleGraceMs) {
+      settings.sandboxIdleCommandContainmentMs = derived;
+    } else {
+      settings.sandboxIdleCommandContainmentMs = undefined;
+      console.warn(
+        "[config] idle command containment disabled: no window fits between " +
+          `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}) and the Modal idle ` +
+          "timeout / rotation lead ceiling; set OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS to override.",
+      );
+    }
   }
   validateSettings(settings, source);
   return settings;
@@ -7578,7 +7587,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
     const containmentMs = settings.sandboxIdleCommandContainmentMs;
-    if (!(containmentMs > settings.sandboxIdleGraceMs)) {
+    if (containmentMs !== undefined && !(containmentMs > settings.sandboxIdleGraceMs)) {
       throw new Error(
         `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS (${containmentMs}) must exceed ` +
           `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}): a box kept warm only by ` +
@@ -7586,6 +7595,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
     if (
+      containmentMs !== undefined &&
       optionalEnvironmentValue("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS", source) !==
         undefined &&
       !(containmentMs < rotationLeadMs)
@@ -7641,6 +7651,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       }
       if (
         settings.modalIdleTimeoutSeconds !== undefined &&
+        containmentMs !== undefined &&
         !(reaperPeriod + containmentMs + drainCaptureTimeoutMs < idleTimeoutMs)
       ) {
         throw new Error(

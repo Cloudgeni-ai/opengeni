@@ -9603,6 +9603,11 @@ export const sandboxLeases = pgTable(
     holdersChangedAt: timestamp("holders_changed_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // Why an enrolled drain contains its commands (0546); cleared with the
+    // enrollment. Null for a pre-0546 enrollment: settle with neutral wording.
+    commandContainmentReason: text("command_containment_reason", {
+      enum: ["idle_containment", "provider_deadline_containment"],
+    }),
     liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
     refcount: integer("refcount").notNull().default(0),
     turnHolders: integer("turn_holders").notNull().default(0),

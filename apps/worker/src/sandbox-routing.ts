@@ -47,7 +47,7 @@ import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
-import type { SessionEvent } from "@opengeni/contracts";
+import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   buildSelfhostedBackendSession,
   ActiveBackendUnresolvableError,
@@ -402,7 +402,11 @@ async function resolveCurrentHomeBackend(
       diagnostic: "provider_not_found_during_home_route_rebind",
     });
     if (marked.status === "marked") {
-      await publishLostProviderCommandEvents(services.bus, ids.workspaceId, marked);
+      await publishDurableSessionEvents(
+        services.bus,
+        ids.workspaceId,
+        marked.backgroundCommandEvents,
+      );
       await services.onHomeSandboxLost?.({
         sandboxGroupId: ids.sandboxGroupId,
         instanceId: lease.instanceId,
@@ -829,26 +833,6 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
   };
 }
 
-/** Live fanout of background commands settled by an exact provider loss. The
- *  terminal events and agent inputs are already durable in the loss commit. */
-async function publishLostProviderCommandEvents(
-  bus: EventBus | undefined,
-  workspaceId: string,
-  marked: { backgroundCommandEvents?: SessionEvent[] },
-): Promise<void> {
-  const events = marked.backgroundCommandEvents ?? [];
-  if (!bus || !events.length) return;
-  for (const sessionId of new Set(events.map((event) => event.sessionId))) {
-    await bus
-      .publish(
-        workspaceId,
-        sessionId,
-        events.filter((event) => event.sessionId === sessionId),
-      )
-      .catch(() => undefined);
-  }
-}
-
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
  *  connection. A null bus / unconfigured NATS yields a NatsControlRpc whose
  *  connection factory returns null → agent_offline on every op (never a throw). */
@@ -1113,7 +1097,11 @@ export function wrapTurnBoxWithRouting(
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
-              await publishLostProviderCommandEvents(services.bus, ids.workspaceId, marked);
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: expectedInstanceId,
@@ -1376,7 +1364,11 @@ export function wrapLazyTurnBoxWithRouting(
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
-              await publishLostProviderCommandEvents(services.bus, ids.workspaceId, marked);
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: backend.providerInstanceId,

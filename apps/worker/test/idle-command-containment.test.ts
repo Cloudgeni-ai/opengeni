@@ -807,9 +807,34 @@ describe("idle command containment", () => {
       expect((await readLease(db, fixture.workspaceId, fixture.sandboxGroupId))?.liveness).toBe(
         "warm",
       );
-      // Once the wait has expired nothing is waiting on the command any more.
+      // Past its deadline the wait still awaits its timeout settlement, which
+      // starts a turn: the command is still awaited.
       await admin`update sessions set input_wait_until = now() - interval '1 second'
         where id = ${fixture.attempt.sessionId}`;
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+      // Once that settlement retired the wait and the group then went unused,
+      // nothing is waiting on the command any more.
+      await admin`update sessions set input_wait_turn_id = null, input_wait_until = null,
+        input_wait_reason = null, input_wait_set_at = null where id = ${fixture.attempt.sessionId}`;
+      await idleFor(fixture, 31);
+      expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    }
+    // Unclaimed machine input that will start a turn (here an agent message).
+    {
+      const fixture = await idleFixture();
+      const [update] = await admin<{ id: string }[]>`insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
+        ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.attempt.sessionId},
+          'agent_message', ${crypto.randomUUID()}, ${`containment-${crypto.randomUUID()}`},
+          'please keep the server up', ${admin.json({ type: "agent_message" })})
+        returning id`;
+      await idleFor(fixture, 45);
+      expect(
+        await admin<{ sandbox_group_id: string }[]>`select sandbox_group_id
+          from opengeni_private.list_command_containment_candidates(100, ${WINDOW_MS}::bigint)`,
+      ).not.toContainEqual({ sandbox_group_id: fixture.sandboxGroupId });
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+      await admin`update session_system_updates set state = 'superseded' where id = ${update!.id}`;
       expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
     }
     // A pending approval or structured human input in any group session.
@@ -907,6 +932,21 @@ describe("idle command containment", () => {
     );
   }, 180_000);
 
+  test("a drain enrolled without a recorded reason settles with neutral loss wording", async () => {
+    // A pre-0546 worker enrolled this lease: drain ids but no containment reason.
+    const fixture = await idleFixture();
+    await admin`update sandbox_leases set unobservable_command_drain_ids = array[${fixture.processId}::uuid],
+      liveness = 'draining', rotation_requested_at = now(), rotation_reason = 'operator',
+      expires_at = now() where id = ${fixture.leaseId}`;
+    const { result } = await drain(fixture);
+    expect(result.status).toBe("terminated");
+    const record = await commandTerminalRecord(fixture);
+    expect(record.command?.settlement_reason).toBe("provider_instance_lost");
+    expect(record.updates[0]?.summary).toBe(
+      "bun run dev --port 3000: result unavailable. Its exit status could not be confirmed.",
+    );
+  }, 180_000);
+
   test("the reaper sweep reports each inspection outcome", async () => {
     const fixture = await idleFixture();
     const outcomes: CommandContainmentInspection[] = [];
@@ -926,16 +966,17 @@ describe("idle command containment", () => {
     // never costs the exclusive workspace-control fence.
     await idleFor(fixture, 5);
     expect(await inventory()).not.toContain(fixture.sandboxGroupId);
-    // A held input wait passes the coarse inventory but not exact enrollment.
+    // A wait whose deadline passed long ago but whose timeout is unsettled
+    // passes the coarse inventory, not exact enrollment.
     await admin`update sessions set input_wait_turn_id = ${fixture.attempt.turnId},
-      input_wait_until = now() + interval '3 hours', input_wait_reason = 'waiting for tests',
-      input_wait_set_at = now() - interval '31 minutes' where id = ${fixture.attempt.sessionId}`;
+      input_wait_until = now() - interval '31 minutes', input_wait_reason = 'waiting for tests',
+      input_wait_set_at = now() - interval '2 hours' where id = ${fixture.attempt.sessionId}`;
     await idleFor(fixture, 31);
     expect(await inventory()).toContain(fixture.sandboxGroupId);
     await sweep();
     expect(outcomes).toContain("not_eligible");
-    await admin`update sessions set input_wait_until = now() - interval '1 second'
-      where id = ${fixture.attempt.sessionId}`;
+    await admin`update sessions set input_wait_turn_id = null, input_wait_until = null,
+      input_wait_reason = null, input_wait_set_at = null where id = ${fixture.attempt.sessionId}`;
     outcomes.length = 0;
     expect((await sweep()).some((row) => row.sandboxGroupId === fixture.sandboxGroupId)).toBe(true);
     expect(outcomes).toContain("idle_enrolled");

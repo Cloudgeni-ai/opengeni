@@ -632,6 +632,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 observability,
                 freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
+                bus,
                 objectStorage,
               },
               {
@@ -709,6 +710,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 observability,
                 freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
+                bus,
                 objectStorage,
               },
               {

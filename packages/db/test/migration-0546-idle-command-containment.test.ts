@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireOwnerMigratedTestDatabase,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   advanceWorkspaceGeneration,
   claimSessionWorkForAttempt,
@@ -10,6 +15,8 @@ import {
   retainWorkspaceMutationProcess,
   type DbClient,
 } from "../src/index";
+import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 
 const MIGRATION = "0546_idle_command_containment.sql";
 const FUNCTION = "opengeni_private.list_command_containment_candidates(integer,bigint)";
@@ -47,11 +54,12 @@ async function migrationSource(): Promise<string> {
   return await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();
 }
 
+/** Called as the runtime role, exactly as the reaper does. */
 async function candidateGroups(idleMs: number | null = WINDOW_MS): Promise<string[]> {
-  const rows = await admin<{ sandbox_group_id: string }[]>`
+  const rows = await app.db.execute<{ sandbox_group_id: string }>(sql`
     select sandbox_group_id
-    from opengeni_private.list_command_containment_candidates(100, ${idleMs}::bigint)`;
-  return rows.map((row) => row.sandbox_group_id);
+    from opengeni_private.list_command_containment_candidates(100, ${idleMs}::bigint)`);
+  return [...rows].map((row) => row.sandbox_group_id);
 }
 
 async function legacyCandidateGroups(): Promise<string[]> {
@@ -275,4 +283,77 @@ describe("0546 idle command containment", () => {
       from pg_proc p where p.oid = ${FUNCTION}::regprocedure`;
     expect(permission).toEqual({ public_execute: false, app_execute: true });
   });
+  test("the inventory screen sees activity as the FORCE-RLS owner", async () => {
+    // Production migrates as a non-superuser owner, so the SECURITY DEFINER
+    // screen reads activity tables only through inventory policies.
+    const owned = await acquireOwnerMigratedTestDatabase("idle-command-containment");
+    if (!owned) throw new Error("PostgreSQL verification requires the Docker fixture");
+    const [sharedAdmin, sharedApp] = [admin, app];
+    let client: DbClient | undefined;
+    try {
+      await migrate(owned.ownerUrl);
+      await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
+      const appUrl = new URL(owned.ownerUrl);
+      appUrl.username = "opengeni_app";
+      appUrl.password = owned.appPassword;
+      client = createDb(appUrl.toString());
+      admin = owned.admin;
+      app = client;
+      const fixture = await leaseWithRetainedCommand();
+      await unusedFor(fixture, 31);
+      expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
+      const [attempt] = await admin<{ id: string; turn_id: string }[]>`
+        select id, turn_id from session_turn_attempts where workspace_id = ${fixture.workspaceId}`;
+      // Each activity table must be visible to the owner-run screen.
+      const probes: Array<[string, () => Promise<unknown>, () => Promise<unknown>]> = [
+        [
+          "attempt close",
+          () => admin`update session_turn_attempts set closed_at = now(), quiesced_at = now()
+              where id = ${attempt!.id}`,
+          () => unusedFor(fixture, 31),
+        ],
+        [
+          "open turn",
+          () =>
+            admin`update session_turns set status = 'requires_action' where id = ${attempt!.turn_id}`,
+          () => admin`update session_turns set status = 'completed' where id = ${attempt!.turn_id}`,
+        ],
+        [
+          "admission",
+          () =>
+            admin`update sandbox_workspace_mutation_admissions set admitted_at = now()
+              where lease_id = ${fixture.leaseId}`,
+          () => unusedFor(fixture, 31),
+        ],
+        [
+          "pending machine input",
+          () => admin`insert into session_system_updates (
+              account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
+            ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId},
+              'agent_message', ${crypto.randomUUID()}, ${`probe-${crypto.randomUUID()}`},
+              'probe', ${admin.json({ type: "agent_message" })})`,
+          () =>
+            admin`update session_system_updates set state = 'superseded'
+              where session_id = ${fixture.sessionId}`,
+        ],
+      ];
+      for (const [label, activate, clear] of probes) {
+        await activate();
+        expect({
+          label,
+          listed: (await candidateGroups()).includes(fixture.sandboxGroupId),
+        }).toEqual({
+          label,
+          listed: false,
+        });
+        await clear();
+        expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
+      }
+    } finally {
+      admin = sharedAdmin;
+      app = sharedApp;
+      await client?.close().catch(() => undefined);
+      await owned.release();
+    }
+  }, 180_000);
 });

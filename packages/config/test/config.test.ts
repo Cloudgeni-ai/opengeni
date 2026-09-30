@@ -2642,6 +2642,14 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         getSettings(),
       ),
     ).toThrow(/must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS\*1000/);
+    // A derived window that cannot fit disables idle containment instead of
+    // failing boot: these idle timeouts boot exactly as before.
+    for (const seconds of ["960", "1000"]) {
+      expect(
+        withEnv({ ...modal, OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds }, () => getSettings())
+          .sandboxIdleCommandContainmentMs,
+      ).toBeUndefined();
+    }
     // Without an explicit idle timeout the hard lifetime governs and 30m fits.
     expect(
       withEnv(

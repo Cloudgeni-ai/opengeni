@@ -14,6 +14,7 @@
 // timer, viewer activity, owner task queue, or provider-specific lifecycle path
 // in the normal drain state machine.
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
+import { publishDurableSessionEvents } from "../session-event-fanout";
 import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
 import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
 
@@ -3210,22 +3211,12 @@ async function terminateDrainableBox(
   });
   // The command terminal events and agent inputs are already durable in the
   // cold commit; this is only best-effort live fanout.
-  if (bus && backgroundCommandEvents?.length) {
-    for (const sessionId of new Set(backgroundCommandEvents.map((event) => event.sessionId))) {
-      await bus
-        .publish(
-          row.workspaceId,
-          sessionId,
-          backgroundCommandEvents.filter((event) => event.sessionId === sessionId),
-        )
-        .catch((error: unknown) => {
-          observability.warn("sandbox reaper: contained command event fanout failed", {
-            sandboxGroupId: row.sandboxGroupId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-    }
-  }
+  await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {
+    observability.warn("sandbox reaper: contained command event fanout failed", {
+      sandboxGroupId: row.sandboxGroupId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
   if (wentCold) {
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another
