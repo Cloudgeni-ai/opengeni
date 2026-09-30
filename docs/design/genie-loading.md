@@ -102,11 +102,13 @@ classic `groupTimeline(items)` grouping are unchanged. The deprecated
   Completed summaries carry fuller facets. Completed compaction has a compact
   indicator and inspectable details. The disclosure chevron remains clear on
   phones without redundant show/hide-steps copy.
-- **Stable settlement.** The Worked separator sits before the final response. Its
-  duration ends at the response's first delta, not its completion receipt. A
-  declared final phase establishes that boundary while streaming; for phase-less
-  messages, settlement identifies the last response without guessing from text
-  length. Same-row expansion state survives updates and settlement. An expanded
+- **Stable settlement.** The Worked separator sits before the final response only
+  after the turn actually settles. Its duration uses the same start-to-end span
+  as the live timer, including final-answer streaming and any trailing work, so
+  the counter does not jump backwards on completion. A declared final phase
+  identifies the response but does not settle the turn; for phase-less messages,
+  settlement identifies the last response without guessing from text length.
+  Same-row expansion state survives updates and settlement. An expanded
   or actively read view is not abruptly collapsed or scrolled away. New turns
   get their own rows rather than inheriting an earlier turn's disclosure.
 
