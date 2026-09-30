@@ -545,7 +545,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // fingerprinted immutable template proves this is our exact fixture, so a
     // transient `docker inspect` outage must not turn into skipped DB tests.
     let generation = native
-      ? new Bun.CryptoHasher("sha256").update(`native:${ADMIN_BASE_URL}`).digest("hex")
+      ? new Bun.CryptoHasher("sha256").update(`native:${ADMIN_URL}`).digest("hex")
       : priorState && (await templateReady())
         ? priorState.generation
         : null;
