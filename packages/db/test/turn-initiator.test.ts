@@ -5,6 +5,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   renderMessageSentAtForModel,
+  UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -289,6 +290,33 @@ async function turnSurface(turnId: string): Promise<string | null> {
 }
 
 describe("immutable session turn initiators", () => {
+  test("an accepted legacy schedule keeps scheduler provenance and no human", async () => {
+    const grant = await fixture();
+    const session = await createSession(client.db, sessionInput(grant));
+    const scheduled = await addAcceptedScheduledOccurrence(grant, session.id, {
+      name: UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
+      context: { backfill: true },
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("legacy schedule was not claimed");
+    expect(claim.turn.initiator).toEqual({
+      kind: "service",
+      subjectId: "scheduler",
+      label: "OpenGeni scheduler",
+    });
+    expect(claim.turn.initiatingHumanSubjectId).toBeNull();
+    expect(claim.turn.initiatorContext).toMatchObject({ scheduledRunIds: [scheduled.runId] });
+    expect(claim.turn.initiatorContext.backfill).toBeUndefined();
+    expect(claim.turn.personalConnectionDelegations).toEqual([]);
+  });
+
   test("scheduled occurrences freeze their accepted task's service name and context with no human", async () => {
     const grant = await fixture();
     const session = await createSession(client.db, sessionInput(grant));
