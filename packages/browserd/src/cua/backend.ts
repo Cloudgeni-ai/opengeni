@@ -49,6 +49,7 @@ export class CuaComputerBackend implements ComputerBackend {
       keyboardInput: permissions.accessibility,
       clipboard: false,
       backgroundActions: permissions.accessibility,
+      backgroundInput: permissions.accessibility,
       parallelApps: false,
     };
   }
@@ -83,6 +84,7 @@ export class CuaComputerBackend implements ComputerBackend {
         semanticActions: data.accessibility === true,
         keyboardInput: data.accessibility === true,
         backgroundActions: data.accessibility === true,
+        backgroundInput: data.accessibility === true,
         windowCapture: data.screen_recording === true,
         pointerInput: data.accessibility === true && data.screen_recording === true,
       };

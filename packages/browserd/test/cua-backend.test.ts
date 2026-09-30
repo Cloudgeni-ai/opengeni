@@ -117,6 +117,8 @@ describe("CUA desktop boundary", () => {
     const fixture = new Fixture(),
       backend = await CuaComputerBackend.open(fixture);
     try {
+      expect(backend.initialCapabilities.backgroundInput).toBe(true);
+      expect((await backend.capabilities()).backgroundInput).toBe(true);
       const target = (await backend.targets())[0]!;
       const first = await backend.observe(target.id);
       expect(JSON.stringify(first)).not.toContain("must-not-leak");

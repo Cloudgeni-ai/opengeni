@@ -647,6 +647,7 @@ export function ComputerViewer({
                 connectionError={frames.error ?? computer.error}
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
+                backgroundInput={computer.session?.capabilities?.backgroundInput === true}
                 clipboardEnabled={computer.session?.capabilities?.clipboard === true}
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
@@ -1010,6 +1011,7 @@ function ComputerViewport(props: {
   connectionError: Error | null;
   mutating: boolean;
   backgroundActions: boolean;
+  backgroundInput: boolean;
   clipboardEnabled: boolean;
   onAction: (action: ComputerAction, frame: ComputerFrame | null) => Promise<void>;
   onReadClipboard: () => Promise<ComputerClipboard>;
@@ -1056,7 +1058,10 @@ function ComputerViewport(props: {
   const rawInputEnabled =
     !streamFailed &&
     !props.machineLocked &&
-    (!props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true);
+    (props.backgroundInput ||
+      !props.backgroundActions ||
+      props.target?.kind === "screen" ||
+      props.target?.focused === true);
 
   const clearBufferedInput = useCallback(() => {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
@@ -1734,9 +1739,11 @@ function ComputerStatusBar(props: {
       <span className="min-w-0 flex-1 truncate">
         {screen
           ? "Full screen · input may move pointer and focus"
-          : props.session?.capabilities?.backgroundActions
-            ? "Window · semantic controls stay in the background"
-            : (props.target?.kind ?? "Desktop")}
+          : props.session?.capabilities?.backgroundInput
+            ? "Window · clicks and typing stay in the background"
+            : props.session?.capabilities?.backgroundActions
+              ? "Window · semantic controls stay in the background"
+              : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}

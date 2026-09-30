@@ -2939,6 +2939,8 @@ export const ComputerSessionCapabilities = z
     keyboardInput: z.boolean(),
     clipboard: z.boolean(),
     backgroundActions: z.boolean(),
+    /** Raw window input stays in the background. Absent means foreground-only. */
+    backgroundInput: z.boolean().optional(),
     parallelApps: z.boolean(),
   })
   .strict();

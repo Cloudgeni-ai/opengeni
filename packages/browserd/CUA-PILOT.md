@@ -14,6 +14,11 @@ the existing desktop environment mode. Only one CUA session may own this process
 physical desktop. Existing macOS accessibility and screen-recording permissions
 are required; the adapter does not request permissions or silently front apps.
 
+The adapter advertises `backgroundInput` because pointer and keyboard delivery
+targets the selected window without taking desktop focus. The viewer accepts
+those clicks and keystrokes directly. Native backends that omit this capability
+retain their foreground-window guard; background semantic controls are separate.
+
 From this package, run:
 
 ```sh
