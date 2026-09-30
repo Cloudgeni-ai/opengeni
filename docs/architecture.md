@@ -363,20 +363,9 @@ Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
-Configured session tool surfaces share
-`resolveAgentToolFamilies` in `packages/contracts/src/agent-config.ts`.
-Worker preparation, runtime hosted/function-tool attachment and the Codemode SDK
-proxy enforce the resolved capability ceiling; null configurations retain the
-legacy path. Sandbox tools and wait/command/title mechanics remain derived or
-unconditional. Configured routers require deferred tools or durable prior router
-history, without reviving removed tools. Server `effectiveTools` reports known
-model names and upfront/search visibility; unknown external MCP schemas remain
-`toolsKnown: false`. See [`agent configuration`](design/agent-configuration.md).
-
-Media projection shares `resolveAgentMediaToolSurface` with runtime attachment.
-Unresolved adapters are omitted with `mediaToolsKnown: false`, rather than inferred
-from pool readiness or policy. Exact per-session build snapshots retain only
-value-free attachment kinds, never credentials.
+Configured sessions resolve tools and media through `packages/contracts/src/agent-config.ts`;
+worker, runtime and Codemode enforce that ceiling, and null configurations keep the legacy
+path. See [`agent configuration`](design/agent-configuration.md).
 
 ### 3.8 A Connected Machine is first-class primary compute
 
