@@ -34,6 +34,14 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Workspace configs read shared provider metadata at module load.
+              // Keep this pure data outside mutually importing settings routes.
+              name: "model-provider-metadata",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]models[\\/]provider-metadata\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Registration runs when lazy routes evaluate. Keep the loader's
               // state and registration entry point together, outside route
               // chunks that can import one another before state initializes.

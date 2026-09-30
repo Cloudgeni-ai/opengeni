@@ -1,4 +1,4 @@
-import { ORGANIZATION_PROVIDER_META } from "@/components/organization-model-provider-connection";
+import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
   ClaudeTokenInstructions,
   useClaudeIdentityFields,
