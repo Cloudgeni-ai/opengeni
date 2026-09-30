@@ -120,7 +120,9 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
     expect(sym.rounds[1].chosen).toEqual([]);
 
     // both relevant small files were tiled whole
-    expect(stage("wave2").tiled).toEqual(["src/components/ArtifactList.tsx", "src/hooks/paging.ts"]);
+    expect(stage("wave2").tiled).toEqual(["src/components/ArtifactList.tsx"]);
+    // paging.ts, added by symbol discovery, is tiled in the symbol-window batch
+    expect(stage("symbol_windows").tiled).toEqual(["src/hooks/paging.ts"]);
 
     // wave 3 followed fetchRowPage: its definition and its call site in Toolbar.tsx
     const leads = stage("leads");

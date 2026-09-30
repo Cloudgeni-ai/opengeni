@@ -107,6 +107,8 @@ export interface CodeSearchConfig {
     maxNewFilesSelected: number;
     /** Triage the files the identifiers lead to with Jev before selecting them (off: rank by symbol evidence). */
     triage: boolean;
+    /** A file the identifiers lead to with at most this many lines is tiled whole. */
+    tileNewMaxLines: number;
   };
   change: {
     /** "Must change together": judge the declarations of the most relevant files against the question. */
@@ -265,6 +267,7 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     maxNewFilesTriaged: 40,
     maxNewFilesSelected: 6,
     triage: false,
+    tileNewMaxLines: 300,
   },
   change: {
     enabled: true,

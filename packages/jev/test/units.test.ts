@@ -170,6 +170,7 @@ describe("config", () => {
       maxNewFilesTriaged: 40,
       maxNewFilesSelected: 6,
       triage: false,
+      tileNewMaxLines: 300,
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.wave3).toEqual({
       enabled: true,

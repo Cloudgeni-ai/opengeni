@@ -450,6 +450,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   const symbolRounds: Array<Record<string, unknown>> = [];
   const symbolAdded: Array<{ path: string; p: number; via: string[] }> = [];
   const followedSymbols: string[] = [];
+  /** Definitions of the identifiers Jev judged worth following (their windows seed leads before verification). */
+  const symbolDefs: Array<{ name: string; path: string; line: number; p: number }> = [];
   /**
    * Follow named identifiers: their definitions and usages across the workspace become candidate files, the
    * files they lead to are triaged, and the passing ones join the selection. Returns the files added.
@@ -479,6 +481,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       const isGeneric = files.size > cfg.symbols.maxRefFiles;
       if (isGeneric) generic.push(`${name} (${files.size} files)`);
       const hits = usage.hits.filter((h) => h.name === name && (!isGeneric || h.kind === "def"));
+      for (const h of hits) if (h.kind === "def") symbolDefs.push({ name, path: h.path, line: h.line, p: x.p });
       if (!hits.length) continue;
       const kwIndex = kws.length;
       const esc = escapeRegex(name);
@@ -579,80 +582,85 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     return take.map((x) => x.ci);
   };
 
-  // ---- 2b. symbol discovery: identifiers of the selected files, judged, then their definitions and usages
-  ts = performance.now();
-  if (cfg.symbols.enabled) {
-    const judged = new Set<string>();
-    // identifiers come from relevant code files (not docs, release notes or unrelated tests)
-    const codeFile = (i: number) =>
-      !isDocPath(cands[i]!.path) &&
-      !isChangelogPath(cands[i]!.path) &&
-      (allowTests || !cands[i]!.isTest);
-    let sources = selected.filter((i) => pOf(i) >= thr.T1 && codeFile(i));
-    if (!sources.length) sources = selected.filter(codeFile).slice(0, 3);
-    for (let round_ = 1; round_ <= cfg.symbols.maxRounds && sources.length; round_++) {
-      const srcFiles = sources.map((i) => ({
-        path: cands[i]!.path,
-        lines: readLines(cands[i]!.path),
-        p: pOf(i),
-        hitLines: [...cands[i]!.hitLines.keys()],
-      }));
-      const exclude = new Set([...searched, ...judged]);
-      const all = symbolCandidates(srcFiles, exclude, qWords);
-      const judgedNow = all.slice(0, cfg.symbols.maxJudged);
-      judgedNow.forEach((c) => judged.add(c.name));
-      if (all.length > judgedNow.length) {
-        cuts.push(
-          `symbols round ${round_}: judged the ${judgedNow.length} strongest of ${all.length} identifiers in ${srcFiles.length} files; not judged: ${all
-            .slice(judgedNow.length, judgedNow.length + 12)
-            .map((c) => c.name)
-            .join(", ")}${all.length - judgedNow.length > 12 ? ", ..." : ""}`,
-        );
-      }
-      const maxW = Math.max(...judgedNow.map((c) => c.weight), 1e-9);
-      const items: LeadItem[] = judgedNow.map((c, j) => ({
-        id: `y${round_}${String(j).padStart(3, "0")}`,
-        name: c.name,
-        seenAt: `${c.seenAt.path}:${c.seenAt.line}`,
-        context: c.context,
-        lex: c.weight / maxW,
-      }));
-      const symScores = await judge.scoreSymbols(items, ctx);
-      const passing = items
-        .map((it) => ({ it, p: symScores.get(it.id) ?? 0 }))
-        .filter((x) => x.p >= cfg.symbols.threshold)
-        .sort((a, b) => b.p - a.p || (a.it.id < b.it.id ? -1 : 1));
-      const chosen = passing.slice(0, cfg.symbols.maxFollowed);
-      if (passing.length > chosen.length) {
-        cuts.push(
-          `symbols round ${round_}: followed ${chosen.length} of ${passing.length} relevant identifiers; not followed: ${passing
-            .slice(chosen.length)
-            .map((x) => `${x.it.name} (${r2(x.p)})`)
-            .join(", ")}`,
-        );
-      }
-      const roundTrace: Record<string, unknown> = {
-        round: round_,
-        sources: srcFiles.map((f) => f.path),
-        candidates: all.length,
-        judged: items.map((it) => ({ name: it.name, p: round(symScores.get(it.id) ?? Number.NaN), ctx: it.context })),
-        chosen: chosen.map((x) => x.it.name),
-      };
-      symbolRounds.push(roundTrace);
-      if (!chosen.length) break;
-      sources = (await followNames(round_, chosen, roundTrace)).filter(codeFile);
+  // ---- 2b. symbol discovery: identifiers of the selected files, judged, then their definitions and usages.
+  // It runs while wave 2 verifies the files triage selected; the files and hits it adds are verified in the
+  // same Jev round as the lead judgment, so it adds no round of its own.
+  const baseSel = [...selected];
+  const symbolsP = (async () => {
+    const tSym = performance.now();
+    if (cfg.symbols.enabled) {
+      const judged = new Set<string>();
+      // identifiers come from relevant code files (not docs, release notes or unrelated tests)
+      const codeFile = (i: number) =>
+        !isDocPath(cands[i]!.path) &&
+        !isChangelogPath(cands[i]!.path) &&
+        (allowTests || !cands[i]!.isTest);
+      let sources = selected.filter((i) => pOf(i) >= thr.T1 && codeFile(i));
+      if (!sources.length) sources = selected.filter(codeFile).slice(0, 3);
+      for (let round_ = 1; round_ <= cfg.symbols.maxRounds && sources.length; round_++) {
+        const srcFiles = sources.map((i) => ({
+          path: cands[i]!.path,
+          lines: readLines(cands[i]!.path),
+          p: pOf(i),
+          hitLines: [...cands[i]!.hitLines.keys()],
+        }));
+        const exclude = new Set([...searched, ...judged]);
+        const all = symbolCandidates(srcFiles, exclude, qWords);
+        const judgedNow = all.slice(0, cfg.symbols.maxJudged);
+        judgedNow.forEach((c) => judged.add(c.name));
+        if (all.length > judgedNow.length) {
+          cuts.push(
+            `symbols round ${round_}: judged the ${judgedNow.length} strongest of ${all.length} identifiers in ${srcFiles.length} files; not judged: ${all
+              .slice(judgedNow.length, judgedNow.length + 12)
+              .map((c) => c.name)
+              .join(", ")}${all.length - judgedNow.length > 12 ? ", ..." : ""}`,
+          );
+        }
+        const maxW = Math.max(...judgedNow.map((c) => c.weight), 1e-9);
+        const items: LeadItem[] = judgedNow.map((c, j) => ({
+          id: `y${round_}${String(j).padStart(3, "0")}`,
+          name: c.name,
+          seenAt: `${c.seenAt.path}:${c.seenAt.line}`,
+          context: c.context,
+          lex: c.weight / maxW,
+        }));
+        const symScores = await judge.scoreSymbols(items, ctx);
+        const passing = items
+          .map((it) => ({ it, p: symScores.get(it.id) ?? 0 }))
+          .filter((x) => x.p >= cfg.symbols.threshold)
+          .sort((a, b) => b.p - a.p || (a.it.id < b.it.id ? -1 : 1));
+        const chosen = passing.slice(0, cfg.symbols.maxFollowed);
+        if (passing.length > chosen.length) {
+          cuts.push(
+            `symbols round ${round_}: followed ${chosen.length} of ${passing.length} relevant identifiers; not followed: ${passing
+              .slice(chosen.length)
+              .map((x) => `${x.it.name} (${r2(x.p)})`)
+              .join(", ")}`,
+          );
+        }
+        const roundTrace: Record<string, unknown> = {
+          round: round_,
+          sources: srcFiles.map((f) => f.path),
+          candidates: all.length,
+          judged: items.map((it) => ({ name: it.name, p: round(symScores.get(it.id) ?? Number.NaN), ctx: it.context })),
+          chosen: chosen.map((x) => x.it.name),
+        };
+        symbolRounds.push(roundTrace);
+        if (!chosen.length) break;
+        sources = (await followNames(round_, chosen, roundTrace)).filter(codeFile);
 
+      }
+      // ranked (for "more candidates") includes the newly triaged files by score
+      for (let i = 0; i < cands.length; i++) if (!ranked.includes(i) && fileScores.has(fileIds[i]!)) ranked.push(i);
+      ranked.sort((a, b) => pOf(b) - pOf(a) || cands[b]!.lexScore - cands[a]!.lexScore || a - b);
     }
-    // ranked (for "more candidates") includes the newly triaged files by score
-    for (let i = 0; i < cands.length; i++) if (!ranked.includes(i) && fileScores.has(fileIds[i]!)) ranked.push(i);
-    ranked.sort((a, b) => pOf(b) - pOf(a) || cands[b]!.lexScore - cands[a]!.lexScore || a - b);
-  }
-  mark("symbols", ts);
-  emit("symbols", {
-    rounds: symbolRounds,
-    added: symbolAdded,
-    selected: selected.map((i) => cands[i]!.path),
-  });
+    mark("symbols", tSym);
+    emit("symbols", {
+      rounds: symbolRounds,
+      added: symbolAdded,
+      selected: selected.map((i) => cands[i]!.path),
+    });
+  })();
 
   // ---- 3. wave 2: windows + verification
   ts = performance.now();
@@ -668,7 +676,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   });
   // the top relevant small files are tiled whole: every declaration is judged, not only keyword windows
   const tiled = new Set(
-    selected
+    baseSel
       .filter((i) => pOf(i) >= thr.T1 && readLines(cands[i]!.path).length <= cfg.wave2.tileMaxLines)
       .sort((a, b) => pOf(b) - pOf(a))
       .slice(0, cfg.wave2.tileMaxFiles),
@@ -688,7 +696,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   const windowCuts: string[] = [];
   let otherWindowCuts = 0;
   const otherWindowFiles = new Set<string>();
-  const perFileWindows: Window[][] = selected.map((i) => {
+  const perFileWindows: Window[][] = baseSel.map((i) => {
     const c = cands[i]!;
     const lines = readLines(c.path);
     const hits = [...c.hitLines.values()];
@@ -727,7 +735,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   const capped = capPassages(perFileWindows, cfg.wave2.maxPassages);
   // keyword and symbol hit lines no checked window covers in relevant files (seed-hit, window and passage caps)
   const uncovered: string[] = [];
-  selected.forEach((ci, f) => {
+  baseSel.forEach((ci, f) => {
     const c = cands[ci]!;
     if (pOf(ci) < thr.T1 || tiled.has(ci)) return;
     const n = readLines(c.path).length;
@@ -744,7 +752,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   });
   if (uncovered.length) cuts.push(`keyword hits outside every checked region: ${uncovered.join("; ")}`);
   const passageCut = perFileWindows.flatMap((ws, f) =>
-    ws.filter((w) => !capped[f]!.includes(w)).map((w) => `${cands[selected[f]!]!.path}:${w.start}-${w.end}`),
+    ws.filter((w) => !capped[f]!.includes(w)).map((w) => `${cands[baseSel[f]!]!.path}:${w.start}-${w.end}`),
   );
   if (passageCut.length)
     cuts.push(`passages checked (limit ${cfg.wave2.maxPassages}): not checked ${passageCut.join(", ")}`);
@@ -791,11 +799,13 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       importOnly: isImportOnly(rawLines),
     });
   };
-  selected.forEach((ci, f) => {
+  baseSel.forEach((ci, f) => {
     const c = cands[ci]!;
     for (const w of [...capped[f]!].sort((a, b) => a.start - b.start))
       makePassage(c.path, w, Math.min(1, c.lexScore / maxLex));
   });
+  const overlapsEvidenceEarly = (path: string, x: { start: number; end: number }) =>
+    evidence.some((e) => e.path === path && !(x.end < e.start || x.start > e.end));
   const applyScores = (scores: Map<string, { rel: number; cov: number[] }>) => {
     for (const e of evidence) {
       const s = scores.get(e.id);
@@ -810,7 +820,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   const changeDecls: Array<{ id: string; name: string; path: string; line: number; p?: number }> = [];
   const changeItems: LeadItem[] = [];
   if (cfg.change.enabled) {
-    const top = selected
+    const top = baseSel
       .filter((i) => pOf(i) >= thr.T1 && !isDocPath(cands[i]!.path) && !isChangelogPath(cands[i]!.path) && (allowTests || !cands[i]!.isTest))
       .sort((a, b) => pOf(b) - pOf(a))
       .slice(0, cfg.change.files);
@@ -845,6 +855,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   const [wave2Scores, changeScores] = await Promise.all([
     judge.scorePassages(passageItems, ctx, "wave2"),
     judge.scoreChange(changeItems, ctx),
+    symbolsP,
   ]);
   applyScores(wave2Scores);
   for (const d of changeDecls) d.p = changeScores.get(d.id) ?? 0;
@@ -877,6 +888,31 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     e.ctName = d.name;
     changeNew.push(...passageItems.slice(before));
   }
+  // windows for what symbol discovery found: the files it added, and new symbol hits in the others
+  const symbolItemsStart = passageItems.length;
+  const symbolTiled: string[] = [];
+  for (const ci of selected) {
+    const c = cands[ci]!;
+    const isNew = !baseSel.includes(ci);
+    if (!isNew && tiled.has(ci)) continue;
+    const lines = readLines(c.path);
+    const symHits = [...c.hitLines.values()].filter((h) => h.kws.some((k) => kws[k]?.symbol));
+    if (!symHits.length) continue;
+    // a small file the identifiers lead to is tiled whole, like the small relevant files of wave 2
+    const ws =
+      isNew && lines.length <= cfg.symbols.tileNewMaxLines
+        ? tileFile(lines, symHits.map((h) => h.line), langOf(c.path), cfg, renderFor(c.path)).slice(0, cfg.wave2.tileMaxWindows)
+        : rankFileWindows(lines, isNew ? [...c.hitLines.values()] : symHits, kws, langOf(c.path), cfg, renderFor(c.path))
+            .filter((x) => !overlapsEvidenceEarly(c.path, x))
+            .slice(0, isNew ? cfg.wave2.windowsPerFile : 3);
+    if (isNew && lines.length <= cfg.symbols.tileNewMaxLines) symbolTiled.push(c.path);
+    for (const x of ws.sort((a, b) => a.start - b.start)) makePassage(c.path, x, 0);
+  }
+  const symbolItems = passageItems.slice(symbolItemsStart);
+  emit("symbol_windows", {
+    tiled: symbolTiled,
+    passages: symbolItems.map((p) => ({ id: p.id, path: p.path, start: p.start, end: p.end })),
+  });
   if (changeNew.length) applyScores(await judge.scorePassages(changeNew, ctx, "change_defs"));
   mark("wave2", ts);
   emit("change", {
@@ -988,23 +1024,37 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   };
   let defsForLeads = new Map<string, DefinitionHit[]>();
   if (cfg.wave3.enabled) {
+    // symbol windows are verified in this round (their rel is still lexical): not seeds
+    const pendingIds = new Set(symbolItems.map((p) => p.id));
     const strong = evidence
-      .filter((e) => inclusionRel(e, cfg) >= thr.T2)
+      .filter((e) => !pendingIds.has(e.id) && inclusionRel(e, cfg) >= thr.T2)
       .sort((a, b) => b.rel - a.rel)
       .slice(0, cfg.wave3.seedPassages);
     // few passages passed: the best ones below the bar still name the code to follow
     const weak =
       strong.length < cfg.wave3.seedPassages
         ? evidence
-            .filter((e) => !strong.includes(e) && !e.importOnly && e.rel >= cfg.wave3.seedFloor)
+            .filter((e) => !pendingIds.has(e.id) && !strong.includes(e) && !e.importOnly && e.rel >= cfg.wave3.seedFloor)
             .sort((a, b) => b.rel - a.rel)
             .slice(0, cfg.wave3.seedPassages - strong.length)
         : [];
-    const seeds = [...strong, ...weak].map((e) => ({
+    // a pending symbol window that holds the definition of a followed identifier seeds leads at that
+    // identifier's own probability (Jev judged the identifier, its window is verified in this round)
+    const defSeeds = evidence
+      .filter((e) => pendingIds.has(e.id))
+      .map((e) => ({
+        e,
+        p: Math.max(0, ...symbolDefs.filter((d) => d.path === e.path && d.line >= e.start && d.line <= e.end).map((d) => d.p)),
+      }))
+      .filter((x) => x.p > 0);
+    const seeds = [
+      ...[...strong, ...weak].map((e) => ({ e, rel: e.rel })),
+      ...defSeeds.map((x) => ({ e: x.e, rel: x.p })),
+    ].map(({ e, rel }) => ({
       path: e.path,
       start: e.start,
       lines: e.fileLines.slice(e.start - 1, e.end),
-      rel: e.rel,
+      rel,
     }));
     const leadSearched = new Set([...searched, ...followedSymbols.map((n) => n.toLowerCase())]);
     const extracted = extractLeads(seeds, leadSearched, qWords, Math.ceil(cfg.wave3.maxLeadCandidates * 1.5));
@@ -1053,7 +1103,12 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       lex: l.weight / maxW,
     }));
     leadItems.forEach((l) => leadIdByName.set(l.name, l.id));
-    leadScores = await judge.scoreLeads(leadItems, ctx);
+    const [ls, symScoresW] = await Promise.all([
+      judge.scoreLeads(leadItems, ctx),
+      judge.scorePassages(symbolItems, ctx, "symbol_windows"),
+    ]);
+    leadScores = ls;
+    applyScores(symScoresW);
     const chosen = leadItems
       .map((l) => ({ name: l.name, id: l.id, p: leadScores.get(l.id) ?? 0 }))
       .filter((x) => x.p >= thr.T3)
@@ -1088,6 +1143,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         })),
     });
   }
+  else if (symbolItems.length) applyScores(await judge.scorePassages(symbolItems, ctx, "symbol_windows"));
   mark("wave3", ts);
 
   // ---- 5. pack + status (adaptive: a low rating follows more leads once and refills the budget)
