@@ -632,8 +632,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 observability,
                 freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
-                bus,
                 objectStorage,
+                bus,
               },
               {
                 accountId: input.accountId,
@@ -710,8 +710,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 observability,
                 freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
-                bus,
                 objectStorage,
+                bus,
               },
               {
                 accountId: input.accountId,
