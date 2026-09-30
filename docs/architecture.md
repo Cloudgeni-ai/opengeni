@@ -1584,8 +1584,8 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
 - **Human, service, API-key, and agent identities are distinct.** Provenance is
   not authority. Personal-resource execution requires the exact permitted
   human snapshot; worker identity never substitutes for it.
-- Workspace providers override organization defaults; webhooks fan out.
-  MCP headers stay in memory; identity is informational.
+- Personal workspaces exclude organization callbacks; disabled providers
+  pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
   Conversation, source, tool, and error text is not centrally regex-redacted.

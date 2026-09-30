@@ -341,6 +341,17 @@
     },
     {
       "method": "POST",
+      "path": "/v1/organizations/:organizationId/credential-provider/rotate-secret",
+      "sdk": [
+        "OpenGeniClient.rotateOrganizationCredentialProviderSecret"
+      ],
+      "request": [],
+      "response": [
+        "RotateOrganizationCredentialProviderSecretResponse"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/v1/organizations/:organizationId/external-identities/lookup",
       "sdk": [
         "OpenGeniEmbeddingClient.lookupExternalIdentity"
@@ -854,6 +865,17 @@
       "request": [],
       "response": [
         "OrganizationWebhookDelivery"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/webhooks/:webhookId/rotate-secret",
+      "sdk": [
+        "OpenGeniClient.rotateOrganizationWebhookSecret"
+      ],
+      "request": [],
+      "response": [
+        "RotateOrganizationWebhookSecretResponse"
       ]
     },
     {
@@ -2749,6 +2771,17 @@
       ],
       "response": [
         "PutWorkspaceCredentialProviderResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/credential-provider/rotate-secret",
+      "sdk": [
+        "OpenGeniClient.rotateWorkspaceCredentialProviderSecret"
+      ],
+      "request": [],
+      "response": [
+        "RotateWorkspaceCredentialProviderSecretResponse"
       ]
     },
     {
@@ -6849,6 +6882,17 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId/rotate-secret",
+      "sdk": [
+        "OpenGeniClient.rotateWorkspaceWebhookSecret"
+      ],
+      "request": [],
+      "response": [
+        "RotateWorkspaceWebhookSecretResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/workspace-state",
       "sdk": [
@@ -10697,7 +10741,7 @@
         "$.eventTypes": "array!",
         "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
         "$.url": "string!",
-        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)? null"
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)! null"
       }
     },
     "CreateOrganizationWebhookResponse": {
@@ -13706,7 +13750,7 @@
       ],
       "shape": {
         "$": "object",
-        "$.externalSource": "string?"
+        "$.externalSource": "string!"
       }
     },
     "InteractionAssociation": {
@@ -17057,7 +17101,7 @@
         "$.enabled": "boolean?",
         "$.timeoutMs": "integer?",
         "$.url": "string!",
-        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)? null"
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)! null"
       }
     },
     "PutOrganizationCredentialProviderResponse": {
@@ -17650,6 +17694,26 @@
         "$.targetRevisionId": "string!"
       }
     },
+    "RotateOrganizationCredentialProviderSecretResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.provider": "ref(OrganizationCredentialProvider)!",
+        "$.secret": "string!"
+      }
+    },
+    "RotateOrganizationWebhookSecretResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.secret": "string!",
+        "$.webhook": "ref(OrganizationWebhook)!"
+      }
+    },
     "RotateSessionMcpCredentialsReceipt": {
       "io": [
         "output"
@@ -17686,6 +17750,26 @@
         "$.updates[]|1.id": "string!",
         "$.updates[]|1.nativeConnectionId": "string!",
         "$.updates[]|1.replacementServerUrl": "string?"
+      }
+    },
+    "RotateWorkspaceCredentialProviderSecretResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.provider": "ref(WorkspaceCredentialProvider)!",
+        "$.secret": "string!"
+      }
+    },
+    "RotateWorkspaceWebhookSecretResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.secret": "string!",
+        "$.webhook": "ref(WorkspaceWebhook)!"
       }
     },
     "RunDocumentDefaultCollectionBackfillRequest": {
@@ -20793,7 +20877,7 @@
         "$.eventTypes": "array?",
         "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
         "$.url": "string?",
-        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)? null"
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)! null"
       }
     },
     "UpdateOrganizationWorkspaceRequest": {
@@ -23954,8 +24038,12 @@
       "RollbackWorkspaceArtifactRequest": "type",
       "RollbackWorkspaceInstructionPolicyRequest": "type",
       "RollbackWorkspaceLearningPolicyRevisionRequest": "type",
+      "RotateOrganizationCredentialProviderSecretResponse": "type",
+      "RotateOrganizationWebhookSecretResponse": "type",
       "RotateSessionMcpCredentialsReceipt": "type",
       "RotateSessionMcpCredentialsRequest": "type",
+      "RotateWorkspaceCredentialProviderSecretResponse": "type",
+      "RotateWorkspaceWebhookSecretResponse": "type",
       "SANDBOX_FILE_ARTIFACT_MAX_BYTES": "value",
       "SandboxBackend": "type",
       "SandboxCapabilityName": "type",
@@ -27243,6 +27331,10 @@
       "rollbackGoalRevision",
       "rollbackWorkspaceArtifact",
       "rollbackWorkspaceInstructionPolicyRevision",
+      "rotateOrganizationCredentialProviderSecret",
+      "rotateOrganizationWebhookSecret",
+      "rotateWorkspaceCredentialProviderSecret",
+      "rotateWorkspaceWebhookSecret",
       "saveAgentLearningSettings",
       "saveAtlassianSources",
       "saveBrowserDownload",
