@@ -20,7 +20,6 @@ import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
   getLatestStartedSessionTurn,
-  getSessionTurnInitiatingHumanSubjectId,
   getWorkspaceModelPolicy,
   getSessionGoal,
   materializeGoalContinuation,
@@ -114,24 +113,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
-    // Budget exhaustion pauses the goal visibly instead of failing the
-    // session. Computed up front and applied inside the locked decision so a
-    // limits pause never consumes continuation budget.
-    const budgetBlocked = await goalRunBudgetBlocked(
-      { ...service, settings },
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        model: continuationModel,
-        initiatingHumanSubjectId: latestStartedTurn
-          ? await getSessionTurnInitiatingHumanSubjectId(
-              db,
-              input.workspaceId,
-              latestStartedTurn.id,
-            )
-          : null,
-      },
-    );
     const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
       modelId: continuationModel,
       requestedModelId: null,
@@ -156,8 +137,25 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
-      budgetBlocked: modelPolicyBlocked ?? budgetBlocked?.message ?? null,
-      budgetPausedReason: modelPolicyBlocked ? "limits" : (budgetBlocked?.pausedReason ?? "limits"),
+      admission: async (tx, causalTurn) => {
+        const budgetBlocked = modelPolicyBlocked
+          ? null
+          : await goalRunBudgetBlocked(
+              { ...service, settings, db: tx },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                model: continuationModel,
+                initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
+              },
+            );
+        return {
+          budgetBlocked: modelPolicyBlocked ?? budgetBlocked?.message ?? null,
+          budgetPausedReason: modelPolicyBlocked
+            ? "limits"
+            : (budgetBlocked?.pausedReason ?? "limits"),
+        };
+      },
       policy: {
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,

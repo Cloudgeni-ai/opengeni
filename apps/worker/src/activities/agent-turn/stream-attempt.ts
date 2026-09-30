@@ -96,9 +96,7 @@ import {
   stableHumanInputRequestId,
   stableInteractionInterventionId,
   stableInteractionInterventionOperationId,
-  BudgetExhaustedError,
-  AllowanceExhaustedError,
-  ensureRunAllowed,
+  ensureRunAllowedBetweenModelCalls,
 } from "./admission";
 import {
   compactionFailureReason,
@@ -585,14 +583,35 @@ export async function runTurnStreamAttempt(
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
   let workerPreparationTotalRecorded = false;
+  const revalidateModelCallAdmission = async () => {
+    await historySink.reconcileConversationTruth({ requireDurable: true });
+    await ensureRunAllowedBetweenModelCalls({
+      settings,
+      db,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+      entitlements,
+      chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+      countsTowardTokenCap: billingState.countsTowardTokenCap,
+      initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+    });
+  };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
   }): Promise<RunAgentTurnResult> => {
     if (!runInput) {
       throw new Error("Run input was not prepared");
     }
-    const responseCountBeforeStream = modelResponseState.responseCount;
+    // The previous stream was persisted before compaction; the sink is now
+    // seeded from its durable replacement. Do not reconcile the old prefix
+    // against that replacement while checking the next stream's admission.
     eventing.stream = undefined;
+    // Compaction commits its paid usage and replacement history before this
+    // boundary, both during preparation and in-activity recovery. Revalidate
+    // the accepted turn's frozen human before another stream can dispatch.
+    if (options.requireTerminalModelResponse) await revalidateModelCallAdmission();
+    const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
     // it emits any result for that response. Keep that response-local batch
@@ -1096,36 +1115,19 @@ export async function runTurnStreamAttempt(
           await historySink.reconcileConversationTruth();
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
-          try {
-            await ensureRunAllowed(
-              settings,
-              db,
-              input.accountId,
-              input.workspaceId,
-              billingState.isExternallyBilledTurn,
-              entitlements,
-              billingState.chargesOpenGeniCredits,
-              billingState.countsTowardTokenCap,
-              turn.initiatingHumanSubjectId,
-            );
-          } catch (limitError) {
-            // Capture the run state at the boundary so the budget valve in
-            // the outer catch can end this segment gracefully with full
-            // conversation context preserved for the post-top-up resume.
-            let serializedRunState: string | null = null;
-            try {
-              serializedRunState = media.compactMediaRunState(
-                String(eventing.stream.state.toString()),
-              );
-            } catch {
-              serializedRunState = null;
-            }
-            throw new BudgetExhaustedError(
-              limitError instanceof Error ? limitError.message : String(limitError),
-              serializedRunState,
-              limitError instanceof AllowanceExhaustedError ? limitError.refusal : null,
-            );
-          }
+          await ensureRunAllowedBetweenModelCalls({
+            settings,
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+            entitlements,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+            countsTowardTokenCap: billingState.countsTowardTokenCap,
+            initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+            serializedRunState: () =>
+              media.compactMediaRunState(String(eventing.stream!.state.toString())),
+          });
         }
         const durableSdkEvent = generatedImageReceipt
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
@@ -1838,6 +1840,9 @@ export async function runTurnStreamAttempt(
   ) {
     return claimedResult({ status: "cancelled" });
   }
+  // Preparation may have spent the last allowance on a completed summary.
+  // Neither the title sidecar nor ordinary inference may dispatch afterward.
+  await revalidateModelCallAdmission();
   if (
     turn.source !== "compaction" &&
     generateSessionTitleInParallel &&

@@ -263,6 +263,46 @@ export class AllowanceExhaustedError extends Error {
   }
 }
 
+/** Revalidate between paid calls without replaying provider work or reserving credits. */
+export async function ensureRunAllowedBetweenModelCalls(input: {
+  settings: Settings;
+  db: ActivityServices["db"];
+  accountId: string;
+  workspaceId: string;
+  isExternallyBilledTurn: boolean;
+  entitlements?: ActivityServices["entitlements"];
+  chargesOpenGeniCredits: boolean;
+  countsTowardTokenCap: boolean;
+  initiatingHumanSubjectId: string | null;
+  serializedRunState?: () => string | null;
+}): Promise<void> {
+  try {
+    await ensureRunAllowed(
+      input.settings,
+      input.db,
+      input.accountId,
+      input.workspaceId,
+      input.isExternallyBilledTurn,
+      input.entitlements,
+      input.chargesOpenGeniCredits,
+      input.countsTowardTokenCap,
+      input.initiatingHumanSubjectId,
+    );
+  } catch (limitError) {
+    let serializedRunState: string | null = null;
+    try {
+      serializedRunState = input.serializedRunState?.() ?? null;
+    } catch {
+      // Durable history remains authoritative when the SDK state cannot serialize.
+    }
+    throw new BudgetExhaustedError(
+      limitError instanceof Error ? limitError.message : String(limitError),
+      serializedRunState,
+      limitError instanceof AllowanceExhaustedError ? limitError.refusal : null,
+    );
+  }
+}
+
 // Exported for unit testing the external-billing bypass (codex-billing.test.ts); not
 // part of the activity surface. Takes the accepted policy's billing attribution and
 // the optional §7.5 P3 host `entitlements` port (when bound, its `admitRun` REPLACES

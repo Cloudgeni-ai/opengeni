@@ -234,7 +234,7 @@ describe("worker agent-run admission funding", () => {
     }
   });
 
-  test("goal activity publishes an allowance pause using the last accepted human", async () => {
+  test("goal activity publishes an allowance pause using locked causal admission", async () => {
     const restoreCodex = mockCodexBilled(false);
     const settings = testSettings({ billingMode: "disabled", usageLimitsMode: "none" });
     const catalog = spyOn(opengeniCore, "resolveCatalogSettings").mockResolvedValue({
@@ -256,15 +256,26 @@ describe("worker agent-run admission funding", () => {
       model: "scripted-model",
       initiator: { kind: "service", subjectId: "scheduler" },
     } as Awaited<ReturnType<typeof opengeniDb.getLatestStartedSessionTurn>>);
-    const human = spyOn(opengeniDb, "getSessionTurnInitiatingHumanSubjectId").mockResolvedValue(
-      "user:original-goal-human",
-    );
     const policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
     const event = { type: "goal.paused" };
-    const materialize = spyOn(opengeniDb, "materializeGoalContinuation").mockResolvedValue({
-      action: "paused",
-      events: [event],
-    } as Awaited<ReturnType<typeof opengeniDb.materializeGoalContinuation>>);
+    const lockedDb = {} as opengeniDb.Database;
+    const materialize = spyOn(opengeniDb, "materializeGoalContinuation").mockImplementation(
+      async (_db, input) => {
+        expect(
+          await input.admission!(lockedDb, {
+            id: "00000000-0000-4000-8000-000000000005",
+            initiatingHumanSubjectId: "user:original-goal-human",
+          }),
+        ).toEqual({
+          budgetBlocked: "OpenGeni usage allowance exhausted",
+          budgetPausedReason: "allowance",
+        });
+        return {
+          action: "paused",
+          events: [event],
+        } as Awaited<ReturnType<typeof opengeniDb.materializeGoalContinuation>>;
+      },
+    );
     const published: unknown[][] = [];
     const services = {
       db: {} as opengeniDb.Database,
@@ -293,7 +304,7 @@ describe("worker agent-run admission funding", () => {
           workflowId: "goal-workflow",
         }),
       ).toEqual({ action: "paused" });
-      expect(allowance).toHaveBeenCalledWith(services.db, {
+      expect(allowance).toHaveBeenCalledWith(lockedDb, {
         accountId: ACCOUNT,
         workspaceId: WORKSPACE,
         subjectId: "user:original-goal-human",
@@ -301,8 +312,7 @@ describe("worker agent-run admission funding", () => {
       expect(materialize).toHaveBeenCalledWith(
         services.db,
         expect.objectContaining({
-          budgetBlocked: "OpenGeni usage allowance exhausted",
-          budgetPausedReason: "allowance",
+          admission: expect.any(Function),
         }),
       );
       expect(published).toEqual([[WORKSPACE, sessionId, [event]]]);
@@ -311,7 +321,6 @@ describe("worker agent-run admission funding", () => {
       goal.mockRestore();
       session.mockRestore();
       previous.mockRestore();
-      human.mockRestore();
       policy.mockRestore();
       materialize.mockRestore();
       restoreCodex();

@@ -66326,6 +66326,7 @@ export async function evaluateGoalContinuation(
             desc(schema.sessionTurns.finishedAt),
             desc(schema.sessionTurns.position),
             desc(schema.sessionTurns.createdAt),
+            desc(schema.sessionTurns.id),
           )
           .limit(1);
         const contextCompactionFailure = latestFinished
@@ -66504,6 +66505,15 @@ export async function materializeGoalContinuation(
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
     budgetPausedReason?: "limits" | "allowance" | undefined;
+    /** Trusted worker admission, evaluated under the same session/goal locks
+     * as lineage materialization. Never substitutes a mutable latest human. */
+    admission?: (
+      tx: Database,
+      causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+    ) => Promise<{
+      budgetBlocked: string | null;
+      budgetPausedReason?: "limits" | "allowance";
+    }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
       model: string;
@@ -66846,6 +66856,36 @@ export async function materializeGoalContinuation(
           }
         }
 
+        // Freeze one exact latest-finished causal row while holding the
+        // canonical session lock. Admission and queued lineage reuse it.
+        const [causalTurn] = await tx
+          .select({
+            id: schema.sessionTurns.id,
+            personalConnectionDelegations: schema.sessionTurns.personalConnectionDelegations,
+            mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
+            initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+            initiatorKind: schema.sessionTurns.initiatorKind,
+            initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+            xaiProviderAccountAuthoritySnapshot:
+              schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+          })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              sql`${schema.sessionTurns.finishedAt} is not null`,
+            ),
+          )
+          .orderBy(
+            desc(schema.sessionTurns.finishedAt),
+            desc(schema.sessionTurns.position),
+            desc(schema.sessionTurns.createdAt),
+            desc(schema.sessionTurns.id),
+          )
+          .limit(1);
+        const admission = await input.admission?.(tx, causalTurn ?? null);
+
         let goalWakeRevision = goalRead.continuationWakeRevision;
         if (goalWakeRevision <= goalRead.continuationObservedRevision) {
           // This is an invariant-repair path, not a polling loop: a workflow
@@ -66869,8 +66909,8 @@ export async function materializeGoalContinuation(
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           defaultMaxAutoContinuations: input.defaultMaxAutoContinuations ?? null,
-          budgetBlocked: input.budgetBlocked ?? null,
-          budgetPausedReason: input.budgetPausedReason,
+          budgetBlocked: admission ? admission.budgetBlocked : (input.budgetBlocked ?? null),
+          budgetPausedReason: admission ? admission.budgetPausedReason : input.budgetPausedReason,
         });
         if (decision.decision === "none" || decision.decision === "queue") {
           return { action: decision.decision, events: [] } as const;
@@ -66918,31 +66958,6 @@ export async function materializeGoalContinuation(
           return { action: "paused", events: [mapEvent(event)] } as const;
         }
 
-        const [causalTurn] = await tx
-          .select({
-            id: schema.sessionTurns.id,
-            personalConnectionDelegations: schema.sessionTurns.personalConnectionDelegations,
-            mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
-            initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-            initiatorKind: schema.sessionTurns.initiatorKind,
-            initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            xaiProviderAccountAuthoritySnapshot:
-              schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              sql`${schema.sessionTurns.finishedAt} is not null`,
-            ),
-          )
-          .orderBy(
-            desc(schema.sessionTurns.position),
-            desc(schema.sessionTurns.createdAt),
-            desc(schema.sessionTurns.id),
-          )
-          .limit(1);
         const personalConnectionDelegations = causalTurn
           ? parsedPersonalConnectionDelegations(
               causalTurn.personalConnectionDelegations,

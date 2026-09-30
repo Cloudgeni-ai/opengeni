@@ -29,19 +29,19 @@ describe("allowance admission lifecycle boundaries", () => {
 
   test("goal refusal is applied through materialization without creating a continuation", async () => {
     const source = await Bun.file(new URL("../src/activities/goals.ts", import.meta.url)).text();
-    const check = source.indexOf("const budgetBlocked = await goalRunBudgetBlocked(");
-    const materialize = source.indexOf(
-      "const decision = await materializeGoalContinuation(",
-      check,
-    );
-    expect(check).toBeGreaterThan(0);
-    expect(materialize).toBeGreaterThan(check);
+    const materialize = source.indexOf("const decision = await materializeGoalContinuation(");
+    const check = source.indexOf("admission: async (tx, causalTurn)", materialize);
+    expect(materialize).toBeGreaterThan(0);
+    expect(check).toBeGreaterThan(materialize);
     expect(source.slice(materialize, source.indexOf("policy:", materialize))).toContain(
       "budgetPausedReason:",
     );
     expect(source).toContain('return { pausedReason: "allowance",');
     expect(source).toContain(
       "agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 })",
+    );
+    expect(source).toContain(
+      "initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null",
     );
   });
 
