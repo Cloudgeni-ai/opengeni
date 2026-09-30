@@ -135,6 +135,11 @@ pending marker in place, and a human title remains protected from every later
 automatic write. Historical fallback sessions therefore self-heal on their
 next eligible model turn.
 
+For non-null agent configurations, title generation is a runtime mechanic:
+selection of `set_session_title` is not required. Session-control permissions and
+the provider-route exception below still apply; null configurations retain the
+exact selected-tool rule above.
+
 The managed OpenRouter free route sends no title request at all. A turn whose
 resolved provider is the deployment-funded OpenRouter provider serving an
 upstream `:free` variant (`isManagedOpenRouterFreeRoute`) spends one deployment

@@ -1,6 +1,44 @@
 # Agent configuration: identity, capabilities, boundary
 
-Status: proposal for discussion (not implemented).
+Status: capability contracts, persistence, resolution and turn-time enforcement
+(M0–M3) implemented. Prompt modularization, preview and boundary presets below
+remain proposals; the shipped request uses `capabilities: "all" | "none" | { from, ...toggles }`,
+not named presets.
+
+### Implemented turn-time boundary (M3)
+
+`resolveAgentToolFamilies` in `packages/contracts/src/agent-config.ts` is the
+shared gate for configured sessions. Worker preparation filters Skill tools,
+model listing, first-party selections and built-in files/docs servers; runtime
+construction filters human input, hosted search and image/video tools. SuperGrok
+request authorization also gates both injected `web_search` and `x_search`.
+Deployment unavailability remains off even when legacy columns retain tools.
+Null `agent_config` keeps the historical attachment and request paths unchanged.
+
+`skills: "read"` exposes **only** `skill_read`, and only with a nonempty configured
+catalog; `"manage"` exposes all seven tools, and `false` exposes none. Sandbox
+tools remain resource-derived. `wait_for_input`, `command_read` and `command_wait`
+remain runtime mechanics even with an explicitly empty first-party selection.
+Titling does not require selecting `set_session_title`; existing provider route
+and session-control permission restrictions still apply.
+
+The search router is attached only for actually deferred tools on configured
+sessions. A durable router call/output, including inactive compacted history,
+keeps it attached on later turns without restoring revoked tools. The Codemode
+SDK proxy checks both capability-derived permissions and endpoint families:
+permissions shared across capabilities cannot re-enable disabled operations.
+
+Configured turns complete deferred catalog preparation before deciding whether
+the router is needed, so an empty MCP catalog does not advertise a search
+surface. Legacy turns retain their overlapping preparation path. Once used,
+the router survives a later deployment search-switch change. Minimal product
+MCP refs default upfront; an explicit `eager: false` still requests search
+visibility, and `"all"` retains the creator's exact legacy refs.
+
+Session `effectiveTools` projects known model-facing names and upfront/search
+visibility from server-side runtime inputs. External MCP tools remain explicitly
+unknown (`toolsKnown: false`) until a catalog is available; they are not invented
+from capability names.
 
 ## Why
 
@@ -139,16 +177,16 @@ Rules:
 | `humanInput` | `request_human_input` | on | on |
 | `webSearch` | hosted `web_search` (+ `x_search` on SuperGrok) | on | off |
 | `skills` | `"read"`: `skill_read`; `"manage"`: + `skill_search/save/install/remove/checkout/publish` | manage | read |
-| `goals` | `goal_*`, `wait_for_input` | on | off |
-| `subagents` | `session_*`, `sessions_list`, `list_models`, `command_*` coordination | on | off |
+| `goals` | `goal_*` (`wait_for_input` is an unconditional runtime mechanic) | on | off |
+| `subagents` | `session_*`, `sessions_list`, `list_models` (`command_read/wait` are runtime mechanics) | on | off |
 | `knowledge` | `knowledge_*`, `task_note_*`, instruction-policy tools, docs server | on | off |
 | `schedules` | `scheduled_tasks_*` | on | off |
 | `artifacts` | `artifacts_*`, `editable_artifact_*`, Sites | on | off |
 | `browser` | `interaction__browser_*`, `interaction__computer_*` | on (if available) | off |
 | `media` | `generate_image`, `generate_video`, hosted `image_generation` | on (if funded) | off |
-| `files` | files server | on | off |
+| `workspaceFiles` | files server | on | off |
 | `workspaceConnectors` | workspace connectors, API Integrations, GitHub, Slack/social/Fiken/Atlassian families | workspace defaults | off (select explicitly via `tools`) |
-| `admin` | variable sets, capability/connection setup, machines, rigs, projects | on | off |
+| `workspaceAdmin` | variable sets, capability/connection setup, machines, rigs, projects | on | off |
 
 3. **Omitted ⇒ workspace default preset. Explicit ⇒ preset + overrides, and
    nothing is added beyond derived tools.**
@@ -281,8 +319,9 @@ One option on the proxy, chat handler, and session create:
   external MCP server exists only after connecting; that stays in the post-run
   model-context inspector (`GET .../sessions/:id/model-context`), whose section
   splitter must learn the module ids.
-- **Codemode needs no separate rule.** It executes only the attempt's frozen tool
-  catalog, so filtering the catalog also filters Codemode.
+- **Codemode has two enforcement paths.** Tool calls execute only the attempt's
+  frozen catalog. The SDK HTTP proxy additionally gates endpoint families and
+  intersects its derived permission ceiling with the live resolved configuration.
 - **Workspace-managed Skills and governance are tenant-level.** Admin-installed
   workspace Skills and policies appear in every session of that workspace. That is
   correct for a per-tenant workspace and is documented as part of the boundary.

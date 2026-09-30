@@ -7182,11 +7182,14 @@
         "$.mcpServers[].toolsKnown": "boolean!",
         "$.tools": "array!",
         "$.tools[]": "object",
-        "$.tools[].capability": "union!=[\"0\",\"1\"]",
+        "$.tools[].capability": "union!=[\"0\",\"1\",\"2\",\"3\"]",
         "$.tools[].capability|0": "ref(AgentCapabilityId)",
         "$.tools[].capability|1": "const=[\"\\\"runtime\\\"\"]",
+        "$.tools[].capability|2": "const=[\"\\\"sandbox\\\"\"]",
+        "$.tools[].capability|3": "const=[\"\\\"product\\\"\"]",
         "$.tools[].name": "string!",
-        "$.tools[].source": "enum!=[\"\\\"first_party\\\"\",\"\\\"hosted\\\"\",\"\\\"runtime\\\"\"]",
+        "$.tools[].source": "enum!=[\"\\\"first_party\\\"\",\"\\\"hosted\\\"\",\"\\\"mcp\\\"\",\"\\\"runtime\\\"\",\"\\\"sandbox\\\"\"]",
+        "$.tools[].visibility": "enum?=[\"\\\"search\\\"\",\"\\\"upfront\\\"\"]",
         "$.unavailable": "array!",
         "$.unavailable[]": "ref(AgentCapabilityId)"
       }
