@@ -1086,7 +1086,13 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.route(pattern, failing);
     await page.reload();
     await page.getByText("Couldn't load the Library", { exact: true }).waitFor();
-    await page.getByText("Intentional knowledge-list failure", { exact: false }).waitFor();
+    // Advice first; the server's own message stays behind Technical details.
+    await page
+      .getByText("Opengeni couldn't finish the request. Try again in a moment.", { exact: false })
+      .first()
+      .waitFor();
+    await page.getByText("Technical details", { exact: true }).first().click();
+    await page.getByText("Intentional knowledge-list failure", { exact: false }).first().waitFor();
     expect(await page.getByRole("button", { name: "Retained entry 19", exact: true }).count()).toBe(
       0,
     );

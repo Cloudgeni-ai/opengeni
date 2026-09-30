@@ -47,10 +47,10 @@ describe("Workspace switcher trigger in Chromium", () => {
     await page.goto(`${baseUrl}/test/workspace-switcher-trigger.html`, {
       waitUntil: "networkidle",
     });
-    const trigger = page.locator('button[aria-label$="Switch workspace"]');
+    const trigger = page.locator('button[aria-label$="Switch workspace or organization"]');
 
     expect(await trigger.getAttribute("aria-label")).toBe(
-      "CloudGeni Product Engineering and Reliability. Personal workspace: Personal workspace. Switch workspace",
+      "Personal workspace, private to you: Personal workspace, in CloudGeni Product Engineering and Reliability. Switch workspace or organization",
     );
     expect(await trigger.getAttribute("aria-haspopup")).toBe("menu");
     expect(await trigger.getAttribute("aria-expanded")).toBe("false");
@@ -65,38 +65,44 @@ describe("Workspace switcher trigger in Chromium", () => {
     for (const label of [
       "Default workspace",
       "Product Testing",
-      "Research Sandbox",
-      "New workspace…",
-      "New organization…",
-      "Organization settings for CloudGeni Product Engineering and Reliability",
+      "New workspace in CloudGeni Product Engineering and Reliability",
+      "Organization settings",
+      // Another organization is one row that opens its workspace.
+      "CloudGeni Research",
+      "New organization",
     ]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
+    // Only the current organization's workspaces and settings are listed.
     expect(
-      await page
-        .getByRole("menuitem", {
-          name: "Organization settings for CloudGeni Research",
-          exact: true,
-        })
-        .count(),
+      await page.getByRole("menuitem", { name: "Research Sandbox", exact: true }).count(),
     ).toBe(0);
+    expect(
+      await page.getByRole("menuitem", { name: "Organization settings", exact: true }).count(),
+    ).toBe(1);
     const personalMenuItem = page.getByRole("menuitem", {
-      name: "Personal workspace Personal workspace",
+      name: "Personal workspace, your Personal workspace, private to you",
       exact: true,
     });
     expect(await personalMenuItem.isVisible()).toBe(true);
-    expect(await personalMenuItem.getByText("Personal", { exact: true }).isVisible()).toBe(true);
+    // Seen as a lock tile in place of the initial.
+    expect(await personalMenuItem.locator("svg.lucide-lock").isVisible()).toBe(true);
 
     const rail = page.getByTestId("production-rail");
     expect(await rail.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await trigger.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
       true,
     );
-    const visualWorkspaceLabel = trigger.locator("span.truncate");
+    // The long organization line truncates inside the trigger instead of widening it.
+    const visualOrganizationLine = trigger.locator("span.truncate").nth(1);
     expect(
-      await visualWorkspaceLabel.evaluate((element) => element.scrollWidth > element.clientWidth),
+      await visualOrganizationLine.evaluate((element) => element.scrollWidth > element.clientWidth),
     ).toBe(true);
-    expect(await trigger.getByText("Personal", { exact: true }).isVisible()).toBe(true);
+    expect(
+      await trigger
+        .getByText("Private · CloudGeni Product Engineering and Reliability", { exact: true })
+        .isVisible(),
+    ).toBe(true);
 
     await page.getByRole("menuitem", { name: "Product Testing", exact: true }).click();
     expect(await page.getByTestId("last-action").textContent()).toBe("Opened Product Testing");
@@ -106,18 +112,20 @@ describe("Workspace switcher trigger in Chromium", () => {
     await page.goto(`${baseUrl}/test/workspace-switcher-trigger.html`, {
       waitUntil: "networkidle",
     });
-    const trigger = page.locator('button[aria-label$="Switch workspace"]');
+    const trigger = page.locator('button[aria-label$="Switch workspace or organization"]');
 
     await trigger.focus();
     await trigger.press("Enter");
-    await page.getByRole("menuitem", { name: "New organization…", exact: true }).click();
+    await page.getByRole("menuitem", { name: "New organization", exact: true }).click();
     expect(await page.getByTestId("last-action").textContent()).toBe("New organization");
 
     const organizationSettings = page.getByRole("menuitem", {
-      name: "Organization settings for CloudGeni Product Engineering and Reliability",
+      name: "Organization settings",
       exact: true,
     });
+    // Home, then past the three workspaces and New workspace.
     await page.keyboard.press("Home");
+    for (let step = 0; step < 4; step += 1) await page.keyboard.press("ArrowDown");
     expect(
       await organizationSettings.evaluate((element) => document.activeElement === element),
     ).toBe(true);
@@ -132,7 +140,7 @@ describe("Workspace switcher trigger in Chromium", () => {
     await page.goto(`${baseUrl}/test/workspace-switcher-trigger.html`, {
       waitUntil: "networkidle",
     });
-    const trigger = page.locator('button[aria-label$="Switch workspace"]');
+    const trigger = page.locator('button[aria-label$="Switch workspace or organization"]');
     const triggerBox = await trigger.boundingBox();
     expect(triggerBox).not.toBeNull();
     expect(
@@ -158,7 +166,7 @@ describe("Workspace switcher trigger in Chromium", () => {
     await page.goto(`${baseUrl}/test/workspace-switcher-trigger.html?mode=collapsed`, {
       waitUntil: "networkidle",
     });
-    const trigger = page.locator('button[aria-label$="Switch workspace"]');
+    const trigger = page.locator('button[aria-label$="Switch workspace or organization"]');
 
     await trigger.focus();
     await trigger.press("Enter");
@@ -169,7 +177,8 @@ describe("Workspace switcher trigger in Chromium", () => {
     // Radix restores focus during deferred close cleanup, not synchronously on Escape.
     await page.waitForFunction(
       () =>
-        document.activeElement === document.querySelector('button[aria-label$="Switch workspace"]'),
+        document.activeElement ===
+        document.querySelector('button[aria-label$="Switch workspace or organization"]'),
       undefined,
       { timeout: 2_000 },
     );
