@@ -72,6 +72,11 @@ import {
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
 import {
+  animateTimelineSettlement,
+  captureTimelineSettlement,
+  type TimelineSettlement,
+} from "./timeline-settlement";
+import {
   UserMessageBody,
   UserMessageDisclosureProvider,
   type UserMessageDisclosureContextValue,
@@ -619,6 +624,7 @@ export function MessageTimeline({
   const previousSourceIdsRef = useRef(new Set<string>());
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
+  const settlementRef = useRef<TimelineSettlement | null>(null);
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
@@ -1465,6 +1471,8 @@ export function MessageTimeline({
     previousSourceIdsRef.current = new Set(sourceItems?.map((item) => item.id));
     const readingAnchor = readingAnchorRef.current;
     readingAnchorRef.current = null;
+    const settlement = settlementRef.current;
+    settlementRef.current = null;
     const attempt = olderLoadAttemptRef.current;
     const committedZeroOverlapOlderReplacement = !!(
       attempt?.[2]?.committed &&
@@ -1658,6 +1666,8 @@ export function MessageTimeline({
             node.scrollTop
           : null;
     }
+
+    if (settlement) animateTimelineSettlement(settlement);
 
     // Promise settlement is not itself permission to retry. A receipt-marked
     // accepted page retires its exact owner on this commit even when projection
@@ -2256,6 +2266,18 @@ export function MessageTimeline({
                           readingAnchorRef.current =
                             !pinnedRef.current && scrollRef.current
                               ? captureTimelineAnchor(scrollRef.current)
+                              : null;
+                          settlementRef.current =
+                            readableTurns &&
+                            autoFollow &&
+                            pinnedRef.current &&
+                            revealedRef.current &&
+                            !hasNewer &&
+                            !pendingReaderLeaveRef.current &&
+                            !disclosureKeepsUnpinnedRef.current &&
+                            !prefersReducedMotion() &&
+                            scrollRef.current
+                              ? captureTimelineSettlement(scrollRef.current, groups)
                               : null;
                         }}
                       >
