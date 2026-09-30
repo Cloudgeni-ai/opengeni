@@ -7301,6 +7301,14 @@
         "$.version": "integer!"
       }
     },
+    "AgentPromptModuleId": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+      }
+    },
     "AgentRenderer": {
       "io": [
         "input",
@@ -15166,6 +15174,8 @@
         "$.content": "string!",
         "$.estimatedTokens": "integer!",
         "$.id": "ref(ModelContextInstructionLayerId)!",
+        "$.modules": "array?",
+        "$.modules[]": "ref(ModelContextInstructionModule)",
         "$.title": "string!",
         "$.utf8Bytes": "integer!"
       }
@@ -15175,7 +15185,17 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
+        "$": "enum=[\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"identity\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
+      }
+    },
+    "ModelContextInstructionModule": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.chars": "integer!",
+        "$.id": "ref(AgentPromptModuleId)!"
       }
     },
     "ModelContextSkill": {
@@ -22998,6 +23018,7 @@
       "AgentLearningOverrides": "type",
       "AgentLearningSettingsRecord": "type",
       "AgentMessageCompletedPayload": "type",
+      "AgentPromptModuleId": "type",
       "AgentRenderer": "type",
       "AgentSkillsCapability": "type",
       "AgentTextDeltaPayload": "type",
@@ -23686,6 +23707,7 @@
       "ModelContextContributionSource": "type",
       "ModelContextInstructionLayer": "type",
       "ModelContextInstructionLayerId": "type",
+      "ModelContextInstructionModule": "type",
       "ModelContextSkill": "type",
       "ModelContextSkillKind": "type",
       "ModelContextSnapshot": "type",

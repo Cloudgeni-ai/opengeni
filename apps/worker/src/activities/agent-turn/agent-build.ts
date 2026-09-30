@@ -111,6 +111,7 @@ export type BuildTurnAgentDeps = {
   supportsImageInput: GovernanceModelOk["supportsImageInput"];
   agentHumanInputEnabled: GovernanceModelOk["agentHumanInputEnabled"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
+  workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
@@ -173,6 +174,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     supportsImageInput,
     agentHumanInputEnabled,
     workspaceAgentInstructions,
+    workspaceAgentIdentity,
     workspaceGovernance,
     structuredWorkspacePolicyActive,
     workspaceMemory,
@@ -757,6 +759,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,
         skillCatalogInHistory: true,
+        // A session with an agent configuration composes the modular prompt
+        // (identity, base behavior, runtime mechanics, capability modules);
+        // its workspace identity survives instruction policies. Null keeps
+        // the legacy composition below byte-for-byte.
+        ...(session.agent
+          ? {
+              agentConfig: session.agent,
+              ...(workspaceAgentIdentity ? { workspaceAgentIdentity } : {}),
+            }
+          : {}),
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),

@@ -2,6 +2,7 @@ import type { ModelRequest, RunContext, SerializedTool, Tool } from "@openai/age
 import type {
   ModelContextInstructionLayer,
   ModelContextInstructionLayerId,
+  ModelContextInstructionModule,
   ModelContextSkill,
   ModelContextSnapshot,
   ModelContextTool,
@@ -15,6 +16,13 @@ export type PersistentAgentInstructionLayerDraft = {
   id: ModelContextInstructionLayerId;
   title: string;
   content: string;
+  /** Modular operational contract only: its prompt modules in order. */
+  modules?: readonly ModelContextInstructionModule[];
+  /**
+   * Separator placed before this layer. Modular layers set it; legacy layers
+   * omit it and keep the historical joins byte-for-byte.
+   */
+  joinBefore?: string;
 };
 
 function contextTextEstimate(value: unknown): number | null {
@@ -108,6 +116,7 @@ const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
   sandbox_preamble: "Sandbox runtime preamble",
   sandbox_filesystem: "Sandbox filesystem",
   sent_system_instructions: "Sent system instructions",
+  identity: "Identity",
 };
 
 export function joinPersistentAgentInstructionLayers(
@@ -119,7 +128,8 @@ export function joinPersistentAgentInstructionLayers(
     const previous = layers[index - 1]!;
     const current = layers[index]!;
     const separator =
-      previous.id === "operational_contract" && current.id === "persona_and_core" ? "\n\n" : " ";
+      current.joinBefore ??
+      (previous.id === "operational_contract" && current.id === "persona_and_core" ? "\n\n" : " ");
     composed = `${composed}${separator}${current.content}`;
   }
   return composed;
@@ -134,6 +144,7 @@ export function countedInstructionLayer(
     content: draft.content,
     utf8Bytes: Buffer.byteLength(draft.content, "utf8"),
     estimatedTokens: estimateTextTokens(draft.content),
+    ...(draft.modules ? { modules: draft.modules.map((module) => ({ ...module })) } : {}),
   };
 }
 

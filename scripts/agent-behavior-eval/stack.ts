@@ -87,6 +87,8 @@ export async function startEvalStack(input: {
       OPENGENI_OPENAI_MODEL: input.model,
       OPENGENI_OPENAI_REASONING_EFFORT: input.reasoningEffort,
       OPENGENI_OBSERVABILITY_METRICS_ENABLED: "false",
+      // Variants may send `agent` (legacy sends none, so this does not change it).
+      OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED: "true",
       ...(services.objectStorageEndpoint
         ? {
             OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",

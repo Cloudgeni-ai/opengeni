@@ -516,6 +516,67 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
 };
 
 // ---------------------------------------------------------------------------
+// Prompt modules
+// ---------------------------------------------------------------------------
+
+/**
+ * Sections of the modular operational contract (sessions with an agent
+ * configuration). The order is the composition order. `base_behavior` and
+ * `runtime_mechanics` are always present; every other module is included only
+ * when its capability or resource is present. The model-context inspector
+ * reports them as metadata on the `operational_contract` layer.
+ */
+export const AGENT_PROMPT_MODULE_IDS = [
+  "base_behavior",
+  "runtime_mechanics",
+  "renderer_markdown",
+  "sandbox",
+  "connected_machine",
+  "repositories",
+  "workspace_environment",
+  "rig",
+  "artifacts",
+  "goals",
+  "subagents",
+  "knowledge",
+  "skills",
+  "admin",
+  "attachments",
+] as const;
+export const AgentPromptModuleId = z.enum(AGENT_PROMPT_MODULE_IDS);
+export type AgentPromptModuleId = z.infer<typeof AgentPromptModuleId>;
+
+export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, string>> = {
+  base_behavior: "Base behavior",
+  runtime_mechanics: "Runtime mechanics",
+  renderer_markdown: "Markdown rendering",
+  sandbox: "Sandbox",
+  connected_machine: "Connected Machine",
+  repositories: "Repositories and Git",
+  workspace_environment: "Workspace environment",
+  rig: "Sandbox environment",
+  artifacts: "Documents, files, and visuals",
+  goals: "Goals",
+  subagents: "Session coordination",
+  knowledge: "Knowledge",
+  skills: "Skills",
+  admin: "Integration setup",
+  attachments: "Attached files",
+};
+
+/** The prompt module each capability owns; capabilities absent here own none. */
+export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
+  Partial<Record<AgentCapabilityId, readonly AgentPromptModuleId[]>>
+> = {
+  artifacts: ["artifacts"],
+  goals: ["goals"],
+  subagents: ["subagents"],
+  knowledge: ["knowledge"],
+  skills: ["skills"],
+  workspaceAdmin: ["admin"],
+};
+
+// ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
 

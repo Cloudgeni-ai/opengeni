@@ -159,8 +159,10 @@ export {
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
 export type {
+  AgentPromptModuleId,
   ModelContextInstructionLayer,
   ModelContextInstructionLayerId,
+  ModelContextInstructionModule,
   ModelContextSkill,
   ModelContextSkillKind,
   ModelContextSnapshot,

@@ -106,6 +106,7 @@ import {
   type FirstPartyMcpToolName,
   type LatencyMode,
   type ReasoningEffort,
+  type ResolvedAgentConfig,
   type ResourceRef,
   type SessionGoalSnapshot,
   type ToolAuthNeededPayload,
@@ -261,6 +262,33 @@ import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
+import {
+  composeModularAgentInstructions,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptResources,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
+export {
+  AGENT_PROMPT_MODULES,
+  DEFAULT_AGENT_IDENTITY,
+  INSTRUCTION_PRECEDENCE,
+  SESSION_INSTRUCTIONS_PREAMBLE,
+  composeModularAgentInstructions,
+  composeOperationalContract,
+  identityFromLegacyTemplate,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptContext,
+  type AgentPromptResources,
+  type ComposeModularAgentInstructionsInput,
+  type ModularInstructionLayer,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
 import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
@@ -2186,6 +2214,23 @@ export type BuildAgentOptions = {
    * metadata no longer enters the prompt-cache-critical system instructions.
    */
   persistentSessionSettings?: PersistentSessionSettings;
+  /**
+   * The session's frozen agent configuration. Absent or null composes the
+   * legacy instructions byte-for-byte; a configuration selects the modular
+   * composer (identity, base behavior, runtime mechanics, capability modules).
+   */
+  agentConfig?: ResolvedAgentConfig | null;
+  /**
+   * Modular composer only: the workspace identity tier (explicit workspace
+   * default identity, else the legacy `agentInstructions` persona). Unlike
+   * `instructionsTemplate`, workspace governance never drops it.
+   */
+  workspaceAgentIdentity?: string;
+  /**
+   * Modular composer only: resource facts for module selection. Derived from
+   * the build resources and options when omitted.
+   */
+  agentPromptResources?: AgentPromptResources;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
   // runtime falls back to settings.agentInstructionsTemplate. The runtime
@@ -2222,62 +2267,10 @@ export type BuildAgentOptions = {
   onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
 };
 
-/**
- * Operator-facing metadata for the workspace environment attached to a run.
- * Surfaced verbatim in the agent instructions: the description is where
- * operators document how the exported credentials are meant to be used
- * (e.g. which variable holds a deploy key and how to clone with it), so an
- * agent must not have to rediscover that by enumerating `env` and guessing.
- * Only metadata belongs here — never variable values.
- */
-export type WorkspaceEnvironmentContext = {
-  name: string;
-  description?: string | null;
-  variableNames?: string[];
-};
-
 /** @deprecated Persistent display metadata is no longer model-visible. */
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
-
-/**
- * The rig a session rides (M3): its name + the active version pinned onto the
- * session. Surfaced verbatim in the non-bypassable CORE instructions so the
- * agent understands its sandbox is a disposable fork of a shared, versioned
- * machine definition and how to promote a durable change. Absent for rig-less
- * sessions (the block never renders).
- */
-export type RigInstructionsContext = {
-  name: string;
-  version: number;
-};
-
-export function rigInstructions(rig: RigInstructionsContext): string[] {
-  return [
-    `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
-    "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
-    "To make a verified setup change available to future sessions using this environment, call rig_propose_change with the exact command that already worked here. Never assume an unverified change propagates.",
-    "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
-  ];
-}
-
-export function workspaceEnvironmentInstructions(
-  environment: WorkspaceEnvironmentContext,
-): string[] {
-  const lines = [
-    `A workspace environment named "${environment.name}" is attached to this session; its variables are exported in the sandbox shell environment.`,
-  ];
-  const variableNames = (environment.variableNames ?? []).filter((name) => name.length > 0);
-  if (variableNames.length > 0) {
-    lines.push(`Exported environment variables: ${[...variableNames].sort().join(", ")}.`);
-  }
-  const description = environment.description?.trim();
-  if (description) {
-    lines.push(`Environment notes from the operator: ${description}`);
-  }
-  return lines;
-}
 
 /**
  * The non-bypassable CORE of the agent instructions: the goal-loop ownership
@@ -2376,10 +2369,84 @@ function gitBindingDiscoveryApplies(
   return [...bindingsByProvider.values()].some((ids) => ids.size > 1);
 }
 
+/**
+ * Resource facts for modular module selection. Every input is a session- or
+ * turn-level fact, so the composed prefix changes only when they change.
+ */
+export function agentPromptResourcesFor(
+  settings: Settings,
+  resources: readonly ResourceRef[],
+  options: Pick<
+    BuildAgentOptions,
+    | "activeSandboxBackend"
+    | "fileResourceDownloads"
+    | "gitCredentialBindings"
+    | "gitTokenSeed"
+    | "gitTokenSeeds"
+    | "workspaceEnvironment"
+    | "rig"
+  >,
+): AgentPromptResources {
+  const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  const connectedMachine = backend === "selfhosted";
+  const managedSandbox = backend !== "none" && !connectedMachine;
+  const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
+  return {
+    managedSandbox,
+    connectedMachine,
+    // A Connected Machine never receives platform clones.
+    repositories: managedSandbox && resources.some((resource) => resource.kind === "repository"),
+    gitCredentials:
+      managedSandbox &&
+      (Boolean(options.gitTokenSeed) ||
+        gitTokenSeeds.length > 0 ||
+        (options.gitCredentialBindings?.length ?? 0) > 0),
+    attachments:
+      (managedSandbox || connectedMachine) &&
+      (resources.some((resource) => resource.kind === "file") ||
+        (options.fileResourceDownloads?.length ?? 0) > 0),
+    ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
+    ...(options.rig ? { rig: options.rig } : {}),
+  };
+}
+
+function inspectModularAgentInstructions(
+  settings: Settings,
+  config: ResolvedAgentConfig,
+  options: BuildAgentOptions,
+): PersistentAgentInstructionInspection {
+  const identity = resolveAgentIdentity({
+    sessionIdentity: config.identity,
+    workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
+    deploymentTemplate: settings.agentInstructionsTemplate,
+  });
+  const composed = composeModularAgentInstructions({
+    capabilities: config.capabilities,
+    renderer: config.renderer,
+    identity,
+    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
+    ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
+      ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
+      : {}),
+    ...(options.skillCatalog && !options.skillCatalogInHistory
+      ? { skillCatalog: formatSkillCatalog(options.skillCatalog) }
+      : {}),
+    workspaceGovernance: options.workspaceGovernance,
+    workspaceMemory: options.workspaceMemory,
+    sessionInstructions: options.sessionInstructions,
+  });
+  return { layers: composed.layers, composed: composed.composed };
+}
+
 export function inspectPersistentAgentInstructions(
   settings: Settings,
   options: BuildAgentOptions,
 ): PersistentAgentInstructionInspection {
+  if (options.agentConfig) {
+    return inspectModularAgentInstructions(settings, options.agentConfig, options);
+  }
   const personaAndCore = composeAgentInstructions(
     options.instructionsTemplate ?? settings.agentInstructionsTemplate,
     options.workspaceEnvironment,
@@ -2686,6 +2753,9 @@ export function buildOpenGeniAgent(
   const instructionOptions: BuildAgentOptions = {
     ...options,
     ...(skillCatalog !== undefined ? { skillCatalog } : {}),
+    ...(options.agentConfig && !options.agentPromptResources
+      ? { agentPromptResources: agentPromptResourcesFor(settings, resources, options) }
+      : {}),
   };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the

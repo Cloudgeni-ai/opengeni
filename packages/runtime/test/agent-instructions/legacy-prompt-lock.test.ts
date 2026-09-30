@@ -61,9 +61,7 @@ describe("legacy prompt bytes (null agent configuration)", () => {
         });
         const locked = LOCKED[name]!;
         expect(inspection.composed.length).toBe(locked.chars);
-        expect(createHash("sha256").update(inspection.composed).digest("hex")).toBe(
-          locked.sha256,
-        );
+        expect(createHash("sha256").update(inspection.composed).digest("hex")).toBe(locked.sha256);
         expect(inspection.layers.map((layer) => layer.id).join(",")).toBe(locked.layers);
       });
     }
