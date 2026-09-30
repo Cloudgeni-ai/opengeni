@@ -6148,6 +6148,17 @@
     },
     {
       "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/remove",
+      "sdk": [
+        "OpenGeniClient.removeWorkspaceSkill"
+      ],
+      "request": [],
+      "response": [
+        "SkillWriteReceipt"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/restore",
       "sdk": [
         "OpenGeniClient.restoreWorkspaceSkill"
@@ -23611,6 +23622,7 @@
       "RejectSessionGoalRevisionResponse": "type",
       "RemoveEnrollmentRequest": "type",
       "RemoveEnrollmentResponse": "type",
+      "RemoveWorkspaceSkillRequest": "type",
       "RenewSessionRealtimeRequest": "type",
       "ReorderChannelsRequest": "type",
       "ReplacePersonalGitHubRepositorySelectionsRequest": "type",
@@ -26900,6 +26912,7 @@
       "removeEnrollment",
       "removeIntegrationFacet",
       "removeWorkspaceMember",
+      "removeWorkspaceSkill",
       "renameCodexAccount",
       "renameOrganizationSuperGrokAccount",
       "renameSuperGrokAccount",

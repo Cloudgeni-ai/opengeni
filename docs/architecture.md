@@ -522,16 +522,14 @@ envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, automation
 ingress) evolves additively and both sides are tolerant readers. Breaking
 changes need a deprecation with `Deprecation`/`Sunset` headers, at least 90
 days on the managed service, and a new major. `bun run check:public-api` and
-`bun run test:sdk-compat` enforce it in CI. `x-opengeni-api-contract` only
-guards stale first-party browser tabs.
+`bun run test:sdk-compat` enforce it in CI.
 
-Official server builds expose `serverVersion` through health and client-config
-responses. There is no runtime negotiation protocol: tolerant reading and a
-shared major version are the compatibility mechanism.
+Official builds expose `serverVersion` in health and client-config responses;
+there is no runtime negotiation protocol.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
-(stale tabs); bearer integrations stay admitted across revisions. See
-[`product-integration.md`](product-integration.md#api-contract-revision).
+(stale tabs); bearer integrations stay admitted across revisions
+([details](product-integration.md#api-contract-revision)).
 
 An optional field that changes execution authority is not an ordinary additive
 response field. Its readers must ship first, new external writes stay behind a
