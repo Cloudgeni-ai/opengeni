@@ -1242,19 +1242,9 @@ pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
 and path/identity re-resolution without retrying an existing or ambiguous
 operation. Deterministic submission conflicts are never reconciled to an
 existing row; ambiguous submission failures may adopt a row only after exact
-attempt scope, catalog, identity, and canonical-argument comparison. Once an
-exact operation has been admitted, a later deterministic wake failure
-reconciles through that exact journal row; if the recovery read is unavailable,
-the client returns a typed outcome-unknown error carrying the same operation id.
-While an admitted operation remains queued or running, the client periodically
-re-notifies the owning dispatcher with that same id. This does not replay the
-tool: a live claim answers already-running, an expired pre-execution claim may
-be reclaimed, and an expired post-execution claim settles outcome-unknown with
-its visible `agent.toolCall.output` in the same PostgreSQL commit as the
-terminal journal state.
-Concurrent first submissions serialize on the caller-owned operation id and
-converge to one creation plus one replay. Client abort is observer-only; server
-cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
+attempt scope, catalog, identity, and canonical-argument comparison.
+Admitted-operation recovery never replays the tool; see
+[run lifecycle](run-lifecycle.md#codemode-recovery). The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
