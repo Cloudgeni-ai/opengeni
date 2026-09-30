@@ -271,6 +271,10 @@ secret and a subset of:
 | `session.humanInput.requested` | The agent asks the user a structured question |
 | `usage.threshold_reached` / `usage.exhausted` / `usage.period_reset` | Allowance lifecycle signals; see [usage allowances](usage-allowances.md#errors-and-event-handling) |
 
+Organization webhooks accept session events only. A create or update that names
+`usage.*` returns HTTP 422 with guidance to register a workspace webhook instead;
+the shared public event-type vocabulary remains unchanged.
+
 ```ts
 // Optional extra delivery destination for one workspace.
 const { webhook, secret } = await client.createWorkspaceWebhook(workspaceId, {
@@ -303,6 +307,8 @@ Organization endpoints receive matching non-personal workspaces' selected events
 workspace endpoints still receive their own events independently. Both gain
 the additive `workspace` routing object; turn events gain `initiatingHuman`
 when known. Pre-upgrade queued deliveries may lack these additions.
+Receivers default a missing `lane` to `"workspace"` for both session and usage
+events, after verifying the signature against the unchanged raw body.
 Import `listOrganizationWebhookDeliveries` and
 `redeliverOrganizationWebhookDelivery` from the focused subpath for organization
 registrations; call them with `client` first.

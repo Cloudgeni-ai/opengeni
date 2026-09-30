@@ -84,6 +84,9 @@ Allowances are ceilings, not reservations or a second prepaid wallet:
 - Admission checks the workspace ceiling and the initiating member's ceiling
   before costly work. Model-call cost is recorded afterward; existing prepaid
   media billing retains its own debit/refund lifecycle.
+- The model producer waits for response settlement and admission before its next
+  paid request. Delegated Send/Steer refuses fresh work before acceptance or
+  interruption; an exact committed replay remains recoverable after exhaustion.
 - One call can overshoot. Parallel admitted calls can overshoot together;
   there is no aggregate overshoot bound of one call. Already incurred cost is
   not reversed. The next admission is refused once the applicable ceiling is

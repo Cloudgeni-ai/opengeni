@@ -19,6 +19,12 @@ with the existing `budget_exhausted` marker, keeps the session usable, and pause
 an active goal with reason `allowance` in the settlement transaction. No
 pre-call reservation or event-scan admission is introduced.
 
+The model producer's pre-wire barrier waits for the preceding response's credit
+settlement and frozen-human allowance check, then rechecks admission before
+dispatch. Consumer event iteration alone cannot fence the SDK's next request.
+Delegated Send/Steer checks target allowance after exact receipt replay and before
+fresh acceptance or interruption, under the existing command locks.
+
 A paid compaction commits its summary/checkpoint and cost before admission is
 rechecked for the frozen turn's workspace and initiating human. An exhausted
 allowance stops before another title or inference request; retained compaction
