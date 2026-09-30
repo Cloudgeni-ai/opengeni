@@ -17965,6 +17965,8 @@
       "shape": {
         "$": "object",
         "$.automaticAvailable": "boolean?",
+        "$.automaticLane": "enum?=[\"\\\"checkpoint\\\"\",\"\\\"fresh_workspace\\\"\"]",
+        "$.availableAt": "string?",
         "$.checkpoint": "ref(SandboxRecoverySelection)! null",
         "$.operationId": "string! null",
         "$.reason": "string! null",

@@ -5,11 +5,12 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { parseClaudeUsageHeaders } from "@opengeni/config";
+import { parseClaudeUsageHeaders, parseModelProvidersJson } from "@opengeni/config";
 import {
   createDb,
   encryptEnvironmentValue,
   readClaudeSubscriptionUsage,
+  loadClaudeSubscriptionUsageCredential,
   recordClaudeSubscriptionUsage,
   upsertWorkspaceProviderApiKeyConnection,
   rotateWorkspaceProviderApiKeyConnection,
@@ -19,6 +20,10 @@ import {
 } from "../src";
 import { prepareClaudeSubscriptionCredential } from "../../../apps/api/src/claude-workspace-connection";
 import { refreshClaudeSubscriptionUsage } from "../../../apps/api/src/claude-subscription-usage";
+import {
+  createClaudeUsageObserver,
+  type CapturedClaudeUsage,
+} from "../../../apps/worker/src/activities/agent-turn/claude-usage-observer";
 
 const key = Buffer.alloc(32, 7);
 const settings = testSettings({
@@ -78,6 +83,54 @@ const observation = (time = new Date(), value = ".5") =>
     }),
     time,
   )!;
+
+test("worker responses received after same-token replacement cannot repopulate the new connection", async () => {
+  const { scope, row, credentialEncrypted } = await fixture();
+  const latest = new Map<"workspace" | "organization", CapturedClaudeUsage>();
+  const observe = await createClaudeUsageObserver(
+    parseModelProvidersJson(
+      JSON.stringify([
+        {
+          id: "workspace-claude-subscription",
+          kind: "claude-subscription-workspace",
+          api: "anthropic-messages",
+          apiKey: setupToken,
+          baseUrl: "https://api.anthropic.com",
+          models: [
+            {
+              id: "workspace-claude-subscription/claude-opus-5-5",
+              upstreamModelId: "claude-opus-5-5",
+            },
+          ],
+        },
+      ]),
+    ),
+    latest,
+    () => loadClaudeSubscriptionUsageCredential(client.db, settings, scope),
+  );
+  await rotateWorkspaceProviderApiKeyConnection(client.db, "claude_subscription", {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId!,
+    connectionId: row.id,
+    expectedVersion: row.version,
+    credentialEncrypted,
+    operationId: crypto.randomUUID(),
+    requestDigest: "worker-response-rotation",
+    updatedBySubjectId: "test:claude-usage",
+  });
+  observe(
+    "workspace-claude-subscription",
+    new Response(null, {
+      status: 429,
+      headers: { "anthropic-ratelimit-unified-5h-utilization": "1" },
+    }),
+  );
+  const snapshot = latest.get("workspace")!;
+  expect(snapshot.expectedConnectionId).toBe(row.id);
+  expect(snapshot.expectedCredentialVersion).toBe(row.version);
+  expect(await recordClaudeSubscriptionUsage(client.db, settings, scope, snapshot)).toBeNull();
+  expect((await readClaudeSubscriptionUsage(client.db, scope)).windows).toEqual([]);
+});
 
 test("real app-role observations persist exact windows without changing credential or admission state", async () => {
   const { scope, row } = await fixture();

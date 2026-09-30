@@ -1,8 +1,9 @@
 import { getSandboxRecoveryDiscontinuity, type Database } from "@opengeni/db";
 
-/** v2 also recognizes system-selected checkpoint fallback receipts. A pre-v2
- * worker cannot claim a session whose filesystem has automatically diverged. */
-export const FILESYSTEM_DISCONTINUITY_PROTOCOL = 2 as const;
+/** v2 also recognizes system-selected checkpoint fallback receipts, and v3
+ * the empty-workspace continuation receipts. A worker below the version a
+ * session's receipts require cannot claim it (migrations 0526 and 0548). */
+export const FILESYSTEM_DISCONTINUITY_PROTOCOL = 3 as const;
 
 export async function recoveryAwareSessionInstructions(
   db: Database,

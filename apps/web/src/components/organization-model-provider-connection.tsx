@@ -71,15 +71,7 @@ export function useOrganizationProviderConnection({
   }, []);
 
   const connected = connection?.status === "active";
-  const claudeUsage = useClaudeUsage({
-    client,
-    scope: "organization",
-    scopeId: organizationId,
-    enabled: enabled && providerKind === "claude_subscription",
-    connected,
-    credentialVersion: connection?.version,
-    canManage: true,
-  });
+
   const slugValid =
     slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(slug);
@@ -113,6 +105,17 @@ export function useOrganizationProviderConnection({
       return undefined;
     }
   }, [client, organizationId, providerKind, enabled]);
+
+  const claudeUsage = useClaudeUsage({
+    client,
+    scope: "organization",
+    scopeId: organizationId,
+    enabled: enabled && providerKind === "claude_subscription",
+    connected,
+    credentialVersion: connection?.version,
+    canManage: true,
+    onCredentialChanged: refreshConnection,
+  });
 
   const refreshModels = useCallback(async (): Promise<CustomModel[] | undefined> => {
     if (!enabled) return undefined;

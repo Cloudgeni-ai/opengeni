@@ -426,16 +426,7 @@ export function useProviderConnection(
     );
   }, [config, connections]);
   const connected = props.canManageConnection ? connection?.status === "active" : readOnlyConnected;
-  const claudeUsage = useClaudeUsage({
-    client,
-    scope: "workspace",
-    scopeId: props.workspaceId,
-    enabled: enabled && config.provider === "claude_subscription",
-    connected: Boolean(connected),
-    credentialVersion: props.canManageConnection ? connection?.version : undefined,
-    credentialId: props.canManageConnection ? connection?.id : undefined,
-    canManage: props.canManageConnection,
-  });
+
   const modelSlugValid =
     modelSlug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(modelSlug);
@@ -512,6 +503,18 @@ export function useProviderConnection(
       return null;
     }
   }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId, enabled]);
+
+  const claudeUsage = useClaudeUsage({
+    client,
+    scope: "workspace",
+    scopeId: props.workspaceId,
+    enabled: enabled && config.provider === "claude_subscription",
+    connected: Boolean(connected),
+    credentialVersion: props.canManageConnection ? connection?.version : undefined,
+    credentialId: props.canManageConnection ? connection?.id : undefined,
+    canManage: props.canManageConnection,
+    onCredentialChanged: refreshConnection,
+  });
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshConnection(), refreshCustomModels()]);

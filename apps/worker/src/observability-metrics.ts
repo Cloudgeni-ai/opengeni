@@ -1248,11 +1248,16 @@ export function recordSandboxProviderMissingBeforeCapture(
 
 export function recordSandboxRecoveryObservationGauges(
   observability: Observability,
-  observations: { providerLosses: number; fallbackSelections: number },
+  observations: {
+    providerLosses: number;
+    fallbackSelections: number;
+    freshWorkspaceSelections?: number;
+  },
 ): void {
   for (const [kind, value] of [
     ["provider_missing_before_capture", observations.providerLosses],
     ["checkpoint_fallback_selected", observations.fallbackSelections],
+    ["fresh_workspace_selected", observations.freshWorkspaceSelections ?? 0],
   ] as const) {
     observability.setGauge({
       name: "opengeni_sandbox_recovery_observations_recent",
@@ -1261,6 +1266,38 @@ export function recordSandboxRecoveryObservationGauges(
       value,
     });
   }
+}
+
+/** Fixed outcomes for a committed automatic continuity decision after
+ * definitive managed-provider loss: a singleton checkpoint (`selected`), a
+ * shared-group checkpoint (`selected_shared`), or a new empty workspace
+ * (`fresh_workspace`). Call only after the durable authorization committed. */
+export const SANDBOX_AUTOMATIC_RECOVERY_OUTCOMES = [
+  "selected",
+  "selected_shared",
+  "fresh_workspace",
+] as const;
+export type SandboxAutomaticRecoveryOutcome = (typeof SANDBOX_AUTOMATIC_RECOVERY_OUTCOMES)[number];
+
+export function sandboxAutomaticRecoveryOutcome(input: {
+  lane: "checkpoint" | "fresh_workspace";
+  groupSessionCount: number;
+}): SandboxAutomaticRecoveryOutcome {
+  if (input.lane === "fresh_workspace") return "fresh_workspace";
+  return input.groupSessionCount > 1 ? "selected_shared" : "selected";
+}
+
+export function recordSandboxAutomaticRecoverySelected(
+  observability: Observability,
+  backend: string,
+  outcome: SandboxAutomaticRecoveryOutcome,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_checkpoint_fallback_total",
+    help: "System-selected continuity after managed provider loss: verified checkpoint or empty workspace.",
+    labels: { backend: safeBackend, outcome },
+  });
 }
 
 export function recordSandboxRotationBacklogGauges(

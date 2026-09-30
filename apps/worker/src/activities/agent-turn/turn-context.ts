@@ -1,6 +1,5 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
 import type { Settings } from "@opengeni/config";
-import type { ClaudeUsageObservation } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
 import type {
@@ -193,11 +192,7 @@ export type ProviderTurnState = {
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
   latestClaudeUsage: Map<
     "workspace" | "organization",
-    {
-      token: string;
-      observation?: ClaudeUsageObservation;
-      refresh?: { status: "reconnect"; checkedAt: string };
-    }
+    import("./claude-usage-observer").CapturedClaudeUsage
   >;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };

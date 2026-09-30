@@ -103,6 +103,14 @@ function processIsGone(pid: number): boolean {
 const CHUNK_BYTES = 512 * 1024;
 
 const hasRipgrep = Bun.which("rg") !== null;
+const CREDENTIAL_EXCLUDES = [
+  "-g",
+  "!**/.opengeni/**",
+  "-g",
+  "!**/.azure/**",
+  "-g",
+  "!**/.config/opengeni/**",
+];
 const SEARCH = ["--null", "--line-number", "--with-filename", "--no-heading", "--color", "never"];
 
 describe("code search ripgrep arguments", () => {
@@ -139,10 +147,33 @@ describe("code search ripgrep arguments", () => {
       "!node_modules",
       "-e",
       "(?-u:\\b)(approval|policy)",
+      ...CREDENTIAL_EXCLUDES,
       "--",
       "./src",
       ".",
     ]);
+  });
+
+  test("always excludes credential directories and refuses them as paths", () => {
+    const out = validateCodeSearchRipgrepArgs(["-e", "x", "--", "."]);
+    const end = out.indexOf("--");
+    expect(out.slice(end - CREDENTIAL_EXCLUDES.length, end)).toEqual(CREDENTIAL_EXCLUDES);
+    for (const path of [
+      ".opengeni",
+      "./.opengeni/codemode-tokens",
+      "repos/app/.opengeni",
+      ".OpenGeni/x",
+      ".azure",
+      ".config/opengeni/agent",
+      ".config/./opengeni",
+      ".config//opengeni",
+    ]) {
+      expect(() => validateCodeSearchRipgrepArgs(["-e", "x", "--", path])).toThrow(
+        ChannelAValidationError,
+      );
+    }
+    const notes = validateCodeSearchRipgrepArgs(["-e", "x", "--", ".opengeni-notes"]);
+    expect(notes.at(-1)).toBe(".opengeni-notes");
   });
 
   test("rejects flags that run programs or read other files", () => {
@@ -610,6 +641,45 @@ describe("SandboxChannelAService.codeSearchPathKinds", () => {
       "missing/dir": "missing",
       ".": "directory",
     });
+  });
+
+  test("reports credential directories missing, also through symlinks", async () => {
+    const root = fixtureRepo();
+    mkdirSync(join(root, ".opengeni", "codemode-tokens"), { recursive: true });
+    writeFileSync(join(root, ".opengeni", "codemode-tokens", "t"), "token\n");
+    mkdirSync(join(root, ".azure"));
+    mkdirSync(join(root, ".config", "opengeni", "agent"), { recursive: true });
+    mkdirSync(join(root, ".config", "other"));
+    symlinkSync(join(root, ".opengeni"), join(root, "state"));
+    symlinkSync(join(root, ".opengeni", "codemode-tokens", "t"), join(root, "src", "t.txt"));
+    const paths = [
+      ".opengeni",
+      ".opengeni/codemode-tokens/t",
+      ".azure",
+      ".config/opengeni/agent",
+      "state",
+      "state/codemode-tokens",
+      "src/t.txt",
+      ".config/other",
+      "src",
+    ];
+    const expected = {
+      ...Object.fromEntries(paths.map((p) => [p, "missing"])),
+      ".config/other": "directory",
+      src: "directory",
+    };
+    const svc = new SandboxChannelAService({ session: hostShellSession(root) });
+    expect(await svc.codeSearchPathKinds(paths)).toEqual(expected);
+    // without realpath (macOS before 13): directories resolve with pwd -P, a symlinked file is refused
+    const bin = mkdtempSync(join(tmpdir(), "code-search-bin-"));
+    roots.push(bin);
+    for (const tool of ["bash", "env", "tr", "dirname", "basename"]) {
+      symlinkSync(Bun.which(tool)!, join(bin, tool));
+    }
+    const noRealpath = new SandboxChannelAService({
+      session: hostShellSession(root, [], undefined, { PATH: bin }),
+    });
+    expect(await noRealpath.codeSearchPathKinds(paths)).toEqual(expected);
   });
 
   test("rejects traversal", async () => {

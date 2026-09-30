@@ -11,9 +11,12 @@ import {
   claimSandboxCheckpointArtifactsForGc,
   commitWarmingToWarm,
   consentPublicSandboxRecovery,
+  confirmDrainCold,
+  sessionHoldsFreshWorkspaceRecovery,
   createDb,
   createSession,
   claimSessionWorkForAttempt,
+  failSandboxRematerialization,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
   failWarmingToCold,
@@ -604,7 +607,7 @@ describe("explicit singleton checkpoint recovery", () => {
     await rejectsWithSqlState(
       claimSessionWorkForAttempt(client.db, f.workspaceId, {
         ...input,
-        filesystemDiscontinuityProtocol: 3 as 1 | 2,
+        filesystemDiscontinuityProtocol: 4 as 1 | 2 | 3,
       }),
     );
     expect(
@@ -1068,6 +1071,17 @@ describe("explicit singleton checkpoint recovery", () => {
   test("complete group membership rejects a second session; pending consent fences new attachment and route changes", async () => {
     const sharedFixture = await fixture();
     await sharedFixture.create(sharedFixture.session.sandboxGroupId);
+    // The provider-proven shared group has a system lane; human consent never
+    // widens to it.
+    expect(await readPublicSandboxRecovery(client.db, sharedFixture)).toMatchObject({
+      status: "eligible",
+      automaticAvailable: true,
+      automaticLane: "checkpoint",
+    });
+    await expect(sharedFixture.consent()).rejects.toThrow("changed");
+    await shared.admin`update sandbox_leases set resume_state =
+      jsonb_set(resume_state, '{opengeniRecovery,provider,status}', '"unknown"'::jsonb)
+      where id = ${sharedFixture.leaseId}`;
     expect(await readPublicSandboxRecovery(client.db, sharedFixture)).toMatchObject({
       status: "unsupported",
       reason: "singleton_required",
@@ -1099,6 +1113,12 @@ describe("explicit singleton checkpoint recovery", () => {
       tx.execute(sql`select id from sessions where sandbox_group_id = ${f.session.sandboxGroupId}`),
     );
     expect(visible).toHaveLength(1);
+    const automatic = await readPublicSandboxRecovery(client.db, f);
+    expect(automatic).toMatchObject({ status: "eligible", automaticLane: "checkpoint" });
+    expect(JSON.stringify(automatic)).not.toContain(hidden.id);
+    await shared.admin`update sandbox_leases set resume_state =
+      jsonb_set(resume_state, '{opengeniRecovery,provider,status}', '"unknown"'::jsonb)
+      where id = ${f.leaseId}`;
     const projection = await readPublicSandboxRecovery(client.db, f);
     expect(projection).toMatchObject({
       status: "unsupported",
@@ -1120,8 +1140,12 @@ describe("explicit singleton checkpoint recovery", () => {
         1,
       );
       const projection = await readPublicSandboxRecovery(client.db, f);
-      expect(projection.status).toBe(
-        consent.status === "fulfilled" ? "consent_accepted" : "unsupported",
+      // A winning attach makes a shared group, whose provider-proven loss is
+      // then a system Retry lane rather than human consent.
+      expect(projection).toMatchObject(
+        consent.status === "fulfilled"
+          ? { status: "consent_accepted" }
+          : { status: "eligible", automaticLane: "checkpoint" },
       );
     }
   });
@@ -1309,5 +1333,1562 @@ describe("explicit singleton checkpoint recovery", () => {
         leaseTtlMs: 60_000,
       }),
     ).resolves.toMatchObject({ role: "blocked" });
+  });
+});
+
+type RecoveryFixture = Awaited<ReturnType<typeof fixture>>;
+
+/** A distinct native Modal filesystem-snapshot archive and its v2 descriptor. */
+function modalSnapshotSessionState(snapshotId: string, capturedAt = "2026-09-20T03:04:05.000Z") {
+  const archive = Buffer.from(
+    `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({ snapshot_id: snapshotId, workspace_persistence: "snapshot_filesystem" })}`,
+  ).toString("base64");
+  const bytes = Buffer.from(archive, "base64");
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  return {
+    workspaceArchive: archive,
+    workspaceArchiveMeta: {
+      version: 2 as const,
+      kind: "provider_snapshot" as const,
+      revision: `wa2:${Date.parse(capturedAt)}:${sha}`,
+      capturedAt,
+      archiveSha256: sha,
+      archiveBytes: bytes.length,
+      provider: "modal_snapshot_filesystem" as const,
+      snapshotId,
+      workspacePersistence: "snapshot_filesystem",
+    },
+  };
+}
+
+async function promptSession(f: RecoveryFixture, sessionId: string) {
+  return withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.subjectId, (tx) =>
+    submitHumanPromptInTransaction(tx, {
+      ...f.scope,
+      sessionId,
+      actor: { type: "human", subjectId: f.subjectId },
+      operationKey: crypto.randomUUID(),
+      delivery: "send",
+      text: "Continue from the current filesystem",
+      resources: [],
+      reasoningEffortFallback: "medium",
+      source: "user",
+    }),
+  );
+}
+
+function attemptClaim(sessionId: string) {
+  return {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" as const },
+  };
+}
+
+/** A running attempt for `sessionId`, claimed by a v3 worker. */
+async function claimedAttempt(f: RecoveryFixture, sessionId: string) {
+  await promptSession(f, sessionId);
+  const input = attemptClaim(sessionId);
+  expect(
+    await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+      ...input,
+      filesystemDiscontinuityProtocol: 3,
+    }),
+  ).toMatchObject({ action: "claimed" });
+  return input;
+}
+
+/** Parent plus two shared children, all quiescent, lost at the provider deadline. */
+async function sharedGroup() {
+  const f = await fixture();
+  const first = await f.create(f.session.sandboxGroupId);
+  const second = await f.create(f.session.sandboxGroupId);
+  return { f, members: [f.session.id, first.id, second.id] };
+}
+
+/** The exact recovery state current confirmDrainCold writes for a box that
+ * vanished before any workspace capture existed. */
+async function withoutAnyArchive(f: RecoveryFixture) {
+  await shared.admin`update sandbox_leases set current_checkpoint_artifact_id = null,
+    archive_generation = null,
+    resume_state = ${shared.admin.json({
+      backendId: "modal",
+      opengeniRecovery: {
+        provider: {
+          status: "missing",
+          instanceId: "lost-box",
+          observedAt: "2026-09-17T06:24:31.000Z",
+          diagnostic: "provider_not_found_before_workspace_capture",
+        },
+        archive: { status: "none", current: null, previous: null },
+        restore: {
+          status: "unrecoverable",
+          rematerializationId: null,
+          selectedRevision: null,
+          startedAt: null,
+          completedAt: "2026-09-17T06:24:31.000Z",
+          failureCode: "archive_unavailable",
+          retryable: false,
+        },
+        workspace: { status: "unrecoverable", verifiedRevision: null, verifiedAt: null },
+      },
+    })}::jsonb
+    where id = ${f.leaseId}`;
+}
+
+async function automaticReceipts(workspaceId: string, action: string, operationId?: string) {
+  return await shared.admin<
+    { target_session_id: string; actor_type: string; result: Record<string, unknown> }[]
+  >`select target_session_id, actor_type, result from session_command_receipts
+    where workspace_id = ${workspaceId} and action = ${action}
+      ${operationId ? shared.admin`and result->>'operationId' = ${operationId}` : shared.admin``}
+    order by target_session_id`;
+}
+
+function groupLease(f: RecoveryFixture) {
+  return {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sandboxGroupId: f.session.sandboxGroupId,
+  };
+}
+
+describe("automatic continuity after definitive managed sandbox loss", () => {
+  test("a quiescent shared group of three selects its checkpoint once, warns every member, and rematerializes", async () => {
+    const { f, members } = await sharedGroup();
+    for (const sessionId of members) {
+      expect(await readPublicSandboxRecovery(client.db, { ...f, sessionId })).toMatchObject({
+        status: "eligible",
+        automaticAvailable: true,
+        automaticLane: "checkpoint",
+        checkpoint: { sessionId, archiveGeneration: 10, workspaceGeneration: 44 },
+      });
+    }
+    const initiator = await claimedAttempt(f, f.session.id);
+    const authorization = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+      ...f.scope,
+      sessionId: f.session.id,
+      attemptId: initiator.attemptId,
+    });
+    expect(authorization).toMatchObject({
+      status: "authorized",
+      lane: "checkpoint",
+      groupSessionCount: 3,
+      selection: { sessionId: f.session.id, archiveGeneration: 10, artifactId: f.artifact.id },
+    });
+    const receipts = await automaticReceipts(f.workspaceId, "sandbox.recovery.automatic");
+    expect(receipts.map((receipt) => receipt.target_session_id).sort()).toEqual(
+      [...members].sort(),
+    );
+    for (const receipt of receipts) {
+      expect(receipt.result).toMatchObject({
+        scope: "shared",
+        initiatingSessionId: f.session.id,
+        checkpoint: { sessionId: receipt.target_session_id, archiveGeneration: 10 },
+      });
+      expect(receipt.actor_type).toBe(
+        receipt.target_session_id === f.session.id ? "agent_attempt" : "service",
+      );
+      const warning = await getSandboxRecoveryDiscontinuity(
+        client.db,
+        f.workspaceId,
+        receipt.target_session_id,
+      );
+      expect(warning).toContain(f.request.selection.capturedAt);
+      expect(warning).toContain("shares with other sessions");
+      expect(warning).toContain("unknown outcomes");
+    }
+    // Reuse is exact and does not duplicate receipts; the shared membership stays pinned.
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      }),
+    ).toMatchObject({ status: "already_authorized", lane: "checkpoint" });
+    expect(await automaticReceipts(f.workspaceId, "sandbox.recovery.automatic")).toHaveLength(3);
+    await rejectsWithSqlState(f.create(f.session.sandboxGroupId));
+    expect(
+      (await readRecentSandboxRecoveryObservations(client.db)).fallbackSelections,
+    ).toBeGreaterThanOrEqual(1);
+
+    // The next turn's election restores the exact selection across the group.
+    const elected = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "turn",
+      holderId: initiator.attemptId,
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected).toMatchObject({
+      role: "spawner",
+      lease: { historicalRecoveryAuthorized: true },
+    });
+    const rematerializationId = crypto.randomUUID();
+    const attempt = {
+      ...groupLease(f),
+      expectedEpoch: elected.lease.leaseEpoch,
+      rematerializationId,
+    };
+    expect(await beginSandboxRematerialization(client.db, attempt)).toMatchObject({
+      status: "started",
+    });
+    await recordWarmingSandboxCreated(client.db, {
+      ...attempt,
+      instanceId: "shared-restored-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "shared-restored-box" } },
+      },
+      leaseTtlMs: 60_000,
+    });
+    await markSandboxRestoreVerifying(client.db, attempt);
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch: attempt.expectedEpoch,
+        instanceId: "shared-restored-box",
+        leaseTtlMs: 60_000,
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: f.request.selection.revision,
+        },
+      }),
+    ).toMatchObject({ committed: true });
+    expect(
+      (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.resumeState
+        ?.opengeniAutomaticCheckpointRecovery,
+    ).toMatchObject({ status: "verified", sessionId: f.session.id });
+    // Membership is released; a finished child messaged later still reconstructs
+    // its warning, and a worker without the automatic warning cannot claim it.
+    await f.create(f.session.sandboxGroupId);
+    await promptSession(f, members[2]!);
+    const child = attemptClaim(members[2]!);
+    await rejectsWithSqlState(
+      claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...child,
+        filesystemDiscontinuityProtocol: 1,
+      }),
+    );
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...child,
+        filesystemDiscontinuityProtocol: 3,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, members[2]!)).toContain(
+      "shares with other sessions",
+    );
+  });
+
+  for (const blocker of ["open_attempt", "pending_tool_call", "holder"] as const) {
+    test(`one shared member with an unresolved ${blocker} blocks the group decision and explains why`, async () => {
+      const { f, members } = await sharedGroup();
+      const busy = members[1]!;
+      if (blocker === "open_attempt") {
+        await claimedAttempt(f, busy);
+      } else if (blocker === "pending_tool_call") {
+        const claim = await claimedAttempt(f, busy);
+        const [row] = await shared.admin<{ turn_id: string }[]>`
+          select turn_id from session_turn_attempts where id = ${claim.attemptId}`;
+        await shared.admin.begin(async (tx) => {
+          await tx`update session_turn_attempts set state = 'closed', outcome = 'requires_action',
+            closed_at = now() where id = ${claim.attemptId}`;
+          await tx`insert into session_pending_tool_calls (account_id, workspace_id, session_id,
+              turn_id, execution_generation, attempt_id, call_id, call_type, call_item,
+              call_item_codec_version)
+            values (${f.accountId}, ${f.workspaceId}, ${busy}, ${row!.turn_id}, 1,
+              ${claim.attemptId}, 'approval-call', 'function_call',
+              ${tx.json({ type: "function_call", name: "exec_command", callId: "approval-call", arguments: "{}" })}, 1)`;
+        });
+      } else {
+        await shared.admin`insert into sandbox_lease_holders(account_id,workspace_id,lease_id,kind,holder_id)
+          values(${f.accountId},${f.workspaceId},${f.leaseId},'viewer','unsettled-viewer')`;
+      }
+      expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+        status: "blocked",
+        reason: blocker === "holder" ? "execution_unresolved" : "shared_sandbox_member_active",
+        checkpoint: { sessionId: f.session.id },
+      });
+      const initiator = await claimedAttempt(f, f.session.id);
+      expect(
+        await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        }),
+      ).toEqual({ status: "not_eligible" });
+      expect(await automaticReceipts(f.workspaceId, "sandbox.recovery.automatic")).toHaveLength(0);
+      for (const sessionId of members) {
+        expect(
+          await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, sessionId),
+        ).toBeNull();
+      }
+    });
+  }
+
+  test("a no-archive loss continues every member on an empty workspace and the next turn publishes it", async () => {
+    const { f, members } = await sharedGroup();
+    await withoutAnyArchive(f);
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "eligible",
+      automaticAvailable: true,
+      automaticLane: "fresh_workspace",
+      checkpoint: null,
+    });
+    const initiator = await claimedAttempt(f, members[1]!);
+    const authorization = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+      ...f.scope,
+      sessionId: members[1]!,
+      attemptId: initiator.attemptId,
+    });
+    expect(authorization).toMatchObject({
+      status: "authorized",
+      lane: "fresh_workspace",
+      reason: "archive_unavailable",
+      lostAt: "2026-09-17T06:24:31.000Z",
+      groupSessionCount: 3,
+    });
+    if (authorization.status === "not_eligible" || authorization.lane !== "fresh_workspace")
+      throw new Error("expected a fresh-workspace decision");
+    const receipts = await automaticReceipts(
+      f.workspaceId,
+      "sandbox.recovery.fresh_workspace",
+      authorization.operationId,
+    );
+    expect(receipts.map((receipt) => receipt.target_session_id).sort()).toEqual(
+      [...members].sort(),
+    );
+    for (const sessionId of members) {
+      const warning = await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, sessionId);
+      expect(warning).toContain("lost at 2026-09-17T06:24:31.000Z");
+      expect(warning).toContain("new empty workspace");
+      expect(warning).toContain("do not assume they exist");
+    }
+    expect(
+      (await readRecentSandboxRecoveryObservations(client.db)).freshWorkspaceSelections,
+    ).toBeGreaterThanOrEqual(1);
+    const [audit] = await shared.admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from audit_events where id = ${authorization.operationId}`;
+    expect(audit!.metadata).toMatchObject({
+      freshWorkspace: true,
+      reason: "archive_unavailable",
+      restoreStatus: "unrecoverable",
+      providerDiagnostic: "provider_not_found_before_workspace_capture",
+    });
+    // A v2 worker cannot reconstruct the empty-workspace warning.
+    await promptSession(f, members[2]!);
+    const child = attemptClaim(members[2]!);
+    await rejectsWithSqlState(
+      claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...child,
+        filesystemDiscontinuityProtocol: 2,
+      }),
+    );
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...child,
+        filesystemDiscontinuityProtocol: 3,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    // Retry of the failed parent is now a system lane, not a dead end.
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "eligible",
+      automaticLane: "fresh_workspace",
+    });
+
+    const elected = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "turn",
+      holderId: initiator.attemptId,
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected).toMatchObject({
+      role: "spawner",
+      lease: {
+        freshWorkspaceRecoveryId: authorization.operationId,
+        historicalRecoveryAuthorized: false,
+      },
+    });
+    const expectedEpoch = elected.lease.leaseEpoch;
+    // No archive, including a legacy per-session fallback, can be restored under it.
+    expect(
+      await beginSandboxRematerialization(client.db, {
+        ...groupLease(f),
+        expectedEpoch,
+        rematerializationId: crypto.randomUUID(),
+      }),
+    ).toMatchObject({ status: "blocked", code: "fresh_workspace_pending" });
+    await recordWarmingSandboxCreated(client.db, {
+      ...groupLease(f),
+      expectedEpoch,
+      rematerializationId: null,
+      instanceId: "fresh-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "fresh-box" } },
+      },
+      leaseTtlMs: 60_000,
+    });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch,
+        instanceId: "fresh-box",
+        leaseTtlMs: 60_000,
+      }),
+    ).toMatchObject({ committed: false, reason: "fresh_workspace_required" });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch,
+        instanceId: "fresh-box",
+        leaseTtlMs: 60_000,
+        freshWorkspace: { operationId: crypto.randomUUID() },
+      }),
+    ).toMatchObject({ committed: false, reason: "fresh_workspace_mismatch" });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch,
+        instanceId: "fresh-box",
+        leaseTtlMs: 60_000,
+        freshWorkspace: { operationId: authorization.operationId },
+      }),
+    ).toMatchObject({ committed: true });
+    const warm = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(warm).toMatchObject({
+      liveness: "warm",
+      instanceId: "fresh-box",
+      recovery: { restore: { status: "not_required" }, workspace: { status: "ready" } },
+    });
+    expect(warm?.resumeState?.opengeniFreshWorkspaceRecovery).toMatchObject({
+      status: "verified",
+      operationId: authorization.operationId,
+    });
+    // Warm publication is not a new decision; every warning stays.
+    expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id)).toContain(
+      "new empty workspace",
+    );
+  });
+
+  test("a failed empty create keeps the decision; the next spawner still publishes an empty box", async () => {
+    const f = await fixture();
+    await withoutAnyArchive(f);
+    const initiator = await claimedAttempt(f, f.session.id);
+    const authorization = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+      ...f.scope,
+      sessionId: f.session.id,
+      attemptId: initiator.attemptId,
+    });
+    if (authorization.status === "not_eligible" || authorization.lane !== "fresh_workspace")
+      throw new Error("expected a fresh-workspace decision");
+    const first = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "failed-fresh-create",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    await failWarmingToCold(client.db, { ...groupLease(f), expectedEpoch: first.lease.leaseEpoch });
+    const cold = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(cold?.resumeState?.opengeniFreshWorkspaceRecovery).toMatchObject({
+      status: "accepted",
+      operationId: authorization.operationId,
+    });
+    expect(cold?.recovery.restore.status).toBe("unrecoverable");
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      }),
+    ).toMatchObject({ status: "already_authorized", operationId: authorization.operationId });
+    expect(await automaticReceipts(f.workspaceId, "sandbox.recovery.fresh_workspace")).toHaveLength(
+      1,
+    );
+    const second = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "retried-fresh-create",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(second).toMatchObject({
+      role: "spawner",
+      lease: { freshWorkspaceRecoveryId: authorization.operationId },
+    });
+  });
+
+  test("an unverified archive continues on an empty workspace", async () => {
+    const f = await fixture();
+    await shared.admin`update sandbox_leases set current_checkpoint_artifact_id = null,
+      resume_state = jsonb_set(
+        jsonb_set(resume_state #- '{sessionState,workspaceArchiveMeta}',
+          '{opengeniRecovery,restore}', ${shared.admin.json({
+            status: "degraded",
+            retryable: false,
+            failureCode: "archive_unverified",
+          })}::jsonb),
+        '{opengeniRecovery,provider}', ${shared.admin.json({
+          status: "missing",
+          instanceId: "lost-box",
+          observedAt: "2026-09-18T01:02:03.000Z",
+        })}::jsonb)
+      where id = ${f.leaseId}`;
+    expect(
+      (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.recovery.archive
+        .status,
+    ).toBe("unverified");
+    const initiator = await claimedAttempt(f, f.session.id);
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      }),
+    ).toMatchObject({
+      status: "authorized",
+      lane: "fresh_workspace",
+      reason: "archive_unverified",
+      lostAt: "2026-09-18T01:02:03.000Z",
+    });
+  });
+
+  /** One elected automatic restore of the fixture's checkpoint that fails
+   * with `failureCode`, leaving the lease cold again. */
+  async function failAutomaticRestore(
+    f: RecoveryFixture,
+    holderId: string,
+    failureCode: string,
+    retryable: boolean,
+  ) {
+    const elected = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "turn",
+      holderId,
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected).toMatchObject({ role: "spawner" });
+    const attempt = {
+      ...groupLease(f),
+      expectedEpoch: elected.lease.leaseEpoch,
+      rematerializationId: crypto.randomUUID(),
+    };
+    expect(await beginSandboxRematerialization(client.db, attempt)).toMatchObject({
+      status: "started",
+    });
+    expect(
+      await failSandboxRematerialization(client.db, { ...attempt, failureCode, retryable }),
+    ).toMatchObject({ failed: true });
+    await shared.admin`delete from sandbox_lease_holders where lease_id = ${f.leaseId}`;
+    await shared.admin`update sandbox_leases set refcount = 0, turn_holders = 0 where id = ${f.leaseId}`;
+    const lease = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(lease?.resumeState?.opengeniAutomaticCheckpointRecovery).toMatchObject({
+      status: "failed",
+    });
+    // A failed replacement box is never recorded as a provider loss.
+    expect(lease?.recovery.provider).toMatchObject({
+      status: "not_created",
+      diagnostic: "replacement_failed",
+    });
+  }
+
+  /** Move the last failure outside its retry backoff. */
+  async function elapseRetryBackoff(f: RecoveryFixture) {
+    await shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+      '{opengeniRecovery,restore,completedAt}',
+      to_jsonb(${new Date(Date.now() - 5 * 60 * 60_000).toISOString()}::text))
+      where id = ${f.leaseId}`;
+  }
+
+  test("only a definitive integrity failure of the selected checkpoint continues on an empty workspace", async () => {
+    const f = await fixture();
+    const initiator = await claimedAttempt(f, f.session.id);
+    const authorize = () =>
+      authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      });
+    expect(await authorize()).toMatchObject({ status: "authorized", lane: "checkpoint" });
+    // The decision pinned its loss evidence before any replacement existed.
+    expect(
+      (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.resumeState
+        ?.opengeniProviderLoss,
+    ).toMatchObject({ source: "warm_resume", leaseId: f.leaseId, workspaceGeneration: 44 });
+    await failAutomaticRestore(f, initiator.attemptId, "archive_hash_mismatch", false);
+    const fresh = await authorize();
+    expect(fresh).toMatchObject({
+      status: "authorized",
+      lane: "fresh_workspace",
+      reason: "checkpoint_restore_failed",
+    });
+    // The newest receipt wins: the session is told its workspace is empty.
+    expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id)).toContain(
+      "new empty workspace",
+    );
+    // The superseded checkpoint decision is retained as audit evidence.
+    if (fresh.status !== "not_eligible" && fresh.lane === "fresh_workspace") {
+      const [audit] = await shared.admin<{ metadata: Record<string, unknown> }[]>`
+        select metadata from audit_events where id = ${fresh.operationId}`;
+      expect(audit!.metadata.supersededAutomaticRecovery).toMatchObject({ status: "failed" });
+      expect(audit!.metadata.currentCheckpointArtifactId).toBe(f.artifact.id);
+      expect(audit!.metadata.providerLoss).toMatchObject({ source: "warm_resume" });
+    }
+  });
+
+  test("transient or ambiguous restore failures keep the checkpoint with backoff, then hand off to an operator", async () => {
+    const f = await fixture();
+    const initiator = await claimedAttempt(f, f.session.id);
+    const authorize = () =>
+      authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      });
+    // Capacity, a worker death, a changed provider binding and a rejected
+    // commit say nothing definitive about the checkpoint itself.
+    const failures: Array<[string, boolean]> = [
+      ["sandbox_rematerialization_failed", true],
+      ["native_snapshot_reference_invalid", false],
+      ["rematerialization_mismatch", false],
+      ["archive_hydration_failed", true],
+      ["sandbox_rematerialization_failed", true],
+      ["archive_hydration_failed", false],
+    ];
+    for (const [index, [failureCode, retryable]] of failures.entries()) {
+      expect(await authorize(), `attempt ${index + 1}`).toMatchObject({
+        status: "authorized",
+        lane: "checkpoint",
+      });
+      expect(
+        (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.resumeState
+          ?.opengeniAutomaticCheckpointRecovery,
+      ).toMatchObject({ status: "accepted", attempt: index + 1 });
+      await failAutomaticRestore(f, initiator.attemptId, failureCode, retryable);
+      if (index === failures.length - 1) break;
+      // Immediately after a failure the lane waits instead of retrying hot.
+      expect(await authorize()).toEqual({ status: "not_eligible" });
+      const waiting = await readPublicSandboxRecovery(client.db, f);
+      expect(waiting).toMatchObject({ status: "blocked", reason: "restore_retry_backoff" });
+      // The projection names when Retry can decide again; nothing retries by itself.
+      expect(Date.parse(waiting.availableAt!)).toBeGreaterThan(Date.now());
+      await elapseRetryBackoff(f);
+    }
+    await elapseRetryBackoff(f);
+    // The verified checkpoint is never discarded for an empty box.
+    expect(await authorize()).toEqual({ status: "not_eligible" });
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "blocked",
+      reason: "restore_retry_exhausted",
+    });
+    expect(await automaticReceipts(f.workspaceId, "sandbox.recovery.fresh_workspace")).toHaveLength(
+      0,
+    );
+  });
+
+  test("a never-lost sandbox with a complete checkpoint never continues on an empty workspace", async () => {
+    for (const [failureCode, retryable] of [
+      ["native_snapshot_reference_invalid", false],
+      ["rematerialization_mismatch", false],
+      ["archive_hash_mismatch", false],
+    ] as const) {
+      const f = await fixture();
+      // An ordinary idle drain captured the exact current generation.
+      await shared.admin`update sandbox_leases set workspace_generation = 10,
+        resume_state = jsonb_set(resume_state, '{opengeniRecovery}', ${shared.admin.json({
+          provider: {
+            status: "not_created",
+            instanceId: null,
+            observedAt: "2026-09-29T01:00:00.000Z",
+          },
+          restore: { status: "pending", rematerializationId: null },
+          workspace: { status: "not_ready" },
+        })}::jsonb) where id = ${f.leaseId}`;
+      const elected = await acquireLease(client.db, {
+        ...groupLease(f),
+        kind: "viewer",
+        holderId: `ordinary-restore-${failureCode}`,
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      });
+      expect(elected).toMatchObject({ role: "spawner", lease: { archiveComplete: true } });
+      const attempt = {
+        ...groupLease(f),
+        expectedEpoch: elected.lease.leaseEpoch,
+        rematerializationId: crypto.randomUUID(),
+      };
+      expect(await beginSandboxRematerialization(client.db, attempt)).toMatchObject({
+        status: "started",
+      });
+      await failSandboxRematerialization(client.db, { ...attempt, failureCode, retryable });
+      await shared.admin`delete from sandbox_lease_holders where lease_id = ${f.leaseId}`;
+      await shared.admin`update sandbox_leases set refcount = 0, viewer_holders = 0 where id = ${f.leaseId}`;
+      const failed = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+      expect(failed?.recovery.provider).toMatchObject({
+        status: "not_created",
+        diagnostic: "replacement_failed",
+      });
+      expect(failed?.recovery.restore.status).toBe("unrecoverable");
+      const projection = await readPublicSandboxRecovery(client.db, f);
+      expect(projection.automaticAvailable, failureCode).toBeUndefined();
+      const initiator = await claimedAttempt(f, f.session.id);
+      expect(
+        await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        }),
+        failureCode,
+      ).toEqual({ status: "not_eligible" });
+      expect(
+        await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id),
+      ).toBeNull();
+    }
+  });
+
+  test("an ordinary complete-archive cold resume never takes the workspace-wide exclusive lock", async () => {
+    const f = await fixture();
+    // The idle drain of a complete archive: the most common Modal resume shape.
+    await shared.admin`update sandbox_leases set workspace_generation = 10,
+      resume_state = jsonb_set(resume_state, '{opengeniRecovery}', ${shared.admin.json({
+        provider: {
+          status: "not_created",
+          instanceId: null,
+          observedAt: "2026-09-29T01:00:00.000Z",
+        },
+        restore: { status: "pending", rematerializationId: null },
+        workspace: { status: "not_ready" },
+      })}::jsonb) where id = ${f.leaseId}`;
+    const initiator = await claimedAttempt(f, f.session.id);
+    const authorize = () =>
+      authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      });
+    const blocked = (ms: number) => Bun.sleep(ms).then(() => "blocked" as const);
+    // Another transaction holds the exclusive workspace-control fence.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    const holder = shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`workspace-control:${f.workspaceId}`}, 0))`;
+      held();
+      await released;
+    });
+    await holding;
+    try {
+      expect(await Promise.race([authorize(), blocked(3_000)])).toEqual({
+        status: "not_eligible",
+      });
+      // Control: a lost lease with an incomplete archive does wait for the fence.
+      await shared.admin`update sandbox_leases set workspace_generation = 44,
+        resume_state = jsonb_set(resume_state, '{opengeniRecovery,provider,status}', '"missing"'::jsonb)
+        where id = ${f.leaseId}`;
+      const lost = authorize();
+      expect(await Promise.race([lost, blocked(1_000)])).toBe("blocked");
+      release();
+      await holder;
+      await lost;
+    } finally {
+      release();
+      await holder.catch(() => undefined);
+    }
+  });
+
+  test("storage configuration, a missing object or a retryable integrity failure never abandon a checkpoint", async () => {
+    for (const [failureCode, retryable] of [
+      ["archive_storage_unavailable", true],
+      ["archive_object_missing", false],
+      ["archive_hash_mismatch", true],
+    ] as const) {
+      const f = await fixture();
+      const initiator = await claimedAttempt(f, f.session.id);
+      const authorize = () =>
+        authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        });
+      expect(await authorize(), failureCode).toMatchObject({
+        status: "authorized",
+        lane: "checkpoint",
+      });
+      await failAutomaticRestore(f, initiator.attemptId, failureCode, retryable);
+      expect(await authorize(), failureCode).toEqual({ status: "not_eligible" });
+      expect(await readPublicSandboxRecovery(client.db, f), failureCode).toMatchObject({
+        status: "blocked",
+        reason: "restore_retry_backoff",
+      });
+      await elapseRetryBackoff(f);
+      expect(await authorize(), failureCode).toMatchObject({
+        status: "authorized",
+        lane: "checkpoint",
+      });
+      expect(
+        (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.resumeState
+          ?.opengeniAutomaticCheckpointRecovery,
+        failureCode,
+      ).toMatchObject({ status: "accepted", attempt: 2 });
+      expect(
+        await automaticReceipts(f.workspaceId, "sandbox.recovery.fresh_workspace"),
+        failureCode,
+      ).toHaveLength(0);
+    }
+  });
+
+  test("the loss audit proves loss only for an overwritten loss record, never for a plain not_created", async () => {
+    const shapes = [
+      {
+        name: "plain not_created (ordinary drain, operator restore or capture failure)",
+        provider: {
+          status: "not_created",
+          instanceId: null,
+          observedAt: "2026-09-17T06:24:31.000Z",
+        },
+        eligibleWithAudit: false,
+      },
+      {
+        name: "replacement_failed",
+        provider: {
+          status: "not_created",
+          instanceId: null,
+          observedAt: "2026-09-17T06:24:31.000Z",
+          diagnostic: "replacement_failed",
+        },
+        eligibleWithAudit: true,
+      },
+      {
+        name: "older replacement failure that wrote missing",
+        provider: { status: "missing", instanceId: null, observedAt: "2026-09-17T06:24:31.000Z" },
+        eligibleWithAudit: true,
+      },
+    ];
+    for (const shape of shapes) {
+      const f = await fixture();
+      await shared.admin`update sandbox_leases set resume_state = jsonb_set(jsonb_set(resume_state,
+        '{opengeniRecovery,provider}', ${shared.admin.json(shape.provider)}::jsonb),
+        '{opengeniRecovery,restore}', ${shared.admin.json({
+          status: "degraded",
+          retryable: false,
+          failureCode: "sandbox_rematerialization_failed",
+          rematerializationId: crypto.randomUUID(),
+          completedAt: "2026-09-17T07:00:00.000Z",
+        })}::jsonb) where id = ${f.leaseId}`;
+      const initiator = await claimedAttempt(f, f.session.id);
+      const authorize = () =>
+        authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        });
+      expect(await authorize(), shape.name).toEqual({ status: "not_eligible" });
+      await shared.admin`insert into audit_events(id, account_id, workspace_id, subject_id, action,
+          target_type, target_id, metadata)
+        values(${crypto.randomUUID()}, ${f.accountId}, ${f.workspaceId}, 'opengeni:sandbox-reaper',
+          'sandbox.provider_missing_before_capture', 'sandbox_group', ${f.session.sandboxGroupId},
+          ${shared.admin.json({ leaseId: f.leaseId, leaseEpoch: 2, workspaceGeneration: 44 })}::jsonb)`;
+      if (shape.eligibleWithAudit) {
+        expect(await authorize(), shape.name).toMatchObject({
+          status: "authorized",
+          lane: "checkpoint",
+        });
+      } else {
+        expect(await authorize(), shape.name).toEqual({ status: "not_eligible" });
+        expect(
+          (await readPublicSandboxRecovery(client.db, f)).automaticAvailable,
+          shape.name,
+        ).toBeUndefined();
+      }
+    }
+  });
+
+  test("an empty workspace waits until the lost box is past its provider lifetime; a checkpoint does not", async () => {
+    for (const archive of ["checkpoint", "none"] as const) {
+      const f = await fixture();
+      if (archive === "none") await withoutAnyArchive(f);
+      // Loss observed moments ago with no recorded deadline.
+      const observedAt = new Date().toISOString();
+      await shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+        '{opengeniRecovery,provider,observedAt}', to_jsonb(${observedAt}::text))
+        where id = ${f.leaseId}`;
+      const initiator = await claimedAttempt(f, f.session.id);
+      const authorize = () =>
+        authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        });
+      if (archive === "checkpoint") {
+        expect(await authorize()).toMatchObject({ status: "authorized", lane: "checkpoint" });
+        continue;
+      }
+      expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+        status: "blocked",
+        reason: "provider_lifetime_unexpired",
+        availableAt: new Date(Date.parse(observedAt) + 24 * 60 * 60_000).toISOString(),
+      });
+      expect(await authorize()).toEqual({ status: "not_eligible" });
+      // The exact recorded deadline of the lost box has passed.
+      await shared.admin`update sandbox_leases set resume_state = resume_state || ${shared.admin.json(
+        {
+          opengeniProviderLoss: {
+            version: 1,
+            source: "drain_probe",
+            leaseId: f.leaseId,
+            lostEpoch: 2,
+            instanceId: "lost-box",
+            workspaceGeneration: 44,
+            observedAt: new Date().toISOString(),
+            providerDeadlineAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+          },
+        },
+      )}::jsonb where id = ${f.leaseId}`;
+      expect(await authorize()).toMatchObject({ status: "authorized", lane: "fresh_workspace" });
+    }
+  });
+
+  test("ambiguous provider truth, an unresolved create, or a recent late capture are never eligible", async () => {
+    const cases: Array<[string, (f: RecoveryFixture) => Promise<void>, string | null]> = [
+      [
+        "unknown",
+        (f) =>
+          shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniRecovery,provider,status}', '"unknown"'::jsonb) where id = ${f.leaseId}`.then(
+            () => undefined,
+          ),
+        null,
+      ],
+      [
+        "creating",
+        (f) =>
+          shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniRecovery,provider,status}', '"creating"'::jsonb) where id = ${f.leaseId}`.then(
+            () => undefined,
+          ),
+        null,
+      ],
+      [
+        "not_created",
+        (f) =>
+          shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniRecovery,provider,status}', '"not_created"'::jsonb) where id = ${f.leaseId}`.then(
+            () => undefined,
+          ),
+        null,
+      ],
+      [
+        "late_capture",
+        (f) =>
+          shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniRecovery,lateArchiveCapture}', ${shared.admin.json({
+            version: 1,
+            captureId: crypto.randomUUID(),
+            providerRequestId: "late-request",
+            sourceLeaseId: f.leaseId,
+            sourceLeaseEpoch: 2,
+            sourceInstanceId: "lost-box",
+            sourceWorkspaceGeneration: 44,
+            recordedAt: new Date().toISOString(),
+          })}::jsonb) where id = ${f.leaseId}`.then(() => undefined),
+        "capture_unresolved",
+      ],
+    ];
+    for (const archive of ["checkpoint", "none"] as const) {
+      for (const [name, mutate, reason] of cases) {
+        const f = await fixture();
+        if (archive === "none") await withoutAnyArchive(f);
+        await mutate(f);
+        const projection = await readPublicSandboxRecovery(client.db, f);
+        expect(projection.automaticAvailable, `${archive}/${name}`).toBeUndefined();
+        if (reason) expect(projection).toMatchObject({ status: "blocked", reason });
+        const initiator = await claimedAttempt(f, f.session.id);
+        expect(
+          await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+            ...f.scope,
+            sessionId: f.session.id,
+            attemptId: initiator.attemptId,
+          }),
+          `${archive}/${name}`,
+        ).toEqual({ status: "not_eligible" });
+        expect(
+          await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id),
+        ).toBeNull();
+      }
+    }
+  });
+
+  test("a settled late capture window allows either lane; a fresh decision retires the receipt", async () => {
+    for (const archive of ["checkpoint", "none"] as const) {
+      const f = await fixture();
+      if (archive === "none") await withoutAnyArchive(f);
+      await shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+        '{opengeniRecovery,lateArchiveCapture}', ${shared.admin.json({
+          version: 1,
+          captureId: crypto.randomUUID(),
+          providerRequestId: "late-request",
+          sourceLeaseId: f.leaseId,
+          sourceLeaseEpoch: 2,
+          sourceInstanceId: "lost-box",
+          sourceWorkspaceGeneration: 44,
+          recordedAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+        })}::jsonb) where id = ${f.leaseId}`;
+      const initiator = await claimedAttempt(f, f.session.id);
+      expect(
+        await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        }),
+      ).toMatchObject({
+        status: "authorized",
+        lane: archive === "none" ? "fresh_workspace" : "checkpoint",
+      });
+      if (archive === "none")
+        expect(
+          (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.recovery
+            .lateArchiveCapture,
+        ).toBeUndefined();
+    }
+  });
+
+  test("lease rows written by the current confirmDrainCold qualify without any new loss receipt", async () => {
+    for (const archive of ["checkpoint", "none"] as const) {
+      const f = await fixture();
+      const lost = await f.create();
+      const children = [await f.create(lost.sandboxGroupId), await f.create(lost.sandboxGroupId)];
+      const leaseId = crypto.randomUUID();
+      const sessionState = modalSnapshotSessionState(`im-deadline-${leaseId}`);
+      // Killed at its provider deadline, stamped when the box was created.
+      await shared.admin`insert into sandbox_leases(id,account_id,workspace_id,sandbox_group_id,backend,
+          liveness,instance_id,refcount,lease_epoch,workspace_generation,archive_generation,
+          provider_created_at,provider_deadline_at,resume_backend_id,resume_state,expires_at)
+        values(${leaseId},${f.accountId},${f.workspaceId},${lost.sandboxGroupId},'modal','draining',
+          'deadline-killed-box',0,7,44,${archive === "none" ? null : 10},
+          now() - interval '26 hours', now() - interval '2 hours','modal',
+          ${shared.admin.json(
+            archive === "none"
+              ? {
+                  backendId: "modal",
+                  sessionState: { providerState: { sandboxId: "deadline-killed-box" } },
+                }
+              : {
+                  backendId: "modal",
+                  sessionState: {
+                    ...sessionState,
+                    providerState: { sandboxId: "deadline-killed-box" },
+                  },
+                },
+          )},now() - interval '1 minute')`;
+      if (archive === "checkpoint") {
+        const binding = {
+          version: 1,
+          serverUrl: "https://modal.test",
+          workspaceName: "recovery-fixture",
+          environment: "main",
+        };
+        const artifact = await registerSandboxCheckpointArtifact(client.db, {
+          ...f.scope,
+          sandboxGroupId: lost.sandboxGroupId,
+          sourceLeaseId: leaseId,
+          sourceLeaseEpoch: 6,
+          sourceInstanceId: "deadline-killed-box",
+          sourceWorkspaceGeneration: 10,
+          providerBinding: binding,
+          providerBindingKey: JSON.stringify(binding),
+          workspaceArchive: sessionState.workspaceArchive as string,
+          workspaceArchiveMeta: sessionState.workspaceArchiveMeta as never,
+        });
+        await shared.admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${f.accountId}, true), set_config('opengeni.workspace_id', ${f.workspaceId}, true)`;
+          await tx`update sandbox_checkpoint_artifacts set state = 'current' where id = ${artifact.id}`;
+          await tx`update sandbox_leases set current_checkpoint_artifact_id = ${artifact.id} where id = ${leaseId}`;
+        });
+      }
+      expect(
+        await confirmDrainCold(client.db, {
+          ...f.scope,
+          sandboxGroupId: lost.sandboxGroupId,
+          expectedEpoch: 7,
+          providerMissingBeforeCapture: true,
+        }),
+      ).toEqual({ wentCold: true });
+      const cold = await readLease(client.db, f.workspaceId, lost.sandboxGroupId);
+      expect(cold?.resumeState?.opengeniProviderLoss).toMatchObject({
+        source: "drain_probe",
+        leaseId,
+        lostEpoch: 7,
+        instanceId: "deadline-killed-box",
+        workspaceGeneration: 44,
+      });
+      expect(cold?.recovery).toMatchObject({
+        provider: { status: "missing", diagnostic: "provider_not_found_before_workspace_capture" },
+        restore:
+          archive === "none"
+            ? { status: "unrecoverable", failureCode: "archive_unavailable", retryable: false }
+            : { status: "degraded", failureCode: "archive_generation_mismatch", retryable: false },
+      });
+      // Exactly the dead end older workers produced for every later turn.
+      await expect(
+        acquireLease(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          sandboxGroupId: lost.sandboxGroupId,
+          kind: "viewer",
+          holderId: "older-worker-view",
+          backend: "modal",
+          leaseTtlMs: 60_000,
+        }),
+      ).resolves.toMatchObject({ role: "blocked" });
+      const initiator = await claimedAttempt(f, lost.id);
+      expect(
+        await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: lost.id,
+          attemptId: initiator.attemptId,
+        }),
+      ).toMatchObject({
+        status: "authorized",
+        lane: archive === "none" ? "fresh_workspace" : "checkpoint",
+        groupSessionCount: 3,
+      });
+      for (const child of children) {
+        expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, child.id)).toContain(
+          archive === "none" ? "new empty workspace" : "shares with other sessions",
+        );
+      }
+      expect(
+        await acquireLease(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          sandboxGroupId: lost.sandboxGroupId,
+          kind: "turn",
+          holderId: initiator.attemptId,
+          backend: "modal",
+          leaseTtlMs: 60_000,
+        }),
+      ).toMatchObject({ role: "spawner" });
+    }
+  });
+
+  /** A turn that failed while its tool call was still pending, exactly as the
+   * lost-sandbox failure leaves it: the turn is terminal, the attempt closed. */
+  async function failedTurnWithPendingCall(f: RecoveryFixture, sessionId: string) {
+    const claim = await claimedAttempt(f, sessionId);
+    const [attempt] = await shared.admin<{ turn_id: string }[]>`
+      select turn_id from session_turn_attempts where id = ${claim.attemptId}`;
+    await shared.admin.begin(async (tx) => {
+      await tx`insert into session_pending_tool_calls (account_id, workspace_id, session_id,
+          turn_id, execution_generation, attempt_id, call_id, call_type, call_item,
+          call_item_codec_version)
+        values (${f.accountId}, ${f.workspaceId}, ${sessionId}, ${attempt!.turn_id}, 1,
+          ${claim.attemptId}, ${`stranded-${claim.attemptId}`}, 'function_call',
+          ${tx.json({ type: "function_call", name: "exec_command", callId: "stranded", arguments: "{}" })}, 1)`;
+      await tx`update session_turn_attempts set state = 'closed', outcome = 'failed',
+        closed_at = now(), quiesced_at = now() where id = ${claim.attemptId}`;
+      await tx`update session_turns set status = 'failed', active_attempt_id = null
+        where id = ${attempt!.turn_id}`;
+      await tx`update sessions set status = 'failed', active_turn_id = null where id = ${sessionId}`;
+    });
+    return attempt!.turn_id;
+  }
+
+  test("a pending tool call left by a failed turn does not block recovery; projection and turn start agree", async () => {
+    const { f, members } = await sharedGroup();
+    // A child's failed recovery attempt stranded a pending call.
+    await failedTurnWithPendingCall(f, members[1]!);
+    // The parent's own earlier failed turn stranded one too.
+    await failedTurnWithPendingCall(f, f.session.id);
+    // Retry would reopen that exact turn, so the banner points to a new
+    // message instead of promising a Retry the server must refuse.
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "blocked",
+      reason: "retry_tool_outcome_unresolved",
+    });
+    // Other members are not blocked by the stranded rows either.
+    expect(
+      await readPublicSandboxRecovery(client.db, { ...f, sessionId: members[2]! }),
+    ).toMatchObject({ status: "eligible", automaticLane: "checkpoint" });
+    // A new message recovers the whole group.
+    const initiator = await claimedAttempt(f, f.session.id);
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      }),
+    ).toMatchObject({ status: "authorized", lane: "checkpoint", groupSessionCount: 3 });
+  });
+
+  test("a live pending tool call in a member still blocks, and the projection says so", async () => {
+    const { f, members } = await sharedGroup();
+    const claim = await claimedAttempt(f, members[1]!);
+    const [attempt] = await shared.admin<{ turn_id: string }[]>`
+      select turn_id from session_turn_attempts where id = ${claim.attemptId}`;
+    // Waiting for human input: the turn can still resume this exact call.
+    await shared.admin.begin(async (tx) => {
+      await tx`insert into session_pending_tool_calls (account_id, workspace_id, session_id,
+          turn_id, execution_generation, attempt_id, call_id, call_type, call_item,
+          call_item_codec_version, interruption_kind)
+        values (${f.accountId}, ${f.workspaceId}, ${members[1]!}, ${attempt!.turn_id}, 1,
+          ${claim.attemptId}, 'human-input', 'function_call',
+          ${tx.json({ type: "function_call", name: "request_human_input", callId: "human-input", arguments: "{}" })}, 1,
+          'human_input')`;
+      await tx`update session_turn_attempts set state = 'closed', outcome = 'requires_action',
+        closed_at = now(), quiesced_at = now() where id = ${claim.attemptId}`;
+      await tx`update session_turns set status = 'requires_action', active_attempt_id = null
+        where id = ${attempt!.turn_id}`;
+    });
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "blocked",
+      reason: "shared_sandbox_member_active",
+    });
+    const initiator = await claimedAttempt(f, f.session.id);
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      }),
+    ).toEqual({ status: "not_eligible" });
+  });
+
+  test("every observed lost-lease shape has a forward path", async () => {
+    const legacyDescriptor = (meta: {
+      archiveSha256: string;
+      archiveBytes: number;
+      capturedAt: string;
+    }) => ({
+      version: 1,
+      revision: `wa1:${Date.parse(meta.capturedAt)}:${meta.archiveSha256}`,
+      archiveSha256: meta.archiveSha256,
+      archiveBytes: meta.archiveBytes,
+      capturedAt: meta.capturedAt,
+      workspace: {
+        algorithm: "sha256",
+        sha256: "b".repeat(64),
+        entryCount: 1,
+        fileCount: 1,
+        totalFileBytes: 7,
+      },
+    });
+    type Shape = {
+      name: string;
+      members: number;
+      mutate: (f: RecoveryFixture) => Promise<unknown>;
+      expected:
+        | { lane: "checkpoint" | "fresh_workspace"; reason?: string }
+        | { ordinaryRestore: true };
+    };
+    const setRestore = (f: RecoveryFixture, value: Record<string, string | boolean | null>) =>
+      shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+        '{opengeniRecovery,restore}', ${shared.admin.json(value)}::jsonb)
+        where id = ${f.leaseId}`;
+    const shapes: Shape[] = [
+      {
+        name: "degraded mismatch, v2 checkpoint, singleton",
+        members: 1,
+        mutate: async () => undefined,
+        expected: { lane: "checkpoint" },
+      },
+      {
+        name: "degraded mismatch, v2 checkpoint, shared",
+        members: 3,
+        mutate: async () => undefined,
+        expected: { lane: "checkpoint" },
+      },
+      {
+        name: "unrecoverable archive_unavailable, shared",
+        members: 3,
+        mutate: withoutAnyArchive,
+        expected: { lane: "fresh_workspace", reason: "archive_unavailable" },
+      },
+      {
+        name: "unrecoverable archive_unavailable, singleton",
+        members: 1,
+        mutate: withoutAnyArchive,
+        expected: { lane: "fresh_workspace", reason: "archive_unavailable" },
+      },
+      {
+        name: "degraded mismatch, legacy v1 descriptor, no registered checkpoint",
+        members: 1,
+        mutate: async (f) => {
+          const [row] = await shared.admin<
+            { meta: { archiveSha256: string; archiveBytes: number; capturedAt: string } }[]
+          >`
+            select resume_state #> '{sessionState,workspaceArchiveMeta}' as meta
+            from sandbox_leases where id = ${f.leaseId}`;
+          await shared.admin`update sandbox_leases set current_checkpoint_artifact_id = null,
+            resume_state = jsonb_set(resume_state, '{sessionState,workspaceArchiveMeta}',
+              ${shared.admin.json(legacyDescriptor(row!.meta))}::jsonb)
+            where id = ${f.leaseId}`;
+        },
+        expected: { lane: "fresh_workspace", reason: "checkpoint_unrestorable" },
+      },
+      {
+        name: "pending after a reset, v2 checkpoint older than the workspace",
+        members: 1,
+        mutate: (f) => setRestore(f, { status: "pending", rematerializationId: null }),
+        expected: { lane: "checkpoint" },
+      },
+      {
+        name: "pending with a complete v2 checkpoint",
+        members: 1,
+        mutate: async (f) => {
+          await setRestore(f, { status: "pending", rematerializationId: null });
+          await shared.admin`update sandbox_leases set workspace_generation = 10
+            where id = ${f.leaseId}`;
+        },
+        expected: { ordinaryRestore: true },
+      },
+      {
+        name: "degraded sandbox_rematerialization_failed after a system restore",
+        members: 1,
+        mutate: async (f) => {
+          await setRestore(f, {
+            status: "degraded",
+            failureCode: "sandbox_rematerialization_failed",
+            retryable: true,
+          });
+          await shared.admin`update sandbox_leases set resume_state = resume_state ||
+            ${shared.admin.json({
+              opengeniHistoricalArchiveRecoveryId: crypto.randomUUID(),
+              opengeniAutomaticCheckpointRecovery: {
+                operationId: crypto.randomUUID(),
+                sessionId: f.session.id,
+                status: "failed",
+              },
+            })}::jsonb where id = ${f.leaseId}`;
+        },
+        expected: { lane: "checkpoint" },
+      },
+      {
+        name: "degraded sandbox_rematerialization_failed without a system decision",
+        members: 1,
+        mutate: (f) =>
+          setRestore(f, {
+            status: "degraded",
+            failureCode: "sandbox_rematerialization_failed",
+            retryable: true,
+          }),
+        expected: { lane: "checkpoint" },
+      },
+    ];
+    for (const shape of shapes) {
+      const f = await fixture();
+      for (let member = 1; member < shape.members; member++)
+        await f.create(f.session.sandboxGroupId);
+      await shape.mutate(f);
+      const initiator = await claimedAttempt(f, f.session.id);
+      const decision = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      });
+      if ("ordinaryRestore" in shape.expected) {
+        expect(decision, shape.name).toEqual({ status: "not_eligible" });
+        const elected = await acquireLease(client.db, {
+          ...groupLease(f),
+          kind: "turn",
+          holderId: initiator.attemptId,
+          backend: "modal",
+          leaseTtlMs: 60_000,
+        });
+        expect(elected, shape.name).toMatchObject({
+          role: "spawner",
+          lease: { archiveComplete: true },
+        });
+        expect(
+          await beginSandboxRematerialization(client.db, {
+            ...groupLease(f),
+            expectedEpoch: elected.lease.leaseEpoch,
+            rematerializationId: crypto.randomUUID(),
+          }),
+          shape.name,
+        ).toMatchObject({ status: "started" });
+        continue;
+      }
+      expect(decision, shape.name).toMatchObject({
+        status: "authorized",
+        lane: shape.expected.lane,
+        groupSessionCount: shape.members,
+        ...(shape.expected.reason ? { reason: shape.expected.reason } : {}),
+      });
+      // The decided lane is also what the next spawner elects.
+      const elected = await acquireLease(client.db, {
+        ...groupLease(f),
+        kind: "turn",
+        holderId: initiator.attemptId,
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      });
+      expect(elected, shape.name).toMatchObject({ role: "spawner" });
+      if (shape.expected.lane === "checkpoint")
+        expect(elected.lease.historicalRecoveryAuthorized, shape.name).toBe(true);
+      else expect(elected.lease.freshWorkspaceRecoveryId, shape.name).toBeTruthy();
+    }
+  });
+
+  /** An authorized empty-workspace decision for a shared group of three. */
+  async function freshDecision() {
+    const { f, members } = await sharedGroup();
+    await withoutAnyArchive(f);
+    const initiator = await claimedAttempt(f, f.session.id);
+    const decision = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+      ...f.scope,
+      sessionId: f.session.id,
+      attemptId: initiator.attemptId,
+    });
+    if (decision.status === "not_eligible" || decision.lane !== "fresh_workspace")
+      throw new Error("expected an empty-workspace decision");
+    return { f, members, initiator, decision };
+  }
+
+  test("a fresh box drained before publication keeps the decision; members never get a legacy archive back", async () => {
+    const { f, members, initiator, decision } = await freshDecision();
+    const elected = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "turn",
+      holderId: initiator.attemptId,
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    await recordWarmingSandboxCreated(client.db, {
+      ...groupLease(f),
+      expectedEpoch: elected.lease.leaseEpoch,
+      rematerializationId: null,
+      instanceId: "fresh-box-orphaned",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "fresh-box-orphaned" } },
+      },
+      leaseTtlMs: 60_000,
+    });
+    // The spawner died after create; the reaper drains and stops that box.
+    await shared.admin`delete from sandbox_lease_holders where lease_id = ${f.leaseId}`;
+    await shared.admin`update sandbox_leases set liveness = 'draining', refcount = 0,
+      turn_holders = 0, expires_at = now() - interval '1 second' where id = ${f.leaseId}`;
+    expect(
+      await confirmDrainCold(client.db, {
+        ...groupLease(f),
+        expectedEpoch: elected.lease.leaseEpoch,
+      }),
+    ).toEqual({ wentCold: true });
+    const cold = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(cold?.resumeState?.opengeniFreshWorkspaceRecovery).toMatchObject({
+      status: "accepted",
+      operationId: decision.operationId,
+    });
+    expect(cold?.recovery.restore.status).toBe("unrecoverable");
+    const next = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "after-orphaned-fresh-box",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(next).toMatchObject({
+      role: "spawner",
+      lease: { freshWorkspaceRecoveryId: decision.operationId },
+    });
+    for (const sessionId of members)
+      expect(await sessionHoldsFreshWorkspaceRecovery(client.db, f.workspaceId, sessionId)).toBe(
+        true,
+      );
+    const unrelated = await f.create();
+    expect(await sessionHoldsFreshWorkspaceRecovery(client.db, f.workspaceId, unrelated.id)).toBe(
+      false,
+    );
+  });
+
+  test("human consent and a pending empty-workspace decision are mutually exclusive", async () => {
+    const f = await fixture();
+    await withoutAnyArchive(f);
+    // Give the singleton a registered checkpoint again so consent is otherwise
+    // structurally possible, but decide the empty workspace first.
+    const initiator = await claimedAttempt(f, f.session.id);
+    const decision = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+      ...f.scope,
+      sessionId: f.session.id,
+      attemptId: initiator.attemptId,
+    });
+    expect(decision).toMatchObject({ status: "authorized", lane: "fresh_workspace" });
+    await expect(f.consent()).rejects.toThrow("changed");
+    // A public recovery state, however it arrived, disables the empty spawn.
+    await shared.admin`update sandbox_leases set public_recovery = ${shared.admin.json({
+      version: 1,
+      status: "failed",
+      sessionId: f.session.id,
+      subjectId: f.subjectId,
+      operationId: crypto.randomUUID(),
+      selection: f.request.selection,
+    })}::jsonb where id = ${f.leaseId}`;
+    expect(
+      await acquireLease(client.db, {
+        ...groupLease(f),
+        kind: "viewer",
+        holderId: "consent-excludes-fresh",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      }),
+    ).toMatchObject({ role: "blocked" });
+  });
+
+  test("a queued turn's pending call is live; a member joining a pending decision still gets its warning", async () => {
+    const { f, members } = await sharedGroup();
+    const claim = await claimedAttempt(f, members[1]!);
+    const [attempt] = await shared.admin<{ turn_id: string }[]>`
+      select turn_id from session_turn_attempts where id = ${claim.attemptId}`;
+    await shared.admin.begin(async (tx) => {
+      await tx`insert into session_pending_tool_calls (account_id, workspace_id, session_id,
+          turn_id, execution_generation, attempt_id, call_id, call_type, call_item,
+          call_item_codec_version)
+        values (${f.accountId}, ${f.workspaceId}, ${members[1]!}, ${attempt!.turn_id}, 1,
+          ${claim.attemptId}, 'requeued-call', 'function_call',
+          ${tx.json({ type: "function_call", name: "exec_command", callId: "requeued-call", arguments: "{}" })}, 1)`;
+      await tx`update session_turn_attempts set state = 'closed', outcome = 'failed',
+        closed_at = now(), quiesced_at = now() where id = ${claim.attemptId}`;
+      await tx`update session_turns set status = 'queued', active_attempt_id = null
+        where id = ${attempt!.turn_id}`;
+    });
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "blocked",
+      reason: "shared_sandbox_member_active",
+    });
+    await shared.admin`update session_turns set status = 'failed' where id = ${attempt!.turn_id}`;
+
+    const { f: g, initiator, decision } = await freshDecision();
+    // The decision's box is being created when a new child joins the group.
+    await acquireLease(client.db, {
+      ...groupLease(g),
+      kind: "turn",
+      holderId: initiator.attemptId,
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    const late = await g.create(g.session.sandboxGroupId);
+    expect(await getSandboxRecoveryDiscontinuity(client.db, g.workspaceId, late.id)).toBeNull();
+    const lateClaim = await claimedAttempt(g, late.id);
+    expect(
+      await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...g.scope,
+        sessionId: late.id,
+        attemptId: lateClaim.attemptId,
+      }),
+    ).toMatchObject({ status: "already_authorized", operationId: decision.operationId });
+    expect(await getSandboxRecoveryDiscontinuity(client.db, g.workspaceId, late.id)).toContain(
+      "new empty workspace",
+    );
   });
 });

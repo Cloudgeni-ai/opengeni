@@ -9,13 +9,13 @@ export type ClaudeUsageObservation = {
   observedAt: string;
   source: "response_headers" | "provider";
 };
-const prefixes: Record<string, string> = {
-  five_hour: "5h",
-  seven_day: "7d",
-  seven_day_opus: "7d-opus",
-  seven_day_sonnet: "7d-sonnet",
-  seven_day_overage_included: "7d-overage-included",
-  overage: "overage",
+const prefixes: Record<string, string[]> = {
+  five_hour: ["5h"],
+  seven_day: ["7d"],
+  seven_day_opus: ["7d-opus"],
+  seven_day_sonnet: ["7d-sonnet"],
+  seven_day_overage_included: ["7d_oi", "7d-overage-included"],
+  overage: ["overage"],
 };
 function percent(value: unknown, scale: number): number | null {
   if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return null;
@@ -36,11 +36,20 @@ export function parseClaudeUsageHeaders(
   now = new Date(),
 ): ClaudeUsageObservation | null {
   const observedAt = now.toISOString();
+  const claim = ClaudeUsageWindowId.safeParse(
+    headers.get("anthropic-ratelimit-unified-representative-claim"),
+  );
+  const claimedStatus = status(headers.get("anthropic-ratelimit-unified-status"));
+  const claimedReset = epoch(headers.get("anthropic-ratelimit-unified-reset"));
   const windows = ClaudeUsageWindowId.options.flatMap((id) => {
-    const prefix = `anthropic-ratelimit-unified-${prefixes[id]}`;
-    const usedPercent = percent(headers.get(`${prefix}-utilization`), 100);
-    const resetsAt = epoch(headers.get(`${prefix}-reset`));
-    const windowStatus = status(headers.get(`${prefix}-status`));
+    const header = (suffix: string) =>
+      prefixes[id]!.map((prefix) =>
+        headers.get(`anthropic-ratelimit-unified-${prefix}-${suffix}`),
+      ).find((value) => value !== null) ?? null;
+    const representative = claim.success && claim.data === id;
+    const usedPercent = percent(header("utilization"), 100);
+    const resetsAt = epoch(header("reset")) ?? (representative ? claimedReset : null);
+    const windowStatus = status(header("status")) ?? (representative ? claimedStatus : null);
     if (usedPercent === null && resetsAt === null && windowStatus === null) return [];
     return [{ id, usedPercent, resetsAt, status: windowStatus, observedAt }];
   });

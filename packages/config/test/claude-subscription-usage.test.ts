@@ -7,6 +7,43 @@ import {
 } from "../src/claude-subscription-usage";
 
 const now = new Date("2026-09-30T14:00:00Z");
+test("canonical included-overage headers and representative model caps retain exact unknown utilization", () => {
+  const result = parseClaudeUsageHeaders(
+    new Headers({
+      "anthropic-ratelimit-unified-7d_oi-utilization": ".25",
+      "anthropic-ratelimit-unified-7d_oi-reset": "1791064800",
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-reset": "1791064800",
+      "anthropic-ratelimit-unified-representative-claim": "seven_day_opus",
+    }),
+    now,
+  )!;
+  expect(result.windows).toEqual([
+    {
+      id: "seven_day_opus",
+      usedPercent: null,
+      resetsAt: "2026-10-03T22:00:00.000Z",
+      status: "rejected",
+      observedAt: now.toISOString(),
+    },
+    {
+      id: "seven_day_overage_included",
+      usedPercent: 25,
+      resetsAt: "2026-10-03T22:00:00.000Z",
+      status: null,
+      observedAt: now.toISOString(),
+    },
+  ]);
+  expect(
+    parseClaudeUsageHeaders(
+      new Headers({
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-representative-claim": "unknown",
+      }),
+      now,
+    ),
+  ).toBeNull();
+});
 test("captured quota headers normalize the 5-hour and weekly windows independently", () => {
   const observation = parseClaudeUsageHeaders(
     new Headers({

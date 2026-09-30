@@ -2,6 +2,7 @@ import {
   getSessionAuthorityProjection,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
+  loadClaudeSubscriptionUsageCredential,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
@@ -40,13 +41,9 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import {
-  emptyClaudeUsage,
-  mergeClaudeUsage,
-  parseClaudeUsageHeaders,
-  parseModelProvidersJson,
-} from "@opengeni/config";
+import { parseModelProvidersJson } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
+import { createClaudeUsageObserver } from "./claude-usage-observer";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -924,46 +921,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             providerTurn.xaiRequestContext = authorization.context;
           }
-          const claudeProviders = new Map(
-            parseModelProvidersJson(runSettings.modelProvidersJson)
-              .filter(
-                (provider) =>
-                  provider.kind === "claude-subscription-workspace" ||
-                  provider.kind === "claude-subscription-organization",
-              )
-              .map((provider) => [provider.id, provider]),
+          const claudeUsageObserver = await createClaudeUsageObserver(
+            parseModelProvidersJson(runSettings.modelProvidersJson),
+            providerTurn.latestClaudeUsage,
+            (scope) =>
+              loadClaudeSubscriptionUsageCredential(db, settings, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                scope,
+              }),
           );
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsageObserver((providerId, response) => {
-              const provider = claudeProviders.get(providerId);
-              if (!provider?.apiKey) return;
-              const scope =
-                provider.kind === "claude-subscription-workspace" ? "workspace" : "organization";
-              const previous = providerTurn.latestClaudeUsage.get(scope);
-              let observation = parseClaudeUsageHeaders(response.headers);
-              if (observation && previous?.observation) {
-                const merged = mergeClaudeUsage(
-                  mergeClaudeUsage(emptyClaudeUsage(1), previous.observation),
-                  observation,
-                );
-                observation = {
-                  windows: merged.windows,
-                  observedAt: merged.observedAt!,
-                  source: merged.source!,
-                };
-              }
-              if (observation || response.status === 401)
-                providerTurn.latestClaudeUsage.set(scope, {
-                  token: provider.apiKey,
-                  ...(previous?.observation && !observation
-                    ? { observation: previous.observation }
-                    : {}),
-                  ...(observation ? { observation } : {}),
-                  ...(response.status === 401
-                    ? { refresh: { status: "reconnect", checkedAt: new Date().toISOString() } }
-                    : {}),
-                });
-            }, fn);
+            withClaudeUsageObserver(claudeUsageObserver, fn);
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>

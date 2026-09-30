@@ -418,6 +418,16 @@ retaining its full projection in the new audit receipt. Never clear public state
 alone, erase permanent consent receipts, or reuse completed consent for automatic
 recovery after a later loss.
 
+System continuity after definitive managed-provider loss (0526/0548) decides for
+the complete quiescent sandbox group: its latest verified checkpoint, or else a
+new EMPTY workspace. Both write a permanent warning receipt for every member before
+any box exists; the empty lane hydrates nothing, not even a per-session legacy
+archive, and keeps the lost archive evidence. Loss needs durable evidence from a
+loss transition; a failed replacement box is `replacement_failed`, never loss.
+Never bypass a complete archive, abandon a checkpoint for a non-definitive restore
+failure, or go empty before the lost box's provider lifetime ends. Keep consent
+singleton-only and never replay unknown outcomes. See `docs/run-lifecycle.md`.
+
 Sandbox acquisition and workspace mutation waits honor the first observed
 capture's durable remaining timeout once, within the lifecycle ceiling.
 Expired or replacement captures never replenish a caller's wait. Budget expiry

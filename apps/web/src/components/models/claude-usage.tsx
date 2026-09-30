@@ -27,6 +27,7 @@ export function useClaudeUsage({
   credentialId,
   credentialVersion,
   canManage,
+  onCredentialChanged,
 }: {
   client: OpenGeniBrowserClient;
   scope: "workspace" | "organization";
@@ -36,10 +37,13 @@ export function useClaudeUsage({
   credentialId?: string | null;
   credentialVersion?: number | null;
   canManage: boolean;
+  onCredentialChanged?: () => Promise<unknown>;
 }): ClaudeUsageState {
   const key = `${scope}:${scopeId}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
   const currentKey = useRef(key);
   currentKey.current = key;
+  const credentialChanged = useRef(onCredentialChanged);
+  credentialChanged.current = onCredentialChanged;
   const generation = useRef(0);
   const refreshingKey = useRef<{ key: string; request: number } | null>(null);
   const [state, setState] = useState<{
@@ -69,11 +73,13 @@ export function useClaudeUsage({
                 : client.getOrganizationClaudeSubscriptionUsage(scopeId));
         if (currentKey.current !== key || generation.current !== request) return;
         if (
-          credentialVersion !== undefined &&
-          credentialVersion !== null &&
-          result.credentialVersion !== credentialVersion
+          !result.connected ||
+          (credentialVersion !== undefined &&
+            credentialVersion !== null &&
+            result.credentialVersion !== credentialVersion)
         ) {
           setState({ key, value: null, error: true, loading: false, refreshing: false });
+          await credentialChanged.current?.();
           return;
         }
         setState({ key, value: result, error: false, loading: false, refreshing: false });
@@ -144,24 +150,54 @@ export function claudeUsageReadings(
       label: labels[id],
       percent:
         !expired && window?.usedPercent != null
-          ? Math.round(Math.min(100, Math.max(0, 100 - window.usedPercent)))
+          ? Math.min(100, Math.max(0, 100 - window.usedPercent))
           : null,
+      ...(!expired && window?.status === "rejected" && id !== "overage"
+        ? { limitReached: true }
+        : {}),
+      ...(!expired &&
+      window?.status === "rejected" &&
+      id === "overage" &&
+      window.usedPercent === null
+        ? { valueLabel: "Unavailable" }
+        : {}),
       ...(reset !== null && !expired ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
     };
   });
 }
 
+/** Omitted windows retain their own observation time, not the latest response's. */
+export function claudeUsageReportedAt(
+  value: ClaudeSubscriptionUsage | null,
+  now: number,
+): string | null {
+  const displayed =
+    value?.windows.filter((window) => !window.resetsAt || Date.parse(window.resetsAt) > now) ?? [];
+  return (
+    displayed.reduce<string | null>(
+      (oldest, window) => (!oldest || window.observedAt < oldest ? window.observedAt : oldest),
+      null,
+    ) ??
+    value?.observedAt ??
+    null
+  );
+}
+
 export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
   const now = useMinuteNow();
   const readings = claudeUsageReadings(state.value, now);
+  const planReadings = readings.filter(
+    (item) => item.label !== labels.overage && item.label !== labels.seven_day_overage_included,
+  );
   const reading =
-    readings.find((item) => item.percent === 0) ??
-    readings.find((item) => item.percent !== null) ??
+    planReadings.find((item) => item.limitReached || item.percent === 0) ??
+    planReadings.find((item) => item.percent !== null) ??
     readings[0]!;
   return (
     <UsageReadout
-      window={reading.label}
+      window={reading.label.replace(/^Weekly/, "this week").replace(/^5-hour$/, "this period")}
       percent={reading.percent}
+      limitReached={reading.limitReached}
       resetsLabel={reading.resetsLabel}
       loading={state.loading}
     />
@@ -172,7 +208,8 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
   const now = useMinuteNow();
   const value = state.value;
   const readings = claudeUsageReadings(value, now);
-  const stale = Boolean(value?.observedAt && now - Date.parse(value.observedAt) > 5 * 60_000);
+  const reportedAt = claudeUsageReportedAt(value, now);
+  const stale = Boolean(reportedAt && now - Date.parse(reportedAt) > 5 * 60_000);
   const disabled =
     value?.refreshStatus === "scope_required"
       ? "This setup token reports usage with model responses. Readings update when Claude is used."
@@ -181,7 +218,9 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
         : undefined;
   const error =
     state.error || value?.refreshStatus === "unavailable"
-      ? "Couldn't check usage. Last reported readings are shown."
+      ? value?.windows.length
+        ? "Couldn't check usage. Last reported readings are shown."
+        : "Couldn't check usage. Try again."
       : value?.refreshStatus === "reconnect"
         ? "Claude no longer accepts this token. Replace it to reconnect."
         : undefined;
@@ -195,9 +234,9 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
         loading={state.loading}
         refreshing={state.refreshing}
         checked={
-          value?.observedAt ? (
+          reportedAt ? (
             <span>
-              <RelativeTime date={value.observedAt} prefix="Reported" now={now} />
+              <RelativeTime date={reportedAt} prefix="Reported" now={now} />
               {stale ? " · may be out of date" : null}
             </span>
           ) : (

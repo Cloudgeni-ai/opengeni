@@ -166,8 +166,9 @@ Rollback after use is limited to warning-compatible builds. Session deletion
 alone removes its warning receipt through the legitimate parent cascade.
 
 This adds canonical-human consent for singleton managed-home Modal recovery only.
-It does not enable automatic rollback, shared-group recovery, command replay,
-empty reset, or a new cancellation/reaper protocol. See [run lifecycle](run-lifecycle.md).
+Consent itself never recovers shared groups, replays commands, resets to an empty
+workspace or changes the cancellation/reaper protocol. System continuity after
+definitive loss is separate (0526 and 0548 below). See [run lifecycle](run-lifecycle.md).
 
 ## Automatic checkpoint continuity (0526)
 
@@ -179,13 +180,13 @@ transaction-local warning protocol v2 for sessions with an automatic receipt;
 human-consented sessions still require v1. Never put either declaration in a
 role default, pool configuration or deployment environment.
 
-The worker may automatically select only the registered CURRENT native Modal
-checkpoint of a singleton home when definitive provider loss made its archive
-generation older than the workspace generation. Selection is a separate
-system-attributed durable receipt, not human consent or proof of restore. The
-ordinary provider snapshot and artifact verification must finish before the box
-is usable. Other degraded failures, unverified archives, shared groups, live
-writers and no-checkpoint cases remain blocked. Every affected agent attempt
+The worker may automatically select the registered CURRENT native Modal
+checkpoint of a managed home when definitive provider loss made its archive
+generation older than the workspace generation (shared groups since 0548).
+Selection is a separate system-attributed durable receipt, not human consent or
+proof of restore. The ordinary provider snapshot and artifact verification must
+finish before the box is usable. Live writers in any group member still block.
+Every affected agent attempt
 reconstructs a deterministic warning after the static instruction prefix;
 unknown command outcomes are never replayed. Operator metrics and alerts
 record the fallback even when the next turn succeeds. A read-only, aggregate
@@ -194,6 +195,40 @@ the last 30 minutes of provider-loss and fallback decisions from a small
 indexed private ledger, committed with their RLS-verified source audit events.
 The ledger stores only event IDs and fixed kinds, not tenant or provider data;
 normal role provisioning grants exact EXECUTE-only capabilities, not table reads.
+
+## Lost sandbox group continuity (0548)
+
+`0548_lost_sandbox_group_continuity.sql` is rolling. It only extends guards for a
+new receipt kind and adds one fixed operator-ledger kind; rows and receipts that
+older images write keep their exact 0526 behavior, and older images never create
+the new receipt. Apply it before rolling API/control/turn images, then provision
+roles as usual. During the overlap an older worker fails closed (SQLSTATE
+`55000` at attempt claim, retried by the ordinary wake) only for a session that
+holds an empty-workspace receipt, and older API/worker images keep refusing the
+new lanes, so affected sessions stay blocked until the new images serve them.
+Rollback of images after a fresh-workspace decision is limited to v3-warning
+builds for those sessions; do not roll the migration back.
+
+After definitive Modal loss (the reaper's missing-before-capture commit or an
+exact warm-instance `NOT_FOUND`, never a failed replacement box) the worker
+decides, for the complete quiescent sandbox group, either the latest verified
+checkpoint (outcomes `selected` and `selected_shared`) or, when none can be
+restored automatically, continuation on a new EMPTY workspace
+(`fresh_workspace`). Both write one permanent warning receipt per group member;
+the empty-workspace receipt requires warning protocol v3 at claim. The empty
+workspace additionally waits until the lost box is past its hard provider
+lifetime (its stamped deadline plus one hour, else loss plus 24 hours). Only a
+definitive, non-retryable content-integrity failure abandons a checkpoint; a
+missing archive object or unconfigured archive storage never does, so fix
+storage and Retry. Other restore failures retry with backoff and then wait for
+an operator. A complete archive is never
+bypassed. The lost archive fields and checkpoint references stay on the lease
+for review. Sessions stuck before this release qualify on their next turn or
+Retry when their loss is provable from the row or its loss audit; a capture
+that was in flight when the box vanished may publish only within one hour, and
+decisions wait for that window. `OpenGeniModalFreshWorkspaceContinuity` warns
+on each empty-workspace decision; see [run lifecycle](run-lifecycle.md) and the
+Sandbox Health dashboard notes.
 
 ## Selective Knowledge source discovery (0469)
 

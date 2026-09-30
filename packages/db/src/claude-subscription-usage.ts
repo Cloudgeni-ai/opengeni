@@ -120,7 +120,7 @@ export async function readClaudeSubscriptionUsage(db: Database, scope: ClaudeUsa
   return scoped(db, scope, async (tx) => usage(await connection(tx, scope)));
 }
 
-/** Secret accessor for the authorized provider refresh path only. */
+/** Secret accessor for authorized refreshes and worker response-observation binding. */
 export async function loadClaudeSubscriptionUsageCredential(
   db: Database,
   settings: Settings,

@@ -1,12 +1,14 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { ClaudeSubscriptionUsage } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   ClaudeUsage,
+  ClaudeUsageReadout,
   claudeUsageReadings,
+  claudeUsageReportedAt,
   useClaudeUsage,
   type ClaudeUsageState,
 } from "./claude-usage";
@@ -63,6 +65,82 @@ test("meters use remaining percentages, retain exact resets and invalidate elaps
     percent: null,
   });
   expect(claudeUsageReadings(null, 0).every((reading) => reading.percent === null)).toBe(true);
+});
+test("near-full allowed quotas stay available and explicit rejection needs no invented percentage", async () => {
+  const value = usage();
+  value.windows = [{ ...value.windows[0]!, usedPercent: 99.6, status: "allowed" }];
+  const state: ClaudeUsageState = {
+    value,
+    loading: false,
+    refreshing: false,
+    error: false,
+    canRefresh: false,
+    refresh: async () => {},
+  };
+  await act(async () =>
+    root.render(
+      <>
+        <ClaudeUsage state={state} />
+        <ClaudeUsageReadout state={state} />
+      </>,
+    ),
+  );
+  expect(container.textContent).toContain("<1% left");
+  expect(container.textContent).not.toContain("Limit reached");
+  value.windows[0] = { ...value.windows[0]!, usedPercent: null, status: "rejected" };
+  await act(async () =>
+    root.render(
+      <>
+        <ClaudeUsage state={{ ...state }} />
+        <ClaudeUsageReadout state={{ ...state }} />
+      </>,
+    ),
+  );
+  expect(container.querySelector('[data-slot="usage-readout"]')?.textContent).toBe("Limit reached");
+  expect(
+    container.querySelector('[data-slot="usage-readout"]')?.hasAttribute("aria-valuenow"),
+  ).toBe(false);
+  expect(container.querySelector('[data-level="exhausted"]')).not.toBeNull();
+});
+test("fresh partial headers cannot make an older retained weekly reading look current", () => {
+  const value = usage();
+  value.windows[0]!.observedAt = "2026-09-30T14:00:00Z";
+  value.windows[1]!.observedAt = "2026-09-29T14:00:00Z";
+  expect(claudeUsageReportedAt(value, Date.parse("2026-09-30T14:00:00Z"))).toBe(
+    "2026-09-29T14:00:00Z",
+  );
+});
+test("an external credential rotation reloads metadata and resumes usage reads", async () => {
+  let serverVersion = 1,
+    metadataReads = 0;
+  const client = {
+    getOrganizationClaudeSubscriptionUsage: async () => usage(serverVersion),
+    refreshOrganizationClaudeSubscriptionUsage: async () => usage(serverVersion),
+  } as unknown as OpenGeniBrowserClient;
+  let state!: ClaudeUsageState;
+  function Harness() {
+    const [version, setVersion] = useState(1);
+    state = useClaudeUsage({
+      client,
+      scope: "organization",
+      scopeId: "org",
+      enabled: true,
+      connected: true,
+      credentialVersion: version,
+      canManage: true,
+      onCredentialChanged: async () => {
+        metadataReads++;
+        setVersion(serverVersion);
+      },
+    });
+    return null;
+  }
+  await act(async () => root.render(<Harness />));
+  serverVersion = 2;
+  await act(async () => state.refresh());
+  expect(state.value?.credentialVersion).toBe(2);
+  expect(state.error).toBe(false);
+  expect(metadataReads).toBe(1);
 });
 test("shared usage components explain scope errors and never claim unknown quotas are full", async () => {
   const state: ClaudeUsageState = {
