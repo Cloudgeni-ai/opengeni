@@ -110,6 +110,7 @@ import {
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
+  PROVIDER_RATE_LIMIT_BACKOFF_MS,
   providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
   sessionTitleCodexRequestContext,
@@ -6007,6 +6008,21 @@ describe("transient provider error classifier", () => {
         retryAfterMs: 12_000,
       }),
     ).toEqual({ status: "recovering", continueDelayMs: 12_000 });
+    // A one-second retry-after on a per-minute limit still waits out the window.
+    expect(
+      [1, 2, 3, 4, 5].map((attemptNumber) =>
+        providerRecoveryResult({
+          failureCode: "provider_rate_limited",
+          attemptNumber,
+          retryAfterMs: 1_000,
+        }),
+      ),
+    ).toEqual(
+      PROVIDER_RATE_LIMIT_BACKOFF_MS.map((continueDelayMs) => ({
+        status: "recovering",
+        continueDelayMs,
+      })),
+    );
     expect(
       providerRecoveryResult({
         failureCode: "provider_unavailable",

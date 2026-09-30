@@ -710,9 +710,12 @@ the worker clear its in-memory copy. Failed requests and late/zombie completion
 events cannot reset the streak. Successful inference between transient outages
 therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
-An explicit provider retry hint is a lower bound. Rate limits use the provider's
-`Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing.
+An explicit provider retry hint is a lower bound. Rate limits wait for the
+longer of the provider's `Retry-After` (60 s when absent) and an escalating floor
+of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
+the floor, a one-second hint on a per-minute token limit spends every automatic
+recovery before the window resets. Other retryable classes keep their existing
+pacing.
 An exhausted API-key provider quota is not a rate limit and is never retried:
 a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
 tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
