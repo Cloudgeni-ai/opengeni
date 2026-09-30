@@ -7,6 +7,7 @@ import {
   appendSessionEvents,
   bootstrapWorkspace,
   checkWorkspaceAllowance,
+  claimSessionWorkForAttempt,
   createDb,
   setMemberAllowance,
   setWorkspaceAllowance,
@@ -88,6 +89,20 @@ describe("MCP real PostgreSQL exhausted-counter admission", () => {
         initialMessage: "Initially allowed",
         idempotencyKey: crypto.randomUUID(),
       });
+      const caller = await createSessionForRequest(deps, grant, grant.workspaceId, {
+        initialMessage: "Delegated caller before exhaustion",
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+        sessionId: caller.id,
+        workflowId: `session-${caller.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error("Delegated caller was not claimed");
       const policyScope = {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -162,6 +177,67 @@ describe("MCP real PostgreSQL exhausted-counter admission", () => {
           expect(JSON.stringify(result)).not.toMatch(/subscription|buy credits|sql/i);
         }
       }
+      const delegatedServer = buildOpenGeniMcpServer(deps, {
+        ...grant,
+        principalKind: "agent_attempt",
+        metadata: {
+          sessionId: caller.id,
+          turnId: claimed.turn.id,
+          attemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+          firstPartyMcpTools: ["session_send_message", "session_steer"],
+        },
+      });
+      const delegatedTools = (
+        delegatedServer as unknown as {
+          _registeredTools: typeof tools;
+        }
+      )._registeredTools;
+      const commandState = async () => {
+        const [state] = await shared.admin`
+          select
+            (select jsonb_agg(to_jsonb(u) order by u.id) from session_system_updates u
+              where u.workspace_id=${grant.workspaceId}) as updates,
+            (select jsonb_agg(to_jsonb(i) order by i.id) from session_attempt_interruptions i
+              where i.workspace_id=${grant.workspaceId}) as interruptions,
+            (select jsonb_agg(to_jsonb(r) order by r.id) from session_command_receipts r
+              where r.workspace_id=${grant.workspaceId}) as receipts,
+            (select jsonb_agg(to_jsonb(t) order by t.id) from session_turns t
+              where t.workspace_id=${grant.workspaceId}) as turns`;
+        return state;
+      };
+      const commandBefore = await commandState();
+      for (const [name, args] of [
+        [
+          "session_send_message",
+          {
+            sessionId: target.id,
+            text: "Refuse delegated Send",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        ],
+        [
+          "session_steer",
+          {
+            sessionId: target.id,
+            instruction: "Refuse delegated Steer",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        ],
+      ] as const) {
+        for (let repeat = 0; repeat < 2; repeat++) {
+          const result = await delegatedTools[name]!.handler(args, {});
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent?.error).toMatchObject({
+            code: "allowance_exhausted",
+            retryable: false,
+            scope,
+            resetsAt: refusal!.resetsAt,
+            ...(scope === "member" ? { subjectId } : {}),
+          });
+        }
+      }
+      expect(await commandState()).toEqual(commandBefore);
       // Retry is HTTP-only, not an MCP catalog entry. Exercise its registered
       // handler and real frozen-turn allowance check, not a synthetic probe.
       const [failure] = await appendSessionEvents(client.db, grant.workspaceId, target.id, [

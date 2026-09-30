@@ -17,7 +17,10 @@ import type {
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
 import { DraftTimelineAnnotations } from "@opengeni/contracts";
+import type { Settings } from "@opengeni/config";
+import { HTTPException } from "hono/http-exception";
 import {
+  checkWorkspaceAllowance,
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
   getComposerDraftInTransaction,
@@ -25,6 +28,8 @@ import {
   getSessionEvent,
   getWorkspaceControlEvent,
   getSessionQueueSnapshot,
+  frozenInitiatorForCommandActor,
+  isCodexBilledTurn,
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
@@ -53,6 +58,8 @@ import {
 import type { SessionWorkflowClient } from "../dependencies";
 import { normalizeResources } from "../domain/resources";
 import { validateDraftTimelineAnnotations } from "../domain/timeline-annotations";
+import { initiatingHumanForAllowance } from "../domain/sessions";
+import { modelFundingForAdmission } from "../billing/limits";
 import {
   requireSessionAuthorization,
   type ResolvedSessionAuthorization,
@@ -146,6 +153,46 @@ function agentActor(context: AgentSessionCommandContext) {
     attemptId: context.callerAttemptId,
     executionGeneration: context.callerExecutionGeneration,
   };
+}
+
+/**
+ * Called inside the command's exact live-attempt fence, after receipt recovery
+ * but before any fresh work or Steer interruption. Attribution comes from the
+ * caller's accepted turn, never the target creator or request subject.
+ */
+async function assertFreshAgentCommandAllowance(
+  tx: SessionActivityDatabase,
+  deps: { settings?: Settings },
+  context: AgentSessionCommandContext,
+  targetSessionId: string,
+): Promise<void> {
+  const target = await getSession(tx, context.workspaceId, targetSessionId);
+  if (!target || target.accountId !== context.accountId) {
+    throw new HTTPException(404, { message: "Target session not found" });
+  }
+  if (deps.settings) {
+    const codexBilled = await isCodexBilledTurn({
+      db: tx,
+      settings: deps.settings,
+      workspaceId: context.workspaceId,
+      model: target.model,
+    });
+    if (modelFundingForAdmission(deps.settings, target.model, codexBilled).fundedWithoutCredits) {
+      return;
+    }
+  }
+  const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
+  const refusal = await checkWorkspaceAllowance(tx, {
+    accountId: target.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: initiatingHumanForAllowance(frozen),
+  });
+  if (refusal) {
+    throw new HTTPException(402, {
+      message: refusal.message,
+      cause: { allowed: false, ...refusal },
+    });
+  }
 }
 
 /**
@@ -334,6 +381,7 @@ async function publishWorkspaceControlEvent(
 export async function sendAgentSessionMessage(
   deps: {
     db: Database;
+    settings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
@@ -356,6 +404,8 @@ export async function sendAgentSessionMessage(
           actor: agentActor(context),
           operationKey: input.idempotencyKey,
           text: input.text,
+          assertFreshAdmission: (scoped) =>
+            assertFreshAgentCommandAllowance(scoped, deps, context, input.targetSessionId),
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
@@ -400,6 +450,7 @@ export async function sendAgentSessionMessage(
 export async function steerAgentSession(
   deps: {
     db: Database;
+    settings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
@@ -426,6 +477,8 @@ export async function steerAgentSession(
           actor: agentActor(context),
           operationKey: input.idempotencyKey,
           instruction: input.instruction,
+          assertFreshAdmission: (scoped) =>
+            assertFreshAgentCommandAllowance(scoped, deps, context, input.targetSessionId),
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
