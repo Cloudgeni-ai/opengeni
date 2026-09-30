@@ -775,6 +775,13 @@ Documents, spreadsheets, and presentations open in the first-party editor;
 users with the `artifacts:publish` grant can edit, everyone else reads. Sites
 render in the sandboxed frame without workspace tool access.
 
+Every built-in string in the viewer and inline previews (header, kind
+subtitles, loading and error states, Site toolbar, counts) is English by
+default and overridable: pass `labels` (a partial `ArtifactLabels`) to
+`SessionArtifactViewer` or `ChatInteractiveBlock`, or wrap a subtree in
+`ArtifactLabelsProvider`. Unspecified keys keep the defaults, and count and
+version labels are functions so the host applies its own plural rules.
+
 Both read through the proxy only when it opts in with `artifacts: true`:
 
 ```ts

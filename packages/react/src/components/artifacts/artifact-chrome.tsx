@@ -13,7 +13,14 @@ import {
   Table2Icon,
   XIcon,
 } from "lucide-react";
-import { forwardRef, type ComponentProps, type ReactNode } from "react";
+import {
+  createContext,
+  forwardRef,
+  useContext,
+  useMemo,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 
 import { cn } from "../../lib/cn";
 
@@ -108,6 +115,146 @@ export function artifactKindSubtitle(kind: ArtifactKind): string {
   return `${kind[0]!.toUpperCase()}${kind.slice(1)} · shared editor`;
 }
 
+type LoadErrorCopy = Readonly<
+  Record<
+    "unavailable" | "invalid" | "transient",
+    {
+      title: string;
+      message: string;
+    }
+  >
+>;
+
+/**
+ * Every user-facing string in the artifact surfaces (inline Site preview, Site
+ * frame, viewer header and states). Hosts translate by passing a partial
+ * `labels` object; unspecified keys keep the English defaults.
+ */
+export type ArtifactLabels = Readonly<{
+  back: string;
+  close: string;
+  /** Header title and loading copy until an artifact's title is known. */
+  opening: string;
+  /** Header title when an artifact cannot be opened. */
+  artifact: string;
+  startingEditor: string;
+  kindSubtitle: (kind: ArtifactKind) => string;
+  live: string;
+  reloadSite: string;
+  openFullScreen: string;
+  editWithAgent: string;
+  editShort: string;
+  preview: string;
+  loadPreview: string;
+  loadSitePreview: string;
+  siteVersion: string;
+  savedVersion: string;
+  version: (revision: number) => string;
+  openSite: string;
+  loadingSite: string;
+  siteArchived: string;
+  siteUnpublished: string;
+  siteReferenceInvalid: string;
+  siteLoadFailed: string;
+  retry: string;
+  tryAgain: string;
+  toolCount: (count: number) => string;
+  toolsAvailable: (count: number) => string;
+  sourceFileCount: (count: number) => string;
+  viewingDisabled: { title: string; message: string };
+  editorsMissing: { title: string; message: string };
+  siteErrors: LoadErrorCopy;
+  editableErrors: LoadErrorCopy;
+  reference: (id: string) => string;
+}>;
+
+export const DEFAULT_ARTIFACT_LABELS: ArtifactLabels = Object.freeze({
+  back: "Back",
+  close: "Close",
+  opening: "Opening artifact…",
+  artifact: "Artifact",
+  startingEditor: "Starting the secure editing session…",
+  kindSubtitle: (kind: ArtifactKind) => artifactKindSubtitle(kind),
+  live: "Live",
+  reloadSite: "Reload Site",
+  openFullScreen: "Open Site full screen",
+  editWithAgent: "Edit with Geni",
+  editShort: "Edit",
+  preview: "Preview",
+  loadPreview: "Load preview",
+  loadSitePreview: "Load Site preview",
+  siteVersion: "Site version",
+  savedVersion: "Saved version",
+  version: (revision: number) => `Version ${revision}`,
+  openSite: "Open Site",
+  loadingSite: "Loading Site…",
+  siteArchived: "This Site is archived.",
+  siteUnpublished: "This Site is archived or unpublished.",
+  siteReferenceInvalid: "This Site reference is invalid.",
+  siteLoadFailed: "Couldn’t load this Site.",
+  retry: "Retry",
+  tryAgain: "Try again",
+  toolCount: (count: number) => `${count} ${count === 1 ? "tool" : "tools"}`,
+  toolsAvailable: (count: number) => `${count} workspace tools available to this Site`,
+  sourceFileCount: (count: number) => `${count} source ${count === 1 ? "file" : "files"}`,
+  viewingDisabled: {
+    title: "Artifact viewing isn't enabled",
+    message: "This app doesn't serve editable artifacts yet.",
+  },
+  editorsMissing: {
+    title: "This artifact can't open here",
+    message: "This app hasn't installed the document, spreadsheet, and presentation editors.",
+  },
+  siteErrors: {
+    unavailable: {
+      title: "This Site isn't available",
+      message: "It may have been removed, or you may not have access.",
+    },
+    invalid: {
+      title: "This Site link isn't valid",
+      message: "Check the address and open a Site from your workspace library.",
+    },
+    transient: {
+      title: "Couldn't load this Site",
+      message: "A temporary problem prevented this Site from loading. Try again.",
+    },
+  },
+  editableErrors: {
+    unavailable: {
+      title: "This artifact isn't available",
+      message: "It may have been removed, or you may not have access.",
+    },
+    invalid: {
+      title: "This artifact link isn't valid",
+      message: "Check the address and open the artifact from your workspace library.",
+    },
+    transient: {
+      title: "Could not open this artifact",
+      message: "A temporary problem prevented this artifact from opening. Try again.",
+    },
+  },
+  reference: (id: string) => `Reference: ${id}`,
+});
+
+const ArtifactLabelsContext = createContext<ArtifactLabels>(DEFAULT_ARTIFACT_LABELS);
+
+/** Translate every artifact surface below; nested providers override outer ones. */
+export function ArtifactLabelsProvider({
+  labels,
+  children,
+}: {
+  labels: Partial<ArtifactLabels> | undefined;
+  children: ReactNode;
+}) {
+  const parent = useContext(ArtifactLabelsContext);
+  const value = useMemo(() => (labels ? { ...parent, ...labels } : parent), [labels, parent]);
+  return <ArtifactLabelsContext.Provider value={value}>{children}</ArtifactLabelsContext.Provider>;
+}
+
+export function useArtifactLabels(): ArtifactLabels {
+  return useContext(ArtifactLabelsContext);
+}
+
 /**
  * One artifact header: optional Back, the kind tile, title (or a host-supplied
  * title control), trailing actions, and optional Close. The console dock and
@@ -119,10 +266,10 @@ export function ArtifactViewerHeader({
   subtitle,
   titleSlot,
   onBack,
-  backLabel = "Back",
+  backLabel,
   actions,
   onClose,
-  closeLabel = "Close",
+  closeLabel,
 }: Readonly<{
   /** `null` while the host does not know the modality yet. */
   kind: ArtifactKind | null;
@@ -131,11 +278,14 @@ export function ArtifactViewerHeader({
   /** Replaces the title text, for example with a picker. */
   titleSlot?: ReactNode;
   onBack?: (() => void) | undefined;
-  backLabel?: string;
+  backLabel?: string | undefined;
   actions?: ReactNode;
   onClose?: (() => void) | undefined;
-  closeLabel?: string;
+  closeLabel?: string | undefined;
 }>) {
+  const labels = useArtifactLabels();
+  backLabel ??= labels.back;
+  closeLabel ??= labels.close;
   return (
     <div
       data-og-artifact-header=""
@@ -152,9 +302,9 @@ export function ArtifactViewerHeader({
       {titleSlot ?? (
         <div className="min-w-0 flex-1">
           <p className="m-0 truncate text-sm font-medium">{title}</p>
-          {(subtitle ?? (kind ? artifactKindSubtitle(kind) : "")) ? (
+          {(subtitle ?? (kind ? labels.kindSubtitle(kind) : "")) ? (
             <p className="m-0 truncate text-xs text-fg-subtle">
-              {subtitle ?? (kind ? artifactKindSubtitle(kind) : "")}
+              {subtitle ?? (kind ? labels.kindSubtitle(kind) : "")}
             </p>
           ) : null}
         </div>
@@ -196,6 +346,7 @@ export function ArtifactProblem({
   view: ArtifactLoadErrorView;
   onRetry?: (() => void) | undefined;
 }) {
+  const labels = useArtifactLabels();
   return (
     <section
       role="alert"
@@ -205,13 +356,13 @@ export function ArtifactProblem({
         <AlertTriangleIcon aria-hidden className="mx-auto mb-3 size-5 text-status-waiting" />
         <h2 className="m-0 text-base font-semibold">{view.title}</h2>
         <p className="mb-0 mt-2 text-sm leading-5 text-fg-muted">
-          {artifactLoadErrorMessage(view)}
+          {artifactLoadErrorMessage(view, labels)}
         </p>
         {view.retryable && onRetry ? (
           <div className="mt-4 flex justify-center">
             <ArtifactButton variant="outline" onClick={onRetry}>
               <RotateCcwIcon aria-hidden="true" />
-              Try again
+              {labels.tryAgain}
             </ArtifactButton>
           </div>
         ) : null}
@@ -229,43 +380,13 @@ export type ArtifactLoadErrorView = Readonly<{
   correlationId?: string;
 }>;
 
-const COPY = {
-  site: {
-    unavailable: {
-      title: "This Site isn't available",
-      message: "It may have been removed, or you may not have access.",
-    },
-    invalid: {
-      title: "This Site link isn't valid",
-      message: "Check the address and open a Site from your workspace library.",
-    },
-    transient: {
-      title: "Couldn't load this Site",
-      message: "A temporary problem prevented this Site from loading. Try again.",
-    },
-  },
-  editable: {
-    unavailable: {
-      title: "This artifact isn't available",
-      message: "It may have been removed, or you may not have access.",
-    },
-    invalid: {
-      title: "This artifact link isn't valid",
-      message: "Check the address and open the artifact from your workspace library.",
-    },
-    transient: {
-      title: "Could not open this artifact",
-      message: "A temporary problem prevented this artifact from opening. Try again.",
-    },
-  },
-} as const;
-
 /** Site/editor load copy. Never surfaces raw OpenGeni API status text. */
 export function artifactLoadErrorView(
   error: unknown,
   kind: ArtifactLoadErrorKind,
+  labels: ArtifactLabels = DEFAULT_ARTIFACT_LABELS,
 ): ArtifactLoadErrorView {
-  const copy = COPY[kind];
+  const copy = kind === "site" ? labels.siteErrors : labels.editableErrors;
   const correlationId = error instanceof OpenGeniApiError ? error.correlationId : undefined;
   const withSupport = (view: {
     title: string;
@@ -282,6 +403,11 @@ export function artifactLoadErrorView(
   return { ...copy.transient, retryable: true };
 }
 
-export function artifactLoadErrorMessage(view: ArtifactLoadErrorView): string {
-  return view.correlationId ? `${view.message} Reference: ${view.correlationId}` : view.message;
+export function artifactLoadErrorMessage(
+  view: ArtifactLoadErrorView,
+  labels: ArtifactLabels = DEFAULT_ARTIFACT_LABELS,
+): string {
+  return view.correlationId
+    ? `${view.message} ${labels.reference(view.correlationId)}`
+    : view.message;
 }

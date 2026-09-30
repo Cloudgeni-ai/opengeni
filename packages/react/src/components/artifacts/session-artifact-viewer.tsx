@@ -4,7 +4,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { cn } from "../../lib/cn";
 import { useOpenGeni, type ClientOverride } from "../../session-context";
-import { ArtifactProblem, ArtifactViewerHeader, type ArtifactKind } from "./artifact-chrome";
+import {
+  ArtifactLabelsProvider,
+  ArtifactProblem,
+  ArtifactViewerHeader,
+  useArtifactLabels,
+  type ArtifactKind,
+  type ArtifactLabels,
+} from "./artifact-chrome";
 import { EditableArtifactView, type EditableArtifactRuntimes } from "./editable-artifact-view";
 import type { SiteToolBridgeFactory } from "./chat-interactive-block";
 import { SiteView } from "./site-view";
@@ -15,12 +22,8 @@ export type SessionArtifactTarget = Readonly<
   | { kind: "site"; artifactId: string; title?: string | undefined }
 >;
 
-export type SessionArtifactViewerLabels = Readonly<{
-  close?: string;
-  back?: string;
-  /** Header title and loading copy until the artifact's title is known. */
-  opening?: string;
-}>;
+/** Every string the viewer shows, including its Site frame and states. */
+export type SessionArtifactViewerLabels = Partial<ArtifactLabels>;
 
 export type SessionArtifactViewerProps = ClientOverride &
   Readonly<{
@@ -57,7 +60,15 @@ type ViewerClient = Pick<
  * client and `createSessionProxyHandler({ artifacts: true })`, scoped to
  * `sessionId`.
  */
-export function SessionArtifactViewer({
+export function SessionArtifactViewer({ labels, ...props }: SessionArtifactViewerProps) {
+  return (
+    <ArtifactLabelsProvider labels={labels}>
+      <Viewer {...props} />
+    </ArtifactLabelsProvider>
+  );
+}
+
+function Viewer({
   client: clientOverride,
   workspaceId: workspaceOverride,
   sessionId,
@@ -67,9 +78,9 @@ export function SessionArtifactViewer({
   editableRuntimes,
   theme,
   siteToolBridge,
-  labels,
   className,
-}: SessionArtifactViewerProps) {
+}: Omit<SessionArtifactViewerProps, "labels">) {
+  const labels = useArtifactLabels();
   const context = useOpenGeni({ client: clientOverride, workspaceId: workspaceOverride });
   const base = context.client as unknown as ViewerClient;
   const workspaceId = context.workspaceId;
@@ -90,7 +101,7 @@ export function SessionArtifactViewer({
   const title =
     current?.title ??
     target.title ??
-    (unavailable === targetKey ? "Artifact" : (labels?.opening ?? "Opening artifact…"));
+    (unavailable === targetKey ? labels.artifact : labels.opening);
   return (
     <section
       aria-label={title}
@@ -101,9 +112,9 @@ export function SessionArtifactViewer({
         kind={kind}
         title={title}
         onBack={onBack}
-        backLabel={labels?.back ?? "Back"}
+        backLabel={labels.back}
         onClose={onClose}
-        closeLabel={labels?.close ?? "Close"}
+        closeLabel={labels.close}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {target.kind === "site" ? (
@@ -115,7 +126,6 @@ export function SessionArtifactViewer({
             theme={theme}
             toolBridge={siteToolBridge}
             showTitle={false}
-            {...(labels?.opening ? { loadingLabel: labels.opening } : {})}
             onTitle={(next) => setLoaded({ key: targetKey, title: next, kind: "site" })}
           />
         ) : (
@@ -125,7 +135,6 @@ export function SessionArtifactViewer({
             workspaceId={workspaceId}
             artifactId={target.artifactId}
             runtimes={editableRuntimes}
-            loadingLabel={labels?.opening}
             onOpened={(next, modality) =>
               setLoaded({ key: targetKey, title: next, kind: modality })
             }
@@ -142,7 +151,6 @@ function EditableBody({
   workspaceId,
   artifactId,
   runtimes,
-  loadingLabel,
   onOpened,
   onUnavailable,
 }: {
@@ -150,10 +158,10 @@ function EditableBody({
   workspaceId: string;
   artifactId: string;
   runtimes: EditableArtifactRuntimes | undefined;
-  loadingLabel: string | undefined;
   onOpened: (title: string, modality: ArtifactKind) => void;
   onUnavailable: () => void;
 }) {
+  const labels = useArtifactLabels();
   const [config, setConfig] = useState<ClientConfig["artifacts"] | null | undefined>(undefined);
   useEffect(() => {
     let live = true;
@@ -187,26 +195,10 @@ function EditableBody({
   }, [blocked, onUnavailable]);
   if (config === undefined) return null;
   if (!config || !transport) {
-    return (
-      <ArtifactProblem
-        view={{
-          title: "Artifact viewing isn't enabled",
-          message: "This app doesn't serve editable artifacts yet.",
-          retryable: false,
-        }}
-      />
-    );
+    return <ArtifactProblem view={{ ...labels.viewingDisabled, retryable: false }} />;
   }
   if (!runtimes) {
-    return (
-      <ArtifactProblem
-        view={{
-          title: "This artifact can't open here",
-          message: "This app hasn't installed the document, spreadsheet, and presentation editors.",
-          retryable: false,
-        }}
-      />
-    );
+    return <ArtifactProblem view={{ ...labels.editorsMissing, retryable: false }} />;
   }
   return (
     <EditableArtifactView
@@ -219,7 +211,6 @@ function EditableBody({
       }}
       transport={transport}
       showHeader={false}
-      loadingLabel={loadingLabel}
       open={async (signal) => {
         const replicaId = createEditableArtifactReplicaId();
         const artifact = await client.getEditableArtifact(workspaceId, artifactId, {

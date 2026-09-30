@@ -1,5 +1,9 @@
 export {
   ArtifactBadge,
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  useArtifactLabels,
+  type ArtifactLabels,
   ArtifactButton,
   ArtifactLoading,
   ArtifactProblem,

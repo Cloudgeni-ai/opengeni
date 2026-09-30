@@ -12,6 +12,7 @@ import {
   ArtifactLoading,
   ArtifactProblem,
   artifactLoadErrorView,
+  useArtifactLabels,
   type ArtifactLoadErrorView,
 } from "./artifact-chrome";
 import { EditableArtifactWorkbenchHost } from "./editable-artifact-workbench";
@@ -53,7 +54,7 @@ export type EditableArtifactViewProps = Readonly<{
   authorityKey?: string | undefined;
   describeError?: ((error: unknown) => ArtifactLoadErrorView) | undefined;
   onTitle?: ((title: string) => void) | undefined;
-  /** Loading copy; defaults to "Opening artifact". */
+  /** Loading copy; defaults to the `opening` label. */
   loadingLabel?: string | undefined;
 }>;
 
@@ -75,10 +76,11 @@ export function EditableArtifactView({
   transport,
   showHeader = true,
   authorityKey,
-  describeError = describeEditableLoadError,
+  describeError,
   onTitle,
-  loadingLabel = "Opening artifact",
+  loadingLabel,
 }: EditableArtifactViewProps) {
+  const labels = useArtifactLabels();
   const [loadEpoch, setLoadEpoch] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const openRef = useRef(open);
@@ -138,11 +140,15 @@ export function EditableArtifactView({
     });
   }, [baseUrl, ready, runtimes, workspaceId]);
 
-  if (state.kind === "loading") return <ArtifactLoading label={loadingLabel} />;
+  if (state.kind === "loading") return <ArtifactLoading label={loadingLabel ?? labels.opening} />;
   if (state.kind === "error") {
     return (
       <ArtifactProblem
-        view={describeError(state.error)}
+        view={
+          describeError
+            ? describeError(state.error)
+            : artifactLoadErrorView(state.error, "editable", labels)
+        }
         onRetry={() => setLoadEpoch((value) => value + 1)}
       />
     );
@@ -160,10 +166,6 @@ export function EditableArtifactView({
       />
     </div>
   );
-}
-
-function describeEditableLoadError(error: unknown): ArtifactLoadErrorView {
-  return artifactLoadErrorView(error, "editable");
 }
 
 function runtimeFor(

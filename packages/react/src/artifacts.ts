@@ -2,6 +2,10 @@ export { inlineHtmlDocument } from "./components/artifacts/inline-html-document"
 export { isRetainedImageContentType, useRetainedImageObjectUrl } from "./timeline/retained-image";
 export {
   ArtifactBadge,
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  useArtifactLabels,
+  type ArtifactLabels,
   ArtifactButton,
   ArtifactLoading,
   ArtifactProblem,

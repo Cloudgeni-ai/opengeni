@@ -2567,14 +2567,16 @@ export function MessageTimeline({
                         </motion.div>
                       ) : null}
                     </AnimatePresence>
-                    <AnimatePresence>
-                      {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
+                    {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
+                      // In flow below the scroller, not floating over it: the band takes
+                      // its height from the viewport's bottom edge, so the action never
+                      // covers a row or its controls, and rows above it do not move.
+                      <div data-og-jump-band="" className="flex shrink-0 justify-center pt-1 pb-3">
                         <motion.button
                           type="button"
                           data-og-jump-to-latest=""
-                          initial={{ opacity: 0, y: 8 }}
+                          initial={{ opacity: 0, y: 4 }}
                           animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: 8 }}
                           transition={{ duration: 0.15, ease: "easeOut" }}
                           onClick={() => {
                             // Returning to the tip explicitly releases reader-owned
@@ -2631,7 +2633,6 @@ export function MessageTimeline({
                             }
                           }}
                           className={cn(
-                            "absolute inset-x-0 bottom-4 mx-auto w-fit",
                             "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
                             "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                             "hover:border-og-border-strong",
@@ -2640,8 +2641,8 @@ export function MessageTimeline({
                           <ArrowDownIcon className="size-3.5" />
                           Jump to latest
                         </motion.button>
-                      ) : null}
-                    </AnimatePresence>
+                      </div>
+                    ) : null}
                   </div>
                 </TimelineAnnotationSourceRootContext.Provider>
               </TooltipProvider>

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { loadSiteSnapshot } from "../../sites-ui";
-import { ArtifactLoading, ArtifactProblem, artifactLoadErrorView } from "./artifact-chrome";
+import {
+  ArtifactLoading,
+  ArtifactProblem,
+  artifactLoadErrorView,
+  useArtifactLabels,
+} from "./artifact-chrome";
 import { ArtifactSandbox } from "./artifact-sandbox";
 import type { SiteSnapshotClient, SiteToolBridgeFactory } from "./chat-interactive-block";
 
@@ -35,12 +40,13 @@ export function SiteView({
   siteId,
   toolBridge,
   theme,
-  archivedMessage = "This Site is archived.",
+  archivedMessage,
   showTitle = true,
-  loadingLabel = "Loading Site…",
+  loadingLabel,
   onTitle,
   className,
 }: SiteViewProps) {
+  const labels = useArtifactLabels();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<unknown>(null);
   const readAbort = useRef<AbortController | null>(null);
@@ -84,11 +90,16 @@ export function SiteView({
   );
   if (error)
     return (
-      <ArtifactProblem view={artifactLoadErrorView(error, "site")} onRetry={() => void load()} />
+      <ArtifactProblem
+        view={artifactLoadErrorView(error, "site", labels)}
+        onRetry={() => void load()}
+      />
     );
-  if (!snapshot || !content) return <ArtifactLoading label={loadingLabel} />;
+  if (!snapshot || !content) return <ArtifactLoading label={loadingLabel ?? labels.loadingSite} />;
   if (snapshot.detail.artifact.status === "archived")
-    return <div className="p-4 text-sm text-fg-muted">{archivedMessage}</div>;
+    return (
+      <div className="p-4 text-sm text-fg-muted">{archivedMessage ?? labels.siteArchived}</div>
+    );
   return (
     <ArtifactSandbox
       html={content.html}

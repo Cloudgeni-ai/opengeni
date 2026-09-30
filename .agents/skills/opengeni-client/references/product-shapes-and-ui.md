@@ -43,6 +43,8 @@ console routes and 404 on the product origin. Never pass them to a raw `<a>`.
   `@opengeni/artifact-kernel-wasm-presentation`) plus the SDK Worker URL
   (`editableRuntimes`). A custom host proxy reports the viewer capability with
   `artifactViewerCapability` from `@opengeni/sdk`. Close the viewer when the session changes.
+  Translate its copy with `labels` (partial `ArtifactLabels`) or
+  `ArtifactLabelsProvider`.
 - Other routing: `resolveLink={(target) => ... ({ href } | { open } | null)}`
   on `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
   subtree; it also covers `Markdown` inside a custom `renderMessageText`.

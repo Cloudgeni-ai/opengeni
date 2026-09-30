@@ -9,7 +9,7 @@ import {
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
-import { ArtifactBadge, ArtifactButton } from "./artifact-chrome";
+import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
 import {
   PublishedHtmlArtifactFrame,
   type PublishedHtmlArtifactToolBridge,
@@ -41,6 +41,7 @@ export type ArtifactSandboxProps = {
  * that escapes the host's scroll containers through the modal top layer.
  */
 export function ArtifactSandbox(props: ArtifactSandboxProps) {
+  const labels = useArtifactLabels();
   const [reloadKey, setReloadKey] = useState(0);
   const [focused, setFocused] = useState(false);
   const frameRef = useRef<HTMLDialogElement>(null);
@@ -91,7 +92,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               onClick={() => setFocused(false)}
             >
               <ArrowLeftIcon className="mr-2 size-3.5" />
-              Back
+              {labels.back}
             </ArtifactButton>
           ) : null}
           {!focused && props.showTitle !== false ? (
@@ -111,15 +112,15 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
           {props.connectedToolCount ? (
             <ArtifactBadge
               className="hidden h-5 max-w-40 gap-1 rounded-md border-border/80 px-1.5 text-2xs font-normal text-fg-muted sm:inline-flex"
-              title={`${props.connectedToolCount} workspace tools available to this Site`}
+              title={labels.toolsAvailable(props.connectedToolCount)}
             >
               <PlugZapIcon className="size-3" />
-              {props.connectedToolCount} {props.connectedToolCount === 1 ? "tool" : "tools"}
+              {labels.toolCount(props.connectedToolCount)}
             </ArtifactBadge>
           ) : null}
           {props.sourceFileCount ? (
             <span className="hidden text-2xs text-fg-subtle xl:inline">
-              {props.sourceFileCount} source {props.sourceFileCount === 1 ? "file" : "files"}
+              {labels.sourceFileCount(props.sourceFileCount)}
             </span>
           ) : null}
         </div>
@@ -133,21 +134,21 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               onClick={props.onEdit}
             >
               <SparklesIcon className="mr-2 size-3.5" />
-              <span className="hidden sm:inline">Edit with Geni</span>
-              <span className="sm:hidden">Edit</span>
+              <span className="hidden sm:inline">{labels.editWithAgent}</span>
+              <span className="sm:hidden">{labels.editShort}</span>
             </ArtifactButton>
           ) : null}
           {props.showLiveStatus !== false && (
             <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex">
               <span className="size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10" />
-              Live
+              {labels.live}
             </span>
           )}
           <ArtifactButton
             variant="ghost"
             size="icon"
             className="size-8 rounded-md text-fg-muted hover:text-fg"
-            aria-label="Reload Site"
+            aria-label={labels.reloadSite}
             onClick={reload}
           >
             <RefreshCwIcon className="size-3.5" />
@@ -157,7 +158,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               variant="ghost"
               size="icon"
               className="size-8 rounded-md text-fg-muted hover:text-fg"
-              aria-label="Open Site full screen"
+              aria-label={labels.openFullScreen}
               onClick={() => setFocused(true)}
             >
               <Maximize2Icon className="size-3.5" />

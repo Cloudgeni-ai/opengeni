@@ -3,7 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 
 import { loadSiteSnapshot } from "../../sites-ui";
 import { useOpenGeniLinkResolver } from "../open-geni-links";
-import { ArtifactButton, ArtifactSelect } from "./artifact-chrome";
+import {
+  ArtifactButton,
+  ArtifactLabelsProvider,
+  ArtifactSelect,
+  useArtifactLabels,
+  type ArtifactLabels,
+} from "./artifact-chrome";
 import { ArtifactSandbox } from "./artifact-sandbox";
 import { DeferredChatMedia } from "./deferred-chat-media";
 import { inlineHtmlDocument } from "./inline-html-document";
@@ -41,6 +47,8 @@ export type ChatInteractiveBlockProps = {
   client: SiteSnapshotClient;
   toolBridge?: SiteToolBridgeFactory | undefined;
   theme?: "light" | "dark" | undefined;
+  /** Translations for the preview's copy; defaults to English. */
+  labels?: Partial<ArtifactLabels> | undefined;
 };
 
 /**
@@ -48,14 +56,23 @@ export type ChatInteractiveBlockProps = {
  * the OpenGeni console renders it. "Open Site" goes through the nearest
  * `resolveLink`, so a host decides where a Site opens.
  */
-export function ChatInteractiveBlock(props: ChatInteractiveBlockProps) {
+export function ChatInteractiveBlock({ labels, ...props }: ChatInteractiveBlockProps) {
+  return (
+    <ArtifactLabelsProvider labels={labels}>
+      <InteractiveBlock {...props} />
+    </ArtifactLabelsProvider>
+  );
+}
+
+function InteractiveBlock(props: ChatInteractiveBlockProps) {
+  const labels = useArtifactLabels();
   const height =
     (props.kind === "html" ? INLINE_PREVIEW_HEIGHT : SITE_PREVIEW_HEIGHT) + PREVIEW_CHROME_HEIGHT;
   return (
     <DeferredChatMedia
       key={`${props.workspaceId}:${props.kind}:${props.kind === "site" ? props.content : "inline"}`}
       height={height}
-      label={props.kind === "html" ? "preview" : "Site preview"}
+      actionLabel={props.kind === "html" ? labels.loadPreview : labels.loadSitePreview}
     >
       <div style={{ height }}>
         <LoadedChatInteractiveBlock {...props} />
@@ -65,6 +82,7 @@ export function ChatInteractiveBlock(props: ChatInteractiveBlockProps) {
 }
 
 function LoadedChatInteractiveBlock(props: ChatInteractiveBlockProps) {
+  const labels = useArtifactLabels();
   if (props.kind === "html") return <InlineHtml {...props} />;
   try {
     const value = JSON.parse(props.content);
@@ -85,16 +103,17 @@ function LoadedChatInteractiveBlock(props: ChatInteractiveBlockProps) {
       />
     );
   } catch {
-    return <p role="alert">This Site reference is invalid.</p>;
+    return <p role="alert">{labels.siteReferenceInvalid}</p>;
   }
 }
 
 function InlineHtml({ content, toolBridge, theme }: ChatInteractiveBlockProps) {
+  const labels = useArtifactLabels();
   const html = useMemo(() => inlineHtmlDocument(content), [content]);
   const bridge = useMemo(() => toolBridge?.(), [toolBridge]);
   return (
     <ArtifactSandbox
-      title="Preview"
+      title={labels.preview}
       showTitle={false}
       showLiveStatus={false}
       html={html}
@@ -170,17 +189,18 @@ function SiteEmbedContent({
     [toolBridge, siteId, content],
   );
   const open = useOpenGeniLinkResolver()?.({ kind: "site", artifactId: siteId, workspaceId });
+  const labels = useArtifactLabels();
   if (error)
     return (
       <p role="alert">
-        Couldn’t load this Site.{" "}
+        {labels.siteLoadFailed}{" "}
         <ArtifactButton size="sm" onClick={() => setRetry((v) => v + 1)}>
-          Retry
+          {labels.retry}
         </ArtifactButton>
       </p>
     );
-  if (!snapshot) return <p role="status">Loading Site…</p>;
-  if (!content) return <p>This Site is archived or unpublished.</p>;
+  if (!snapshot) return <p role="status">{labels.loadingSite}</p>;
+  if (!content) return <p>{labels.siteUnpublished}</p>;
   return (
     <ArtifactSandbox
       title={snapshot.detail.artifact.title}
@@ -196,17 +216,17 @@ function SiteEmbedContent({
           {snapshot.detail.versions.length > 1 ||
           !snapshot.detail.versions.some((v) => v.id === content.versionId) ? (
             <ArtifactSelect
-              aria-label="Site version"
+              aria-label={labels.siteVersion}
               className="bg-transparent text-xs"
               value={content.versionId}
               onChange={(e) => onVersionChange(e.target.value)}
             >
               {!snapshot.detail.versions.some((v) => v.id === content.versionId) && (
-                <option value={content.versionId}>Saved version</option>
+                <option value={content.versionId}>{labels.savedVersion}</option>
               )}
               {snapshot.detail.versions.map((v) => (
                 <option key={v.id} value={v.id}>
-                  Version {v.revision}
+                  {labels.version(v.revision)}
                 </option>
               ))}
             </ArtifactSelect>
@@ -217,7 +237,7 @@ function SiteEmbedContent({
               href={open.href}
               data-og-open-site=""
             >
-              Open Site
+              {labels.openSite}
             </a>
           ) : open?.open ? (
             <button
@@ -230,7 +250,7 @@ function SiteEmbedContent({
                   .catch(() => undefined)
               }
             >
-              Open Site
+              {labels.openSite}
             </button>
           ) : null}
         </>

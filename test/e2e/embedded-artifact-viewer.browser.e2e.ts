@@ -151,4 +151,40 @@ describe("embedded artifact viewer", () => {
       await page.close();
     }
   }, 60_000);
+
+  for (const width of [1440, 390]) {
+    test(`Jump to latest never covers conversation rows at ${width}px`, async () => {
+      const page = await open(width, "light");
+      try {
+        await page.waitForTimeout(800);
+        await page.locator("[data-og-timeline-scroller]").hover();
+        await page.mouse.wheel(0, -200);
+        const pill = page.locator("[data-og-jump-to-latest]");
+        await pill.waitFor();
+        const geometry = await page.evaluate(() => {
+          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          const view = scroller.getBoundingClientRect();
+          const button = document
+            .querySelector("[data-og-jump-to-latest]")!
+            .getBoundingClientRect();
+          const covered = [...scroller.querySelectorAll("[data-og-group-key], button, a")]
+            .map((element) => element.getBoundingClientRect())
+            .filter((rect) => {
+              const top = Math.max(rect.top, view.top);
+              const bottom = Math.min(rect.bottom, view.bottom);
+              return bottom > top && bottom > button.top && top < button.bottom;
+            }).length;
+          return { covered, pillTop: button.top, viewportBottom: view.bottom };
+        });
+        // The action sits in its own band below the scrolling viewport.
+        expect(geometry.covered).toBe(0);
+        expect(geometry.pillTop).toBeGreaterThanOrEqual(geometry.viewportBottom - 0.5);
+        await capture(page, `jump-to-latest-${width}-light`);
+        await pill.click();
+        await pill.waitFor({ state: "detached" });
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+  }
 });
