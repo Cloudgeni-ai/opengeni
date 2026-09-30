@@ -331,7 +331,8 @@ describe("settings rail", () => {
       const labels = menuItems().map((item) => item.textContent ?? "");
       expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
       expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
-      expect(labels.some((label) => label.startsWith("New workspace"))).toBe(false);
+      // Admins get the one quiet "New workspace" row; everyone else does not (see the picker tests).
+      expect(labels.filter((label) => label.startsWith("New workspace"))).toHaveLength(1);
       expect(labels).not.toContain("Organization settings");
       expect(labels.slice(-2)).toEqual(["Beta Partners", "Northwind Labs"]);
       // Switching workspace keeps the settings page.
