@@ -1351,10 +1351,13 @@ Lightpanda supports semantic observations only.
 
 Typing batches: [React](../packages/react/README.md).
 
-Native macOS operations drain Cocoa pools and clean up pending capture starts.
-Desktop discovery proceeds independently of semantic inspection.
+Native macOS cleans Cocoa pools and capture starts. Discovery is independent of
+semantic inspection.
+Backends implement `ComputerBackend`; `ComputerDriver` owns
+controller/viewer projection. The [CUA pilot](../packages/browserd/CUA-PILOT.md)
+remains experimental.
 
-New capability negotiation advertises only `manual` and `on-verify` recording.
+Recording supports `manual` and `on-verify`.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.

@@ -30,3 +30,4 @@ export * from "./supervisor";
 export * from "./workspace-files";
 
 export * from "./chromium-context-pool";
+export * from "./computer-backend";
