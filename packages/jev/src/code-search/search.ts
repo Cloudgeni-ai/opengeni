@@ -1539,7 +1539,12 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         ? "Passages are verbatim with original line numbers (N| text), grouped by file, best first; rel = relevance, [sN] = covers sub-question N. The rating covers only these passages; it cannot see other entry points, defaults, flags or exceptions the search did not return. This shows where to look: before changing code, read the relevant regions in full, including the not-shown ranges listed at the end."
         : "No passage passed verification. Try other keywords (exact identifiers, config keys, error strings) or read the candidates below.",
     );
-    return [head.join("\n"), body.body, footer].filter(Boolean).join("\n\n") + "\n";
+    // the engine version closes every pack, so real-use analysis can tell engines apart
+    return (
+      [head.join("\n"), body.body, footer, `(engine ${CODE_SEARCH_ENGINE_VERSION})`]
+        .filter(Boolean)
+        .join("\n\n") + "\n"
+    );
   };
   let text = buildText(0);
   text = buildText(estTokens(text.length, cpt));
