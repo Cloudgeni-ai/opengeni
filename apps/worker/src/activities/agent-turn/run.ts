@@ -25,6 +25,7 @@ import {
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
+  awaitModelCallAdmission,
   materializeSandboxFileDownloads,
   sandboxFileDownloadFailureNote,
   type SandboxFileDownload,
@@ -374,12 +375,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
-    const checkpointBeforeProviderDispatch = () =>
-      checkpointHistoryBeforeProviderDispatch(historySink, {
+    const checkpointBeforeProviderDispatch = async () => {
+      await awaitModelCallAdmission();
+      await checkpointHistoryBeforeProviderDispatch(historySink, {
         effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
         routingEnabled: routingEnabled(settings),
         readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
       });
+    };
 
     try {
       const claimed = await claimTurnAttempt({

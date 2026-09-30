@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { setTraceProcessors, type Span, type Trace, type TracingProcessor } from "@openai/agents";
+import { beforeModelRequest } from "./model-request-capture";
 
 export type ModelPreparationPhase =
   | "sandbox_agent_preparation"
@@ -127,6 +128,7 @@ export function withModelTransportStartedObserver<T>(
 }
 
 export async function recordModelTransportStarted(): Promise<void> {
+  await beforeModelRequest();
   await modelTransportStartedObserver.getStore()?.();
 }
 

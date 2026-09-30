@@ -1,8 +1,13 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
+import { tool } from "@openai/agents";
+import * as opengeniDb from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
   testSettings,
+  ScriptedModel,
+  functionCall,
+  assistantMessage,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
@@ -31,7 +36,12 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import { CompactionNeededError, prepareRunInput, type OpenGeniRuntime } from "@opengeni/runtime";
+import {
+  CompactionNeededError,
+  createProductionAgentRuntime,
+  prepareRunInput,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
 import { createActivityTestHarness } from "../src/activities";
 import { createGoalActivities } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -72,6 +82,202 @@ async function fixture() {
     actorSubjectId: human,
   };
 }
+
+test.each(["unfinished_debit", "settled_debit_delayed_admission"] as const)(
+  "real PG SDK producer cannot race the next paid call past %s",
+  async (delayBoundary) => {
+    const ctx = await fixture();
+    await applyCreditLedgerEntry(app.db, {
+      ...ctx,
+      type: "purchase",
+      amountMicros: 10_000,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    await setWorkspaceAllowance(app.db, {
+      ...ctx,
+      includedCredits: 100,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    const session = await createSession(app.db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      createdBy: { kind: "subject", subjectId: ctx.subjectId },
+      initialMessage: "Execute a local tool then answer",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(app.db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: { text: "Complete the task" },
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let began!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      began = resolve;
+    });
+    let held = false;
+    const holdOnce = async () => {
+      if (held) return;
+      held = true;
+      began();
+      await released;
+    };
+    const originalDebit = opengeniDb.applyCreditDebitUpToBalance;
+    const debit =
+      delayBoundary === "unfinished_debit"
+        ? spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(async (db, input) => {
+            if (input.metadata?.sessionId === session.id) await holdOnce();
+            return originalDebit(db, input);
+          })
+        : null;
+    const scripted = new ScriptedModel([
+      {
+        id: `paid-first-${session.id}`,
+        inputTokens: 100,
+        outputText: "x",
+        output: [functionCall("local_fixture", {}, "local-call")],
+      },
+      { inputTokens: 100, output: [assistantMessage("must not dispatch")] },
+    ]);
+    const production = createProductionAgentRuntime({ model: scripted });
+    const runtime: OpenGeniRuntime = {
+      ...production,
+      configure: () => {},
+      resolveTurnModel: () => ({
+        provider: {
+          id: "test-chat",
+          label: "Offline",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
+        client: {} as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>["client"],
+        model: scripted,
+        configured: {
+          id: "scripted-model",
+          label: "Offline",
+          providerId: "test-chat",
+          providerLabel: "Offline",
+          api: "chat",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactTokenLimit: 225_000,
+          reasoningEffort: false,
+          hostedWebSearch: false,
+        },
+      }),
+      buildAgent: (...args) => {
+        const agent = production.buildAgent(...args);
+        agent.tools.push(
+          tool({
+            name: "local_fixture",
+            description: "Offline no-op",
+            parameters: { type: "object", properties: {}, additionalProperties: false },
+            strict: false,
+            execute: async () => "local result",
+          }),
+        );
+        return agent;
+      },
+    };
+    const settings = testSettings({
+      databaseUrl: shared.appUrl,
+      openaiModel: "scripted-model",
+      sandboxBackend: "none",
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      modelPricingJson: JSON.stringify({
+        "scripted-model": {
+          inputMicrosPerMillionTokens: 1_000_000,
+          outputMicrosPerMillionTokens: 0,
+        },
+      }),
+    });
+    const activities = createActivityTestHarness({
+      settings,
+      db: app.db,
+      bus: new MemoryEventBus(),
+      runtime,
+      entitlements: {
+        admitRun: async () => {
+          const usage = await getWorkspaceUsage(app.db, ctx);
+          if (delayBoundary === "settled_debit_delayed_admission" && usage.workspace.used === 100)
+            await holdOnce();
+          return { allowed: true };
+        },
+      } as NonNullable<Parameters<typeof createActivityTestHarness>[0]["entitlements"]>,
+    });
+    try {
+      const running = activities.runAgentTurn({
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          blocked,
+          running.then(() => {
+            throw new Error("Worker ended before the settlement fixture hold");
+          }),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error("Settlement fixture hold was not reached")),
+              15_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+      await Bun.sleep(25);
+      expect(scripted.calls).toBe(1);
+      expect((await getWorkspaceUsage(app.db, ctx)).workspace.used).toBe(
+        delayBoundary === "unfinished_debit" ? 0 : 100,
+      );
+      release();
+      expect((await running).status).toBe("idle");
+      expect(scripted.calls).toBe(1);
+      expect((await getWorkspaceUsage(app.db, ctx)).workspace.used).toBe(100);
+      expect(await getSessionGoal(app.db, ctx.workspaceId, session.id)).toMatchObject({
+        status: "paused",
+        pausedReason: "allowance",
+        autoContinuations: 0,
+      });
+      const events = await listSessionEvents(app.db, ctx.workspaceId, session.id, {
+        after: 0,
+        limit: 100,
+      });
+      expect(events.filter((event) => event.type === "agent.model.usage")).toHaveLength(1);
+      expect(events.find((event) => event.type === "turn.completed")?.payload).toMatchObject({
+        segmentLimit: "budget_exhausted",
+        code: "allowance_exhausted",
+        scope: "workspace",
+      });
+    } finally {
+      release();
+      debit?.mockRestore();
+    }
+  },
+  60_000,
+);
 
 test.each(["workspace", "member", "recovery"] as const)(
   "real PG compaction spends last %s allowance, retains summary and refuses title/inference",

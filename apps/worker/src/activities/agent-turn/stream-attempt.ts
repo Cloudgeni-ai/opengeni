@@ -90,6 +90,7 @@ import {
   type SessionTurn,
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
+import { createModelCallAdmission } from "./model-call-admission";
 
 import {
   assertWorkspaceHumanInputAllowed,
@@ -611,6 +612,10 @@ export async function runTurnStreamAttempt(
     // boundary, both during preparation and in-activity recovery. Revalidate
     // the accepted turn's frozen human before another stream can dispatch.
     if (options.requireTerminalModelResponse) await revalidateModelCallAdmission();
+    const modelCallAdmission = createModelCallAdmission({
+      signal: runtimeCancellationSignal,
+      admit: revalidateModelCallAdmission,
+    });
     const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
@@ -827,6 +832,8 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
+          beforeModelRequest: modelCallAdmission.beforeModelRequest,
+          onModelResponse: modelCallAdmission.onModelResponse,
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
           onModelVisibleContext: async (snapshot) => {
@@ -962,7 +969,13 @@ export async function runTurnStreamAttempt(
     if (leases.xai.lost) {
       throw new Error("xAI credential lease expired before the model run");
     }
-    eventing.stream = await withProviderRequestContext(runStreamOnce);
+    try {
+      eventing.stream = await withProviderRequestContext(runStreamOnce);
+    } catch (error) {
+      modelCallAdmission.fail(error);
+      modelCallAdmission.close();
+      throw error;
+    }
     // Bounded provider label for the streaming SLIs — the resolved registry
     // provider id (or the built-in OpenAI/Azure provider), never a raw
     // user-supplied model string.
@@ -1129,6 +1142,8 @@ export async function runTurnStreamAttempt(
               media.compactMediaRunState(String(eventing.stream!.state.toString())),
           });
         }
+        // Release only after both the debit and frozen-human admission finish.
+        modelCallAdmission.settle(next.value);
         const durableSdkEvent = generatedImageReceipt
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
           : next.value;
@@ -1402,6 +1417,7 @@ export async function runTurnStreamAttempt(
         }
       }
     } catch (error) {
+      modelCallAdmission.fail(error);
       // Event processing can fail while SDK completion is still pending.
       // Close this stream before any failure publication; a legitimate
       // compaction retry may start a new, independently fenced generation.
@@ -1457,6 +1473,7 @@ export async function runTurnStreamAttempt(
       }
       throw error;
     } finally {
+      modelCallAdmission.close();
       if (!streamDone) {
         // ReadableStream cancellation synchronously trips the Agents SDK's
         // abort controller, but its returned promise may wait for an
