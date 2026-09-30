@@ -35,6 +35,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
@@ -87,7 +88,7 @@ export function InsightsRoute({
   const [floorFilter, setFloorFilter] = useState<"all" | "active">("all");
   const [snapshot, setSnapshot] = useState<WorkspaceInsightsSnapshot | null>(null);
   const [loadedFilters, setLoadedFilters] = useState<InsightsFilters>(filters);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
 
@@ -117,7 +118,7 @@ export function InsightsRoute({
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setLoadError(error instanceof Error ? error.message : String(error));
+        setLoadError(error);
         setLoading(false);
       });
     return () => {
@@ -202,28 +203,30 @@ export function InsightsRoute({
   );
 
   if (!canRead || (loadError && !snapshot)) {
+    // A refusal from the server reads like missing access: no red, no Try again.
+    const failed = canRead && !isPermissionDenied(loadError);
     return (
       <ContentPage width="wide" data-insights className="gap-6">
         {heading}
         <div role="alert">
           <Notice
-            tone={canRead ? "failed" : "muted"}
-            title={canRead ? "Insights couldn't load" : "Workspace access required"}
+            tone={failed ? "failed" : "muted"}
+            title={failed ? "Insights couldn't load" : "Workspace access required"}
             action={
-              canRead ? (
+              failed ? (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
                   onClick={() => setRetry((value) => value + 1)}
                 >
-                  Retry
+                  Try again
                 </Button>
               ) : undefined
             }
           >
-            {canRead
-              ? `Try again to load workspace usage. ${loadError}`
+            {failed
+              ? apiErrorAdvice(loadError)
               : "Workspace admin permission is required to view Insights."}
           </Notice>
         </div>
@@ -301,11 +304,11 @@ export function InsightsRoute({
                 variant="outline"
                 onClick={() => setRetry((value) => value + 1)}
               >
-                Retry
+                Try again
               </Button>
             }
           >
-            Showing the last successful selection. {loadError}
+            Showing the last successful selection. {userErrorText(loadError)}
           </Notice>
         </div>
       ) : null}

@@ -55,9 +55,10 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { resourceScopeLabel } from "@/components/resource-scope-picker";
-import { errorParts, userFacingError } from "@/components/variable-sets/variable-set-model";
+import { userFacingError } from "@/components/variable-sets/variable-set-model";
 import { LoadFailure } from "@/components/variable-sets/variable-set-pages";
 import { useAppContext } from "@/context";
+import { apiErrorDetails, userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
@@ -368,13 +369,16 @@ export function RigDetailRoute({
             variant="inline"
             announce
             className="mt-6"
-            title={errorParts(rig.mutationError).message}
+            title="Couldn't update the environment."
             action={
               <Button type="button" variant="ghost" size="xs" onClick={rig.clearMutationError}>
                 Dismiss
               </Button>
             }
-          />
+            {...apiErrorDetails(rig.mutationError)}
+          >
+            {userErrorText(rig.mutationError)}
+          </ErrorMessage>
         ) : null}
         <DetailPageBody aside={aside}>
           <div className="min-w-0">
