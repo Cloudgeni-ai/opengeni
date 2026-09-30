@@ -845,6 +845,18 @@ describe("OpenGeniClient access + workspaces", () => {
 });
 
 describe("OpenGeniClient scheduled tasks", () => {
+  test("sends a model-only patch without inventing a replacement config", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
+    await client.updateScheduledTask(WORKSPACE_ID, TASK_ID, {
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("PATCH");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+  });
+
   test("normalizes Connected Machine working directories before sending", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
     await client.createScheduledTask(WORKSPACE_ID, {

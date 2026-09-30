@@ -34,7 +34,7 @@ type ProviderOk = Extract<CredentialProviderResponse, { status: "ok" }>;
 
 function gitCredentialLine(entry: NonNullable<ProviderOk["git"]>[number]): string {
   const username = encodeURIComponent(entry.username ?? "x-access-token");
-  return `https://${username}:${encodeURIComponent(entry.password)}@${entry.host}`;
+  return `https://${username}:${encodeURIComponent(entry.password)}@${entry.host.toLowerCase()}`;
 }
 
 /**
@@ -49,7 +49,7 @@ export function withGitCredentialHelper(response: ProviderOk): ProviderOk {
   const index = Number.isFinite(existingCount) && existingCount > 0 ? existingCount : 0;
   environment[`GIT_CONFIG_KEY_${index}`] = "credential.helper";
   environment[`GIT_CONFIG_VALUE_${index}`] =
-    `!f() { test "$1" = get && exec git credential-store --file="$${GIT_CREDENTIALS_FILE_ENV}" get; }; f`;
+    `!f() { test "$1" = get && sed '/^path=/d' | git credential-store --file="$${GIT_CREDENTIALS_FILE_ENV}" get; }; f`;
   environment.GIT_CONFIG_COUNT = String(index + 1);
   return {
     ...response,

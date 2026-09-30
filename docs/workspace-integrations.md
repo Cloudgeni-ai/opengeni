@@ -164,6 +164,14 @@ The provider answers with one of:
 - `git` entries become a credential-store file plus a read-only Git
   credential helper, so the next `git` command uses a renewed token.
   `username` defaults to `x-access-token`.
+  Repository resources without `connectionId`, `credentialBindingId`,
+  `connectionType`, or `githubInstallationId` use this helper for their initial
+  clone: provision → clone → agent. Only an exact URI host match supplies
+  credentials; no provider or matching host means an anonymous clone, with
+  strict failure unless `optional` is set. Explicit OpenGeni connections keep
+  their own credential path; enabled providers suppress inferred GitHub App
+  bindings for bare resources. Tokens never enter remotes or `.git/config`.
+  Connected Machines neither clone resources nor receive platform credentials.
 - `expiresAt` schedules renewal five minutes early; without it OpenGeni
   refreshes every 30 minutes.
 - Scope echoes are added by OpenGeni; the provider does not return them.

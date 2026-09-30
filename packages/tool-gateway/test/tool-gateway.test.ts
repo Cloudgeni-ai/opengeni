@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { createObservability, withMcpTelemetry, withTraceContext } from "@opengeni/observability";
 import {
   TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS,
   TOOL_GATEWAY_INPUT_ISSUES_MAX,
@@ -30,6 +31,74 @@ const definition: ToolGatewayDefinition = {
 };
 
 describe("ToolGateway", () => {
+  test("prepared gateway timing retains call context after preparation and never replays a rejection", async () => {
+    const bodies: any[] = [];
+    const observer = createObservability(
+      {
+        serviceName: "test",
+        environment: "test",
+        observabilityStructuredLogs: true,
+        observabilityMetricsEnabled: false,
+        observabilityOtlpHeaders: "",
+        observabilityOtlpEndpoint: "http://collector",
+      },
+      {
+        component: "worker",
+        exporter: async (_url, body) => {
+          bodies.push(body);
+        },
+      },
+    );
+    const root = observer.startSpan("attempt");
+    let executions = 0;
+    let completions = 0;
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          ...definition,
+          execute: async () => {
+            executions++;
+            return { isError: true, content: [{ type: "text", text: "SECRET_PROVIDER_RESULT" }] };
+          },
+          lifecycle: {
+            prepare: async () => ({
+              complete: async () => {
+                completions++;
+              },
+            }),
+          },
+        },
+      ],
+    });
+    const prepared = await withMcpTelemetry(observer, "attempt", () =>
+      withTraceContext(root, () =>
+        gateway.prepareCall({
+          operationId: crypto.randomUUID(),
+          catalogDigest: catalog.digest,
+          identity: definition.identity,
+          arguments: { query: "SECRET_ARGUMENT" },
+          caller: { kind: "codemode", subjectId: "human:test" },
+        }),
+      ),
+    );
+    expect((await prepared.execute()).isError).toBe(true);
+    root.end();
+    await observer.flush();
+    const spans = bodies.flatMap((b) => b.resourceSpans.flatMap((r: any) => r.scopeSpans[0].spans));
+    const attributes = (s: any) =>
+      Object.fromEntries(s.attributes.map((a: any) => [a.key, Object.values(a.value)[0]]));
+    const execution = spans.find((s) => s.name === "mcp.phase.execution");
+    const preparation = spans.find((s) => s.name === "mcp.phase.gateway_policy");
+    expect(execution.parentSpanId).toBe(root.spanId);
+    expect(attributes(execution).mcpCallKey).toBe(attributes(preparation).mcpCallKey);
+    expect(attributes(execution).outcome).toBe("rejected");
+    expect(JSON.stringify(spans)).not.toContain("SECRET");
+    expect(executions).toBe(1);
+    expect(completions).toBe(1);
+  });
   test("executes HTTP, MCP, browser, model, and Codemode callers through one core", async () => {
     const { catalog, gateway } = createWorkspaceToolGateway({
       accountId: "11111111-1111-4111-8111-111111111111",

@@ -12,6 +12,7 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export type { ServiceContext } from "./embedding-client";
 export {
   OPENGENI_WEBHOOK_HEADERS,
   OpenGeniSignatureError,

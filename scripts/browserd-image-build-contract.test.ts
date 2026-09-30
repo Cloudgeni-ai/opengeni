@@ -90,6 +90,15 @@ describe("browser controller image build contract", () => {
         'test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"',
       );
       expect(dockerfile).toContain(
+        'cp -a packages/observability/src "$runtime/node_modules/@opengeni/observability/src"',
+      );
+      expect(dockerfile).toContain(
+        'cp -aL packages/observability/node_modules/prom-client "$runtime/node_modules/prom-client"',
+      );
+      expect(dockerfile).toContain('"$runtime/node_modules/@opentelemetry/api"');
+      expect(dockerfile).toContain('"$runtime/node_modules/tdigest"');
+      expect(dockerfile).toContain('"$runtime/node_modules/bintrees"');
+      expect(dockerfile).toContain(
         "ln -s /opt/opengeni/codemode-runtime/node_modules /node_modules",
       );
       expect(dockerfile).toContain('await import("@opengeni/codemode")');

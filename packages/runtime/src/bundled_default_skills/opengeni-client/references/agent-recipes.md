@@ -28,6 +28,29 @@ Tool schemas are prompt cost: one run with 23 MCP tools spent about 35k input
 tokens per turn. Trim with `allowedTools` on each server, and set
 `eager: true` in `tools` only for a server the first request needs.
 
+## Product-owned background job
+
+Attribute automation to a service, not a fabricated human:
+
+```ts
+const job = og.asService("acme:reports", { jobId: jobRecord.id });
+await job.createSession(workspaceId, {
+  initialMessage: "Summarize the latest product report.",
+  idempotencyKey: `reports:${jobRecord.id}`,
+  skills: productSkills,
+  tools: selectedProductTools,
+  firstPartyMcpTools: [],
+  bundledSkillIds: [],
+});
+```
+
+The original `og` client remains unchanged. `asService` cannot chain with
+`asUser` or `asLinkedUser`; it records non-secret attribution without granting
+permissions or borrowing personal resources. Use a workspace-owned Connection
+for background API/MCP access, or the product's signed workspace credential
+provider for short-lived managed-sandbox Git/cloud material. See
+[Data tools and credentials](data-tools-and-credentials.md).
+
 ## Per-user tool tokens
 
 When the product's MCP server should act as the signed-in user, give each

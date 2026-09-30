@@ -4277,6 +4277,41 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/custom-models",
+      "sdk": [
+        "OpenGeniClient.listWorkspaceClaudeCustomModels"
+      ],
+      "request": [],
+      "response": [
+        "WorkspaceGatewayCustomModelsResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/custom-models",
+      "sdk": [
+        "OpenGeniClient.createWorkspaceClaudeCustomModel"
+      ],
+      "request": [
+        "CreateWorkspaceGatewayCustomModelRequest"
+      ],
+      "response": [
+        "WorkspaceGatewayCustomModel"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/custom-models/:customModelId",
+      "sdk": [
+        "OpenGeniClient.deleteWorkspaceClaudeCustomModel"
+      ],
+      "request": [
+        "DeleteWorkspaceGatewayCustomModelRequest"
+      ],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/network-routes",
       "sdk": [
         "OpenGeniClient.listNetworkRoutes"
@@ -9243,6 +9278,7 @@
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
         "$.billingMode": "enum!=[\"\\\"disabled\\\"\",\"\\\"stripe\\\"\"]",
+        "$.claudeSubscriptionEnabled": "boolean?",
         "$.codeSearch": "object!",
         "$.codeSearch.available": "boolean!",
         "$.codeSearch.workspaceDefault": "enum!=[\"\\\"off\\\"\",\"\\\"on\\\"\",\"\\\"split\\\"\"]",
@@ -9291,7 +9327,7 @@
         "$": "object",
         "$.aliases": "array?",
         "$.aliases[]": "string",
-        "$.api": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.api": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
         "$.contextWindowTokens": "integer?",
@@ -9300,7 +9336,7 @@
         "$.definitionVersion": "string?",
         "$.deployment": "object?",
         "$.deployment.upstreamModelId": "string!",
-        "$.deployment.wireApi": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.deployment.wireApi": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.executionLimits": "object?",
         "$.executionLimits.autoCompactTokenLimit": "integer! null",
         "$.executionLimits.contextWindowTokens": "integer! null",
@@ -15772,7 +15808,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
+        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
     "OrganizationProviderCustomModel": {
@@ -20935,6 +20971,9 @@
         "$": "object",
         "$.action": "ref(ScheduledTaskAction)?",
         "$.agentConfig": "ref(ScheduledTaskAgentConfigInput)?",
+        "$.agentConfigPatch": "object?",
+        "$.agentConfigPatch.model": "string?",
+        "$.agentConfigPatch.reasoningEffort": "ref(ReasoningEffort)?",
         "$.agentLearning": "object?",
         "$.agentLearning.baselineScope": "ref(ConnectionOwnership)?",
         "$.agentLearning.expectedVersion": "integer!",
@@ -21251,6 +21290,9 @@
       "shape": {
         "$": "object",
         "$.apiKey": "string!",
+        "$.claudeIdentity": "object?",
+        "$.claudeIdentity.accountUuid": "string!",
+        "$.claudeIdentity.deviceId": "string!",
         "$.expectedVersion": "integer?",
         "$.operationId": "string!"
       }
@@ -22537,7 +22579,7 @@
         "$": "object",
         "$.aliases": "array?",
         "$.aliases[]": "string",
-        "$.api": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.api": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.availability": "ref(ModelAvailabilityV1)!",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
@@ -22548,7 +22590,7 @@
         "$.definitionVersion": "string?",
         "$.deployment": "object?",
         "$.deployment.upstreamModelId": "string!",
-        "$.deployment.wireApi": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.deployment.wireApi": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.executionLimits": "object?",
         "$.executionLimits.autoCompactTokenLimit": "integer! null",
         "$.executionLimits.contextWindowTokens": "integer! null",
@@ -24080,6 +24122,7 @@
       "ScheduledTaskTriggerType": "type",
       "ScopedKnowledgeScope": "type",
       "SendMessageInput": "type",
+      "ServiceContext": "type",
       "ServiceTurnInitiator": "type",
       "ServiceTurnInitiatorContext": "type",
       "Session": "type",
@@ -25326,6 +25369,7 @@
       "advancedSourceSummary": "value",
       "AgentMessageItem": "type",
       "answersFromDrafts": "value",
+      "AnthropicMark": "value",
       "appendFinalTranscript": "value",
       "ApplyPatchOperation": "type",
       "applyPatchOps": "value",
@@ -25352,6 +25396,7 @@
       "ChatComposer": "value",
       "ChatComposerMessages": "type",
       "ChatComposerProps": "type",
+      "ClaudeMark": "value",
       "ClientOverride": "type",
       "cn": "value",
       "CodeEditor": "value",
@@ -25462,6 +25507,7 @@
       "GeneratedVideoPlayerProps": "type",
       "gitFileDiffToPatch": "value",
       "GoalItem": "type",
+      "GrokMark": "value",
       "groupPickerRowsByBillingClass": "value",
       "groupTimeline": "value",
       "GroupTimelineOptions": "type",
@@ -25575,6 +25621,7 @@
       "OpenGeniContextValue": "type",
       "OpenGeniProvider": "value",
       "OpenGeniProviderProps": "type",
+      "OpenRouterMark": "value",
       "parseCommandLine": "value",
       "ParsedCommandLine": "type",
       "parseExecBannerSessionId": "value",
@@ -26977,6 +27024,7 @@
       "createVideoArtifactPlaybackSource",
       "createWorkspace",
       "createWorkspaceArtifact",
+      "createWorkspaceClaudeCustomModel",
       "createWorkspaceGatewayCustomModel",
       "createWorkspaceInstructionPolicyDraft",
       "createWorkspaceInstructionPolicyOnboardingProposal",
@@ -27002,6 +27050,7 @@
       "deleteVariableSet",
       "deleteVariableSetVariable",
       "deleteWorkspace",
+      "deleteWorkspaceClaudeCustomModel",
       "deleteWorkspaceCredentialProvider",
       "deleteWorkspaceGatewayCustomModel",
       "deleteWorkspaceOpenRouterCustomModel",
@@ -27229,6 +27278,7 @@
       "listUserResourceAuthorities",
       "listVariableSets",
       "listWorkspaceArtifacts",
+      "listWorkspaceClaudeCustomModels",
       "listWorkspaceControlEventPage",
       "listWorkspaceControlEvents",
       "listWorkspaceGatewayCustomModels",
@@ -27469,6 +27519,7 @@
       "addExternalWorkspaceMember",
       "advanceConnectAttempt",
       "asLinkedUser",
+      "asService",
       "asUser",
       "beginIdentityLink",
       "cancelConnectAttempt",

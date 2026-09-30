@@ -2,6 +2,7 @@ import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
 import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
 import {
   materializeRunCredentials,
+  repositoryHasExplicitGitConnection,
   clearRunCredentials,
   clearRunCredentialsForAttempt,
   refreshGitCredentialBindingTokenFiles,
@@ -149,30 +150,36 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     machinePrimary,
     groupBoxBackend,
   });
-
-  const runCredentialResolver = await waitForTurnOperation(
-    bindRunCredentialResolver({
-      db,
-      settings: runSettings,
-      initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
-      connectionCredentials: connectionCredentials ?? null,
-      localMcpServerIds: deps.localMcpServerIds ?? [],
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      session,
-      turn,
-      attemptId: input.attemptId,
-      effectiveSandboxBackend: effectiveRunCredentialBackend,
-      variableSet: workspaceVariableSet
-        ? {
-            id: workspaceVariableSet.id,
-            name: workspaceVariableSet.name,
-          }
-        : null,
-    }),
-    cancellationSignal,
-    undefined,
+  const platformGitResources = turnResources.filter(
+    (resource) => resource.kind !== "repository" || repositoryHasExplicitGitConnection(resource),
   );
+
+  const runCredentialResolver =
+    effectiveRunCredentialBackend === "none" || effectiveRunCredentialBackend === "selfhosted"
+      ? null
+      : await waitForTurnOperation(
+          bindRunCredentialResolver({
+            db,
+            settings: runSettings,
+            initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
+            connectionCredentials: connectionCredentials ?? null,
+            localMcpServerIds: deps.localMcpServerIds ?? [],
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            session,
+            turn,
+            attemptId: input.attemptId,
+            effectiveSandboxBackend: effectiveRunCredentialBackend,
+            variableSet: workspaceVariableSet
+              ? {
+                  id: workspaceVariableSet.id,
+                  name: workspaceVariableSet.name,
+                }
+              : null,
+          }),
+          cancellationSignal,
+          undefined,
+        );
   const establishDecision = sandboxEstablishPolicyDecision({
     lazyEnabled: lazyProvisionEnabled(settings),
     machinePrimary,
@@ -349,7 +356,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   } = await waitForTurnOperation(
     sandboxEnvironmentForRun(
       sandboxEnvironmentSettings,
-      turnResources,
+      platformGitResources,
       // Rig default sets merged BELOW the session set (session wins); rig-less
       // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
       sandboxWorkspaceEnvironmentValues,
@@ -410,7 +417,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       return Promise.resolve(undefined);
     }
     runGitCredentialsMint ??= waitForTurnOperation(
-      mintRunGitCredentials(runSettings, turnResources, {
+      mintRunGitCredentials(runSettings, platformGitResources, {
         scope: connectionScope,
         ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
         gitCredentials: connectionCredentials?.gitCredentials,
@@ -444,7 +451,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         mint: async () => {
           const binding = await mintRunGitCredentialBinding(
             runSettings,
-            turnResources,
+            platformGitResources,
             initialBinding.provider,
             initialBinding.credentialBindingId,
             {

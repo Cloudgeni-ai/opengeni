@@ -13904,7 +13904,9 @@ export const workspaceGatewayCustomModels = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     version: integer("version").notNull().default(1),
@@ -13936,7 +13938,7 @@ export const workspaceGatewayCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "workspace_gateway_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     upstreamCheck: check(
       "workspace_gateway_custom_models_upstream_chk",
@@ -13975,7 +13977,9 @@ export const organizationModelProviderConnections = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
     version: integer("version").notNull().default(1),
@@ -13997,7 +14001,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -14025,7 +14029,9 @@ export const organizationModelProviderConnectionOperations = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
     resultStatus: text("result_status").$type<"active" | "revoked">().notNull(),
@@ -14046,7 +14052,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",
@@ -14070,7 +14076,9 @@ export const organizationModelProviderCustomModels = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     version: integer("version").notNull().default(1),
@@ -14095,7 +14103,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",

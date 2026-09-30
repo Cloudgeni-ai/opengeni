@@ -22,7 +22,14 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
   /** An organization was created by self-service setup or as an additional one. */
   "organization.setup": ["created", "additional"],
   /** A model subscription or organization model provider was connected. */
-  "model.connected": ["codex", "supergrok", "vercel_gateway", "openrouter"],
+  "model.connected": [
+    "codex",
+    "supergrok",
+    "vercel_gateway",
+    "openrouter",
+    "anthropic",
+    "claude_subscription",
+  ],
   /** A credit top-up payment was granted. */
   "credits.purchased": [],
   /** An integration connection was created. Attribute: provider class. */

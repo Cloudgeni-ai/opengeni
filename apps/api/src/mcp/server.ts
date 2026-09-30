@@ -1511,7 +1511,8 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_update",
       {
-        description: "Update a scheduled task.",
+        description:
+          "Update a scheduled task. For model/reasoning-only edits use agentConfigPatch: { model?, reasoningEffort? }; all omitted configuration is preserved. agentConfig is a complete replacement, and scheduled_tasks_get is a bounded projection, not replacement input. Task model settings apply to newly created sessions; existing-session targets and already-created reusable sessions keep their own model/reasoning.",
         inputSchema: {
           id: z4.string().uuid(),
           name: z4.string().optional(),
@@ -1520,6 +1521,10 @@ export function buildOpenGeniMcpServer(
           targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
+          agentConfigPatch: z4
+            .object({ model: z4.string().optional(), reasoningEffort: z4.string().optional() })
+            .strict()
+            .optional(),
           status: z4.string().optional(),
           // Omitted preserves the frozen selections, [] clears them, and an
           // array replaces them; declared so MCP validation doesn't strip it.
@@ -1537,6 +1542,13 @@ export function buildOpenGeniMcpServer(
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
+        const patchWarnings = (task: ScheduledTask) =>
+          payload.agentConfigPatch &&
+          (task.runMode === "existing_session" || task.reusableSessionId)
+            ? [
+                "The task uses an existing session, whose model and reasoning are unchanged. Change that session separately if intended.",
+              ]
+            : [];
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         const update = await validatedScheduledTaskUpdate({
           settings: deps.settings,
@@ -1550,7 +1562,11 @@ export function buildOpenGeniMcpServer(
           authorizationSurface: "first_party_mcp",
         });
         if (!scheduledTaskUpdateChangesState(existing, update)) {
-          return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false, {
+              warnings: patchWarnings(existing),
+            }),
+          );
         }
         const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
@@ -1559,7 +1575,11 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true));
+        return json(
+          scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true, {
+            warnings: patchWarnings(task),
+          }),
+        );
       },
     );
 

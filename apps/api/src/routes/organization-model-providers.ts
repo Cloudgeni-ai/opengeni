@@ -1,3 +1,4 @@
+import { claudeProviderId } from "@opengeni/config";
 import {
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
@@ -48,7 +49,7 @@ function providerKind(value: string) {
 }
 
 function connectionJson(connection: {
-  providerKind: "vercel_gateway" | "openrouter";
+  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
   status: "active" | "revoked";
   version: number;
   createdAt: Date;
@@ -87,6 +88,22 @@ function conflict(error: unknown): never {
 }
 
 export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.use("/v1/organizations/:organizationId/model-providers/:providerKind", async (c, next) => {
+    if (
+      c.req.param("providerKind") === "claude_subscription" &&
+      !deps.settings.claudeSubscriptionEnabled
+    )
+      throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+    await next();
+  });
+  app.use("/v1/organizations/:organizationId/model-providers/:providerKind/*", async (c, next) => {
+    if (
+      c.req.param("providerKind") === "claude_subscription" &&
+      !deps.settings.claudeSubscriptionEnabled
+    )
+      throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+    await next();
+  });
   app.get("/v1/organizations/:organizationId/model-providers/:providerKind", async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
@@ -109,6 +126,25 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       UpsertOrganizationModelProviderConnectionRequest,
       "invalid organization model provider connection",
     );
+    const kind = providerKind(c.req.param("providerKind"));
+    if (kind === "anthropic" && !/^sk-ant-api[0-9]+-\S+$/.test(payload.apiKey))
+      throw new HTTPException(422, {
+        message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
+      });
+    if (kind === "claude_subscription" && !/^sk-ant-oat[0-9]+-\S+$/.test(payload.apiKey))
+      throw new HTTPException(422, { message: "Enter the setup token from claude setup-token." });
+    if (kind === "claude_subscription" && !payload.claudeIdentity)
+      throw new HTTPException(422, {
+        message: "Enter the Claude account UUID and device ID from your Claude Code configuration.",
+      });
+    if (kind !== "claude_subscription" && payload.claudeIdentity)
+      throw new HTTPException(422, {
+        message: "Claude identity is only valid for subscription connections.",
+      });
+    const credential =
+      kind === "claude_subscription"
+        ? JSON.stringify({ version: 1, token: payload.apiKey, identity: payload.claudeIdentity })
+        : payload.apiKey;
     try {
       const connection = await upsertOrganizationModelProviderConnection(deps.db, {
         organizationId,
@@ -116,9 +152,9 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         providerKind: providerKind(c.req.param("providerKind")),
         credentialEncrypted: encryptEnvironmentValue(
           requireEnvironmentEncryption(deps.settings),
-          payload.apiKey,
+          credential,
         ),
-        credentialDigest: organizationModelProviderCredentialDigest(payload.apiKey),
+        credentialDigest: organizationModelProviderCredentialDigest(credential),
         operationId: payload.operationId,
         ...(payload.expectedVersion === undefined
           ? {}
@@ -182,6 +218,12 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         CreateOrganizationProviderCustomModelRequest,
         "invalid organization custom model",
       );
+      const kind = providerKind(c.req.param("providerKind"));
+      if (
+        (kind === "anthropic" || kind === "claude_subscription") &&
+        `${claudeProviderId(kind)}/${payload.upstreamModelId}`.length > 256
+      )
+        throw new HTTPException(422, { message: "Claude model ID is too long" });
       try {
         const model = await createOrganizationModelProviderCustomModel(deps.db, {
           organizationId,

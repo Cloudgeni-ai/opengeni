@@ -314,6 +314,21 @@ describe("applyTurnGitHubRepositoryBindings (run.ts wiring)", () => {
     expect(published).toEqual([]);
   });
 
+  test("an enabled credential provider keeps bare resources instead of inferring a platform connection", async () => {
+    const { input, published } = wiring({ hasCredentialProvider: true });
+    const result = await applyTurnGitHubRepositoryBindings({
+      ...input,
+      resolve: async () => {
+        throw new Error("must not infer a platform connection over product credentials");
+      },
+    });
+    expect(result).toEqual({
+      turnResources: input.claimedTurnResources,
+      runtimeResources: input.claimedRuntimeResources,
+    });
+    expect(published).toEqual([]);
+  });
+
   test("a thrown resolution is logged and the turn proceeds with bare resources", async () => {
     const { input, published, warned } = wiring();
     const result = await applyTurnGitHubRepositoryBindings({

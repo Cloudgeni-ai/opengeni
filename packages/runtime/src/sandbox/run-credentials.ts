@@ -557,7 +557,7 @@ export async function materializeRunCredentials(
     [
       "umask 077",
       `mkdir -p -- ${shellQuote(`${root}/versions`)}`,
-      `chmod 0700 -- ${shellQuote(root)} ${shellQuote(`${root}/versions`)}`,
+      `chmod -- 0700 ${shellQuote(root)} ${shellQuote(`${root}/versions`)}`,
       `rm -rf -- ${shellQuote(stage)}`,
       `mkdir -p -- ${shellQuote(`${stage}/files`)}`,
     ].join("\n"),
@@ -580,7 +580,7 @@ export async function materializeRunCredentials(
   );
   await runCredentialCommand(
     session,
-    `chmod 0600 -- ${shellQuote(`${stage}/env`)}`,
+    `chmod -- 0600 ${shellQuote(`${stage}/env`)}`,
     options.commandRunner,
   );
 
@@ -591,7 +591,7 @@ export async function materializeRunCredentials(
     await writeCredentialFile(session, target, file.content, options.commandRunner);
     await runCredentialCommand(
       session,
-      `chmod ${shellQuote(file.mode ?? "0600")} -- ${shellQuote(target)}`,
+      `chmod -- ${shellQuote(file.mode ?? "0600")} ${shellQuote(target)}`,
       options.commandRunner,
     );
   }

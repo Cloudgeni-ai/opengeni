@@ -9,6 +9,8 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import OpenAI from "openai";
+import { AnthropicMessagesModel } from "./anthropic-messages";
+import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
@@ -104,6 +106,12 @@ export function buildModelInstance(
   client: OpenAI,
   modelId: string,
 ): Model {
+  if (provider.api === "anthropic-messages")
+    return new AnthropicMessagesModel(
+      provider,
+      modelId,
+      instrumentedModelFetch(provider.id, globalThis.fetch),
+    );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)
     : new OpenGeniResponsesModel(client, modelId, provider);
@@ -160,10 +168,18 @@ export function resolveTurnModel(
  * SDK default provider for a model that is in no provider's allow-list.
  */
 export class MultiProviderModelProvider implements ModelProvider {
+  // Per-run only: preserve Claude prompt/request lineage across tool iterations.
+  private readonly anthropicModels = new Map<string, Model>();
   constructor(private readonly settings: Settings) {}
 
   async getModel(modelName?: string): Promise<Model> {
-    return this.resolveBinding(modelName).model;
+    const binding = this.resolveBinding(modelName);
+    if (binding.provider.api !== "anthropic-messages") return binding.model;
+    const key = `${binding.provider.id}/${binding.modelId}`;
+    const cached = this.anthropicModels.get(key);
+    if (cached) return cached;
+    this.anthropicModels.set(key, binding.model);
+    return binding.model;
   }
 
   /**
