@@ -263,6 +263,7 @@ import {
   steerAgentSession,
   updateSessionTitle,
   sessionWithEffectiveToolPolicy,
+  workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyDefaultServerIds,
   workspaceSessionToolPolicyServerIds,
   type AgentSessionCommandContext,
@@ -7198,9 +7199,15 @@ async function withMcpEffectivePolicy(
   subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
     workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
     workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, [session]),
   ]);
-  return sessionWithEffectiveToolPolicy(session, workspaceServerIds, workspaceDefaultServerIds);
+  return sessionWithEffectiveToolPolicy(
+    session,
+    workspaceServerIds,
+    workspaceDefaultServerIds,
+    effectiveToolsContext,
+  );
 }

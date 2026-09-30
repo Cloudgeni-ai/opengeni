@@ -8628,8 +8628,9 @@ export type AgentEffectiveTools = {
   unavailable: AgentCapabilityId[];
   tools: Array<{
     name: string;
-    capability: AgentCapabilityId | "runtime";
-    source: "first_party" | "runtime" | "hosted";
+    capability: AgentCapabilityId | "runtime" | "sandbox" | "product";
+    source: "first_party" | "runtime" | "hosted" | "sandbox" | "mcp";
+    visibility?: "upfront" | "search" | undefined;
   }>;
   mcpServers: Array<{
     id: string;

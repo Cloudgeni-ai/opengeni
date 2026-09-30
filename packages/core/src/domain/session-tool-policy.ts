@@ -1,16 +1,52 @@
-import type { Settings } from "@opengeni/config";
 import {
+  allowedFirstPartyMcpToolsForSession,
+  codeSearchDeploymentPolicy,
+  environmentsEncryptionKeyBytes,
+  isDirectOpenAiApiBaseUrl,
+  resolveModelProviderForTurn,
+  resolveModelProvider,
+  resolveFirstPartyDelegationSecret,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  type Settings,
+} from "@opengeni/config";
+import {
+  AGENT_SKILL_MANAGE_TOOL_NAMES,
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
+  type FirstPartyMcpToolName,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH,
   mergeToolRefs,
   projectAgentEffectiveTools,
+  resolveAgentToolFamilies,
+  resolveWorkspaceAgentHumanInputEnabled,
   resolveWorkspaceSessionToolDefaults,
+  type AgentFunctionToolName,
+  type AgentToolEnvironment,
+  type VideoGenerationPolicy,
   type Session,
   type SessionEffectiveToolPolicy,
   type SessionToolPolicy,
   type ToolRef,
 } from "@opengeni/contracts";
-import { requireWorkspace, type Database } from "@opengeni/db";
+import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
+import {
+  getSandbox,
+  getLatestStartedSessionTurn,
+  getSessionTurnMediaAuthority,
+  getWorkspaceVideoGenerationPolicy,
+  listSkillDescriptors,
+  loadWorkspaceVercelAiGatewayApiKey,
+  requireWorkspace,
+  sessionHasToolRouterHistory,
+  workspaceCodexSubscriptionActive,
+  workspaceXaiSubscriptionActiveForAuthority,
+  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
+  type Database,
+} from "@opengeni/db";
+import { resolveWorkspaceCatalogSettings } from "../model-catalog";
+import { videoGenerationCapabilitiesForPolicy } from "./video-generation-capabilities";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 
 const MANDATORY_SESSION_MCP_SERVER_IDS = ["opengeni"] as const;
@@ -218,34 +254,472 @@ export function workspaceSessionToolPolicyDefaultServerIdsFor(
   ]);
 }
 
+/** Metadata only: no MCP listing, provider probes, account selection or credentials. */
+export type SessionEffectiveToolsContext = {
+  settings: Settings;
+  humanInputEnabled: boolean;
+  hasWorkspaceSkills: boolean;
+  workspaceSettings?: unknown;
+  objectStorageAvailable: boolean;
+  activeSandboxBackends?: ReadonlyMap<string, Settings["sandboxBackend"]>;
+  /** Exact, verified adapter names when a host already holds a runtime snapshot. */
+  mediaToolNames?: readonly AgentFunctionToolName[];
+  routerInHistory?: boolean;
+  routerHistorySessionIds?: ReadonlySet<string>;
+  workspaceGatewayImageAvailable?: boolean;
+  workspaceVideoAvailable?: boolean;
+  subscriptionImageSessionIds?: ReadonlySet<string>;
+  subscriptionVideoSessionIds?: ReadonlySet<string>;
+};
+
+/**
+ * Resolve one context for a response page, not one catalog per session. Legacy
+ * rows require no additional reads and never acquire an effectiveTools field.
+ */
+export async function workspaceSessionEffectiveToolsContext(
+  deps: { db: Database; settings: Settings; objectStorage?: unknown },
+  workspaceId: string,
+  subjectId: string,
+  sessions: readonly Session[],
+): Promise<SessionEffectiveToolsContext> {
+  const configured = sessions.filter((session) => session.agent != null);
+  const baseline: SessionEffectiveToolsContext = {
+    settings: deps.settings,
+    humanInputEnabled: false,
+    hasWorkspaceSkills: false,
+    objectStorageAvailable: Boolean(deps.objectStorage),
+  };
+  if (configured.length === 0) return baseline;
+  const [
+    workspace,
+    catalog,
+    descriptors,
+    sandboxes,
+    routerHistory,
+    mediaAvailability,
+    subscriptionMedia,
+  ] = await Promise.all([
+    requireWorkspace(deps.db, workspaceId),
+    resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+      accountId: configured[0]!.accountId,
+      workspaceId,
+      retainedProductModelIds: configured.map((session) => session.model),
+    }),
+    configured.some((session) => session.agent?.capabilities.skills === "read")
+      ? listSkillDescriptors(deps.db, {
+          accountId: configured[0]!.accountId,
+          workspaceId,
+          subjectId,
+        })
+      : Promise.resolve([]),
+    deps.settings.sandboxSelfhostedEnabled
+      ? Promise.all(
+          sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
+            async (id) =>
+              [
+                id,
+                await getSandbox(
+                  deps.db,
+                  { accountId: configured[0]!.accountId, workspaceId, subjectId },
+                  id,
+                ),
+              ] as const,
+          ),
+        )
+      : Promise.resolve([]),
+    Promise.all(
+      [...new Map(configured.map((session) => [session.id, session])).values()].map(
+        async (session) =>
+          [
+            session.id,
+            await sessionHasToolRouterHistory(deps.db, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: session.id,
+            }),
+          ] as const,
+      ),
+    ),
+    configured.some((session) => resolveAgentToolFamilies(session.agent).media) &&
+    baseline.objectStorageAvailable
+      ? workspaceSessionMediaAvailability(deps, workspaceId)
+      : Promise.resolve({
+          workspaceGatewayImageAvailable: false,
+          workspaceVideoAvailable: false,
+        }),
+    baseline.objectStorageAvailable
+      ? Promise.all(
+          configured
+            .filter(
+              (session) =>
+                resolveAgentToolFamilies(session.agent).media &&
+                /^(codex|supergrok)\//.test(session.model),
+            )
+            .map(async (session) => {
+              const latest = await getLatestStartedSessionTurn(deps.db, workspaceId, session.id);
+              const authority = latest
+                ? await getSessionTurnMediaAuthority(deps.db, workspaceId, session.id, latest.id)
+                : null;
+              if (session.model.startsWith("codex/")) {
+                return {
+                  id: session.id,
+                  image: await workspaceCodexSubscriptionActive(
+                    deps.db,
+                    deps.settings,
+                    workspaceId,
+                    latest?.id,
+                  ),
+                  video: false,
+                };
+              }
+              const actor = authority?.subjectId ?? subjectId;
+              const authoritySnapshot =
+                authority?.xai ??
+                (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(deps.db, {
+                  workspaceId,
+                  subjectId: actor,
+                }));
+              const active = await workspaceXaiSubscriptionActiveForAuthority(
+                deps.db,
+                deps.settings,
+                {
+                  workspaceId,
+                  subjectId: actor,
+                  authoritySnapshot,
+                },
+              );
+              const policy = await getWorkspaceVideoGenerationPolicy(deps.db, workspaceId);
+              return {
+                id: session.id,
+                image: active,
+                video:
+                  active &&
+                  policy.fundingSource === "supergrok_subscription" &&
+                  validVideoPolicy(policy) &&
+                  environmentsEncryptionKeyBytes(deps.settings) !== undefined,
+              };
+            }),
+        )
+      : Promise.resolve([]),
+  ]);
+  return {
+    ...baseline,
+    ...mediaAvailability,
+    subscriptionImageSessionIds: new Set(
+      subscriptionMedia.filter((entry) => entry.image).map((entry) => entry.id),
+    ),
+    subscriptionVideoSessionIds: new Set(
+      subscriptionMedia.filter((entry) => entry.video).map((entry) => entry.id),
+    ),
+    settings: catalog.settings,
+    workspaceSettings: workspace.settings,
+    humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspace.settings),
+    hasWorkspaceSkills: descriptors.some((entry) => entry.activationMode === "workspace_managed"),
+    activeSandboxBackends: new Map(
+      sandboxes.flatMap(([id, sandbox]) =>
+        sandbox?.kind === "selfhosted" ? [[id, "selfhosted" as const]] : [],
+      ),
+    ),
+    routerHistorySessionIds: new Set(
+      routerHistory.filter(([, present]) => present).map(([id]) => id),
+    ),
+  };
+}
+
+async function workspaceSessionMediaAvailability(
+  deps: { db: Database; settings: Settings },
+  workspaceId: string,
+) {
+  const [policy, gatewayApiKey] = await Promise.all([
+    getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
+    loadWorkspaceVercelAiGatewayApiKey(deps.db, deps.settings, workspaceId),
+  ]);
+  const encryptionAvailable = environmentsEncryptionKeyBytes(deps.settings) !== undefined;
+  const videoCredentialAvailable =
+    policy.fundingSource === "opengeni_credits"
+      ? Boolean(deps.settings.vercelAiGatewayApiKey) && encryptionAvailable
+      : policy.fundingSource === "workspace_gateway"
+        ? Boolean(gatewayApiKey) && encryptionAvailable
+        : false;
+  return {
+    workspaceGatewayImageAvailable: Boolean(gatewayApiKey),
+    workspaceVideoAvailable: videoCredentialAvailable && validVideoPolicy(policy),
+  };
+}
+
+function validVideoPolicy(policy: VideoGenerationPolicy): boolean {
+  try {
+    videoGenerationCapabilitiesForPolicy({ policy, credentialVersion: 1 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sessionHasSkills(session: Session, context: SessionEffectiveToolsContext): boolean {
+  if (context.hasWorkspaceSkills || session.skills.length > 0) return true;
+  // Undefined is the worker's bundled default. Explicit [] means no bundles.
+  if (session.bundledSkillIds === undefined) return true;
+  const tools = new Set(
+    resolveAgentToolFamilies(session.agent).firstPartyTools(
+      allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
+    ),
+  );
+  return session.bundledSkillIds.some((id) => {
+    if (
+      [
+        "builtin:opengeni-documents",
+        "builtin:opengeni-spreadsheets",
+        "builtin:opengeni-presentations",
+      ].includes(id)
+    ) {
+      return tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
+    }
+    if (id === "builtin:opengeni-sites") {
+      return tools.has("artifacts_create") && tools.has("artifacts_publish");
+    }
+    if (id === "builtin:opengeni-video-generation") {
+      return context.mediaToolNames?.includes("generate_video") === true;
+    }
+    return true;
+  });
+}
+
+/** The server can prove attachment policy, not successful future provider calls. */
+export function sessionEffectiveToolProjectionInput(
+  session: Session & { agent: NonNullable<Session["agent"]> },
+  toolRefs: readonly ToolRef[],
+  context?: SessionEffectiveToolsContext,
+) {
+  const model = context ? resolveModelProviderForTurn(context.settings, session.model) : undefined;
+  const sandboxBackend =
+    (session.activeSandboxId
+      ? context?.activeSandboxBackends?.get(session.activeSandboxId)
+      : undefined) ?? session.sandboxBackend;
+  const sandboxAvailable = context !== undefined && sandboxBackend !== "none";
+  const supportsImages =
+    model?.model.api === "responses" && model.model.capabilities.inputModalities.includes("image");
+  const hostedToolNames: AgentFunctionToolName[] = [];
+  if (model?.provider.kind === "xai-subscription") {
+    if (context?.settings.webSearchEnabled) hostedToolNames.push("web_search", "x_search");
+  } else if (model?.model.hostedWebSearch) hostedToolNames.push("web_search");
+  if (
+    context?.objectStorageAvailable &&
+    model?.model.capabilities.hostedTools.imageGeneration.runnable &&
+    model.provider.builtin &&
+    model.provider.id === "openai" &&
+    isDirectOpenAiApiBaseUrl(model.provider.baseUrl) &&
+    context.settings.openaiProvider === "openai" &&
+    isDirectOpenAiApiBaseUrl(context.settings.openaiBaseUrl) &&
+    Boolean(context.settings.openaiApiKey)
+  ) {
+    hostedToolNames.push("image_generation");
+  }
+  const gateway = context
+    ? resolveModelProvider(context.settings, WORKSPACE_GATEWAY_PROVIDER_ID)?.provider
+    : undefined;
+  const gatewayImageAvailable =
+    context?.objectStorageAvailable &&
+    !hostedToolNames.includes("image_generation") &&
+    model?.provider.kind !== "codex-subscription" &&
+    model?.provider.kind !== "xai-subscription" &&
+    ((gateway?.kind === "vercel-gateway-workspace" && Boolean(gateway.apiKey)) ||
+      context.workspaceGatewayImageAvailable === true);
+  const videoAvailable =
+    context?.objectStorageAvailable &&
+    session.sandboxBackend !== "none" &&
+    (context.workspaceVideoAvailable === true ||
+      context.subscriptionVideoSessionIds?.has(session.id) === true);
+  const runtimeToolNames: AgentFunctionToolName[] = context
+    ? [
+        "request_human_input",
+        "list_models",
+        "skill_read",
+        ...AGENT_SKILL_MANAGE_TOOL_NAMES,
+        ...(gatewayImageAvailable ? ["generate_image" as const] : []),
+        ...(context.subscriptionImageSessionIds?.has(session.id)
+          ? ["generate_image" as const]
+          : []),
+        ...(videoAvailable
+          ? ["generate_video" as const, "get_video_generation_capabilities" as const]
+          : []),
+        ...(context.mediaToolNames ?? []),
+      ]
+    : [];
+  const sandboxToolNames: AgentFunctionToolName[] = sandboxAvailable
+    ? [
+        "exec_command",
+        "write_stdin",
+        "apply_patch",
+        ...(supportsImages ? ["view_image" as const] : []),
+        ...(session.resources.some((resource) => resource.kind === "repository")
+          ? ["repository_skill_read" as const]
+          : []),
+        ...(codeSearchEnabledForTurn(
+          session.codeSearchEnabled,
+          context?.workspaceSettings,
+          codeSearchDeploymentPolicy(context!.settings),
+        ) && session.sandboxOs !== "windows"
+          ? ["code_search" as const]
+          : []),
+      ]
+    : [];
+  const needsTitle =
+    session.titleSource !== "user" &&
+    (!session.title?.trim() || session.title.trim() === AUTOMATIC_SESSION_TITLE_FALLBACK);
+  const firstPartyMcpTools =
+    context && toolRefs.some((ref) => ref.id === "opengeni")
+      ? resolveAgentToolFamilies(session.agent)
+          .firstPartyTools(
+            allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
+          )
+          .filter((name) => name !== "set_session_title" || !needsTitle)
+      : [];
+  const interactionNames = new Set<string>(FIRST_PARTY_IN_PROCESS_TOOL_NAMES);
+  const firstPartyModelNames = new Map<FirstPartyMcpToolName, string>();
+  const permissions: readonly string[] =
+    session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+  const permissionAllowed = (permission: string) =>
+    permissions.includes(permission as never) || permissions.includes("workspace:admin");
+  if (context && resolveFirstPartyDelegationSecret(context.settings)) {
+    for (const name of FIRST_PARTY_IN_PROCESS_TOOL_NAMES) {
+      const readOnly = [
+        "interaction_discover",
+        "browser_observe",
+        "browser_read",
+        "browser_screenshot",
+        "browser_clipboard",
+        "browser_debug",
+        "computer_targets",
+        "computer_observe",
+        "computer_clipboard",
+      ].includes(name);
+      if (permissionAllowed(readOnly ? "sessions:read" : "sessions:control")) {
+        firstPartyModelNames.set(name, `interaction__${name}`);
+        if (
+          !firstPartyMcpTools.includes(name) &&
+          resolveAgentToolFamilies(session.agent).allowsFirstPartyTool(name) &&
+          session.firstPartyMcpTools.includes(name)
+        )
+          firstPartyMcpTools.push(name);
+      }
+    }
+  }
+  // Interaction names are never registered by the remote first-party server.
+  for (let index = firstPartyMcpTools.length - 1; index >= 0; index--) {
+    const name = firstPartyMcpTools[index]!;
+    if (interactionNames.has(name) && !firstPartyModelNames.has(name))
+      firstPartyMcpTools.splice(index, 1);
+  }
+  const codex = model?.provider.kind === "codex-subscription";
+  const retainedRouter =
+    context?.routerInHistory === true || context?.routerHistorySessionIds?.has(session.id) === true;
+  const progressiveDisclosure =
+    retainedRouter ||
+    (context
+      ? codex
+        ? context.settings.codexToolSearchEnabled
+        : context.settings.lazyToolSearchEnabled
+      : false);
+  const upfrontToolNames = new Set<string>([
+    ...hostedToolNames,
+    ...sandboxToolNames,
+    "skill_read",
+    "request_human_input",
+    "list_models",
+    ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
+    !progressiveDisclosure
+      ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
+      : []),
+    ...(!progressiveDisclosure ? runtimeToolNames : []),
+  ]);
+  const environment: AgentToolEnvironment = {
+    productServerIds: new Set([
+      ...session.mcpServers.map((server) => server.id),
+      ...(session.toolPolicy.mode !== "workspace_default"
+        ? session.tools.map((tool) => tool.id)
+        : []),
+    ]),
+    hasSkills: context ? sessionHasSkills(session, context) : false,
+    webSearch: hostedToolNames.includes("web_search"),
+    humanInput: context?.humanInputEnabled ?? false,
+    media:
+      hostedToolNames.includes("image_generation") ||
+      gatewayImageAvailable ||
+      context?.subscriptionImageSessionIds?.has(session.id) === true ||
+      videoAvailable ||
+      (context?.mediaToolNames?.length ?? 0) > 0,
+    routerInHistory:
+      context?.routerInHistory === true ||
+      context?.routerHistorySessionIds?.has(session.id) === true,
+  };
+  const families = resolveAgentToolFamilies(session.agent, environment);
+  environment.hasDeferredTools =
+    toolRefs.some(
+      (ref) => ref.id !== "opengeni" && ref.eager !== true && families.allowsMcpServer(ref.id),
+    ) ||
+    firstPartyMcpTools.some(
+      (name) => families.allowsFirstPartyTool(name) && !upfrontToolNames.has(name),
+    ) ||
+    runtimeToolNames.some(
+      (name) => families.allowsFunctionTool(name) && !upfrontToolNames.has(name),
+    );
+  const provider = model?.provider;
+  const native =
+    codex ||
+    (provider?.api === "responses" &&
+      (provider.wireProfile === "azure-openai" ||
+        (provider.builtin && provider.id === "openai" && provider.baseUrl === undefined)));
+  const routerToolNames: AgentFunctionToolName[] =
+    progressiveDisclosure && resolveAgentToolFamilies(session.agent, environment).router
+      ? ["tool_search", "tool_list", ...(native ? [] : ["tool_invoke" as const])]
+      : [];
+  for (const name of routerToolNames) upfrontToolNames.add(name);
+  return {
+    config: session.agent,
+    firstPartyMcpTools,
+    firstPartyModelNames,
+    mcpServerIds: toolRefs.map((ref) => ref.id),
+    productServerIds: environment.productServerIds ?? new Set<string>(),
+    environment,
+    runtimeToolNames,
+    hostedToolNames,
+    sandboxToolNames,
+    routerToolNames,
+    upfrontToolNames,
+  };
+}
+
 /** Add a bounded, secret-safe effective projection to a session response. */
 export function sessionWithEffectiveToolPolicy(
   session: Session,
   workspaceServerIds: Iterable<string>,
   workspaceDefaultServerIds: Iterable<string> = [],
+  effectiveToolsContext?: SessionEffectiveToolsContext,
 ): Session {
   const availableIds = new Set(workspaceServerIds);
   for (const server of session.mcpServers) {
     availableIds.add(server.id);
   }
-  const effectiveToolPolicy = resolveSessionToolPolicy({
+  const { effectivePolicy: effectiveToolPolicy, toolRefs } = resolveSessionToolPolicy({
     toolPolicy: session.toolPolicy,
     sessionTools: session.tools,
     availableMcpServerIds: availableIds,
     defaultMcpServerIds: workspaceDefaultServerIds,
-  }).effectivePolicy;
+  });
   return {
     ...session,
     effectiveToolPolicy,
     // Configured sessions also report what they can use at capability level.
     ...(session.agent
       ? {
-          effectiveTools: projectAgentEffectiveTools({
-            config: session.agent,
-            firstPartyMcpTools: session.firstPartyMcpTools,
-            mcpServerIds: effectiveToolPolicy.configuredIds,
-            productServerIds: new Set(session.mcpServers.map((server) => server.id)),
-          }),
+          effectiveTools: projectAgentEffectiveTools(
+            sessionEffectiveToolProjectionInput(
+              { ...session, agent: session.agent },
+              toolRefs,
+              effectiveToolsContext,
+            ),
+          ),
         }
       : {}),
   };

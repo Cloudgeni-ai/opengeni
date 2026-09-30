@@ -35,6 +35,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
+  resolveAgentToolFamilies,
   resolveWorkspaceMemoryEnabled,
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
@@ -44,6 +45,8 @@ import {
   type AccessGrant,
   type ClientAgentConfig,
   type ErrorCode,
+  type FirstPartyMcpToolName,
+  type Session,
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
@@ -1387,12 +1390,14 @@ export function createAppComposition(deps: AppDependencies): {
     const prefix = `/v1/workspaces/${workspaceId}/codemode/sdk`;
     let forwarded: Request;
     try {
-      forwarded = await codemodeSessionRequest(
-        routeDeps,
-        grant,
-        c.req.raw,
-        url.pathname.slice(prefix.length) + url.search,
-      );
+      const path = url.pathname.slice(prefix.length) + url.search;
+      forwarded = await codemodeSessionRequest(routeDeps, grant, c.req.raw, path, (session) => {
+        assertConfiguredCodemodeSessionProxyPath(session, path, c.req.method);
+        const proxyTools = configuredCodemodeSessionProxyTools(routeDeps.settings, session);
+        return proxyTools === null
+          ? routeDeps.settings
+          : { ...routeDeps.settings, allowedFirstPartyMcpTools: proxyTools };
+      });
     } catch (error) {
       throw codemodeHttpError(error);
     }
@@ -1697,6 +1702,136 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
     };
   }
   return { mode: "none" as const };
+}
+
+/** Configured SDK credentials cannot regain tools from widened legacy columns. */
+export function configuredCodemodeSessionProxyTools(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  session: Pick<Session, "agent">,
+): FirstPartyMcpToolName[] | null {
+  if (!session.agent) return null;
+  const families = resolveAgentToolFamilies(session.agent);
+  return resolveFirstPartyMcpToolPolicy(settings).allowed.filter((tool) =>
+    families.allowsFirstPartyTool(tool),
+  );
+}
+
+/**
+ * Permissions span capabilities: project_create grants sessions:create,
+ * and runtime titling grants sessions:control. Fence the endpoint family
+ * too, without changing null-config routing or ordinary REST authorization.
+ */
+export function assertConfiguredCodemodeSessionProxyPath(
+  session: Pick<Session, "id" | "agent">,
+  path: string,
+  method: string,
+): void {
+  if (!session.agent) return;
+  const families = resolveAgentToolFamilies(session.agent);
+  const pathname = new URL(path, "http://codemode.invalid").pathname;
+  const segments = pathname.split("/").filter(Boolean);
+  const verb = method.toUpperCase();
+  const read = verb === "GET" || verb === "HEAD";
+  const allows = (tool: FirstPartyMcpToolName) => families.allowsFirstPartyTool(tool);
+  let allowed = false;
+  if (pathname === "/v1/config/client") {
+    allowed = read;
+  } else if (segments[0] === "v1" && segments[1] === "workspaces" && segments[2] === "site-host") {
+    const [surface, targetSessionId, operation] = segments.slice(3);
+    if (!surface) {
+      allowed = read;
+    } else if (surface === "sessions") {
+      const ownSession = targetSessionId === session.id;
+      const targetAllowed = ownSession || families.subagents;
+      if (!targetSessionId) {
+        allowed = families.subagents;
+      } else if (ownSession && !operation && read) {
+        allowed = true;
+      } else if (ownSession && !operation && verb === "PATCH") {
+        allowed = allows("set_session_title");
+      } else if (ownSession && operation === "background-commands") {
+        allowed = read && allows("command_read");
+      } else if (operation === "goal") {
+        allowed = allows("goal_set") && targetAllowed;
+      } else if (operation === "browser" || operation === "computer") {
+        allowed = allows("browser_open") && targetAllowed;
+      } else if (operation === "human-input-requests") {
+        allowed = families.humanInput && targetAllowed;
+      } else if (operation === "artifacts") {
+        allowed = allows("artifacts_list") && targetAllowed;
+      } else if (ownSession && ["fs", "git", "terminal", "workspace"].includes(operation ?? "")) {
+        // Resource-derived sandbox mechanics are not platform capabilities.
+        allowed = true;
+      } else if (
+        [
+          "agent",
+          "tool-policy",
+          "mcp-servers",
+          "mcp-credentials",
+          "variable-sets",
+          "project",
+        ].includes(operation ?? "")
+      ) {
+        allowed = allows("project_get") && targetAllowed;
+      } else {
+        allowed = families.subagents;
+      }
+    } else if (surface === "files") {
+      allowed = families.allowsMcpServer("files");
+    } else if (surface === "skills") {
+      allowed = families.skills === "manage" || (families.skills === "read" && read);
+    } else if (surface === "human-input-requests") {
+      allowed = families.humanInput;
+    } else {
+      const owners: Record<string, FirstPartyMcpToolName> = {
+        "model-catalog": "sessions_list",
+        "realtime-model-catalog": "sessions_list",
+        "model-policy": "sessions_list",
+        "gateway-custom-models": "sessions_list",
+        "openrouter-custom-models": "sessions_list",
+        "new-session-draft": "session_create",
+        "session-tenancy": "session_create",
+        "session-message-search": "session_events",
+        "agent-topology": "sessions_list",
+        projects: "project_get",
+        sandboxes: "sandboxes_list",
+        machines: "sandboxes_list",
+        rigs: "rig_list",
+        environments: "environment_list",
+        "variable-sets": "variable_set_list",
+        capabilities: "capability_catalog_search",
+        catalog: "capability_catalog_search",
+        members: "project_get",
+        "member-candidates": "project_get",
+        "control-events": "project_get",
+        "browser-identities": "browser_identity",
+        "browser-sessions": "browser_open",
+        "computer-sessions": "computer_open",
+        "attached-browsers": "browser_open",
+        documents: "knowledge_search",
+        knowledge: "knowledge_search",
+        memory: "knowledge_search",
+        "instruction-policy": "instruction_policy_get",
+        preferences: "preference_registry_get",
+        "company-profile": "company_profile_propose",
+        artifacts: "artifacts_list",
+        "scheduled-tasks": "scheduled_tasks_list",
+        automations: "scheduled_tasks_list",
+        connections: "github_connect_link",
+        integrations: "github_connect_link",
+        github: "github_connect_link",
+        social: "social_connections_list",
+        mcp: "github_connect_link",
+      };
+      const tool = owners[surface];
+      allowed = tool !== undefined && allows(tool);
+    }
+  }
+  if (!allowed) {
+    throw new HTTPException(403, {
+      message: "Agent configuration does not allow this Codemode SDK operation",
+    });
+  }
 }
 
 function codemodeHttpError(error: unknown): HTTPException {
