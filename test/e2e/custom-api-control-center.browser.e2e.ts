@@ -567,9 +567,16 @@ async function openCapabilities(page: Page): Promise<void> {
 
 /** Opens the one Outlook Mail provider row's page (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
+  // A connected provider is a row in the Connected list; otherwise a catalog row.
   const row = page
-    .locator(".og-capability-catalog-row")
-    .and(page.getByRole("button", { name: /^Outlook Mail\s/ }));
+    .getByRole("list", { name: "Connected", exact: true })
+    .getByRole("button", { name: "Outlook Mail", exact: true })
+    .or(
+      page
+        .locator(".og-capability-catalog-row")
+        .and(page.getByRole("button", { name: /^Outlook Mail\s/ })),
+    )
+    .first();
   await expectVisible(row);
   await row.click();
   const sheet = page.locator("[data-capability-page]");

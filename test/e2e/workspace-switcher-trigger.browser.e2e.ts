@@ -81,8 +81,8 @@ describe("Workspace switcher trigger in Chromium", () => {
       await page.getByRole("menuitem", { name: "Organization settings", exact: true }).count(),
     ).toBe(1);
     const personalMenuItem = page.getByRole("menuitem", {
-      name: "Personal workspace, your Personal workspace, private to you",
-      exact: true,
+      // The sr-only suffix is a separate box, so Chromium adds a space before its comma.
+      name: /^Personal workspace\s*, your Personal workspace, private to you$/,
     });
     expect(await personalMenuItem.isVisible()).toBe(true);
     // Seen as a lock tile in place of the initial.

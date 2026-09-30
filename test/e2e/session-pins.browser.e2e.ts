@@ -188,9 +188,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await row.dispatchEvent("contextmenu", { button: 0, ctrlKey: true });
       const menu = page.locator(`[data-session-menu="${session.id}"]`);
       await menu.getByText("Move to project", { exact: true }).waitFor();
-      expect(await menu.getByRole("menuitem", { name: "Default", exact: true }).isDisabled()).toBe(
-        true,
-      );
+      // The current project is marked (checked, aria-current), not disabled.
+      expect(
+        await menu
+          .getByRole("menuitem", { name: "Default", exact: true })
+          .getAttribute("aria-current"),
+      ).toBe("true");
       const persistedMove = (channelId: string | null) =>
         page.waitForResponse(
           (response) =>
@@ -450,11 +453,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           const footerRect = footer.getBoundingClientRect();
           const scrollStyle = getComputedStyle(element);
           const footerStyle = getComputedStyle(footer);
-          const canvas = document.createElement("canvas");
-          canvas.width = canvas.height = 1;
-          const paint = canvas.getContext("2d")!;
-          paint.fillStyle = footerStyle.backgroundColor;
-          paint.fillRect(0, 0, 1, 1);
           const settings = footer.querySelector("a[aria-current], nav a")!;
           const settingsRect = settings.getBoundingClientRect();
           const hit = document.elementFromPoint(
@@ -467,7 +465,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
             separated: scrollRect.bottom <= footerRect.top + 1,
             contained: footerRect.bottom <= window.innerHeight + 1,
             above: Number(footerStyle.zIndex) > Number(scrollStyle.zIndex),
-            backgroundAlpha: paint.getImageData(0, 0, 1, 1).data[3],
             shrink: footerStyle.flexShrink,
             settingsClickable: settings.contains(hit),
           };
@@ -477,7 +474,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         expect(layout.separated).toBe(true);
         expect(layout.contained).toBe(true);
         expect(layout.above).toBe(true);
-        expect(layout.backgroundAlpha).toBe(255);
+        // The footer is transparent so the rail glow runs to the bottom edge;
+        // as a sibling of the clipped viewport (separated above), rows never
+        // scroll under it.
         expect(layout.shrink).toBe("0");
         expect(layout.settingsClickable).toBe(true);
       }

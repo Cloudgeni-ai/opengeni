@@ -48,7 +48,8 @@ test("connected page is compact, accessible, and keeps real routing and disconne
     await page.goto(`${baseUrl}/workspaces/${workspaceId}/plugins?integration=slack`);
     // The legacy link opens the Slack page, not a sheet.
     const sheet = page.locator(slackPage);
-    await sheet.getByText("Connected", { exact: true }).waitFor();
+    // A connected page carries no Connected badge; its routing settings say it.
+    await sheet.getByRole("heading", { name: "Where work starts", exact: true }).waitFor();
     expect(await sheet.locator("h1").textContent()).toBe("Slack");
     expect(new URL(page.url()).searchParams.get("open")).toBe("integration:slack");
     expect(await page.getByRole("dialog").count()).toBe(0);
@@ -100,7 +101,7 @@ test("sibling workspace finds the verified connection and opens its home setting
     await installApi(page, { installed: true, routingSaves: 0, disconnects: 0 });
     await page.goto(`${baseUrl}/workspaces/${siblingId}/plugins?integration=slack`);
     const sheet = page.locator(slackPage);
-    await sheet.getByText("Connected", { exact: true }).waitFor();
+    await sheet.getByRole("button", { name: "Open Slack settings" }).waitFor();
     expect(
       await sheet.getByRole("button", { name: "Add Opengeni to Slack", exact: true }).count(),
     ).toBe(0);

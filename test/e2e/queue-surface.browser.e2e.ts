@@ -388,7 +388,8 @@ describe("queue surface browser acceptance", () => {
         if (theme === "light") {
           expect(collapsed.backgroundLightness ?? 0).toBeGreaterThan(0.9);
         } else {
-          expect(collapsed.backgroundLightness ?? 1).toBeLessThan(0.3);
+          // The graphite dark canvas (#303030) sits at OKLab L 0.31.
+          expect(collapsed.backgroundLightness ?? 1).toBeLessThan(0.35);
         }
         const collapsedTree = await chromeAccessibilityTree(page);
         const collapsedControl = collapsedTree.find(
@@ -1811,9 +1812,23 @@ async function pageMetrics(page: Page) {
     const harnessStyles = harness ? getComputedStyle(harness) : null;
     const backgroundColor = harnessStyles?.backgroundColor ?? "";
     const lightnessMatch = /^oklch\(([\d.]+)(%)?/.exec(backgroundColor);
+    const rgbMatch = /^rgba?\(([\d.]+),? ([\d.]+),? ([\d.]+)/.exec(backgroundColor);
+    // OKLab lightness of an sRGB color (hex tokens compute to rgb()).
+    const oklabLightness = (red: number, green: number, blue: number) => {
+      const [r, g, b] = [red, green, blue].map((value) => {
+        const channel = value / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      }) as [number, number, number];
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+    };
     const backgroundLightness = lightnessMatch
       ? Number(lightnessMatch[1]) / (lightnessMatch[2] ? 100 : 1)
-      : null;
+      : rgbMatch
+        ? oklabLightness(Number(rgbMatch[1]), Number(rgbMatch[2]), Number(rgbMatch[3]))
+        : null;
     return {
       documentOverflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
       surfaceHeight: Math.round(surface?.getBoundingClientRect().height ?? 0),
