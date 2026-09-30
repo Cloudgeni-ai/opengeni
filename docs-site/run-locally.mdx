@@ -69,6 +69,8 @@ Wait for `OpenGeni dev stack ready` before opening the printed web URL. Infrastr
 
 Connect Anthropic API keys from workspace or organization **Settings → Models**. Claude subscription setup is separately available when the operator enables `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true` (default off). Subscription tokens use your Claude plan limits; Anthropic API keys use API billing. Setup makes no model calls.
 
+Connect **OpenAI** or **Azure OpenAI** during onboarding or in **Workspace settings → Models**. OpenAI needs an API key; Azure also needs the resource endpoint and deployment name. Setup sends a short test message before saving the encrypted key, then selects the model for your next chat. Usage is billed to your provider account.
+
 Model provider credentials never reach the agent sandbox unless you allow them explicitly. The repository's [model providers guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/model-providers.md) covers inference configuration in depth.
 
 ## Stop and clean up

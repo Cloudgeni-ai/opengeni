@@ -171,7 +171,7 @@ export function OrgSettingsRoute({
       void import("@/lib/analytics")
         .then(({ captureAnalyticsEvent }) => captureAnalyticsEvent("checkout_completed"))
         .catch(() => undefined);
-      toast.success("Payment received", {
+      toast.success("Checkout complete", {
         description: "Your credits will appear shortly.",
       });
     } else {

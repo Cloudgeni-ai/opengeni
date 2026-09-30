@@ -198,6 +198,8 @@ export type AppDependencies = {
   managedEmailTransport?: ManagedEmailTransport;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
+  /** Injectable transport for customer OpenAI/Azure connection checks. */
+  directModelFetch?: typeof fetch;
   /** Injectable GitHub transport for deterministic personal-OAuth tests. */
   githubPersonalFetch?: typeof fetch;
   /** Injectable credential-free GitHub transport for public repository verification tests. */

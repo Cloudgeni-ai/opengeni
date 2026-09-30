@@ -6,10 +6,11 @@
 
 1. Read §2–4, §6.
 2. **Subsystems:** §13 sources.
-3. **Behavior:** source links.
-4. **Stale boundaries:** update per §14.
+3. **Stale boundaries:** update per §14.
 
 ---
+
+Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
 
 ## 1. Startup
 

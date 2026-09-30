@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { verifyDirectModelAccess } from "@opengeni/core";
 import { assertClaudeWorkspaceCredential } from "../claude-workspace-connection";
 import {
   createConnectionIdempotently,
@@ -38,6 +39,7 @@ import {
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   ApiIntegrationOAuthStartRequest,
+  DirectModelProviderMetadata,
   ConnectionResponse,
   CreateConnectionRequest,
   FikenInstallRequest,
@@ -243,6 +245,43 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = access.grant;
     const beforeCommit = externalContinuationCommitAuthorizer(access);
     const payload = await parseRequestJson(c, CreateConnectionRequest);
+    if (
+      payload.metadata?.directModelProvider !== undefined ||
+      String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
+    ) {
+      const config = DirectModelProviderMetadata.safeParse(payload.metadata?.directModelProvider);
+      const domain = config.success
+        ? new URL(config.data.endpoint ?? "https://api.openai.com/v1").hostname
+        : null;
+      if (
+        !config.success ||
+        payload.subjectId !== null ||
+        payload.kind !== "api_key" ||
+        canonicalProviderDomain(payload.providerDomain) !== domain ||
+        payload.metadata?.credentialRole !== `direct_${config.data.provider}` ||
+        typeof payload.credential.apiKey !== "string" ||
+        !payload.credential.apiKey.trim() ||
+        !payload.operationId ||
+        payload.expiresAt
+      ) {
+        throw new HTTPException(422, {
+          message:
+            "Invalid OpenAI or Azure OpenAI connection: provide a key, model, and official provider endpoint",
+        });
+      }
+      payload.metadata = { ...payload.metadata, directModelProvider: config.data };
+      if (payload.verifyModelAccess) {
+        await verifyDirectModelAccess(
+          config.data,
+          payload.credential.apiKey as string,
+          deps.directModelFetch,
+        );
+      }
+    } else if (payload.verifyModelAccess) {
+      throw new HTTPException(422, {
+        message: "Model checks require an OpenAI or Azure OpenAI connection",
+      });
+    }
     // All writes in this closure must use the caller-owned scoped transaction.
     // eslint-disable-next-line no-shadow
     const persist = async (db: Database) => {
@@ -372,7 +411,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       kind: payload.kind,
       metadata: payload.metadata,
     });
-    return modelKey
+    return modelKey || payload.metadata?.directModelProvider !== undefined
       ? commit(db)
       : withOrganizationIntegrationAcquisition(
           db,
@@ -934,6 +973,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             c.req.param("connectionId"),
             grant.subjectId,
           );
+          if (
+            initial?.metadata.directModelProvider !== undefined ||
+            payload.metadata?.directModelProvider !== undefined ||
+            String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
+          ) {
+            throw new HTTPException(422, {
+              message:
+                "Disconnect and reconnect OpenAI or Azure OpenAI to replace its key or deployment",
+            });
+          }
           // Model-key rotation owns an advisory -> credential-row prefix. Do
           // not take its row first or change that excluded lane's lock order.
           if (!initial || !workspaceProviderApiKeyConnectionKind(initial)) {

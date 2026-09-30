@@ -640,6 +640,10 @@ const effectiveBudgets = {
     wholeKibEnvelope(700_042, 1.5 * kib),
     // Same design-system stylesheet growth documented in the raw bound above.
     wholeKibEnvelope(706_357, 1.5 * kib),
+    // Customer provider validation and credit top-up integrated with a82657f84:
+    // Bun 1.4 macOS/arm64 measures 2,524,920 raw / 711,450 gzip across 39 files.
+    // Retain the established 1.5 KiB variance allowance for this gzip graph.
+    wholeKibEnvelope(711_450, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

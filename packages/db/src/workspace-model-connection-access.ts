@@ -1,3 +1,5 @@
+import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+import { listConnectionsMetadata } from "./index";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -85,6 +87,10 @@ export async function getWorkspaceConnectionModelRestrictions(
     );
     for (const row of rows) restrictions[row.prefix] = row.allowedModelIds;
   });
+  for (const connection of await listConnectionsMetadata(db, workspaceId, null)) {
+    const spec = directModelConnectionSpec(connection);
+    if (spec) restrictions[`${spec.providerId}/`] = [spec.modelId];
+  }
   return restrictions;
 }
 
@@ -110,6 +116,19 @@ export async function assertModelConnectionAllowsTurn(
 ): Promise<void> {
   const model = input.modelId;
   let query;
+  if (isDirectModelId(model)) {
+    const connection = (await listConnectionsMetadata(db, input.workspaceId, null)).find(
+      (candidate) =>
+        directModelConnectionSpec(candidate)?.modelId === model &&
+        (!input.workspaceProviderConnectionId ||
+          candidate.id === input.workspaceProviderConnectionId),
+    );
+    if (!connection)
+      throw new Error(
+        "This OpenAI or Azure OpenAI connection is no longer available; reconnect and select its model",
+      );
+    return;
+  }
   if (model.startsWith("codex/") || model.startsWith("supergrok/")) {
     const codex = model.startsWith("codex/");
     const id = codex ? input.codexCredentialId : input.xaiCredentialId;

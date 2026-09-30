@@ -1,3 +1,4 @@
+import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -322,6 +323,17 @@ export function WorkspaceModelsPage({
         }
         providerSections={
           <>
+            <Section
+              title="OpenAI and Azure OpenAI"
+              description="Use your own API key for models in this workspace."
+            >
+              <DirectModelProviderConnections
+                key={workspaceId}
+                workspaceId={workspaceId}
+                canManage={canManageConnections}
+                onConnectionChange={connectionChanged}
+              />
+            </Section>
             {codexSectionVisible(codex) ? (
               <Section title="Codex">
                 <CodexSettingRows

@@ -469,8 +469,14 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
-    '  [ -n "$__opengeni_setsid" ] || exit 125',
-    `  exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    '  if [ -n "$__opengeni_setsid" ]; then',
+    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    "  fi",
+    // macOS has setsid(2), but no setsid executable. The parent is proven
+    // not to be a group leader, so the same process can safely start a session.
+    '  __opengeni_python="$(command -v python3 2>/dev/null)"',
+    '  [ -n "$__opengeni_python" ] || exit 125',
+    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
     "fi",
     groupLeaderCommand,
   ].join("\n");

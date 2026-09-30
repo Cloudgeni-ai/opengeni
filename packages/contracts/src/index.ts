@@ -1,3 +1,4 @@
+export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
@@ -11490,6 +11491,8 @@ export const CreateConnectionRequest = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
   operationId: z.string().uuid().optional(),
+  /** For direct OpenAI/Azure keys: run a short provider check before saving. */
+  verifyModelAccess: z.boolean().optional(),
   /** Retired: connection execution is authorized by the initiating user. */
   initialUseContexts: z.never().optional(),
 });

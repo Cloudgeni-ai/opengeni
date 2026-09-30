@@ -1,3 +1,4 @@
+import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import { currentSessionAttachmentReadAccess } from "./database";
 import { readSessionFileAttachments } from "./session-file-attachments";
 export {
@@ -5561,6 +5562,34 @@ export async function hasCreditLedgerEntry(
       )
       .limit(1);
     return Boolean(row);
+  });
+}
+
+export async function getCreditLedgerEntry(
+  db: Database,
+  accountId: string,
+  idempotencyKey: string,
+): Promise<{
+  amountMicros: number;
+  sourceType: string | null;
+  metadata: Record<string, unknown>;
+} | null> {
+  return await withAccountRls(db, accountId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        amountMicros: schema.creditLedgerEntries.amountMicros,
+        sourceType: schema.creditLedgerEntries.sourceType,
+        metadata: schema.creditLedgerEntries.metadata,
+      })
+      .from(schema.creditLedgerEntries)
+      .where(
+        and(
+          eq(schema.creditLedgerEntries.accountId, accountId),
+          eq(schema.creditLedgerEntries.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
   });
 }
 
@@ -84764,4 +84793,40 @@ export async function updateConnectorToolPermissionPolicies(
       }
     }),
   );
+}
+
+/** Resolve only the selected immutable customer model connection; no deployment fallback. */
+export async function loadDirectModelProviderConnection(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  modelId: string,
+) {
+  if (!isDirectModelId(modelId)) return null;
+  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (candidate) => directModelConnectionSpec(candidate)?.modelId === modelId,
+  );
+  if (!metadata) throw new Error("OpenAI or Azure OpenAI connection is no longer available");
+  const connection = await loadConnectionCredentialForBroker(db, settings, {
+    workspaceId,
+    connectionId: metadata.id,
+    providerDomain: metadata.providerDomain,
+    kind: "api_key",
+    allowSubjectOwned: false,
+  });
+  if (
+    !connection ||
+    directModelConnectionSpec(connection)?.modelId !== modelId ||
+    typeof connection.credential.apiKey !== "string" ||
+    !connection.credential.apiKey.trim()
+  ) {
+    throw new Error("OpenAI or Azure OpenAI connection changed; reconnect and select its model");
+  }
+  await assertModelConnectionAllowsTurn(db, {
+    workspaceId,
+    subjectId: "worker:model-access",
+    modelId,
+    workspaceProviderConnectionId: connection.id,
+  });
+  return { ...metadata, apiKey: connection.credential.apiKey };
 }

@@ -1,3 +1,5 @@
+import { withDirectModelProviders } from "@opengeni/config";
+import { listConnectionsMetadata } from "@opengeni/db";
 import {
   getWorkspaceProviderApiKeyConnectionMetadata,
   listWorkspaceProviderCustomModels,
@@ -582,11 +584,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceClaudeConnections[kind] = { active: metadata !== null, models: workspaceModels };
       }),
     );
+    const workspaceCatalogSettings = withDirectModelProviders(
+      resolvedCatalog.settings,
+      await listConnectionsMetadata(deps.db, workspaceId, null),
+    );
     const selections = resolveWorkspaceModelSelection({
       claudeConnections,
       workspaceClaudeConnections,
       connectionModelRestrictions,
-      settings: resolvedCatalog.settings,
+      settings: workspaceCatalogSettings,
       policy,
       codexSubscriptionActive,
       xaiSubscriptionActive,
@@ -603,7 +609,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // scheduled occurrence names no model; published so pickers show it.
     const workspaceSettings = workspace?.settings ?? {};
     const defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
-      settings: resolvedCatalog.settings,
+      settings: workspaceCatalogSettings,
       accountId: grant.accountId,
       workspaceSettings,
       selections,
@@ -614,7 +620,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         projectWorkspaceModelCatalog(selections, {
           defaultSelection,
           creditsSelection: creditsDefaultSessionModel({
-            settings: resolvedCatalog.settings,
+            settings: workspaceCatalogSettings,
             selections,
             workspaceSettings,
           }),

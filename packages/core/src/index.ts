@@ -1,4 +1,5 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
+export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
 export * from "./domain/organization-integration-catalog";

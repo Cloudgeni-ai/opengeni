@@ -134,6 +134,7 @@ Keep these boundaries explicit:
   `Authorization` header. The optional deployment shared key uses
   `x-opengeni-access-key`.
 - Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
+- Customer OpenAI/Azure model keys use encrypted shared workspace Connections, with model identity bound to the exact connection and version. Discover the contract in `packages/contracts/src/direct-model-provider.ts` and execution loader in `packages/db/src/index.ts`; never fall back to deployment keys. See `docs/model-providers.md`.
 - Product access mode (`local`, `configured`, `managed`) is separate from deployment/infrastructure profile (`azure-managed`, existing services, local Kubernetes, previews, and so on).
 - RLS is defense-in-depth. Do not claim RLS-backed isolation from app-level checks alone; verify policies with a non-owner DB role and current workspace/account settings.
 
