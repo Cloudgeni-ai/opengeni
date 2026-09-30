@@ -7,7 +7,14 @@ import {
   ConnectionAccessRows,
   useConnectionAccess,
 } from "@/components/connection-access-settings";
-import { ModelsFormPage, ProviderTile, RenameAccountDialog } from "@/components/models/models-ui";
+import {
+  ModelsFormPage,
+  NOT_IN_USE,
+  ProviderTile,
+  RenameAccountDialog,
+  type ModelsScopeLabels,
+} from "@/components/models/models-ui";
+import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import {
   SuperGrokDeviceCodePanel,
@@ -50,6 +57,8 @@ export interface SuperGrokPlaces {
   /** "Local" or the organization's name: where these accounts belong. */
   scopeName: string;
   organizationName: string;
+  /** Who each account is for: "Everyone in Acme", "This workspace only", "Only you". */
+  scope: ModelsScopeLabels;
   openAccount: (accountId: string) => void;
   openConnect: () => void;
   openAccess: (accountId: string) => void;
@@ -78,23 +87,50 @@ function accountStatus(account: SuperGrokAccount): "connected" | "paused" | "nee
   return "connected";
 }
 
+/**
+ * The organization's own SuperGrok accounts, for people who manage them: the
+ * rows show every one of them, in use here or not, and open their organization page.
+ */
+export interface OrganizationSuperGrokPool {
+  grok: SuperGrokSubscriptions;
+  workspace: { id: string; personal: boolean };
+  openAccount: (accountId: string) => void;
+}
+
 /** How many rows SuperGrok adds to the Accounts list once loaded. */
-export function superGrokListedCount(grok: SuperGrokSubscriptions): number {
+export function superGrokListedCount(
+  grok: SuperGrokSubscriptions,
+  organization: OrganizationSuperGrokPool | null = null,
+): number {
   if (grok.unavailable || grok.loading) return 0;
   if (grok.loadError || grok.pending) return 1;
-  return grok.accounts.length;
+  const own = grok.inherited ? 0 : grok.accounts.length;
+  const shared = organization
+    ? organization.grok.accounts.length
+    : grok.inherited
+      ? grok.accounts.length
+      : 0;
+  return own + shared;
+}
+
+/** Who a SuperGrok account is for, in the one tag its row and page carry. */
+function scopeOf(grok: SuperGrokSubscriptions, account: SuperGrokAccount, places: SuperGrokPlaces) {
+  if (grok.inherited || grok.organizationId) return places.scope.organization;
+  return account.scope === "user" ? places.scope.user : places.scope.workspace;
 }
 
 /** SuperGrok's rows in the Accounts list. Nothing when the deployment has it off. */
 export function SuperGrokAccountRows({
   grok,
   places,
+  organization = null,
 }: {
   grok: SuperGrokSubscriptions;
   places: SuperGrokPlaces;
+  organization?: OrganizationSuperGrokPool | null;
 }) {
   if (grok.unavailable) return null;
-  if (grok.loading) return <ListRowSkeleton count={1} />;
+  if (grok.loading || organization?.grok.loading) return <ListRowSkeleton count={1} />;
   if (grok.loadError) {
     return (
       <li className="col-span-full list-none px-3 py-3">
@@ -108,9 +144,45 @@ export function SuperGrokAccountRows({
       </li>
     );
   }
+  const own = grok.inherited ? [] : grok.accounts;
+  const shared = organization
+    ? organization.grok.accounts.map((account) => {
+        const live = grok.inherited
+          ? grok.accounts.find((candidate) => candidate.id === account.id)
+          : undefined;
+        return live ? (
+          <SuperGrokRow
+            key={account.id}
+            grok={grok}
+            account={live}
+            places={places}
+            onOpen={() => organization.openAccount(account.id)}
+          />
+        ) : (
+          <SharedSuperGrokSetAsideRow
+            key={account.id}
+            account={account}
+            organization={organization}
+            places={places}
+            ownInUse={own.length > 0}
+          />
+        );
+      })
+    : grok.inherited
+      ? grok.accounts.map((account) => (
+          <SuperGrokRow
+            key={account.id}
+            grok={grok}
+            account={account}
+            places={places}
+            onOpen={() => places.openAccount(account.id)}
+          />
+        ))
+      : [];
   return (
     <>
-      {grok.accounts.map((account) => (
+      {shared}
+      {own.map((account) => (
         <SuperGrokRow
           key={account.id}
           grok={grok}
@@ -132,16 +204,63 @@ export function SuperGrokAccountRows({
   );
 }
 
+/** An organization SuperGrok account new work here doesn't use, with the plain reason. */
+function SharedSuperGrokSetAsideRow({
+  account,
+  organization,
+  places,
+  ownInUse,
+}: {
+  account: SuperGrokAccount;
+  organization: OrganizationSuperGrokPool;
+  places: SuperGrokPlaces;
+  /** This workspace has its own SuperGrok accounts, which new work uses instead. */
+  ownInUse: boolean;
+}) {
+  const access = useConnectionAccess({
+    client: organization.grok.client,
+    organizationId: organization.grok.organizationId,
+    kind: "supergrok",
+    connectionId: account.id,
+    enabled: !ownInUse,
+  });
+  const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
+  return (
+    <ListRow
+      leading={<ProviderTile provider="supergrok" size="lg" />}
+      title={superGrokAccountName(account)}
+      meta={[
+        places.scope.organization,
+        planOf(account),
+        ownInUse
+          ? "Set aside while this workspace has its own"
+          : reaches === false
+            ? `Not available in ${places.scopeName}`
+            : null,
+      ]}
+      cells={{ usage: NOT_IN_USE }}
+      indicator={needsReconnect(account) ? { kind: "attention", label: "Needs reconnect" } : "open"}
+      onOpen={() => organization.openAccount(account.id)}
+    />
+  );
+}
+
 /** "When several accounts are connected", once there are two SuperGrok accounts. */
 export function superGrokSectionVisible(grok: SuperGrokSubscriptions): boolean {
   return !grok.unavailable && !grok.loading && grok.canManageAccounts && grok.accounts.length >= 2;
 }
 
-export function SuperGrokSettingRows({ grok }: { grok: SuperGrokSubscriptions }) {
+export function SuperGrokSettingRows({
+  grok,
+  label = "When several accounts are connected",
+}: {
+  grok: SuperGrokSubscriptions;
+  label?: string;
+}) {
   return (
     <SettingRowGroup>
       <SettingRow
-        label="When several accounts are connected"
+        label={label}
         description="Spread work sends new chats to the account with the most room left. Primary only uses the primary account."
         controlWidth="auto"
         control={
@@ -181,11 +300,7 @@ function SuperGrokRow({
       leading={<ProviderTile provider="supergrok" size="lg" />}
       title={superGrokAccountName(account)}
       titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
-      meta={[
-        planOf(account),
-        grok.inherited ? `Shared by ${places.organizationName}` : null,
-        account.scope === "user" ? "Only you" : null,
-      ]}
+      meta={[scopeOf(grok, account, places), planOf(account)]}
       cells={{
         usage: needsReconnect(account) ? null : status === "paused" ? (
           <StatusBadge status="paused" variant="dot" />
@@ -267,13 +382,7 @@ function SuperGrokAccountDetail({
     connectionId: account.id,
     enabled: canEdit,
   });
-  const scopeLabel = grok.inherited
-    ? `Shared by ${places.organizationName}`
-    : account.scope === "user"
-      ? "Only you"
-      : organization
-        ? "Organization account"
-        : "This workspace";
+  const scopeLabel = scopeOf(grok, account, places);
   return (
     <DetailPage
       back={{ label: "Models", onClick: places.backToList }}
@@ -301,7 +410,7 @@ function SuperGrokAccountDetail({
       />
       <DetailPageBody>
         {grok.inherited ? (
-          <ManagedNote>Managed by your organization.</ManagedNote>
+          <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
         ) : !canEdit ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
         ) : null}

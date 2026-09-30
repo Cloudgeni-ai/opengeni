@@ -49,7 +49,12 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { parseReturnTo, returnToOf, type ReturnToSearch } from "@/lib/return-to";
-import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
+import {
+  organizationModelsRedirect,
+  parseModelsAccount,
+  parseModelsView,
+  type ModelsView,
+} from "@/lib/models-route";
 import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
@@ -923,15 +928,28 @@ function Organization() {
   const { checkout, section, account, view, person, invitation, workspace, from, fromLabel } =
     workspaceOrganizationRoute.useSearch();
   const page = parseOrganizationSection(section);
+  // Models is one page now, in the workspace's settings: the organization's
+  // accounts live there, tagged "Everyone in <organization>".
+  if (page === "models") {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/settings"
+        params={{ workspaceId }}
+        search={{
+          section: "models",
+          ...organizationModelsRedirect({ account, view: parseModelsView(view) }),
+        }}
+        replace
+      />
+    );
+  }
   return (
     <LazyOrgSettingsRoute
       workspaceId={workspaceId}
       checkout={checkout}
       section={page}
-      modelsAccount={account}
-      modelsView={page === "models" ? parseModelsView(view) : undefined}
       returnTo={returnToOf({ from, fromLabel })}
-      organizationView={page === "models" ? undefined : parseOrganizationView(view)}
+      organizationView={parseOrganizationView(view)}
       person={person}
       invitation={invitation}
       workspace={workspace}

@@ -385,6 +385,13 @@ Learned on Settings > Models, 27 Sep 2026.
   value or none.
 - **One row per provider.** A provider with several connection modes is one row; its page lists
   the modes as outcomes ("Pay with your ChatGPT plan", "Pay per use with an API key").
+- **One Models page, every account tagged by who it is for.** Learned 30 Sep 2026. Workspace and
+  organization accounts are one list; the first meta fact says who can use each: "Everyone in
+  Acme", "This workspace only" ("Personal workspace only"), "Only you". The page subtitle says
+  what a new chat starts with and who pays. Connect defaults to the widest scope the person can
+  manage (everyone, for organization owners and admins); "Only this workspace" is a secondary
+  navigational row under the provider list, explained (separate billing or keys for one team).
+  People who can't connect see the list read-only and one line naming who can.
 - **Toolbar pieces stay in the toolbar.** `ToolbarSearch` always sits inside a `Toolbar`. A `Select`
   in a narrow `SettingRow` gets a fixed width so the column doesn't jump between values.
 
@@ -492,8 +499,10 @@ admin manages without access, does the header add the name as quiet 12px meta). 
 headings. Inside a section, pages fall into at most two groups set apart by space, never by a
 second level of labels: Workspace = its settings and dashboards, then its runtime (Variable sets,
 Sandbox environments, Machines); Organization = the organization and its people (General, People,
-Workspaces, Organization identity), then what it provides, pays for and protects (Models,
-Integrations, Billing & usage, Developer, Security & data). Sections are split by one hairline.
+Workspaces, Organization identity), then what it provides, pays for and protects (Integrations,
+Billing & usage, Developer, Security & data). Models is one page, in the Workspace section: it
+lists what the workspace can use, including the organization's accounts (section 7), so the
+organization has no Models page of its own. Sections are split by one hairline.
 There are no per-section switchers. Workspace, organization and personal settings all draw this
 same rail, so the scope of every page is visible and nothing jumps to a second rail. Switching
 workspace or organization in the picker keeps the same kind of page;

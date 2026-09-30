@@ -5,7 +5,6 @@ import {
   FingerprintIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
-  SparklesIcon,
   SquareStackIcon,
   UsersIcon,
   type LucideIcon,
@@ -22,14 +21,14 @@ type OrganizationSettingsItem = {
 /**
  * The organization's settings pages: one name and one icon each, in rail order.
  * A page that exists at both scopes wears the same icon in the workspace rail
- * (`settings-rail.tsx`): General, People/Access, Models, Developer, Security.
+ * (`settings-rail.tsx`): General, People/Access, Developer, Security. Models is one
+ * page in the workspace section; the organization's accounts are on it.
  */
 export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "general", label: "General", icon: SlidersHorizontalIcon },
   { id: "people", label: "People", icon: UsersIcon },
   { id: "workspaces", label: "Workspaces", icon: SquareStackIcon },
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
-  { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
   { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },
@@ -42,7 +41,7 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
  */
 export const ORGANIZATION_SETTINGS_GROUPS: readonly (readonly OrganizationAdminSection[])[] = [
   ["general", "people", "workspaces", "identity"],
-  ["models", "integrations", "billing", "developer", "security"],
+  ["integrations", "billing", "developer", "security"],
 ];
 
 export function organizationSettingsLabel(section: OrganizationAdminSection): string {
@@ -63,7 +62,8 @@ export function organizationSettingsDescription(
     case "workspaces":
       return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
     case "models":
-      return "Subscriptions and API keys the organization pays for, and which workspaces can use them.";
+      // Redirects to the workspace's Models page, which has its own subtitle.
+      return undefined;
     case "integrations":
       // "Allowed integrations" and its one row say it all.
       return undefined;

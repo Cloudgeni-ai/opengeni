@@ -63,6 +63,30 @@ export function ProviderTile({
   return <LogoTile size={size} icon={<ProviderMark provider={provider} className="text-fg" />} />;
 }
 
+/**
+ * Who an account is for, as the one tag on its row and page: the whole
+ * organization, this workspace, or only the person who connected it.
+ */
+export interface ModelsScopeLabels {
+  /** "Everyone in Acme". */
+  organization: string;
+  /** "This workspace only", or "Personal workspace only". */
+  workspace: string;
+  /** "Only you". */
+  user: string;
+}
+
+export function modelsScopeLabels(organizationName: string, personal: boolean): ModelsScopeLabels {
+  return {
+    organization: `Everyone in ${organizationName}`,
+    workspace: personal ? "Personal workspace only" : "This workspace only",
+    user: "Only you",
+  };
+}
+
+/** "Not in use", in the usage column of an account new work here doesn't use. */
+export const NOT_IN_USE = <span className="text-xs font-medium text-fg-subtle">Not in use</span>;
+
 /** A full-page form with a back link and a sticky Cancel + primary footer. */
 export function ModelsFormPage({
   backLabel = "Models",

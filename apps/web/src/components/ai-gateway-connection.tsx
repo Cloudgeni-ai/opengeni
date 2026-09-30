@@ -13,15 +13,7 @@ import { trackModelConnection } from "@/lib/analytics-observer";
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import {
-  BuildingIcon,
-  FolderIcon,
-  KeyRoundIcon,
-  Loader2Icon,
-  MinusCircleIcon,
-  PlusIcon,
-  UnplugIcon,
-} from "lucide-react";
+import { KeyRoundIcon, Loader2Icon, MinusCircleIcon, PlusIcon, UnplugIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -42,7 +34,7 @@ import {
   type ConnectionAccessTarget,
 } from "@/components/connection-access-settings";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ModelsFormPage, ProviderTile } from "@/components/models/models-ui";
+import { ModelsFormPage, NOT_IN_USE, ProviderTile } from "@/components/models/models-ui";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -911,9 +903,16 @@ export function providerListed(state: ProviderConnection): boolean {
 export function ProviderConnectionRow({
   state,
   onOpen,
+  scope,
+  setAside,
 }: {
   state: ProviderConnection;
-  onOpen: () => void;
+  /** Opens the provider's page; omitted for a read-only row. */
+  onOpen?: (() => void) | undefined;
+  /** Who the key is for: "Everyone in Acme", "This workspace only". */
+  scope?: string | undefined;
+  /** Why new work here doesn't use this key; the row then reads "Not in use". */
+  setAside?: string | null | undefined;
 }) {
   const { config } = state;
   const status = providerStatus(state);
@@ -926,27 +925,33 @@ export function ProviderConnectionRow({
       leading={<ProviderTile provider={config.provider} size="lg" />}
       title={config.title}
       meta={[
+        scope,
         status.status === "connected"
           ? config.provider === "claude_subscription"
             ? "Claude plan"
             : "API key"
           : status.label,
-        modelsLabel,
+        setAside ?? modelsLabel,
       ]}
       cells={
-        state.claudeUsage && state.connected
-          ? { usage: <ClaudeUsageReadout state={state.claudeUsage} /> }
-          : undefined
+        setAside
+          ? { usage: NOT_IN_USE }
+          : state.claudeUsage && state.connected
+            ? { usage: <ClaudeUsageReadout state={state.claudeUsage} /> }
+            : {}
       }
-      indicator={
-        status.status === "unavailable"
-          ? {
-              kind: "unavailable",
-              label: status.label === "Replace token" ? "Replace token" : "Couldn't load",
-            }
-          : "open"
-      }
-      onOpen={onOpen}
+      {...(onOpen
+        ? {
+            onOpen,
+            indicator:
+              status.status === "unavailable"
+                ? {
+                    kind: "unavailable" as const,
+                    label: status.label === "Replace token" ? "Replace token" : "Couldn't load",
+                  }
+                : ("open" as const),
+          }
+        : {})}
     />
   );
 }
@@ -1363,12 +1368,7 @@ export function ProviderConnectionPage({
                     ? "Stored encrypted"
                     : "Not connected"}
             </DetailAsideItem>
-            <DetailAsideItem
-              label="Belongs to"
-              icon={state.organization ? <BuildingIcon /> : <FolderIcon />}
-            >
-              {scopeName ?? state.scopeLabel}
-            </DetailAsideItem>
+            {/* Who it's for is in the header meta; the aside doesn't repeat it. */}
             <DetailAsideItem label="Billed to">{config.billedTo}</DetailAsideItem>
           </DetailAside>
         }

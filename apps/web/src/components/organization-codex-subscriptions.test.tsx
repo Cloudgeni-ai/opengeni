@@ -4,8 +4,6 @@ import type { CodexAccount, OrganizationCodexAccountsResponse } from "@opengeni/
 import { act, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { ModelsView } from "@/lib/models-route";
-
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const activeAccountId = "22222222-2222-4222-8222-222222222222";
 const inactiveAccountId = "33333333-3333-4333-8333-333333333333";
@@ -80,15 +78,12 @@ const context = {
   },
 };
 
-let navigateTo: (search: { account?: string; view?: ModelsView }) => void = () => {};
-
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({
   toast: { error: mock(() => undefined), success: mock(() => undefined) },
 }));
 mock.module("@tanstack/react-router", () => ({
-  useNavigate: () => (options: { search: { account?: string; view?: ModelsView } }) =>
-    navigateTo(options.search),
+  useNavigate: () => () => undefined,
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("@/components/ui/dropdown-menu", () => ({
@@ -131,23 +126,38 @@ GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 
-const { OrganizationModelsPage } = await import("./models/organization-models-page");
+const { OrgCodexAccountPage, reachesWorkspace } =
+  await import("./models/organization-codex-models");
+const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
 
 afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
 
-function Harness() {
-  const [search, setSearch] = useState<{ account?: string; view?: ModelsView }>({});
-  navigateTo = setSearch;
+let backToList = mock(() => undefined);
+let refreshNow: () => Promise<void> = async () => undefined;
+
+/** An organization account's page on the one Models page, with the real data hook. */
+function Harness({ accountId }: { accountId: string }) {
+  const codex = useOrganizationCodexSubscriptions({
+    client: context.client as never,
+    organizationId,
+  });
+  refreshNow = codex.refresh;
+  const [open] = useState(accountId);
   return (
-    <OrganizationModelsPage
-      workspaceId="workspace-a"
-      organizationId={organizationId}
-      organizationName="Acme"
-      account={search.account}
-      view={search.view}
+    <OrgCodexAccountPage
+      codex={codex}
+      accountId={open}
+      places={{
+        organizationName: "Acme",
+        scopeLabel: "Everyone in Acme",
+        openAccount: () => undefined,
+        openConnect: () => undefined,
+        openAccess: () => undefined,
+        backToList,
+      }}
     />
   );
 }
@@ -167,22 +177,18 @@ function button(container: HTMLElement, text: string | RegExp) {
 }
 
 describe("organization Codex subscriptions", () => {
-  test("sends explicit JSON bodies for activate and disconnect mutations", async () => {
+  test("an account's page sends explicit JSON bodies for activate and disconnect", async () => {
+    backToList = mock(() => undefined);
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
 
     try {
-      await act(async () => root.render(<Harness />));
-      await flush();
-      expect(container.textContent).toContain("Available in all shared workspaces + Personal");
-
-      const row = [...container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
-        (candidate) => candidate.textContent?.includes("Backup subscription"),
-      )!;
-      await act(async () => row.querySelector<HTMLElement>("[data-row-action]")!.click());
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
       await flush();
       expect(container.querySelector("h1")?.textContent).toBe("Backup subscription");
+      expect(container.textContent).toContain("Everyone in Acme");
+      expect(container.textContent).toContain("Available in");
 
       await act(async () => button(container, "Make primary")!.click());
       await flush();
@@ -201,14 +207,14 @@ describe("organization Codex subscriptions", () => {
         `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}`,
         {},
       ]);
-      expect(container.textContent).toContain("Shared with the organization's workspaces.");
+      expect(backToList).toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
   });
 
-  test("a failed read shows an alert with Try again", async () => {
+  test("a failed read recovers on refresh", async () => {
     requestJson.mockImplementationOnce(async () => {
       throw new Error("organization read failed");
     });
@@ -216,15 +222,37 @@ describe("organization Codex subscriptions", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     try {
-      await act(async () => root.render(<Harness />));
+      await act(async () => root.render(<Harness accountId={activeAccountId} />));
       await flush();
-      expect(container.textContent).toContain("Couldn't load the organization's Codex accounts.");
-      await act(async () => button(container, "Try again")!.click());
+      expect(container.textContent).toContain("This account isn't connected");
+      await act(async () => refreshNow());
       await flush();
-      expect(container.textContent).toContain("Primary subscription");
+      expect(container.querySelector("h1")?.textContent).toBe("Primary subscription");
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+
+  test("whether an organization account reaches a workspace follows Available in", () => {
+    const shared = { id: "workspace-a", personal: false };
+    const personal = { id: "personal-a", personal: true };
+    expect(reachesWorkspace(null, shared)).toBeNull();
+    expect(reachesWorkspace(access, shared)).toBe(true);
+    expect(reachesWorkspace(access, personal)).toBe(true);
+    const limited = {
+      ...access,
+      policy: {
+        ...access.policy,
+        allowedWorkspaces: ["workspace-b"],
+        allowPersonalWorkspaces: false,
+      },
+    };
+    expect(reachesWorkspace(limited, shared)).toBe(false);
+    expect(reachesWorkspace(limited, personal)).toBe(false);
+    // Organization API keys never serve Personal workspaces.
+    expect(reachesWorkspace({ ...access, personalWorkspacesSupported: false }, personal)).toBe(
+      false,
+    );
   });
 });

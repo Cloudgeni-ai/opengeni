@@ -77,6 +77,11 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   const places: SuperGrokPlaces = {
     scopeName: "Local",
     organizationName: "Organization",
+    scope: {
+      organization: "Everyone in Organization",
+      workspace: "This workspace only",
+      user: "Only you",
+    },
     openAccount: () => undefined,
     openConnect: () => undefined,
     openAccess: () => undefined,
@@ -284,7 +289,9 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
         codexAvailable={false}
         grok="hidden"
         gateways={gateways}
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,
@@ -301,7 +308,9 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
       <ConnectPickerPage
         codexAvailable={false}
         grok="hidden"
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,

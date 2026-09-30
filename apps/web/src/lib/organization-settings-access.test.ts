@@ -55,7 +55,6 @@ describe("organization settings access", () => {
         "general",
         "identity",
         "integrations",
-        "models",
         "people",
         "security",
         "workspaces",

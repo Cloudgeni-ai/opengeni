@@ -220,7 +220,7 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
-        "Models",
+        // Models is one page, in the Workspace section; the organization's accounts are on it.
         "Integrations",
         "Billing & usage",
         "Developer",
@@ -228,7 +228,7 @@ describe("settings rail", () => {
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 5]);
+      ).toEqual([4, 4]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
@@ -242,7 +242,7 @@ describe("settings rail", () => {
           ?.getAttribute("class")
           ?.split(" ")
           .find((name) => name.startsWith("lucide-") && name !== "lucide");
-      for (const label of ["General", "Models", "Developer"]) {
+      for (const label of ["General", "Developer"]) {
         const workspaceIcon = iconOf(workspaceSection, label);
         expect(workspaceIcon).toBeDefined();
         expect(iconOf(organizationSection, label)).toBe(workspaceIcon);

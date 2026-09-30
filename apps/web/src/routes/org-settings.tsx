@@ -1,4 +1,4 @@
-// Organization settings: General, People, Workspaces, Models, Integrations,
+// Organization settings: General, People, Workspaces, Integrations,
 // Organization identity, Billing & usage, Developer and Security & data.
 // They render inside the settings shell's Organization section
 // (components/settings/workspace-settings-shell.tsx); pages this person can't
@@ -8,7 +8,6 @@ import { PlusIcon, UserPlusIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { OrganizationModelsPage } from "@/components/models/organization-models-page";
 import type { ReturnTo } from "@/lib/return-to";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
 import { OrganizationGeneralPage } from "@/components/organization/general-page";
@@ -32,7 +31,6 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { PageHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import type { ModelsView } from "@/lib/models-route";
 import { orgLabel } from "@/lib/org";
 import {
   canInviteOrganizationRole,
@@ -60,8 +58,6 @@ export function OrgSettingsRoute({
   workspaceId,
   checkout,
   section: requestedSection,
-  modelsAccount,
-  modelsView,
   returnTo,
   organizationView,
   person,
@@ -71,10 +67,6 @@ export function OrgSettingsRoute({
   workspaceId: string;
   checkout?: "success" | "cancelled";
   section?: OrganizationAdminSection;
-  /** Models: the account page that is open. */
-  modelsAccount?: string | undefined;
-  /** Models: the form page that is open. */
-  modelsView?: ModelsView | undefined;
   /** Where a cross-scope link came from; the back link returns there. */
   returnTo?: ReturnTo | undefined;
   /** People or Workspaces: the form page that is open. */
@@ -222,7 +214,6 @@ export function OrgSettingsRoute({
   );
 
   const subPage =
-    (section === "models" && Boolean(modelsAccount || modelsView)) ||
     (section === "people" && Boolean(person || invitation || organizationView)) ||
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
     (section === "developer" && organizationView === "new-key") ||
@@ -274,18 +265,6 @@ export function OrgSettingsRoute({
                 params: { workspaceId: createdId },
               });
             }}
-          />
-        ) : null}
-
-        {section === "models" ? (
-          <OrganizationModelsSection
-            key={`${identityKey}:models`}
-            workspaceId={workspaceId}
-            organizationId={accountId}
-            fallbackLabel={fallbackLabel}
-            account={modelsAccount}
-            view={modelsView}
-            returnTo={returnTo}
           />
         ) : null}
 
@@ -421,26 +400,5 @@ function BillingSection({
       <DetailPageHeader title="Billing & usage" />
       <div className="mt-6 min-w-0">{children}</div>
     </DetailPage>
-  );
-}
-
-/** Models, named with the organization's real name once it has loaded. */
-function OrganizationModelsSection({
-  fallbackLabel,
-  ...props
-}: {
-  workspaceId: string;
-  organizationId: string;
-  fallbackLabel: string;
-  account: string | undefined;
-  view: ModelsView | undefined;
-  returnTo: ReturnTo | undefined;
-}) {
-  const directory = useOptionalOrganizationDirectory();
-  return (
-    <OrganizationModelsPage
-      {...props}
-      organizationName={directory?.overview.value?.organization.name ?? fallbackLabel}
-    />
   );
 }

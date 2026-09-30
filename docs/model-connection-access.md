@@ -55,7 +55,13 @@ assigned organization pool resolves to the first eligible assigned account,
 without changing the organization default. Policy never authorizes a fallback
 to a different provider or payment source.
 
-In the web app, Settings > Models shows one row per connected account; each
+In the web app, Settings > Models is one page in the workspace's settings
+(there is no separate organization Models page; its old URL redirects). It
+shows one row per account this workspace can use, each tagged by who it is for
+("Everyone in <organization>", "This workspace only", "Only you"). Organization
+owners and admins connect for the whole organization by default, with "Only
+this workspace" as a secondary choice, and also see the organization's
+accounts that don't reach this workspace, muted with the reason. Each
 account's own page carries "Available in" and "Models it can serve"
 (`apps/web/src/components/connection-access-settings.tsx`), edited on a form
 page. In a workspace the per-account model list shows only once an account is

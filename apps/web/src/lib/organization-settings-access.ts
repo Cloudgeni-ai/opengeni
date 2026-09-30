@@ -70,7 +70,7 @@ export function organizationSettingsAccess(input: {
     visible.add("general");
     if (managedHumanSession && !singleUser) visible.add("people");
     visible.add("workspaces");
-    visible.add("models");
+    // Models is one page in the workspace's settings; its organization URL redirects there.
     visible.add("integrations");
   }
   visible.add("identity");

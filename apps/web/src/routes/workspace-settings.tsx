@@ -196,6 +196,7 @@ function OperationalWorkspaceSettingsRoute({
           key={`models:${workspaceId}`}
           workspaceId={workspaceId}
           workspaceName={activeWorkspace?.name ?? "this workspace"}
+          personal={personal}
           organizationId={accountId}
           organizationName={organizationName ?? "your organization"}
           canManageSettings={canManageSettings}

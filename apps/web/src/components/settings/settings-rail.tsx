@@ -63,9 +63,9 @@ export const WORKSPACE_SETTINGS_COPY: Record<
     description: ({ workspace, organization }) =>
       `People from ${organization} who can use ${workspace}.`,
   },
+  // The page's first line says what a new chat here uses and who pays.
   models: {
     title: "Models",
-    description: () => "Which models this workspace can use, and who pays for them.",
   },
   "api-keys": {
     title: "API keys",

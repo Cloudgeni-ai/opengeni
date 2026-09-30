@@ -51,9 +51,14 @@ export function useSuperGrokSubscriptions({
   organizationId,
   canManage,
   client,
-}: SubscriptionScope & { client: OpenGeniBrowserClient }) {
+  enabled: readEnabled = true,
+}: SubscriptionScope & {
+  client: OpenGeniBrowserClient;
+  /** False for people who can't read these accounts: nothing is read. */
+  enabled?: boolean;
+}) {
   const [data, setData] = useState<SuperGrokAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(readEnabled);
   const [loadError, setLoadError] = useState<string | null>(null);
   /** SuperGrok is off for this deployment: the page doesn't show it at all. */
   const [unavailable, setUnavailable] = useState(false);
@@ -64,6 +69,7 @@ export function useSuperGrokSubscriptions({
   const pollAbort = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
+    if (!readEnabled) return;
     try {
       setData(
         organizationId
@@ -84,18 +90,18 @@ export function useSuperGrokSubscriptions({
     } finally {
       setLoading(false);
     }
-  }, [client, workspaceId, organizationId]);
+  }, [client, workspaceId, organizationId, readEnabled]);
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(true);
+    setLoading(readEnabled);
     void refresh();
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
       pollAbort.current = null;
     };
-  }, [refresh]);
+  }, [refresh, readEnabled]);
 
   /** `scope` is "workspace" (shared) or "user" (only the person connecting). */
   const connect = useCallback(
@@ -283,6 +289,7 @@ export function useSuperGrokSubscriptions({
   const accounts = data?.accounts ?? [];
   const inherited = !organizationId && data?.source === "organization";
   return {
+    client,
     organizationId,
     workspaceId,
     canManage,

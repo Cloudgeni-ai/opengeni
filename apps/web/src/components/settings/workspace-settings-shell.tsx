@@ -24,7 +24,8 @@ import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner
 
 /** Sub-pages (an account, a key, a form) bring their own back link and title. */
 function isSubPage(section: WorkspaceSettingsSection, search: Record<string, unknown>): boolean {
-  if (section === "models") return Boolean(search.account || search.view);
+  // Models draws its own header: its subtitle says what a new chat uses and who pays.
+  if (section === "models") return true;
   if (section === "api-keys") return Boolean(search.key);
   if (section === "access") return Boolean(search.view);
   return false;
