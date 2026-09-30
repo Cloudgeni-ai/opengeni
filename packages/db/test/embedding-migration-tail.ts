@@ -61,4 +61,9 @@ export const embeddingMigrationTail = [
   "0535_slack_file_upload_operations.sql",
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
   "0539_scheduled_admission_refusals.sql",
+  // Allowance receipts compile against the withheld Knowledge/embedding and
+  // scheduled-refusal lifecycle. Replay them after those prerequisites.
+  "0547_usage_allowances.sql",
+  "0548_non_model_debit_attribution.sql",
+  "0549_video_allowance_refunds.sql",
 ];
