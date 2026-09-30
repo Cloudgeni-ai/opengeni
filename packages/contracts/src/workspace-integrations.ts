@@ -114,14 +114,23 @@ export const OrganizationWebhookEventType = WorkspaceWebhookEventType.exclude([
 ]);
 export type OrganizationWebhookEventType = z.infer<typeof OrganizationWebhookEventType>;
 const OrganizationEventTypes = z
-  .array(OrganizationWebhookEventType)
+  .array(WorkspaceWebhookEventType)
   .min(1)
-  .max(OrganizationWebhookEventType.options.length)
+  .max(WorkspaceWebhookEventType.options.length)
+  .refine((types) => types.every((type) => !type.startsWith("usage.")), {
+    message:
+      "Organization webhooks accept session events only; subscribe to usage events on a workspace webhook.",
+  })
   .transform((types) => [...new Set(types)]);
 
 export const OrganizationWebhook = WorkspaceWebhook.omit({ workspaceId: true }).extend({
   organizationId: z.string().uuid(),
-  eventTypes: z.array(OrganizationWebhookEventType),
+  eventTypes: z
+    .array(WorkspaceWebhookEventType)
+    .refine((types) => types.every((type) => !type.startsWith("usage.")), {
+      message:
+        "Organization webhooks accept session events only; subscribe to usage events on a workspace webhook.",
+    }),
   workspaceFilter: IntegrationWorkspaceFilter.nullable(),
 });
 export type OrganizationWebhook = z.infer<typeof OrganizationWebhook>;
@@ -189,7 +198,7 @@ export type ListOrganizationWebhookDeliveriesResponse = z.infer<
  * receivers read details through the authenticated API.
  */
 export const SessionWorkspaceWebhookEvent = z.object({
-  lane: z.enum(["organization", "workspace"]),
+  lane: z.enum(["organization", "workspace"]).default("workspace"),
   id: z.string().uuid(),
   type: z.string(),
   workspaceId: z.string().uuid(),
@@ -212,7 +221,7 @@ export type SessionWorkspaceWebhookEvent = z.infer<typeof SessionWorkspaceWebhoo
 /** Workspace allowance events have no synthetic session or turn identity.
  * Optional null context fields let transport adapters share an envelope. */
 export const WorkspaceUsageWebhookEvent = z.object({
-  lane: z.literal("workspace"),
+  lane: z.literal("workspace").default("workspace"),
   id: z.string().uuid(),
   type: z.enum(["usage.threshold_reached", "usage.exhausted", "usage.period_reset"]),
   workspaceId: z.string().uuid(),

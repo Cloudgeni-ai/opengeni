@@ -123,10 +123,14 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
   deliveryId: string | null;
 }> {
   const event = await verifiedObject(input);
+  const usageEvent = typeof event.type === "string" && event.type.startsWith("usage.");
+  const lane = event.lane === undefined ? "workspace" : event.lane;
   if (
     typeof event.id !== "string" ||
     typeof event.type !== "string" ||
     typeof event.workspaceId !== "string" ||
+    (lane !== "workspace" && lane !== "organization") ||
+    (usageEvent && lane !== "workspace") ||
     !(
       typeof event.sessionId === "string" ||
       ((event.sessionId === null || event.sessionId === undefined) &&
@@ -136,7 +140,7 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
     throw new OpenGeniSignatureError();
   }
   return {
-    event: event as WorkspaceWebhookEvent,
+    event: { ...event, lane } as WorkspaceWebhookEvent,
     deliveryId: header(input.headers, OPENGENI_DELIVERY_ID_HEADER),
   };
 }

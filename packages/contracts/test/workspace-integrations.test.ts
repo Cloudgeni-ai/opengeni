@@ -4,12 +4,14 @@ import {
   CreateOrganizationWebhookRequest,
   CredentialProviderResponse,
   InitiatingHuman,
+  OrganizationWebhook,
   PutOrganizationCredentialProviderRequest,
   resolveWorkspaceDefaultSandboxImage,
   signOpenGeniPayload,
   UpdateOrganizationWebhookRequest,
   UpdateWorkspaceSettingsRequest,
   verifyOpenGeniSignature,
+  WorkspaceWebhookEvent,
 } from "../src/index";
 
 describe("OpenGeni signatures", () => {
@@ -269,4 +271,79 @@ test("organization webhooks accept session event types only; usage events stay p
       eventTypes: ["usage.exhausted"],
     }).success,
   ).toBe(true);
+  const invalid = CreateOrganizationWebhookRequest.safeParse({
+    ...base,
+    eventTypes: ["usage.exhausted"],
+  });
+  expect(invalid.success).toBe(false);
+  if (!invalid.success) {
+    expect(invalid.error.issues[0]?.message).toContain("workspace webhook");
+  }
+  const webhook = {
+    id: crypto.randomUUID(),
+    organizationId: crypto.randomUUID(),
+    url: base.url,
+    enabled: true,
+    description: null,
+    workspaceFilter: null,
+    createdAt: "2026-09-01T00:00:00Z",
+    updatedAt: "2026-09-01T00:00:00Z",
+  };
+  expect(
+    OrganizationWebhook.safeParse({ ...webhook, eventTypes: ["turn.completed"] }).success,
+  ).toBe(true);
+  expect(
+    OrganizationWebhook.safeParse({ ...webhook, eventTypes: ["usage.exhausted"] }).success,
+  ).toBe(false);
+});
+
+test("signed pre-upgrade session and usage webhook bodies default to the workspace lane", async () => {
+  const common = {
+    id: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
+    occurredAt: "2026-09-01T00:00:00Z",
+  };
+  for (const event of [
+    {
+      ...common,
+      type: "turn.completed",
+      sessionId: crypto.randomUUID(),
+      turnId: null,
+      sequence: 1,
+      data: {},
+    },
+    { ...common, type: "usage.exhausted", data: { scope: "workspace", resetsAt: null } },
+  ]) {
+    const body = JSON.stringify(event);
+    const signature = await signOpenGeniPayload("legacy-secret", body, 1_700_000_000);
+    expect(
+      await verifyOpenGeniSignature({
+        secret: "legacy-secret",
+        body,
+        signature,
+        nowSeconds: 1_700_000_001,
+      }),
+    ).toBe(true);
+    expect(WorkspaceWebhookEvent.parse(JSON.parse(body)).lane).toBe("workspace");
+    expect(WorkspaceWebhookEvent.parse({ ...event, lane: "workspace" }).lane).toBe("workspace");
+  }
+  const session = {
+    ...common,
+    type: "turn.completed",
+    sessionId: crypto.randomUUID(),
+    turnId: null,
+    sequence: 1,
+    data: {},
+  };
+  expect(WorkspaceWebhookEvent.parse({ ...session, lane: "organization" }).lane).toBe(
+    "organization",
+  );
+  expect(
+    WorkspaceWebhookEvent.safeParse({
+      ...common,
+      type: "usage.exhausted",
+      lane: "organization",
+      data: {},
+    }).success,
+  ).toBe(false);
 });

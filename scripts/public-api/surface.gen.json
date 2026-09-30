@@ -10940,7 +10940,7 @@
         "$.description": "string? null",
         "$.enabled": "boolean?",
         "$.eventTypes": "array!",
-        "$.eventTypes[]": "ref(OrganizationWebhookEventType)",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
         "$.url": "string!",
         "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)! null"
       }
@@ -16427,7 +16427,7 @@
         "$.description": "string! null",
         "$.enabled": "boolean!",
         "$.eventTypes": "array!",
-        "$.eventTypes[]": "ref(OrganizationWebhookEventType)",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
         "$.id": "string!",
         "$.organizationId": "string!",
         "$.updatedAt": "string!",
@@ -16453,15 +16453,6 @@
         "$.nextAttemptAt": "string! null",
         "$.status": "ref(WorkspaceWebhookDeliveryStatus)!",
         "$.webhookId": "string!"
-      }
-    },
-    "OrganizationWebhookEventType": {
-      "io": [
-        "input",
-        "output"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"session.humanInput.requested\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\"]"
       }
     },
     "OrganizationWorkspaceAccess": {
@@ -21219,7 +21210,7 @@
         "$.description": "string? null",
         "$.enabled": "boolean?",
         "$.eventTypes": "array?",
-        "$.eventTypes[]": "ref(OrganizationWebhookEventType)",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
         "$.url": "string?",
         "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)! null"
       }
