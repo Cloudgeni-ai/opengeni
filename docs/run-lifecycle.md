@@ -2040,15 +2040,17 @@ only backoff: the process remains active, retains every blocker, carries no
 exit/loss proof, and is periodically eligible for a later positive binding
 lookup and ordinary reconciliation.
 A Modal command's exit is reported only once both output streams reach EOF.
-Output is therefore read in 1 MiB pages per stream, and within one claim the
-reaper keeps reading while each read advances the durable cursor, bounded by
-eight reads and ten seconds. A running command whose output advanced is
-re-probed at reaper cadence rather than on the exponential backoff reserved
+Output is therefore read in 1 MiB pages per stream over a widened HTTP/2 flow
+window. Within one claim, observation or cancellation, the reaper keeps
+reading while a read still returns a large backlog (256 KiB or more), bounded
+by eight reads and ten seconds per claim and sixty seconds per sweep. A
+command left with a backlog is re-probed at reaper cadence; one that only
+trickles output, such as a server, stays on the exponential backoff reserved
 for quiet commands and failures. Without this, a command that finished in
 seconds but printed megabytes stayed running for hours, holding its process
 blocker and preventing idle drain and capture until the provider deadline.
-Each stream records at most 16 MiB of output; later bytes are still read and
-the page that crosses the limit carries one explicit marker.
+Each stream records at most 16 MiB of output; later bytes are still read, and
+the one page that crosses or starts at the limit carries an explicit marker.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 

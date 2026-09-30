@@ -123,6 +123,10 @@ export class ModalCommandRouterWire {
         "grpc.max_receive_message_length": maxWireBytes,
         "grpc.max_send_message_length": maxWireBytes,
         "grpc.enable_retries": 0,
+        // The HTTP/2 default 64 KiB window caps one read at 64 KiB per round
+        // trip. Two pages lets stdout and stderr each fill a page in one trip
+        // while bounding bytes discarded when a full read cancels its stream.
+        "grpc-node.flow_control_window": 2 * MODAL_ROUTER_READ_PAGE_BYTES,
       },
     );
     this.metadata = new Metadata();

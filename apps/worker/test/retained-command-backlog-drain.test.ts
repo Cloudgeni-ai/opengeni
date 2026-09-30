@@ -1,127 +1,159 @@
 import { describe, expect, test } from "bun:test";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
+import { ModalCommandControl } from "../../../packages/runtime/src/sandbox/providers/modal-command-control";
+import { MODAL_ROUTER_READ_PAGE_BYTES as PAGE } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
+import { installModalCommandSession } from "../../../packages/runtime/src/sandbox/providers/modal-command-session";
+import type { ChannelASession } from "../../../packages/runtime/src/sandbox/channel-a";
+import type { ProviderCommandSession } from "../../../packages/runtime/src/sandbox/provider-command-session";
 import {
   RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS,
   drainRetainedCommandBacklog,
   retainedProcessReconciliationDeferral,
 } from "../src/activities/sandbox-lease";
 
-const PAGE = 1024 * 1024;
+const locator = (): ModalRouterProviderCommand => ({
+  kind: "modal-router-v1",
+  sandboxId: "sb-test",
+  taskId: "task-test",
+  execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
+  streams: {
+    stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+  },
+});
 
-function cursor(stdout: number, exitCode: number | null = null): ModalRouterProviderCommand {
-  return {
-    kind: "modal-router-v1",
-    sandboxId: "sb-test",
-    taskId: "task-test",
-    execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
-    streams: {
-      stdout: { byteOffset: stdout, utf8Remainder: "", eof: exitCode !== null, exitCode },
-      stderr: { byteOffset: 0, utf8Remainder: "", eof: exitCode !== null, exitCode },
+/** The real Modal command control and session adapter over a router that
+ * holds `total` bytes of already-written stdout. The command has exited, but
+ * as on Modal, its exit is reported only once stdout is read to EOF. A
+ * trickling command instead gains 1 KiB per read and never ends. */
+function retainedCommand(total: number, options: { trickle?: boolean; failAtRead?: number } = {}) {
+  const control = ModalCommandControl.forSandbox(
+    {
+      version: () => "0.9.0",
+      cpClient: { sandboxGetTaskId: async () => ({ taskId: "task-test" }) },
+    } as never,
+    "sb-test",
+    "/workspace",
+  );
+  let reads = 0;
+  Object.defineProperty(control, "withRouter", {
+    value: async (_task: string, _signal: unknown, run: (router: unknown) => unknown) =>
+      await run({
+        read: async (_identity: unknown, stream: string, offset: number) => {
+          if (stream === "stderr") return { bytes: Buffer.alloc(0), eof: true };
+          reads++;
+          if (options.failAtRead === reads) throw new Error("provider unavailable");
+          const size = options.trickle ? 1024 : Math.min(PAGE, total - offset);
+          return {
+            bytes: Buffer.alloc(size, 120),
+            eof: !options.trickle && offset + size >= total,
+          };
+        },
+        poll: async () => (options.trickle ? null : 0),
+      }),
+  });
+  const session = {} as ChannelASession & ProviderCommandSession;
+  installModalCommandSession(session, control);
+  let stored = locator();
+  let recorded = "";
+  session.bindProviderCommand!(7, stored, {
+    load: async () => stored,
+    acknowledge: async () => {
+      throw new Error("byte-offset output never uses the legacy acknowledgement");
     },
+    reserveInput: async () => 0,
+    captureRouterPage: async (page) => {
+      recorded += page.stdout;
+      stored = page.command as ModalRouterProviderCommand;
+      return { command: stored, captured: true };
+    },
+  });
+  // The reaper's capture step for a byte-offset page: the page was committed
+  // during the read, and confirming it consumes the in-memory receipt.
+  const capturePage = async (value: unknown) => {
+    if (!(await session.captureCommandOutput!(value as string)))
+      throw new Error("Byte-offset output requires atomic capture before settlement");
   };
-}
-
-/** A finished command whose output is `pages` provider pages long: every read
- * returns one page, and only the read that reaches EOF reports the exit. */
-function backlogSession(pages: number, options: { failAtRead?: number } = {}) {
-  const receipts = new Map<string, unknown>();
-  let offset = 0,
-    reads = 0,
-    serial = 0;
-  const page = (from: number, to: number, exitCode: number | null) => {
-    const text =
-      exitCode === null
-        ? `Provider output receipt: ${serial++}\nProcess running with session ID 7\nOutput:\n`
-        : `Provider output receipt: ${serial++}\nProcess exited with code ${exitCode}\nOutput:\n`;
-    receipts.set(text, {
-      command: cursor(to, exitCode),
-      expected: cursor(from),
-      chunks: [],
-      exitCode,
-    });
-    return text;
+  const probe = async (budget?: { until: number }) =>
+    await drainRetainedCommandBacklog(
+      session as never,
+      7,
+      await session.writeStdin!({ sessionId: 7, chars: "", yieldTimeMs: 1000 }),
+      capturePage,
+      budget,
+    );
+  return {
+    probe,
+    reads: () => reads,
+    recorded: () => recorded,
+    offset: () => stored.streams.stdout.byteOffset,
   };
-  const read = () => {
-    reads++;
-    if (options.failAtRead === reads) throw new Error("provider unavailable");
-    const from = offset;
-    offset = Math.min(pages * PAGE, offset + PAGE);
-    return page(from, offset, offset === pages * PAGE ? 0 : null);
-  };
-  const session = {
-    getProviderCommandOutput: (result: unknown) =>
-      (typeof result === "string" ? receipts.get(result) : null) as never,
-    writeStdin: async () => read(),
-  };
-  return { session, first: read(), reads: () => reads };
 }
 
 describe("retained command backlog drain", () => {
   test("a finished command's backlog settles within one claim", async () => {
-    const { session, first, reads } = backlogSession(5);
-    const captured: unknown[] = [];
-    const result = await drainRetainedCommandBacklog(session, 7, first, async (value) => {
-      captured.push(value);
-    });
-    expect(result).toEqual({
+    const command = retainedCommand(5 * PAGE);
+    expect(await command.probe()).toEqual({
       status: "proved",
       proof: { outcome: "exited", exitCode: 0, reason: "provider_exit_banner" },
     });
-    expect(reads()).toBe(5);
-    expect(captured).toHaveLength(4);
+    expect(command.reads()).toBe(5);
+    expect(command.offset()).toBe(5 * PAGE);
+    expect(command.recorded()).toHaveLength(5 * PAGE);
   });
 
-  test("a read that made no progress is not repeated", async () => {
-    const receipts = new Map<string, unknown>();
-    const idle = "Provider output receipt: 0\nProcess running with session ID 7\nOutput:\n";
-    receipts.set(idle, { command: cursor(10), expected: cursor(10), chunks: [], exitCode: null });
-    let reads = 0;
-    const result = await drainRetainedCommandBacklog(
-      {
-        getProviderCommandOutput: (value: unknown) => receipts.get(value as string) as never,
-        writeStdin: async () => {
-          reads++;
-          return idle;
-        },
-      },
-      7,
-      idle,
-      async () => {},
-    );
-    expect(result).toEqual({ status: "deferred", reason: "provider_running" });
-    expect(reads).toBe(0);
+  test("a command that only trickles output is not re-read and keeps its backoff", async () => {
+    const command = retainedCommand(0, { trickle: true });
+    expect(await command.probe()).toEqual({ status: "deferred", reason: "provider_running" });
+    expect(command.reads()).toBe(1);
   });
 
-  test("the per-claim read budget is bounded and progress is reported", async () => {
-    const { session, first, reads } = backlogSession(RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS * 4);
-    const result = await drainRetainedCommandBacklog(session, 7, first, async () => {});
-    expect(result).toEqual({
+  test("the per-claim read budget is bounded and the remaining backlog is reported", async () => {
+    const command = retainedCommand(64 * PAGE);
+    expect(await command.probe()).toEqual({
       status: "deferred",
       reason: "provider_running",
-      outputAdvanced: true,
+      outputBacklog: true,
     });
-    expect(reads()).toBe(RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS + 1);
+    expect(command.reads()).toBe(RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS + 1);
+    expect(command.offset()).toBe((RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS + 1) * PAGE);
+  });
+
+  test("an exhausted sweep budget stops further reads but keeps the backlog signal", async () => {
+    const command = retainedCommand(64 * PAGE);
+    expect(await command.probe({ until: Date.now() - 1 })).toEqual({
+      status: "deferred",
+      reason: "provider_running",
+      outputBacklog: true,
+    });
+    expect(command.reads()).toBe(1);
   });
 
   test("a provider failure mid-drain keeps the observation already made", async () => {
-    const { session, first } = backlogSession(10, { failAtRead: 3 });
-    const captured: unknown[] = [];
-    const result = await drainRetainedCommandBacklog(session, 7, first, async (value) => {
-      captured.push(value);
-    });
-    expect(result).toEqual({
+    const command = retainedCommand(64 * PAGE, { failAtRead: 3 });
+    expect(await command.probe()).toEqual({
       status: "deferred",
       reason: "provider_running",
-      outputAdvanced: true,
+      outputBacklog: true,
     });
-    expect(captured).toHaveLength(1);
+    expect(command.offset()).toBe(2 * PAGE);
+  });
+
+  test("output past the recording limit is drained to exit with one marker", async () => {
+    const command = retainedCommand(20 * PAGE);
+    let result = await command.probe();
+    while (result.status === "deferred") result = await command.probe();
+    expect(result).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 0 } });
+    expect(command.offset()).toBe(20 * PAGE);
+    expect(command.recorded().match(/stopped recording stdout/g)).toHaveLength(1);
+    expect(command.recorded().length).toBeLessThan(17 * PAGE);
   });
 });
 
 describe("retained command retry while output drains", () => {
   const settings = { sandboxLeaseReaperPeriodMs: 30_000 };
 
-  test("a running command whose output advanced is re-read at the reaper cadence", () => {
+  test("a command with a remaining backlog is re-read at the reaper cadence", () => {
     expect(
       retainedProcessReconciliationDeferral(
         settings,
@@ -132,7 +164,7 @@ describe("retained command retry while output drains", () => {
     ).toBe(30_000);
   });
 
-  test("a quiet running command keeps the bounded exponential backoff", () => {
+  test("a quiet running command and provider failures keep the bounded backoff", () => {
     expect(
       retainedProcessReconciliationDeferral(settings, { reconcileAttempts: 40 }, "provider_running")
         .retryAfterMs,

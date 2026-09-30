@@ -48,10 +48,13 @@ export function recordedOutputText(
   endOffset: number,
   text: string,
 ): string {
-  if (startOffset >= MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES) return "";
-  if (endOffset <= MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES) return text;
-  const limitMiB = MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES / (1024 * 1024);
-  return `${text}\n[OpenGeni stopped recording ${stream} after ${limitMiB} MiB. The command keeps running and its exit is still reported.]\n`;
+  const limit = MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES;
+  if (endOffset <= limit) return text;
+  // Exactly one page per stream crosses or starts at the limit; stale readers
+  // are fenced by the cursor, so the marker is recorded once.
+  const marker = `[OpenGeni stopped recording ${stream} after ${limit / (1024 * 1024)} MiB. The command keeps running and its exit is still reported.]\n`;
+  if (startOffset < limit) return `${text}\n${marker}`;
+  return startOffset === limit ? marker : "";
 }
 
 /** New commands use replayable task-router byte offsets. Legacy identifiers
