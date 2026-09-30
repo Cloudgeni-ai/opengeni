@@ -70,6 +70,35 @@ workspace/session scope independently of service labels, and returns short-lived
 `git` credentials with an `expiresAt`. The provider, not a human's personal
 Connection, owns those credentials.
 
+Organization registration and secret rotation are focused server-side helpers,
+not eager client methods:
+
+```ts
+import {
+  putOrganizationCredentialProvider,
+  createOrganizationWebhook,
+  rotateOrganizationCredentialProviderSecret,
+} from "@opengeni/sdk/workspace-integrations";
+
+const { secret } = await putOrganizationCredentialProvider(client, organizationId, {
+  url: "https://product.example/credentials",
+  workspaceFilter: { externalSource: "product:production" },
+});
+await createOrganizationWebhook(client, organizationId, {
+  url: "https://product.example/events",
+  eventTypes: ["turn.completed"],
+  workspaceFilter: { externalSource: "product:production" },
+});
+// Rotate explicitly when needed; store the new once-returned secret.
+// await rotateOrganizationCredentialProviderSecret(client, organizationId);
+```
+
+All functions in `@opengeni/sdk/workspace-integrations` take `client` first.
+This also covers organization reads/updates/deletes, webhook delivery listing
+and redelivery, `getWorkspaceWebhook`, and both scopes' secret-rotation helpers.
+Keep them on the product backend, never import them into the browser to expose
+an organization key.
+
 ```ts
 await client.asService("acme:reports", { jobId: jobRecord.id }).createSession(workspaceId, {
   initialMessage: "Summarize the latest report changes.",

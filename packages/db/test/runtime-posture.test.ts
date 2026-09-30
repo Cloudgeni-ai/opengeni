@@ -834,6 +834,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0542 adds three organization integration tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 3
+            : 0) +
           // 0536 adds the workspace credential provider, webhook, and delivery tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -918,6 +924,9 @@ describe("runtime database posture evaluator", () => {
         "workspace_credential_providers",
         "workspace_webhook_deliveries",
         "workspace_webhooks",
+        "organization_credential_providers",
+        "organization_webhook_deliveries",
+        "organization_webhooks",
       ] as const) {
         expect(FORCE_RLS_TABLES).toContain(table);
         expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
@@ -931,12 +940,14 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount,
@@ -1044,6 +1055,64 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("organization integration helpers require owner-fenced fixed-path execution", () => {
+    const posture = safePosture();
+    posture.tables.push({
+      ...knowledgeAuthorityTables()[0]!,
+      name: "organization_webhook_deliveries",
+    });
+    const routine = {
+      name: "claim_organization_webhook_deliveries_v1(uuid, integer, integer)",
+      owner: "opengeni_migrator",
+      execute: true,
+      publicExecute: false,
+      securityDefiner: true,
+      configuration: ["search_path=pg_catalog, public, pg_temp"],
+    };
+    posture.privateRoutines.push(routine);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    routine.publicExecute = true;
+    expect(
+      evaluateRuntimeDatabasePosture(posture, options).some((value) =>
+        value.includes("integration routine"),
+      ),
+    ).toBe(true);
+    routine.publicExecute = false;
+    routine.owner = "other_owner";
+    expect(
+      evaluateRuntimeDatabasePosture(posture, options).some((value) =>
+        value.includes("integration routine"),
+      ),
+    ).toBe(true);
+    routine.owner = "opengeni_migrator";
+    for (const path of [
+      "search_path=public",
+      'search_path="$user", public',
+      "search_path=pg_temp, public, pg_catalog",
+      "search_path=pg_catalog, foreign_schema, pg_temp",
+      "search_path=pg_catalog, public, untrusted, pg_temp",
+    ]) {
+      routine.configuration = [path];
+      expect(
+        evaluateRuntimeDatabasePosture(posture, options).some((value) =>
+          value.includes("integration routine"),
+        ),
+      ).toBe(true);
+    }
+    posture.schemas.push(
+      { ...posture.schemas[0]!, name: "tenantx" },
+      { ...posture.schemas[0]!, name: "Tenant Space" },
+    );
+    routine.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
+    expect(
+      evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "tenantx" }),
+    ).toEqual([]);
+    routine.configuration = ['search_path=pg_catalog, "Tenant Space", pg_temp'];
+    expect(
+      evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "Tenant Space" }),
+    ).toEqual([]);
   });
 
   test("integration policy mutation requires a same-owner definer with a safe search path", () => {

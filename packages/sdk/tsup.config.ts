@@ -26,6 +26,7 @@ export default defineConfig({
     "src/github-repositories.ts",
     "src/document-authority.ts",
     "src/knowledge.ts",
+    "src/workspace-integrations.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",
