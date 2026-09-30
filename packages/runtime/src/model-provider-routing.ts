@@ -8,7 +8,7 @@ import {
   type ModelRequest,
   type ResponseStreamEvent,
 } from "@openai/agents";
-import OpenAI from "openai";
+import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
@@ -16,6 +16,10 @@ import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import {
+  ResponsesStreamingTerminalError,
+  responsesStreamingTerminalError,
+} from "./responses-terminal-error";
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
@@ -79,6 +83,51 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     protected readonly provider: ResolvedModelProvider,
   ) {
     super(client, model);
+  }
+
+  protected override _fetchResponse(
+    request: ModelRequest,
+    stream: false,
+  ): Promise<OpenAI.Responses.Response>;
+  protected _fetchResponse(
+    request: ModelRequest,
+    stream: true,
+  ): Promise<AsyncIterable<OpenAI.Responses.ResponseStreamEvent>>;
+  protected async _fetchResponse(
+    request: ModelRequest,
+    stream: boolean,
+  ): Promise<OpenAI.Responses.Response | AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
+    // The pinned SDK's runtime supports both modes, but its declaration exposes
+    // only the non-streaming overload. Do not rebuild its request/transport here.
+    const response = await super._fetchResponse(request, stream as false);
+    if (!stream || !this.ownsResponsesTerminalClassification()) return response;
+    return this.classifiedResponseStream(
+      response as unknown as AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+    );
+  }
+
+  private async *classifiedResponseStream(
+    stream: AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+  ): AsyncIterable<OpenAI.Responses.ResponseStreamEvent> {
+    try {
+      for await (const event of stream) {
+        const failure = responsesStreamingTerminalError(event);
+        if (failure) throw failure;
+        yield event;
+      }
+    } catch (error) {
+      // The OpenAI parser can throw a top-level `error` before yielding it.
+      // Convert inside the stream, before the Agents SDK's span error handler,
+      // so even enabled model tracing receives only the structural message.
+      if (error instanceof APIError && error.status === undefined && error.error) {
+        throw new ResponsesStreamingTerminalError("response.error", error.error, error.headers);
+      }
+      throw error;
+    }
+  }
+
+  private ownsResponsesTerminalClassification(): boolean {
+    return this.provider.kind !== "codex-subscription" && this.provider.kind !== "xai-subscription";
   }
 
   protected override _buildResponsesCreateRequest(request: ModelRequest, stream: boolean) {

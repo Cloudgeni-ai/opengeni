@@ -20,6 +20,7 @@ import {
   isModalTaskExecStartPreDispatchUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
+  ResponsesStreamingTerminalError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
@@ -857,6 +858,9 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
 }
 
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
+  if (error instanceof ResponsesStreamingTerminalError) {
+    return error.category === "safety" ? error.detail : undefined;
+  }
   return collectErrorStrings(error).find(
     (value) =>
       /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
@@ -870,6 +874,9 @@ function isProviderSafetyRefusal(error: unknown): boolean {
 }
 
 export function isTransientProviderError(error: unknown): boolean {
+  if (error instanceof ResponsesStreamingTerminalError) {
+    return error.category === "unavailable";
+  }
   // A semantic refusal can arrive inside a 5xx transport envelope.
   if (isProviderSafetyRefusal(error)) return false;
   const status =
@@ -1066,6 +1073,41 @@ function baseAgentRunFailurePayload(
       code: "provider_safety_refusal",
       retryable: false,
       detail: safetyRefusalDiagnostic,
+    };
+  }
+  if (error instanceof ResponsesStreamingTerminalError) {
+    const quota =
+      error.category === "unknown" || error.category === "rate_limit"
+        ? classifyProviderQuotaExhaustionError({
+            code: error.code,
+            error: { code: error.code, type: error.type, message: error.detail },
+            retryAfterSeconds: error.retryAfterSeconds,
+          })
+        : null;
+    if (quota) {
+      return {
+        error: providerQuotaExhaustedMessage(quota.scope),
+        code: PROVIDER_QUOTA_EXHAUSTED_CODE,
+        retryable: false,
+        quotaScope: quota.scope,
+        detail: error.detail,
+      };
+    }
+    return {
+      error:
+        error.category === "rate_limit"
+          ? "Model provider rate limit hit. Try again in a minute or lower the reasoning effort."
+          : error.category === "unavailable"
+            ? "The model provider is temporarily unavailable. The same turn will retry after a short delay."
+            : "The model provider rejected the response. Automatic retries stopped.",
+      code:
+        error.category === "rate_limit"
+          ? "provider_rate_limited"
+          : error.category === "unavailable"
+            ? "provider_unavailable"
+            : "provider_request_rejected",
+      retryable: error.category === "rate_limit" || error.category === "unavailable",
+      detail: error.detail,
     };
   }
   const message = error instanceof Error ? error.message : String(error);

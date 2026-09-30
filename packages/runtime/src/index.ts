@@ -458,6 +458,7 @@ export {
   MultiProviderModelProvider,
   OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
+  ResponsesStreamingTerminalError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,

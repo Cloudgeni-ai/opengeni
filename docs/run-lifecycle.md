@@ -737,6 +737,14 @@ the worker clear its in-memory copy. Failed requests and late/zombie completion
 events cannot reset the streak. Successful inference between transient outages
 therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
+OpenAI/Azure HTTP-200 Responses `response.failed` / `response.error` terminals
+are intercepted before the SDK flattens their diagnostic. Closed server-error
+and overload codes use this recovery lane; rate-limit codes retain the pacing
+below. Invalid requests, content-policy refusals, and unknown terminal codes
+remain terminal even when their diagnostic mentions transient failures. The
+failure/recovery `detail` preserves the exact provider message through 4 KiB;
+larger messages keep a UTF-8-safe prefix and explicit truncation marker. SDK
+error messages, tracing and worker public diagnostics stay structural.
 An explicit provider retry hint is a lower bound. Rate limits wait for the
 longer of the provider's `Retry-After` (60 s when absent) and an escalating floor
 of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
