@@ -515,23 +515,21 @@ identity. Ordinary draining owns termination. See [lifecycle](run-lifecycle.md).
 
 ### 3.10 Client/server compatibility policy
 
-Published clients (`@opengeni/sdk`, `@opengeni/react`) and server builds are
-compatible within the same major release-train version. Evolution within a
-major is additive and both sides are tolerant readers:
+Canonical policy: [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md).
+The `@opengeni/sdk` major is the API compatibility major. Within a major the
+public surface (SDK-reachable `/v1` routes and their shapes, the session event
+envelope and types, `@opengeni/sdk`/`@opengeni/react` exports, automation
+ingress) evolves additively and both sides are tolerant readers. Breaking
+changes need a deprecation with `Deprecation`/`Sunset` headers, at least 90
+days on the managed service, and a new major. `bun run check:public-api` and
+`bun run test:sdk-compat` enforce it in CI.
 
-- servers ignore unknown request parameters and preserve behavior when a new
-  optional parameter is absent;
-- clients ignore unknown response fields and event types; and
-- removing or retyping an existing field, parameter, or event shape requires a
-  major release-train change.
-
-Official server builds expose `serverVersion` through health and client-config
-responses. There is no runtime negotiation protocol: tolerant reading and a
-shared major version are the compatibility mechanism.
+Official builds expose `serverVersion` in health and client-config responses;
+there is no runtime negotiation protocol.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
-(stale tabs); bearer integrations stay admitted across revisions. See
-[`product-integration.md`](product-integration.md#api-contract-revision).
+(stale tabs); bearer integrations stay admitted across revisions
+([details](product-integration.md#api-contract-revision)).
 
 An optional field that changes execution authority is not an ordinary additive
 response field. Its readers must ship first, new external writes stay behind a
@@ -542,7 +540,8 @@ regardless of the local admission-switch value; activation switches gate
 producers, not consumers.
 
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
-`packages/contracts/src/index.ts`, and `packages/sdk/test/contract-parity.test.ts`.
+`packages/contracts/src/index.ts`, `packages/sdk/test/contract-parity.test.ts`,
+`scripts/public-api/`, and `apps/api/src/http/deprecation.ts`.
 
 The root client in `packages/sdk/src/embedding-client.ts` adds server-side
 administration; `/browser` and `/artifacts` keep narrower dependency boundaries.
@@ -1718,8 +1717,8 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
-| HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
-| SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
+| HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
+| SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
