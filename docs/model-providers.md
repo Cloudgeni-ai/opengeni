@@ -1300,15 +1300,19 @@ Both are encrypted with the token in the existing credential column; API reads
 return neither. Legacy token-only connections must be replaced with this metadata
 before use. Registry OAuth providers supply the same fields through
 `anthropic.identity`. Never hardcode a user's account IDs into source or borrow
-another connection's identity. Session IDs use the existing session cache key;
+another connection's identity. The worker passes its stable session cache key to
+native Claude, preserving session identity across turns and activity retries;
 prompt IDs persist through the run's tool loop and client request IDs are fresh.
 
 Billing attribution is a system text block. Its `cc_version` suffix follows the
 locally inspected 2.1.285 fingerprint calculation; previous request and prompt
 IDs describe this request sequence. **The `cch` checksum is not implemented:** its
-algorithm has not been verified. No captured checksum is replayed. Consequently
-this profile is not yet a byte-exact reproduction and has not been proven to
-resolve the observed HTTP 429.
+algorithm has not been verified. No captured checksum is replayed. A single
+user-approved nonstreaming Opus 5.5 probe on 2026-09-30 returned HTTP 200 and the
+requested text with this profile and no `cch`. Omission therefore did not prevent
+that request; this does not establish a universal requirement or the cause of
+the earlier HTTP 429. The profile is not a byte-exact reproduction. Separately,
+98 completed captured response streams passed offline adapter replay.
 
 The profile enables `claude-code-20250219` and `oauth-2025-04-20`. Thinking requests
 also enable interleaved thinking, thinking token counts, effort, and summarized

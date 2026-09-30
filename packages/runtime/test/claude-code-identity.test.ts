@@ -142,3 +142,30 @@ test("run-scoped native routing preserves prompt lineage but never shares it acr
   expect(await first.getModel("claude/test")).toBe(a);
   expect(await new MultiProviderModelProvider(settings).getModel("claude/test")).not.toBe(a);
 });
+
+test("new turn adapters preserve session identity while separating prompt and request lineage", async () => {
+  const sent: Array<{ headers: Headers; body: any }> = [];
+  const capture = (async (_url, init) => {
+    sent.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+    return Response.json(result, { headers: { "request-id": `req_${sent.length}` } });
+  }) as typeof fetch;
+  const firstTurn = new AnthropicMessagesModel(provider, "claude-opus-5-5", capture);
+  const secondTurn = new AnthropicMessagesModel(provider, "claude-opus-5-5", capture);
+  await firstTurn.getResponse(request);
+  await firstTurn.getResponse(request);
+  await secondTurn.getResponse(request);
+  const expectedSessionId = request.modelSettings.providerData!.prompt_cache_key;
+  for (const item of sent) {
+    expect(item.headers.get("x-claude-code-session-id")).toBe(expectedSessionId);
+    expect(JSON.parse(item.body.metadata.user_id).session_id).toBe(expectedSessionId);
+    expect(item.body.prompt_cache_key).toBeUndefined();
+  }
+  expect(sent[0]!.headers.get("x-claude-code-prompt-id")).toBe(
+    sent[1]!.headers.get("x-claude-code-prompt-id"),
+  );
+  expect(sent[2]!.headers.get("x-claude-code-prompt-id")).not.toBe(
+    sent[0]!.headers.get("x-claude-code-prompt-id"),
+  );
+  expect(sent[1]!.body.system[0].text).toContain("cc_prev_req=req_1;");
+  expect(sent[2]!.body.system[0].text).not.toContain("cc_prev_req=");
+});
