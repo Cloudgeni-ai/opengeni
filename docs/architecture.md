@@ -712,19 +712,9 @@ metered separately. Normal completion joins it before atomic settlement;
 exceptional/cancelled exits abort and join. Generic title writes lose to human
 renames. Runtimes without this seam retain serialized `set_session_title`.
 
-`packages/db/src/session-execution-policy.ts` derives execution/display policy from
-the latest started turn, otherwise stored session defaults. An explicit
-`session_set_model` write establishes a durable `session.model_settings.updated`
-boundary. After that boundary, only a later-accepted human/API turn that actually
-starts can replace those defaults; older queued turns and occurrence-specific
-automation cannot undo the choice. Admission is the original `turn.queued` event,
-not a later approval/recovery trigger. The actual latest-started turn remains a
-separate causal identity (tools, execution context and provenance are not reset).
-`packages/db/src/session-model-settings.ts` writes the defaults, boundary and
-idempotent receipt together under the canonical control/workspace/session/attempt
-locks. It does not accept or wake work, resume pauses, change latency, or rewrite
-immutable accepted turns/occurrences. Reads, prompt admission, goal continuation,
-maintenance and new scheduled occurrence snapshots use the same effective defaults.
+`packages/db/src/session-execution-policy.ts` projects defaults;
+`packages/db/src/session-model-settings.ts` records boundaries, preserving accepted
+execution. [Semantics](mcp-surfaces.md).
 
 Active-source message-point forks preserve the current active model-history
 prefix through the selected boundary, including authenticated compaction summaries.

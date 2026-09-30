@@ -56,7 +56,9 @@ This is a future-default change, not a prompt or a resume. Already accepted work
 keeps its frozen policy. Older queued turns cannot undo the choice when they
 start, and scheduled per-occurrence model overrides do not replace these explicit
 session defaults. A subsequent human/API turn accepted after the setting can
-establish a new inherited choice when it starts. New schedules targeting the
+establish a new inherited choice when it starts. Ordering uses its original
+`turn.queued` admission, not a mutable approval/recovery trigger; an older turn
+never becomes a fresh model selection. New schedules targeting the
 session capture the effective defaults at occurrence admission; editing the
 session does not edit the task's own configuration. No Codemode SDK proxy path
 is widened, and already-running attempts do not gain a newly released tool.
