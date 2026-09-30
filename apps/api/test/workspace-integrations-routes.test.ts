@@ -110,6 +110,21 @@ async function call(
 }
 
 describe("workspace integration routes", () => {
+  test("concurrent first provider PUT returns a secret only on the single create", async () => {
+    await call("DELETE", "/credential-provider");
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        call("PUT", "/credential-provider", {
+          url: `https://product.example/credentials/${index}`,
+        }),
+      ),
+    );
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
+    expect(responses.filter((response) => response.status === 200)).toHaveLength(7);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    expect(bodies.filter((body) => body.secret !== undefined)).toHaveLength(1);
+    await call("DELETE", "/credential-provider");
+  });
   test("credential provider secret is shown once and survives updates", async () => {
     expect(await (await call("GET", "/credential-provider")).json()).toEqual({ provider: null });
     const created = await call("PUT", "/credential-provider", {
@@ -207,6 +222,11 @@ describe("workspace integration routes", () => {
       });
       const flaky = (await flakyResponse.json()).webhook;
       const listed = await (await call("GET", "/webhooks")).json();
+      const fetched = await call("GET", `/webhooks/${webhook.id}`);
+      expect(fetched.status).toBe(200);
+      expect((await fetched.json()).id).toBe(webhook.id);
+      expect(fetched.headers.get("cache-control")).toBe("private, no-store");
+      expect((await call("GET", `/webhooks/${crypto.randomUUID()}`)).status).toBe(404);
       expect(listed.webhooks.map((entry: { id: string }) => entry.id)).toEqual([
         webhook.id,
         flaky.id,

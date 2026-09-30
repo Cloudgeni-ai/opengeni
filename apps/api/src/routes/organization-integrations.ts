@@ -1,0 +1,249 @@
+import {
+  CreateOrganizationWebhookRequest,
+  CreateOrganizationWebhookResponse,
+  GetOrganizationCredentialProviderResponse,
+  ListOrganizationWebhookDeliveriesResponse,
+  ListOrganizationWebhooksResponse,
+  OrganizationCredentialProvider,
+  OrganizationWebhook,
+  PutOrganizationCredentialProviderRequest,
+  PutOrganizationCredentialProviderResponse,
+  UpdateOrganizationWebhookRequest,
+  type AccessContext,
+} from "@opengeni/contracts";
+import {
+  accountScopedApiKeyWorkspaceAuthority,
+  requireAccessContext,
+  type ApiRouteDeps,
+} from "@opengeni/core";
+import {
+  createOrganizationWebhook,
+  deleteOrganizationCredentialProvider,
+  deleteOrganizationWebhook,
+  encryptEnvironmentValue,
+  getOrganizationCredentialProvider,
+  getOrganizationWebhook,
+  listOrganizationWebhookDeliveries,
+  listOrganizationWebhooks,
+  OrganizationWebhookLimitError,
+  redeliverOrganizationWebhookDelivery,
+  updateOrganizationWebhook,
+  upsertOrganizationCredentialProvider,
+  withCredentialProviderConfigurationLock,
+  type OrganizationCredentialProviderRow,
+  type OrganizationWebhookRow,
+} from "@opengeni/db";
+import type { Context, Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
+import {
+  integrationBody as body,
+  integrationDeliveryProjection as deliveryProjection,
+  integrationProviderFields,
+  integrationRouteConfiguration,
+  integrationWebhookFields,
+  isIntegrationAgent,
+  newIntegrationSecret,
+} from "./workspace-integrations";
+
+/** Literal account authority only: workspace admin never implies org admin. */
+export function requireOrganizationIntegrationAdmin(
+  context: AccessContext,
+  organizationId: string,
+): string {
+  if (context.workspaceGrants.some(isIntegrationAgent)) {
+    throw new HTTPException(403, {
+      message: "Agent attempts cannot manage organization integrations",
+    });
+  }
+  const grant = context.accountGrants.find(
+    (candidate) =>
+      candidate.accountId === organizationId && candidate.subjectId === context.subjectId,
+  );
+  if (!grant?.permissions.includes("account:admin")) {
+    throw new HTTPException(403, { message: "missing permission: account:admin" });
+  }
+  if (context.subjectId.startsWith("api_key:")) {
+    const authority = accountScopedApiKeyWorkspaceAuthority(context);
+    if (!authority || authority.accountId !== organizationId) {
+      throw new HTTPException(403, { message: "organization API key authority required" });
+    }
+  }
+  return grant.subjectId;
+}
+
+function providerProjection(
+  row: OrganizationCredentialProviderRow,
+): OrganizationCredentialProvider {
+  return OrganizationCredentialProvider.parse({
+    ...integrationProviderFields(row),
+    organizationId: row.accountId,
+    workspaceFilter: row.workspaceFilter,
+  });
+}
+function webhookProjection(row: OrganizationWebhookRow): OrganizationWebhook {
+  return OrganizationWebhook.parse({
+    ...integrationWebhookFields(row),
+    organizationId: row.accountId,
+    workspaceFilter: row.workspaceFilter,
+  });
+}
+
+export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteDeps): void {
+  const scope = async (c: Context) => {
+    const id = z.string().uuid().safeParse(c.req.param("organizationId"));
+    if (!id.success) throw new HTTPException(422, { message: "invalid organization id" });
+    const context = await requireAccessContext(c, deps);
+    const subjectId = requireOrganizationIntegrationAdmin(context, id.data);
+    c.header("cache-control", "private, no-store");
+    return { accountId: id.data, subjectId };
+  };
+  const { requireKey, requireDeployableUrl: requireUrl } = integrationRouteConfiguration(
+    deps,
+    "organization",
+  );
+  const encrypted = (secret: string): string => encryptEnvironmentValue(requireKey(), secret);
+  const webhookId = (c: Context): string => {
+    const id = z.string().uuid().safeParse(c.req.param("webhookId"));
+    if (!id.success) throw new HTTPException(404, { message: "Webhook not found" });
+    return id.data;
+  };
+  const base = "/v1/organizations/:organizationId";
+  app.get(`${base}/credential-provider`, async (c) => {
+    const target = await scope(c);
+    const row = await getOrganizationCredentialProvider(deps.db, target);
+    return c.json(
+      GetOrganizationCredentialProviderResponse.parse({
+        provider: row ? providerProjection(row) : null,
+      }),
+    );
+  });
+  app.put(`${base}/credential-provider`, async (c) => {
+    const target = await scope(c);
+    const request = await body(c, PutOrganizationCredentialProviderRequest);
+    requireUrl(request.url);
+    const { row, secret, created } = await withCredentialProviderConfigurationLock(
+      deps.db,
+      target,
+      async (tx) => {
+        const existing = await getOrganizationCredentialProvider(tx, target);
+        const secret = existing ? undefined : newIntegrationSecret("ogcp");
+        const row = await upsertOrganizationCredentialProvider(tx, {
+          accountId: target.accountId,
+          url: request.url,
+          enabled: request.enabled ?? existing?.enabled ?? true,
+          timeoutMs: request.timeoutMs ?? existing?.timeoutMs ?? 10_000,
+          workspaceFilter:
+            request.workspaceFilter === undefined
+              ? (existing?.workspaceFilter ?? null)
+              : request.workspaceFilter,
+          createdBySubjectId: target.subjectId,
+          ...(secret ? { secretEncrypted: encrypted(secret) } : {}),
+        });
+        return { row, secret, created: !existing };
+      },
+    );
+    return c.json(
+      PutOrganizationCredentialProviderResponse.parse({
+        provider: providerProjection(row),
+        ...(secret ? { secret } : {}),
+      }),
+      created ? 201 : 200,
+    );
+  });
+  app.delete(`${base}/credential-provider`, async (c) => {
+    await deleteOrganizationCredentialProvider(deps.db, await scope(c));
+    return c.body(null, 204);
+  });
+  app.get(`${base}/webhooks`, async (c) => {
+    const rows = await listOrganizationWebhooks(deps.db, await scope(c));
+    return c.json(
+      ListOrganizationWebhooksResponse.parse({ webhooks: rows.map(webhookProjection) }),
+    );
+  });
+  app.post(`${base}/webhooks`, async (c) => {
+    const target = await scope(c);
+    const request = await body(c, CreateOrganizationWebhookRequest);
+    requireUrl(request.url);
+    const secret = newIntegrationSecret("whsec");
+    try {
+      const row = await createOrganizationWebhook(deps.db, {
+        accountId: target.accountId,
+        url: request.url,
+        secretEncrypted: encrypted(secret),
+        eventTypes: request.eventTypes,
+        enabled: request.enabled ?? true,
+        description: request.description ?? null,
+        workspaceFilter: request.workspaceFilter ?? null,
+        createdBySubjectId: target.subjectId,
+      });
+      return c.json(
+        CreateOrganizationWebhookResponse.parse({ webhook: webhookProjection(row), secret }),
+        201,
+      );
+    } catch (error) {
+      if (error instanceof OrganizationWebhookLimitError)
+        throw new HTTPException(409, { message: error.message });
+      throw error;
+    }
+  });
+  app.get(`${base}/webhooks/:webhookId`, async (c) => {
+    const target = await scope(c);
+    const row = await getOrganizationWebhook(deps.db, {
+      accountId: target.accountId,
+      webhookId: webhookId(c),
+    });
+    if (!row) throw new HTTPException(404, { message: "Webhook not found" });
+    return c.json(webhookProjection(row));
+  });
+  app.patch(`${base}/webhooks/:webhookId`, async (c) => {
+    const target = await scope(c);
+    const request = await body(c, UpdateOrganizationWebhookRequest);
+    if (request.url) requireUrl(request.url);
+    const row = await updateOrganizationWebhook(deps.db, {
+      accountId: target.accountId,
+      webhookId: webhookId(c),
+      ...(request.url !== undefined ? { url: request.url } : {}),
+      ...(request.eventTypes !== undefined ? { eventTypes: request.eventTypes } : {}),
+      ...(request.enabled !== undefined ? { enabled: request.enabled } : {}),
+      ...(request.description !== undefined ? { description: request.description } : {}),
+      ...(request.workspaceFilter !== undefined
+        ? { workspaceFilter: request.workspaceFilter }
+        : {}),
+    });
+    if (!row) throw new HTTPException(404, { message: "Webhook not found" });
+    return c.json(webhookProjection(row));
+  });
+  app.delete(`${base}/webhooks/:webhookId`, async (c) => {
+    const target = await scope(c);
+    if (!(await deleteOrganizationWebhook(deps.db, { ...target, webhookId: webhookId(c) }))) {
+      throw new HTTPException(404, { message: "Webhook not found" });
+    }
+    return c.body(null, 204);
+  });
+  app.get(`${base}/webhooks/:webhookId/deliveries`, async (c) => {
+    const target = { ...(await scope(c)), webhookId: webhookId(c) };
+    if (!(await getOrganizationWebhook(deps.db, target)))
+      throw new HTTPException(404, { message: "Webhook not found" });
+    const limit = z.coerce.number().int().min(1).max(200).catch(50).parse(c.req.query("limit"));
+    const rows = await listOrganizationWebhookDeliveries(deps.db, { ...target, limit });
+    return c.json(
+      ListOrganizationWebhookDeliveriesResponse.parse({ deliveries: rows.map(deliveryProjection) }),
+    );
+  });
+  app.post(`${base}/webhooks/:webhookId/deliveries/:deliveryId/redeliver`, async (c) => {
+    const target = await scope(c);
+    const id = z.string().uuid().safeParse(c.req.param("deliveryId"));
+    if (!id.success) throw new HTTPException(404, { message: "Delivery not found" });
+    const row = await redeliverOrganizationWebhookDelivery(deps.db, {
+      ...target,
+      webhookId: webhookId(c),
+      deliveryId: id.data,
+    });
+    if (!row)
+      throw new HTTPException(409, {
+        message: "Only a delivered or failed delivery can be redelivered",
+      });
+    return c.json(deliveryProjection(row));
+  });
+}
