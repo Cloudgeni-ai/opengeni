@@ -44,6 +44,8 @@ export function modelPickerBillingClassFor(
   model: ModelPickerBillingCandidate,
 ): ModelPickerBillingClass {
   if (
+    model.provider === "workspace-claude-subscription" ||
+    model.providerId === "workspace-claude-subscription" ||
     model.provider === "organization-claude-subscription" ||
     model.providerId === "organization-claude-subscription"
   )

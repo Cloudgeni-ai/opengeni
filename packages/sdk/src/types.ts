@@ -4022,6 +4022,7 @@ export type ClientConfig = {
    */
   apiContractRevision: string;
   serverVersion?: string | undefined;
+  claudeSubscriptionEnabled?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];

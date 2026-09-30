@@ -4744,6 +4744,50 @@ export class OpenGeniClient {
     );
   }
 
+  /** List workspace-owned Claude model slugs. */
+  async listWorkspaceClaudeCustomModels(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+  ): Promise<WorkspaceGatewayCustomModelsResponse> {
+    return await this.requestJson<WorkspaceGatewayCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+    );
+  }
+
+  /** Add an immutable workspace-owned Claude model generation. */
+  async createWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> {
+    return await this.requestJson<WorkspaceGatewayCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+      request,
+    );
+  }
+
+  /** Retire a workspace-owned Claude model generation. */
+  async deleteWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    customModelId: string,
+    request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    )
+      throw new TypeError("customModelId must be a UUID");
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
   /** List organization-owned exact upstream model slugs. */
   async listOrganizationProviderCustomModels(
     organizationId: string,

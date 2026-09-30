@@ -93,7 +93,7 @@ export function WorkspaceModelsPage({
   view: ModelsView | undefined;
   onConnectionChange: () => void;
 }) {
-  const client = useAppContext().client;
+  const { client, clientConfig } = useAppContext();
   const scope = useMemo(() => ({ kind: "workspace" as const, workspaceId }), [workspaceId]);
   const nav = useModelsNavigation(scope, { account, view });
   const organizationNav = useModelsNavigation(
@@ -129,7 +129,27 @@ export function WorkspaceModelsPage({
     canManageCustomModels: canManageSettings,
     onConnectionChange: connectionChanged,
   });
-  const gateways: Record<"vercel" | "openrouter", ProviderConnection> = { vercel, openrouter };
+  const anthropic = useProviderConnection({
+    client,
+    config: PROVIDER_CONNECTION_CONFIGS.anthropic,
+    workspaceId,
+    canManageConnection: canManageConnections,
+    canManageCustomModels: canManageSettings,
+    onConnectionChange: connectionChanged,
+  });
+  const claude_subscription = useProviderConnection({
+    client,
+    config: PROVIDER_CONNECTION_CONFIGS.claude_subscription,
+    workspaceId,
+    canManageConnection: canManageConnections,
+    canManageCustomModels: canManageSettings,
+    onConnectionChange: connectionChanged,
+    enabled: clientConfig.claudeSubscriptionEnabled === true,
+  });
+  const gateways: Record<
+    "vercel" | "openrouter" | "anthropic" | "claude_subscription",
+    ProviderConnection
+  > = { vercel, openrouter, anthropic, claude_subscription };
   const credits = useOpenGeniCredits(organizationId);
 
   const backToList = () => nav.openAccount(undefined);
@@ -165,20 +185,28 @@ export function WorkspaceModelsPage({
   });
 
   let page: ReactNode;
-  if (view === "connect") {
+  if (
+    !clientConfig.claudeSubscriptionEnabled &&
+    (view === "connect:claude_subscription" ||
+      (key?.provider === "gateway" && key.id === "claude_subscription"))
+  ) {
+    page = (
+      <DetailPage
+        back={{ label: "Models", onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailPageHeader title="Claude subscriptions are not enabled" />
+      </DetailPage>
+    );
+  } else if (view === "connect") {
     page = (
       <ConnectPickerPage
         codexAvailable={canManageConnections}
         grok={!canManageConnections ? "hidden" : grok.unavailable ? "not_enabled" : "available"}
         gateways={gateways}
-        organizationClaude={canManageOrganizationModels && Boolean(organizationId)}
         scopeName={workspaceName}
         onClose={backToList}
-        onPick={(provider) =>
-          provider === "claude_subscription" || provider === "anthropic"
-            ? organizationNav.openView(`connect:${provider}`)
-            : nav.openView(`connect:${provider}`)
-        }
+        onPick={(provider) => nav.openView(`connect:${provider}`)}
         onOpenConnected={(provider) => nav.openAccount(`gateway:${provider}`)}
       />
     );
@@ -186,10 +214,16 @@ export function WorkspaceModelsPage({
     page = <CodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} />;
   } else if (view === "connect:supergrok") {
     page = <SuperGrokConnectPage grok={grok} places={grokPlaces} onClose={backToList} />;
-  } else if (view === "connect:vercel" || view === "connect:openrouter") {
-    const id = view === "connect:vercel" ? "vercel" : "openrouter";
+  } else if (
+    view === "connect:vercel" ||
+    view === "connect:openrouter" ||
+    view === "connect:anthropic" ||
+    view === "connect:claude_subscription"
+  ) {
+    const id = view.slice("connect:".length) as keyof typeof gateways;
     page = (
       <ProviderConnectPage
+        key={id}
         state={gateways[id]}
         onClose={backToList}
         onConnected={() => nav.openAccount(`gateway:${id}`)}
@@ -212,7 +246,7 @@ export function WorkspaceModelsPage({
       ) : key.provider === "supergrok" ? (
         <SuperGrokAccessPage grok={grok} accountId={key.id} client={client} onClose={back} />
       ) : (
-        <ProviderAccessPage state={gateways[key.id as "vercel" | "openrouter"]} onClose={back} />
+        <ProviderAccessPage state={gateways[key.id as keyof typeof gateways]} onClose={back} />
       );
   } else if (key?.provider === "codex") {
     page = <CodexAccountPage codex={codex} accountId={key.id} places={codexPlaces} />;
@@ -220,7 +254,7 @@ export function WorkspaceModelsPage({
     page = (
       <SuperGrokAccountPage grok={grok} accountId={key.id} places={grokPlaces} client={client} />
     );
-  } else if (key?.provider === "gateway" && (key.id === "vercel" || key.id === "openrouter")) {
+  } else if (key?.provider === "gateway") {
     page = (
       <ProviderConnectionPage
         state={gateways[key.id]}
@@ -236,12 +270,14 @@ export function WorkspaceModelsPage({
       credits.visible ? 1 : 0,
       codexListedCount(codex, setAsideOrganization),
       superGrokListedCount(grok),
-      ...(["openrouter", "vercel"] as const).map((id) => (providerListed(gateways[id]) ? 1 : 0)),
+      ...(["claude_subscription", "anthropic", "openrouter", "vercel"] as const).map((id) =>
+        providerListed(gateways[id]) ? 1 : 0,
+      ),
     ];
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
-      (["openrouter", "vercel"] as const).some(
+      (["claude_subscription", "anthropic", "openrouter", "vercel"] as const).some(
         (id) => !gateways[id].hidden && !gateways[id].settled,
       );
     page = (
@@ -273,7 +309,7 @@ export function WorkspaceModelsPage({
               organizationAccounts={setAsideOrganization}
             />
             <SuperGrokAccountRows grok={grok} places={grokPlaces} />
-            {(["openrouter", "vercel"] as const)
+            {(["claude_subscription", "anthropic", "openrouter", "vercel"] as const)
               .filter((id) => providerListed(gateways[id]))
               .map((id) => (
                 <ProviderConnectionRow
@@ -423,14 +459,12 @@ export function ConnectPickerPage({
   codexAvailable,
   grok,
   gateways,
-  organizationClaude = false,
   scopeName,
   onClose,
   onPick,
   onOpenConnected,
 }: {
   codexAvailable: boolean;
-  organizationClaude?: boolean;
   /** "not_enabled": this server has SuperGrok off. "hidden": the viewer can't connect it. */
   grok: "available" | "not_enabled" | "hidden";
   gateways?:
@@ -464,20 +498,6 @@ export function ConnectPickerPage({
             title: "SuperGrok",
             summary: "Pay with your SuperGrok plan",
             notEnabled: grok === "not_enabled",
-          },
-        ]
-      : []),
-    ...(organizationClaude
-      ? [
-          {
-            id: "claude_subscription" as const,
-            title: "Claude subscription",
-            summary: "Use your Claude plan · Shared through your organization",
-          },
-          {
-            id: "anthropic" as const,
-            title: "Anthropic API",
-            summary: "Pay with an Anthropic API key · Shared through your organization",
           },
         ]
       : []),

@@ -10445,7 +10445,11 @@ export async function createConnection(
   );
 }
 
-type WorkspaceProviderApiKeyConnectionKind = "vercel_gateway" | "openrouter";
+export type WorkspaceProviderApiKeyConnectionKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 type WorkspaceProviderApiKeyConnectionSpec = {
   providerDomain: string;
@@ -10455,9 +10459,18 @@ type WorkspaceProviderApiKeyConnectionSpec = {
   label: string;
 };
 
-function workspaceProviderApiKeyConnectionSpec(
+export function workspaceProviderApiKeyConnectionSpec(
   providerKind: WorkspaceProviderApiKeyConnectionKind,
 ): WorkspaceProviderApiKeyConnectionSpec {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription") {
+    return {
+      providerDomain: "api.anthropic.com",
+      credentialRole: providerKind,
+      operationIdMetadataKey: `${providerKind}CredentialOperationId`,
+      operationDigestMetadataKey: `${providerKind}CredentialOperationDigest`,
+      label: providerKind === "anthropic" ? "Anthropic API" : "Claude subscription",
+    };
+  }
   return providerKind === "vercel_gateway"
     ? {
         providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -10483,11 +10496,11 @@ async function lockWorkspaceProviderApiKeyConnection(
   const lockKey =
     providerKind === "vercel_gateway"
       ? `workspace-vercel-ai-gateway:${workspaceId}`
-      : `workspace-openrouter:${workspaceId}`;
+      : `workspace-${providerKind}:${workspaceId}`;
   await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
 }
 
-async function upsertWorkspaceProviderApiKeyConnection(
+export async function upsertWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: UpsertWorkspaceProviderApiKeyConnectionInput,
@@ -10553,7 +10566,7 @@ async function upsertWorkspaceProviderApiKeyConnection(
   );
 }
 
-async function rotateWorkspaceProviderApiKeyConnection(
+export async function rotateWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RotateWorkspaceProviderApiKeyConnectionInput,
@@ -10634,7 +10647,7 @@ async function rotateWorkspaceProviderApiKeyConnection(
   );
 }
 
-async function revokeWorkspaceProviderApiKeyConnections(
+export async function revokeWorkspaceProviderApiKeyConnections(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RevokeWorkspaceProviderApiKeyConnectionsInput,
@@ -14911,7 +14924,7 @@ export async function loadConnectionCredentialForBroker(
   );
 }
 
-async function getWorkspaceProviderApiKeyConnectionMetadata(
+export async function getWorkspaceProviderApiKeyConnectionMetadata(
   db: Database,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
@@ -14957,13 +14970,14 @@ export async function workspaceOpenRouterConnectionActive(
   return (await getWorkspaceOpenRouterConnectionMetadata(db, workspaceId)) !== null;
 }
 
-async function loadWorkspaceProviderApiKey(
+export async function loadWorkspaceProviderApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   turnModelId?: string | null,
 ): Promise<string | null> {
+  if (providerKind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return null;
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
     (connection) =>
@@ -83931,6 +83945,10 @@ function mapConnectionMetadata(row: {
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    anthropicCredentialOperationId: _anthropicOperationId,
+    anthropicCredentialOperationDigest: _anthropicOperationDigest,
+    claude_subscriptionCredentialOperationId: _claudeOperationId,
+    claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
     ...publicMetadata
   } = row.metadata;
   return {

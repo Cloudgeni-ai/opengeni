@@ -1,3 +1,4 @@
+import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
 import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
@@ -1070,6 +1071,7 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
+        claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
@@ -1495,6 +1497,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);

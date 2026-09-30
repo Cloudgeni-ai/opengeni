@@ -12,8 +12,58 @@ import {
   workspaceCustomModelReference,
 } from "../src/model-catalog";
 
+test("deployment flag removes subscription models and credentials without disabling API keys", () => {
+  const connections = {
+    anthropic: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+    claude_subscription: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  };
+  const enabled = withClaudeConnectionCatalog(
+    testSettings({ claudeSubscriptionEnabled: true }),
+    connections,
+  );
+  const disabled = { ...enabled, claudeSubscriptionEnabled: false };
+  expect(
+    configuredModels(disabled).some((model) =>
+      model.id.startsWith("organization-claude-subscription/"),
+    ),
+  ).toBe(false);
+  expect(
+    configuredModels(disabled).some((model) => model.id.startsWith("organization-anthropic/")),
+  ).toBe(true);
+  expect(() => withClaudeConnectionCredential(disabled, "claude_subscription", "token")).toThrow(
+    "not enabled",
+  );
+  const rebuilt = withClaudeConnectionCatalog(disabled, connections);
+  expect(
+    configuredProviders(rebuilt).some(
+      (provider) => provider.id === "organization-claude-subscription",
+    ),
+  ).toBe(false);
+  expect(withClaudeConnectionCredential(rebuilt, "anthropic", "key")).toBeDefined();
+  expect(testSettings().claudeSubscriptionEnabled).toBe(false);
+});
+
+test("workspace and organization Claude credentials cannot overwrite each other", () => {
+  const connections = {
+    anthropic: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  };
+  let settings = withClaudeConnectionCatalog(testSettings(), connections);
+  settings = withClaudeConnectionCatalog(settings, connections, "workspace");
+  settings = withClaudeConnectionCredential(settings, "anthropic", "org-key");
+  settings = withClaudeConnectionCredential(settings, "anthropic", "workspace-key", "workspace");
+  const providers = configuredProviders(settings);
+  expect(providers.find((provider) => provider.id === "organization-anthropic")?.apiKey).toBe(
+    "org-key",
+  );
+  const workspace = providers.find((provider) => provider.id === "workspace-anthropic");
+  expect(workspace?.apiKey).toBe("workspace-key");
+  expect(workspace?.credentialSource.kind).toBe("workspace_connection");
+  expect(workspace?.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
+  expect(JSON.stringify(configuredModels(settings))).not.toContain("workspace-key");
+});
+
 test("Claude keys and subscription tokens remain separate scoped routes and readiness", () => {
-  const settings = testSettings();
+  const settings = testSettings({ claudeSubscriptionEnabled: true });
   const claudeConnections = {
     anthropic: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
     claude_subscription: { active: false, models: [{ upstreamModelId: "claude-opus-5-5" }] },
@@ -72,6 +122,7 @@ test("Claude keys and subscription tokens remain separate scoped routes and read
 
 test("deployment credentials cannot become organization Claude credentials", () => {
   const settings = testSettings({
+    claudeSubscriptionEnabled: true,
     modelProvidersJson: JSON.stringify([
       {
         id: "organization-anthropic",
@@ -93,7 +144,7 @@ test("deployment credentials cannot become organization Claude credentials", () 
 
 test("rebuilding a Claude catalog clears old credentials before live authorization", () => {
   const model = { upstreamModelId: "claude-opus-5-5" };
-  let settings = withClaudeConnectionCatalog(testSettings(), {
+  let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     anthropic: { active: true, models: [model] },
     claude_subscription: { active: true, models: [model] },
   });
@@ -117,7 +168,7 @@ test("rebuilding a Claude catalog clears old credentials before live authorizati
 });
 
 test("managed Claude catalog enables reasoning only for verified adaptive models", () => {
-  const settings = withClaudeConnectionCatalog(testSettings(), {
+  const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     anthropic: {
       models: ["claude-opus-5-5", "claude-haiku-4-5-20251001", "claude-custom-future"].map(
         (upstreamModelId) => ({ upstreamModelId }),
@@ -146,7 +197,7 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
 });
 
 test("subscription identity stays inside scoped credentials without changing model admission", () => {
-  const settings = withClaudeConnectionCatalog(testSettings(), {
+  const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
   });
   const identity = {
@@ -180,7 +231,7 @@ test("subscription identity stays inside scoped credentials without changing mod
 });
 
 test("accepted model definition tracks Claude generation options but excludes account identity", () => {
-  const settings = withClaudeConnectionCatalog(testSettings(), {
+  const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
   });
   const modelId = "organization-claude-subscription/claude-opus-5-5";
@@ -216,4 +267,50 @@ test("accepted model definition tracks Claude generation options but excludes ac
       initial,
     );
   }
+});
+
+test("workspace Claude readiness, connection restrictions and admission references stay scope-specific", () => {
+  const models = [{ upstreamModelId: "claude-opus-5-5" }];
+  const settings = testSettings({ claudeSubscriptionEnabled: true });
+  const input = {
+    settings,
+    policy: null,
+    codexSubscriptionActive: false,
+    claudeConnections: { anthropic: { active: false, models } },
+    workspaceClaudeConnections: {
+      anthropic: { active: true, models },
+      claude_subscription: { active: false, models },
+    },
+  };
+  const rows = resolveWorkspaceModelSelection(input);
+  expect(
+    rows.find((row) => row.model.id === "workspace-anthropic/claude-opus-5-5")?.availability
+      .selectable,
+  ).toBe(true);
+  expect(
+    rows.find((row) => row.model.id === "organization-anthropic/claude-opus-5-5")
+      ?.credentialReadiness.status,
+  ).toBe("not_ready");
+  expect(
+    rows.find((row) => row.model.id === "workspace-claude-subscription/claude-opus-5-5")
+      ?.credentialReadiness.status,
+  ).toBe("not_ready");
+  for (const kind of ["anthropic", "claude_subscription"] as const) {
+    const id = `workspace-${kind === "anthropic" ? kind : "claude-subscription"}/claude-opus-5-5`;
+    expect(workspaceCustomModelReference(settings, id)).toEqual({
+      scope: "workspace",
+      providerKind: kind,
+      upstreamModelId: "claude-opus-5-5",
+    });
+  }
+  const disabled = resolveWorkspaceModelSelection({
+    ...input,
+    settings: { ...settings, claudeSubscriptionEnabled: false },
+  });
+  expect(disabled.some((row) => row.model.providerId === "workspace-claude-subscription")).toBe(
+    false,
+  );
+  expect(
+    disabled.find((row) => row.model.providerId === "workspace-anthropic")?.availability.selectable,
+  ).toBe(true);
 });

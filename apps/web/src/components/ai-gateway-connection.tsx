@@ -1,3 +1,4 @@
+import { ORGANIZATION_PROVIDER_META } from "@/components/organization-model-provider-connection";
 import {
   ClaudeTokenInstructions,
   useClaudeIdentityFields,
@@ -71,6 +72,7 @@ type WorkspaceProviderCustomModel = WorkspaceGatewayCustomModel;
 type CustomModelCreateRequest = {
   operationId: string;
   upstreamModelId: string;
+  label?: string;
 };
 
 type CustomModelDeleteRequest = {
@@ -79,7 +81,7 @@ type CustomModelDeleteRequest = {
 };
 
 type ProviderConnectionConfig = {
-  id: "vercel-ai-gateway" | "openrouter";
+  id: "vercel-ai-gateway" | "openrouter" | "anthropic" | "claude_subscription";
   providerDomain: string;
   credentialRole: string;
   credentialLabel: string;
@@ -87,7 +89,7 @@ type ProviderConnectionConfig = {
   title: string;
   provider: "vercel" | "openrouter" | "anthropic" | "claude_subscription";
   billedTo: string;
-  analyticsAction: AnalyticsAction;
+  analyticsAction?: AnalyticsAction;
   /** One sentence under the name, for the not-connected row and the Connect page. */
   summary: string;
   /** Where to get a key. */
@@ -210,6 +212,45 @@ const OPENROUTER_CONFIG: ProviderConnectionConfig = {
     client.deleteWorkspaceOpenRouterCustomModel(workspaceId, customModelId, request),
 };
 
+function claudeWorkspaceConfig(
+  kind: "anthropic" | "claude_subscription",
+): ProviderConnectionConfig {
+  const meta = ORGANIZATION_PROVIDER_META[kind];
+  return {
+    ...meta,
+    id: kind,
+    providerDomain: "api.anthropic.com",
+    credentialRole: kind,
+    credentialLabel: meta.title,
+    readinessProvider:
+      kind === "anthropic" ? "workspace-anthropic" : "workspace-claude-subscription",
+    billedTo:
+      kind === "anthropic"
+        ? "The workspace's Anthropic API account"
+        : "The connected Claude subscription",
+    billingDescription:
+      kind === "anthropic"
+        ? "Anthropic bills this workspace connection's API account."
+        : "Calls use this workspace connection's Claude subscription limits.",
+    connectionManagerDescription:
+      "Members with connection-management access manage this workspace connection.",
+    keyPlaceholder: () => (kind === "anthropic" ? "sk-ant-api…" : "sk-ant-oat…"),
+    customModelsDescription:
+      "Choose models for this workspace. Availability depends on the connected account.",
+    customModelConnectedHelp:
+      "The model becomes selectable when workspace and connection access allow it.",
+    customModelDisconnectedHelp:
+      "Add models now; they become selectable after you connect this account.",
+    emptyCustomModelsDescription: "Add a Claude model to make it available in this workspace.",
+    listCustomModels: (client, workspaceId) =>
+      client.listWorkspaceClaudeCustomModels(workspaceId, kind),
+    createCustomModel: (client, workspaceId, request) =>
+      client.createWorkspaceClaudeCustomModel(workspaceId, kind, request),
+    deleteCustomModel: (client, workspaceId, modelId, request) =>
+      client.deleteWorkspaceClaudeCustomModel(workspaceId, kind, modelId, request),
+  };
+}
+
 function isProviderConnection(
   connection: ConnectionMetadata,
   config: ProviderConnectionConfig,
@@ -227,11 +268,14 @@ export type ProviderConnectionProps = {
   canManageConnection: boolean;
   canManageCustomModels: boolean;
   onConnectionChange?: (() => void) | undefined;
+  enabled?: boolean;
 };
 
 export const PROVIDER_CONNECTION_CONFIGS = {
   vercel: VERCEL_AI_GATEWAY_CONFIG,
   openrouter: OPENROUTER_CONFIG,
+  anthropic: claudeWorkspaceConfig("anthropic"),
+  claude_subscription: claudeWorkspaceConfig("claude_subscription"),
 } as const;
 
 export type ProviderConnection = ProviderConnectionView;
@@ -329,6 +373,7 @@ export function useProviderConnection(
 } {
   const client = props.client;
   const config = props.config;
+  const enabled = props.enabled !== false;
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [readOnlyConnected, setReadOnlyConnected] = useState(false);
   const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
@@ -391,6 +436,7 @@ export function useProviderConnection(
   const refreshCustomModels = useCallback(async (): Promise<
     WorkspaceProviderCustomModel[] | null
   > => {
+    if (!enabled) return null;
     const requestGeneration = ++customModelsRequestGenerationRef.current;
     try {
       const result = await config.listCustomModels(client, props.workspaceId);
@@ -409,9 +455,10 @@ export function useProviderConnection(
       setCustomModelsLoaded(true);
       return null;
     }
-  }, [client, config, props.workspaceId]);
+  }, [client, config, props.workspaceId, enabled]);
 
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
+    if (!enabled) return null;
     const requestGeneration = ++connectionRequestGenerationRef.current;
     try {
       if (props.canManageConnection) {
@@ -448,7 +495,7 @@ export function useProviderConnection(
       setLoaded(true);
       return null;
     }
-  }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId]);
+  }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId, enabled]);
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshConnection(), refreshCustomModels()]);
@@ -480,13 +527,24 @@ export function useProviderConnection(
   }, [customModels, modelPendingRemoval]);
 
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  async function saveKey(apiKey: string): Promise<boolean> {
-    const value = apiKey.trim();
-    if (!value) return false;
-    const recordOutcome = trackModelConnection(
-      config.id === "openrouter" ? "openrouter" : "ai-gateway",
-      props.workspaceId,
-    );
+  async function saveKey(
+    apiKey: string,
+    claudeIdentity?: { accountUuid: string; deviceId: string },
+  ): Promise<boolean> {
+    const token = apiKey.trim();
+    if (!token || !enabled || !props.canManageConnection || busy) return false;
+    if (config.id === "claude_subscription" && !claudeIdentity) return false;
+    const value =
+      config.id === "claude_subscription"
+        ? JSON.stringify({ version: 1, token, identity: claudeIdentity })
+        : token;
+    const recordOutcome =
+      config.id === "openrouter" || config.id === "vercel-ai-gateway"
+        ? trackModelConnection(
+            config.id === "openrouter" ? "openrouter" : "ai-gateway",
+            props.workspaceId,
+          )
+        : () => {};
     const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -558,6 +616,7 @@ export function useProviderConnection(
 
   /** Resolves true once no active key remains; toasts either way. */
   async function disconnect(): Promise<boolean> {
+    if (!enabled || !props.canManageConnection || busy) return false;
     if (!connection) return false;
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -606,9 +665,16 @@ export function useProviderConnection(
     }
   }
 
-  async function addCustomModel() {
-    if (modelBusy || !modelSlugValid || modelSlugExists) return;
-    const submittedSlug = modelSlug;
+  async function addCustomModel(upstreamModelId?: string) {
+    if (!enabled || !props.canManageCustomModels || modelBusy) return;
+    const submittedSlug = upstreamModelId ?? modelSlug;
+    if (
+      !submittedSlug ||
+      submittedSlug.length > WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH ||
+      !/^[!-{}-~]+$/.test(submittedSlug) ||
+      customModels.some((model) => model.upstreamModelId === submittedSlug)
+    )
+      return;
     const pending = pendingModelCreateRef.current;
     const operationId =
       pending?.upstreamModelId === submittedSlug ? pending.operationId : crypto.randomUUID();
@@ -643,6 +709,10 @@ export function useProviderConnection(
         config.createCustomModel(client, props.workspaceId, {
           operationId,
           upstreamModelId: submittedSlug,
+          ...((config.provider === "anthropic" || config.provider === "claude_subscription") &&
+          claudeModelLabel(submittedSlug) !== submittedSlug
+            ? { label: claudeModelLabel(submittedSlug) }
+            : {}),
         });
       let saved: WorkspaceProviderCustomModel;
       try {
@@ -672,6 +742,7 @@ export function useProviderConnection(
   }
 
   async function removeCustomModel(model: WorkspaceProviderCustomModel): Promise<boolean> {
+    if (!enabled || !props.canManageCustomModels) return false;
     const modelIndex = customModels.findIndex((candidate) => candidate.id === model.id);
     const focusModelId =
       customModels[modelIndex + 1]?.id ?? customModels[modelIndex - 1]?.id ?? null;
@@ -748,17 +819,17 @@ export function useProviderConnection(
     accessTarget: {
       client,
       workspaceId: props.workspaceId,
-      kind: config.credentialRole === "openrouter" ? "openrouter" : "vercel_gateway",
+      kind: config.provider === "vercel" ? "vercel_gateway" : config.provider,
       connectionId: "current",
     },
-    canManageConnection: props.canManageConnection,
-    canManageCustomModels: props.canManageCustomModels,
+    canManageConnection: enabled && props.canManageConnection,
+    canManageCustomModels: enabled && props.canManageCustomModels,
     connection,
     connected,
     loaded,
     customModelsLoaded,
-    settled,
-    hidden,
+    settled: !enabled || settled,
+    hidden: !enabled || hidden,
     error,
     customModelsError,
     customModels,

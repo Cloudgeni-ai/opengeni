@@ -91,9 +91,9 @@ export function useClaudeIdentityFields(enabled: boolean) {
             <UploadIcon aria-hidden="true" />
             {valid ? "Choose another settings file" : "Choose Claude settings file"}
           </Button>
-          <TextInput
+          <input
             ref={fileInput}
-            className="sr-only"
+            hidden
             tabIndex={-1}
             aria-hidden="true"
             type="file"

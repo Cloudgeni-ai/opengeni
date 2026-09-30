@@ -743,6 +743,7 @@ const SettingsSchema = z.object({
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
   // account pool and a distinct rail from the existing xai/* API-key provider.
   supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
+  claudeSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED
   // Maximum silence between complete, valid SuperGrok SSE data events. This is
   // not a request/run duration cap; every valid event resets the timer.
   supergrokResponseStreamIdleTimeoutMs: z.coerce
@@ -2078,6 +2079,8 @@ export const RegistryProviderKind = z.enum([
   "openrouter-organization",
   "anthropic-organization",
   "claude-subscription-organization",
+  "anthropic-workspace",
+  "claude-subscription-workspace",
 ]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
@@ -2249,6 +2252,8 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   ORGANIZATION_OPENROUTER_PROVIDER_ID,
   "organization-anthropic",
   "organization-claude-subscription",
+  "workspace-anthropic",
+  "workspace-claude-subscription",
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
@@ -3379,6 +3384,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
+    claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(
       "OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS",
     ),
@@ -4383,7 +4389,11 @@ function openRouterRegistryProvider(
 
 function configuredRegistryProviders(settings: Settings): InternalRegistryProvider[] {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
-  const injected: InternalRegistryProvider[] = [...providers];
+  const injected: InternalRegistryProvider[] = providers.filter(
+    (provider) =>
+      settings.claudeSubscriptionEnabled ||
+      !(provider.api === "anthropic-messages" && provider.anthropic?.auth === "oauth"),
+  );
   if (settings.vercelAiGatewayApiKey && configuredGatewayCatalogModels(settings).length > 0) {
     injected.push(
       gatewayRegistryProvider(settings, {
@@ -4768,6 +4778,8 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
       return { kind: "connected_subscription", provider: "xai" };
     case "vercel-gateway-workspace":
     case "openrouter-workspace":
+    case "anthropic-workspace":
+    case "claude-subscription-workspace":
       return { kind: "workspace_connection", mechanism: "api_key" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
@@ -4795,6 +4807,8 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
     case "openrouter-workspace":
+    case "anthropic-workspace":
+    case "claude-subscription-workspace":
       return { upstreamPayer: "workspace", metering: "external" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
@@ -7613,6 +7627,8 @@ export function validateModelCatalogSettings(
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "anthropic-organization" ||
+      provider.kind === "anthropic-workspace" ||
+      provider.kind === "claude-subscription-workspace" ||
       provider.kind === "claude-subscription-organization" ||
       provider.kind === "xai-subscription"
     ) {
@@ -8002,11 +8018,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Native Claude connections reuse the encrypted organization connection boundary. */
+/** Native Claude connections reuse the encrypted workspace and organization boundaries. */
 export const CLAUDE_CONNECTION_KINDS = ["anthropic", "claude_subscription"] as const;
 export type ClaudeConnectionKind = (typeof CLAUDE_CONNECTION_KINDS)[number];
-export function claudeProviderId(kind: ClaudeConnectionKind): string {
-  return kind === "anthropic" ? "organization-anthropic" : "organization-claude-subscription";
+export function claudeProviderId(
+  kind: ClaudeConnectionKind,
+  scope: "workspace" | "organization" = "organization",
+): string {
+  return `${scope}-${kind === "anthropic" ? "anthropic" : "claude-subscription"}`;
 }
 export type ClaudeConnectionCatalog = Partial<
   Record<
@@ -8020,18 +8039,23 @@ export type ClaudeConnectionCatalog = Partial<
 export function withClaudeConnectionCatalog(
   settings: Settings,
   connections: ClaudeConnectionCatalog,
+  scope: "workspace" | "organization" = "organization",
 ): Settings {
   let providers = parseModelProvidersJson(settings.modelProvidersJson);
   for (const kind of CLAUDE_CONNECTION_KINDS) {
+    if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) {
+      providers = providers.filter((provider) => provider.id !== claudeProviderId(kind, scope));
+      continue;
+    }
     const connection = connections[kind];
     if (!connection) continue;
-    const id = claudeProviderId(kind);
+    const id = claudeProviderId(kind, scope);
     providers = providers.filter((provider) => provider.id !== id);
     if (!connection.models.length) continue;
     providers.push({
       id,
       label: kind === "anthropic" ? "Anthropic API" : "Claude subscription",
-      kind: kind === "anthropic" ? "anthropic-organization" : "claude-subscription-organization",
+      kind: kind === "anthropic" ? `anthropic-${scope}` : `claude-subscription-${scope}`,
       api: "anthropic-messages",
       wireProfile: "openai",
       baseUrl: "https://api.anthropic.com/v1",
@@ -8089,7 +8113,10 @@ export function withClaudeConnectionCredential(
   settings: Settings,
   kind: ClaudeConnectionKind,
   credential: string,
+  scope: "workspace" | "organization" = "organization",
 ): Settings {
+  if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled)
+    throw new Error("Claude subscriptions are not enabled on this deployment");
   if (!credential.trim()) throw new Error("Claude credential is empty");
   const bundle =
     kind === "claude_subscription" && credential.trim().startsWith("{")
@@ -8099,7 +8126,7 @@ export function withClaudeConnectionCredential(
     ...settings,
     modelProvidersJson: JSON.stringify(
       parseModelProvidersJson(settings.modelProvidersJson).map((provider) =>
-        provider.id === claudeProviderId(kind)
+        provider.id === claudeProviderId(kind, scope)
           ? {
               ...provider,
               apiKey: bundle?.token ?? credential,

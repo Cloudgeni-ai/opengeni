@@ -37,6 +37,9 @@ import {
   listOrganizationModelProviderCustomModelsForWorkspace,
   getOrganizationModelProviderCustomModelForExecution,
   loadOrganizationModelProviderApiKey,
+  listWorkspaceProviderCustomModels,
+  getWorkspaceProviderCustomModelForExecution,
+  loadWorkspaceProviderApiKey,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -297,6 +300,7 @@ export async function settingsWithOrganizationProviderCredentials(
     ? withOrganizationOpenRouterCredential(gatewaySettings, openRouterKey, openRouterModels)
     : withOrganizationOpenRouterCatalogProvider(gatewaySettings, openRouterModels);
   for (const kind of CLAUDE_CONNECTION_KINDS) {
+    if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
     const models = await buildModels(kind, claudeProviderId(kind) + "/");
     result = withClaudeConnectionCatalog(result, { [kind]: { models } });
     const credential = await loadOrganizationModelProviderApiKey(db, settings, {
@@ -305,6 +309,39 @@ export async function settingsWithOrganizationProviderCredentials(
       providerKind: kind,
     });
     if (credential) result = withClaudeConnectionCredential(result, kind, credential);
+    const workspaceModels = await listWorkspaceProviderCustomModels(db, {
+      accountId,
+      workspaceId,
+      providerKind: kind,
+    });
+    const workspacePrefix = claudeProviderId(kind, "workspace") + "/";
+    const workspaceModelId = retainedProductModelId?.startsWith(workspacePrefix)
+      ? retainedProductModelId
+      : null;
+    if (workspaceModelId) {
+      const retained = await getWorkspaceProviderCustomModelForExecution(db, {
+        accountId,
+        workspaceId,
+        providerKind: kind,
+        upstreamModelId: workspaceModelId.slice(workspacePrefix.length),
+      });
+      if (retained && !workspaceModels.some((model) => model.id === retained.id))
+        workspaceModels.push(retained);
+    }
+    result = withClaudeConnectionCatalog(
+      result,
+      { [kind]: { models: workspaceModels } },
+      "workspace",
+    );
+    const workspaceCredential = await loadWorkspaceProviderApiKey(
+      db,
+      settings,
+      workspaceId,
+      kind,
+      workspaceModelId,
+    );
+    if (workspaceCredential)
+      result = withClaudeConnectionCredential(result, kind, workspaceCredential, "workspace");
   }
   return result;
 }

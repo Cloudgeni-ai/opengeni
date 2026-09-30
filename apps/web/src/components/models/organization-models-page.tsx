@@ -91,7 +91,8 @@ export function OrganizationModelsPage({
   /** Where a cross-scope link came from (a workspace's Models); Back returns there. */
   returnTo?: ReturnTo | undefined;
 }) {
-  const client = useAppContext().client;
+  const { client, clientConfig } = useAppContext();
+  const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
   const nav = useModelsNavigation(
     useMemo(() => ({ kind: "organization" as const, workspaceId }), [workspaceId]),
     { account, view, returnTo },
@@ -117,6 +118,7 @@ export function OrganizationModelsPage({
     client,
     organizationId,
     providerKind: "claude_subscription",
+    enabled: claudeEnabled,
   });
   const gateways = { vercel, openrouter, anthropic, claude_subscription };
 
@@ -142,7 +144,13 @@ export function OrganizationModelsPage({
 
   const key = accountKeyOf(account);
   let page: ReactNode;
-  if (view === "connect") {
+  if (
+    !claudeEnabled &&
+    (view === "connect:claude_subscription" ||
+      (key?.provider === "gateway" && key.id === "claude_subscription"))
+  ) {
+    page = <Notice>Claude subscriptions are not enabled on this deployment.</Notice>;
+  } else if (view === "connect") {
     page = (
       <ConnectPickerPage
         codexAvailable

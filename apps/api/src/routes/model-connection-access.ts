@@ -18,8 +18,7 @@ import {
   getOrganizationAdministrationOverview,
   getXaiSubscriptionAccountAuthoritySnapshot,
   listOrganizationModelProviderCustomModels,
-  getWorkspaceVercelAiGatewayConnectionMetadata,
-  getWorkspaceOpenRouterConnectionMetadata,
+  getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -38,7 +37,10 @@ const Kind = z.enum([
 ]);
 function modelPrefix(target: ModelConnectionTarget) {
   if (target.kind === "anthropic" || target.kind === "claude_subscription")
-    return claudeProviderId(target.kind) + "/";
+    return (
+      claudeProviderId(target.kind, target.workspaceId === null ? "organization" : "workspace") +
+      "/"
+    );
   if (target.kind === "codex" || target.kind === "supergrok") return `${target.kind}/`;
   return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : "openrouter"}/`;
 }
@@ -48,6 +50,8 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     const path = `/v1/${scope}/:scopeId/model-connections/:kind/:connectionId/access`;
     async function target(c: Context, mutate: boolean): Promise<ModelConnectionTarget> {
       const kind = Kind.parse(c.req.param("kind"));
+      if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled)
+        throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
       const scopeId = z.string().uuid().parse(c.req.param("scopeId"));
       let connectionId = c.req.param("connectionId")!;
       if (kind === "codex" || kind === "supergrok")
@@ -63,8 +67,6 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           subjectId: human.subjectId,
         };
       }
-      if (kind === "anthropic" || kind === "claude_subscription")
-        throw new HTTPException(404, { message: "Manage this connection in organization Models" });
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
       if (kind === "supergrok") {
         const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
@@ -82,12 +84,13 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         }
         if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
       } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
-      if (kind === "vercel_gateway" || kind === "openrouter") {
-        const metadata = await (
-          kind === "vercel_gateway"
-            ? getWorkspaceVercelAiGatewayConnectionMetadata
-            : getWorkspaceOpenRouterConnectionMetadata
-        )(deps.db, scopeId);
+      if (
+        kind === "vercel_gateway" ||
+        kind === "openrouter" ||
+        kind === "anthropic" ||
+        kind === "claude_subscription"
+      ) {
+        const metadata = await getWorkspaceProviderApiKeyConnectionMetadata(deps.db, scopeId, kind);
         if (!metadata || (connectionId !== "current" && metadata.connectionId !== connectionId))
           throw new HTTPException(404, { message: "Connection not found" });
         connectionId = metadata.connectionId;

@@ -237,6 +237,8 @@ function isCodexModel(model: ClientModel): boolean {
 }
 
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("workspace-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("workspace-anthropic/")) return "byok";
   if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";
   if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";

@@ -32,6 +32,8 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
   // lets tolerant older contracts parse the additive provider.
   const source =
     organizationProvider ||
+    model.providerId === "workspace-anthropic" ||
+    model.providerId === "workspace-claude-subscription" ||
     model.providerId === OPENROUTER_PROVIDER_ID ||
     model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
       ? undefined
@@ -45,7 +47,10 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
             ? undefined
             : "opengeni";
   const publicProvider =
-    anonymousProvider || organizationProvider
+    anonymousProvider ||
+    organizationProvider ||
+    model.providerId === "workspace-anthropic" ||
+    model.providerId === "workspace-claude-subscription"
       ? { provider: model.providerId, providerLabel: model.providerLabel }
       : model.providerId === OPENROUTER_PROVIDER_ID
         ? { provider: "openrouter", providerLabel: "OpenRouter" }

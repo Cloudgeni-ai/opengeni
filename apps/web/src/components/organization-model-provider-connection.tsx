@@ -118,10 +118,12 @@ export function useOrganizationProviderConnection({
   organizationId,
   providerKind,
   client,
+  enabled = true,
 }: {
   organizationId: string;
   providerKind: ProviderKind;
   client: OpenGeniBrowserClient;
+  enabled?: boolean;
 }): ProviderConnectionView {
   const meta = ORGANIZATION_PROVIDER_META[providerKind];
   const [connection, setConnection] = useState<Connection | null>(null);
@@ -173,6 +175,7 @@ export function useOrganizationProviderConnection({
         : `Add models now; they become selectable after ${meta.shortName} is connected.`;
 
   const refreshConnection = useCallback(async (): Promise<Connection | null | undefined> => {
+    if (!enabled) return undefined;
     const generation = ++connectionGenerationRef.current;
     try {
       const result = await client.getOrganizationModelProviderConnection(
@@ -190,9 +193,10 @@ export function useOrganizationProviderConnection({
       setLoaded(true);
       return undefined;
     }
-  }, [client, organizationId, providerKind]);
+  }, [client, organizationId, providerKind, enabled]);
 
   const refreshModels = useCallback(async (): Promise<CustomModel[] | undefined> => {
+    if (!enabled) return undefined;
     const generation = ++modelsGenerationRef.current;
     try {
       const result = await client.listOrganizationProviderCustomModels(
@@ -210,7 +214,7 @@ export function useOrganizationProviderConnection({
       setModelsLoaded(true);
       return undefined;
     }
-  }, [client, organizationId, providerKind]);
+  }, [client, organizationId, providerKind, enabled]);
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshConnection(), refreshModels()]);
@@ -423,11 +427,11 @@ export function useOrganizationProviderConnection({
     scopeLabel: "Organization",
     organization: true,
     accessTarget: { client, organizationId, kind: providerKind, connectionId: "current" },
-    canManageConnection: true,
-    canManageCustomModels: true,
+    canManageConnection: enabled,
+    canManageCustomModels: enabled,
     connected,
-    settled: loaded && modelsLoaded,
-    hidden: false,
+    settled: !enabled || (loaded && modelsLoaded),
+    hidden: !enabled,
     error: connectionError,
     customModelsError: modelsError,
     customModels: models,

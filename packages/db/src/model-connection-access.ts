@@ -68,13 +68,12 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
       condition: sql`account_id = ${target.accountId}::uuid AND provider_kind = ${target.kind} AND status = 'active'
         AND ${target.connectionId === "current" ? sql`true` : sql`id::text = ${target.connectionId}`}`,
     };
-  if (target.kind === "anthropic" || target.kind === "claude_subscription")
-    throw new Error("Claude connections are managed at organization scope");
   return {
     table: sql.identifier("connections"),
     condition: sql`account_id = ${target.accountId}::uuid AND workspace_id = ${target.workspaceId}::uuid
       AND id = ${target.connectionId}::uuid AND subject_id IS NULL AND kind = 'api_key' AND status = 'active'
-      AND metadata->>'credentialRole' = ${target.kind === "vercel_gateway" ? "vercel_ai_gateway" : "openrouter"}`,
+      AND metadata->>'credentialRole' = ${target.kind === "vercel_gateway" ? "vercel_ai_gateway" : target.kind}
+      ${target.kind === "anthropic" || target.kind === "claude_subscription" ? sql`AND lower(provider_domain) = 'api.anthropic.com'` : sql``}`,
   };
 }
 

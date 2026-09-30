@@ -131,6 +131,7 @@ test("Claude credentials use distinct accessible forms and explain subscription 
     expect(submitButton().disabled).toBe(true);
     expect(container.textContent).toContain(config.title);
     if (kind === "claude_subscription") {
+      expect(container.querySelector<HTMLInputElement>('input[type="file"]')?.hidden).toBe(true);
       expect(
         container.querySelector<HTMLInputElement>('input[aria-label="Create a Claude setup token"]')
           ?.value,
@@ -315,7 +316,15 @@ test("Claude subscription row has its logo and plan, never API-key billing", asy
   expect(container.querySelector("svg path")).not.toBeNull();
 });
 
-test("workspace connect offers organization Claude setup only when permitted", async () => {
+test("workspace connect offers workspace Claude setup only when permitted", async () => {
+  const { PROVIDER_CONNECTION_CONFIGS } = await import("../ai-gateway-connection");
+  const gateways = {
+    claude_subscription: {
+      config: PROVIDER_CONNECTION_CONFIGS.claude_subscription,
+      canManageConnection: true,
+      connected: false,
+    },
+  } as unknown as Partial<Record<"claude_subscription", ProviderConnection>>;
   const { ConnectPickerPage } = await import("./workspace-models-page");
   const pick = mock(() => {});
   await act(async () =>
@@ -323,14 +332,14 @@ test("workspace connect offers organization Claude setup only when permitted", a
       <ConnectPickerPage
         codexAvailable={false}
         grok="hidden"
-        organizationClaude
+        gateways={gateways}
         scopeName="Workspace"
         onClose={() => {}}
         onPick={pick}
       />,
     ),
   );
-  expect(container.textContent).toContain("Shared through your organization");
+  expect(container.textContent).not.toContain("Shared through your organization");
   const claude = [...container.querySelectorAll("button")].find(
     (button) => button.textContent === "Claude subscription",
   )!;
@@ -348,4 +357,82 @@ test("workspace connect offers organization Claude setup only when permitted", a
     ),
   );
   expect(container.textContent).not.toContain("Claude subscription");
+});
+
+test("workspace Claude saves identity only inside the credential and stays off without network activity", async () => {
+  const { useProviderConnection, PROVIDER_CONNECTION_CONFIGS } =
+    await import("../ai-gateway-connection");
+  const listConnections = mock(async () => []);
+  const listModels = mock(async () => ({ models: [] }));
+  const createConnection = mock(async (_workspaceId: string, request: Record<string, unknown>) => ({
+    id: "fixture",
+    subjectId: null,
+    status: "active",
+    version: 1,
+    ...request,
+  }));
+  const createModel = mock(
+    async (
+      _workspaceId: string,
+      _kind: string,
+      request: { upstreamModelId: string; label?: string; operationId: string },
+    ) => ({ id: "model", version: 1, ...request }),
+  );
+  const client = {
+    listConnections,
+    listWorkspaceClaudeCustomModels: listModels,
+    createWorkspaceClaudeCustomModel: createModel,
+    createConnection,
+  } as unknown as Parameters<typeof useProviderConnection>[0]["client"];
+  let state!: ReturnType<typeof useProviderConnection>;
+  function Harness({ enabled }: { enabled: boolean }) {
+    state = useProviderConnection({
+      client,
+      config: PROVIDER_CONNECTION_CONFIGS.claude_subscription,
+      workspaceId: "workspace",
+      canManageConnection: true,
+      canManageCustomModels: true,
+      enabled,
+    });
+    return null;
+  }
+  await act(async () => root.render(<Harness enabled={false} />));
+  expect(listConnections).not.toHaveBeenCalled();
+  expect(listModels).not.toHaveBeenCalled();
+  expect(state.hidden).toBe(true);
+  expect(state.canManageConnection).toBe(false);
+  const identity = {
+    accountUuid: "10000000-0000-4000-8000-000000000001",
+    deviceId: "a".repeat(64),
+  };
+  expect(await state.saveKey("sk-ant-oat01-fixture", identity)).toBe(false);
+  expect(createConnection).not.toHaveBeenCalled();
+  await act(async () => root.render(<Harness enabled />));
+  expect(listModels).toHaveBeenCalledWith("workspace", "claude_subscription");
+  await act(async () => {
+    expect(await state.saveKey("sk-ant-oat01-fixture", identity)).toBe(true);
+  });
+  const payload = createConnection.mock.calls[0]![1] as {
+    credential: { apiKey: string };
+    metadata: unknown;
+    subjectId: unknown;
+  };
+  expect(JSON.parse(payload.credential.apiKey)).toEqual({
+    version: 1,
+    token: "sk-ant-oat01-fixture",
+    identity,
+  });
+  expect(JSON.stringify(payload.metadata)).not.toContain(identity.accountUuid);
+  expect(payload.subjectId).toBeNull();
+  expect(state.accessTarget.kind).toBe("claude_subscription");
+  expect(state.scopeLabel).toBe("Workspace");
+  expect(state.config.customModelsDescription).toContain("this workspace");
+  await act(async () => {
+    await state.addCustomModel("claude-opus-5-5");
+  });
+  expect(createModel.mock.calls[0]?.slice(0, 2)).toEqual(["workspace", "claude_subscription"]);
+  expect(createModel.mock.calls[0]?.[2]).toMatchObject({
+    upstreamModelId: "claude-opus-5-5",
+    label: "Claude Opus 5.5",
+  });
 });

@@ -1,3 +1,4 @@
+import { claudeProviderId } from "@opengeni/config";
 import {
   CreateOrganizationProviderCustomModelRequest,
   DeleteOrganizationProviderCustomModelRequest,
@@ -87,6 +88,22 @@ function conflict(error: unknown): never {
 }
 
 export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.use("/v1/organizations/:organizationId/model-providers/:providerKind", async (c, next) => {
+    if (
+      c.req.param("providerKind") === "claude_subscription" &&
+      !deps.settings.claudeSubscriptionEnabled
+    )
+      throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+    await next();
+  });
+  app.use("/v1/organizations/:organizationId/model-providers/:providerKind/*", async (c, next) => {
+    if (
+      c.req.param("providerKind") === "claude_subscription" &&
+      !deps.settings.claudeSubscriptionEnabled
+    )
+      throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+    await next();
+  });
   app.get("/v1/organizations/:organizationId/model-providers/:providerKind", async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
@@ -201,6 +218,12 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         CreateOrganizationProviderCustomModelRequest,
         "invalid organization custom model",
       );
+      const kind = providerKind(c.req.param("providerKind"));
+      if (
+        (kind === "anthropic" || kind === "claude_subscription") &&
+        `${claudeProviderId(kind)}/${payload.upstreamModelId}`.length > 256
+      )
+        throw new HTTPException(422, { message: "Claude model ID is too long" });
       try {
         const model = await createOrganizationModelProviderCustomModel(deps.db, {
           organizationId,

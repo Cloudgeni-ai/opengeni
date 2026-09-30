@@ -13814,7 +13814,9 @@ export const workspaceGatewayCustomModels = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     version: integer("version").notNull().default(1),
@@ -13846,7 +13848,7 @@ export const workspaceGatewayCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "workspace_gateway_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     upstreamCheck: check(
       "workspace_gateway_custom_models_upstream_chk",

@@ -197,6 +197,10 @@ export function advancedSourceSummary(model: ClientModel): string | null {
 }
 
 function workspaceProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "workspace-anthropic")
+    return "Billed to the workspace Anthropic API account";
+  if (model.provider === "workspace-claude-subscription")
+    return "Uses the workspace Claude subscription · no OpenGeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
   }

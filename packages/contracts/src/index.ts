@@ -17628,6 +17628,7 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // compatibility policy lives in docs/architecture.md — clients within the
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
+    claudeSubscriptionEnabled: z.boolean().optional(),
     defaultModel: z.string(),
     allowedModels: z.array(z.string()).min(1),
     // Richer model list (provider-grouped) for the picker. Defaults to [] for

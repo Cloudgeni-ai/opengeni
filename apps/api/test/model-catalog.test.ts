@@ -20,10 +20,18 @@ import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-ord
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 
 test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
-  let settings = withClaudeConnectionCatalog(testSettings(), {
+  let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
     claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
   });
+  settings = withClaudeConnectionCatalog(
+    settings,
+    {
+      anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+      claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+    },
+    "workspace",
+  );
   settings = withClaudeConnectionCredential(settings, "anthropic", "fixture-secret");
   settings = withClaudeConnectionCredential(
     settings,
@@ -35,6 +43,8 @@ test("public Claude catalog preserves provider and payment identity without leak
     }),
   );
   for (const [providerId, label, billingClass] of [
+    ["workspace-anthropic", "Anthropic API", "byok"],
+    ["workspace-claude-subscription", "Claude subscription", "claude_subscription"],
     ["organization-anthropic", "Anthropic API", "organization_byok"],
     ["organization-claude-subscription", "Claude subscription", "claude_subscription"],
   ]) {

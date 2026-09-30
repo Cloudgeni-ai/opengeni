@@ -1252,7 +1252,7 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 
 ## Native Claude Messages
 
-Organization Models supports **Anthropic API** keys and **Claude subscription**
+Workspace and organization Models support **Anthropic API** keys and **Claude subscription**
 setup tokens as separate connections. Generate a subscription token with
 `claude setup-token`; OpenGeni does not refresh it. Replace expired or revoked
 credentials on the connection page. Claude setup offers a copyable terminal command
@@ -1260,10 +1260,10 @@ and a local import of `~/.claude.json`; only its account/device identifiers are
 submitted with the token, never the settings file. Manual entry remains available
 in the setup disclosure. Token replacement uses the same full-page form. Named
 Opus/Sonnet choices add models without requiring model IDs; other IDs remain
-available under the model disclosure. Workspace administrators who can manage
-organization models can open this shared setup from the workspace Connect account
-page. Credentials are encrypted with the existing
-organization connection storage and workspace access policy. Add exact upstream
+available under the model disclosure. Workspace setup creates a workspace-owned connection;
+organization setup creates a separate connection for shared workspaces. The two
+scopes never borrow or overwrite each other’s credentials. Both use existing encrypted
+connection storage and model access policy. Add exact upstream
 model IDs to each connection; connecting alone does not validate model entitlement
 or make a paid model call. Subscription usage consumes the connected plan's limits;
 API-key usage is billed by Anthropic. Neither uses OpenGeni credits.
@@ -1277,6 +1277,20 @@ preserved. Initial system/developer history items join the top-level system fiel
 in order; later system items keep their conversation position. Tool names unsupported on the wire receive stable reversible names.
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and OpenGeni's text compaction remain available.
+
+Claude subscription connections require `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true`;
+the deployment default is off. Anthropic API-key connections are independent of
+this flag. When off, subscription setup endpoints and catalog/credential resolution
+are disabled, and subscription setup is hidden from model settings. Stored credentials
+are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
+
+Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
+:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the existing
+workspace connection create/rotate/revoke API. Model IDs are scoped under
+`workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
+`organization-anthropic/` and `organization-claude-subscription/`. Custom models use
+immutable generations: retiring one prevents fresh selection while preserving
+accepted execution history. Connection/model allowlists still govern execution.
 
 Registry providers can set `anthropic.auth` (`api-key` or `oauth`), `cacheTtl`
 (`5m`, `1h`, or `off`), `maxOutputTokens`, and `streamIdleTimeoutMs`. API keys use
