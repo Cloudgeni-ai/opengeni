@@ -384,12 +384,17 @@ describe("organization billing StrictMode ownership", () => {
     await act(async () => period("This month").click());
     await flush();
     expect(usageSection.textContent).toContain("Couldn't load period usage");
+    expect(usageSection.textContent).toContain("Try again. If it keeps happening");
+    // The server's own message stays behind Technical details.
+    expect(usageSection.textContent!.split("Technical details")[0]).not.toContain(
+      "usage unavailable",
+    );
     expect(usageSection.textContent).not.toContain("No usage recorded");
 
     await act(async () => button(container, "Add credits").click());
     await flush();
     expect(createBillingCheckout).toHaveBeenCalledTimes(1);
-    expect(toastError).toHaveBeenCalledWith("Checkout failed", {
+    expect(toastError).toHaveBeenCalledWith("Couldn't open checkout", {
       description: "bounded checkout failure",
     });
     expect(button(container, "Add credits").disabled).toBe(false);

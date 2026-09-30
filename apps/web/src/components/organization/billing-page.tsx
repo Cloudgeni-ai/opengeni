@@ -11,6 +11,12 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import { analyticsAction } from "@/lib/analytics-actions";
+import {
+  apiErrorAdvice,
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+} from "@/lib/api-error";
 import { entitlementEntries, validTopupAmount } from "@/lib/format";
 import {
   beginOrganizationAdminOperation,
@@ -164,9 +170,7 @@ export function OrganizationBillingPage({
       window.location.assign(session.url);
     } catch (error) {
       if (!ownsBillingOperation(operation)) return;
-      toast.error("Checkout failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Couldn't open checkout", { description: userErrorText(error) });
     } finally {
       if (ownsBillingOperation(operation)) setBusy(false);
     }
@@ -185,9 +189,7 @@ export function OrganizationBillingPage({
       window.location.assign(session.url);
     } catch (error) {
       if (!ownsBillingOperation(operation)) return;
-      toast.error("Couldn't open Stripe billing", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Couldn't open Stripe billing", { description: userErrorText(error) });
     } finally {
       if (ownsBillingOperation(operation)) setBusy(false);
     }
@@ -214,14 +216,12 @@ export function OrganizationBillingPage({
               hasError={Boolean(visibleBillingError)}
             />
             {visibleBillingError ? (
-              <ErrorMessage
-                variant="inline"
+              <BillingLoadFailure
                 title="Couldn't load the billing balance"
-                announce
-                action={<RowButton onClick={() => void refreshBilling()}>Try again</RowButton>}
-              >
-                {visibleBillingError.message}
-              </ErrorMessage>
+                denied="You can't see the billing balance. Ask an organization owner for access."
+                error={visibleBillingError}
+                onRetry={() => void refreshBilling()}
+              />
             ) : null}
             {stripe && canManageBilling ? (
               <SettingRowGroup>
@@ -303,6 +303,32 @@ export function OrganizationBillingPage({
   );
 }
 
+/**
+ * A billing read that failed: a calm line without Try again when the viewer
+ * lacks the permission, otherwise what happened and what to do.
+ */
+function BillingLoadFailure(props: {
+  title: string;
+  denied: string;
+  error: Error;
+  onRetry: () => void;
+}) {
+  if (isPermissionDenied(props.error)) {
+    return <p className="text-xs leading-[18px] text-fg-muted">{props.denied}</p>;
+  }
+  return (
+    <ErrorMessage
+      variant="inline"
+      title={props.title}
+      announce
+      action={<RowButton onClick={props.onRetry}>Try again</RowButton>}
+      {...apiErrorDetails(props.error)}
+    >
+      {apiErrorAdvice(props.error)}
+    </ErrorMessage>
+  );
+}
+
 /** "max_concurrent_sessions" as "Max concurrent sessions". */
 function entitlementLabel(name: string): string {
   const words = name.replace(/[_.-]+/g, " ").trim();
@@ -324,14 +350,12 @@ function EntitlementsSection(props: {
   if (props.error) {
     return (
       <Section title="Plan limits">
-        <ErrorMessage
-          variant="inline"
+        <BillingLoadFailure
           title="Couldn't load the plan's limits"
-          announce
-          action={<RowButton onClick={props.onRetry}>Try again</RowButton>}
-        >
-          {props.error.message}
-        </ErrorMessage>
+          denied="You can't see the plan's limits. Ask an organization owner for access."
+          error={props.error}
+          onRetry={props.onRetry}
+        />
       </Section>
     );
   }

@@ -20,6 +20,7 @@ import { formatDate } from "@/components/ui/relative-time";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@/lib/api-error";
 import { inAppClick } from "@/lib/in-app-click";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
@@ -290,7 +291,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
           }
         >
           <div className="mt-3 flex min-w-0 flex-col gap-4">
-            {!props.enabled ? (
+            {!props.enabled || (error && isPermissionDenied(error)) ? (
               <p className="text-xs leading-[18px] text-fg-muted">
                 You don't have permission to view usage. Ask an organization owner.
               </p>
@@ -302,8 +303,9 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
                 action={
                   <RowButton onClick={() => setRevision((value) => value + 1)}>Try again</RowButton>
                 }
+                {...apiErrorDetails(error)}
               >
-                {error.message}
+                {apiErrorAdvice(error)}
               </ErrorMessage>
             ) : !data ? (
               <p role="status" className="text-xs leading-[18px] text-fg-muted">
@@ -442,8 +444,9 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
                 title="Couldn't load more workspaces"
                 announce
                 action={<RowButton onClick={() => void loadMoreWorkspaces()}>Try again</RowButton>}
+                {...apiErrorDetails(moreError)}
               >
-                {moreError.message}
+                {apiErrorAdvice(moreError)}
               </ErrorMessage>
             ) : null}
             {nextCursor && !moreError ? (
