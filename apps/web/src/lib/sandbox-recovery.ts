@@ -64,11 +64,18 @@ export function isRecoveryNotApplicableError(error: unknown): boolean {
 /** Public blocker codes are stable; UI copy must not expose persistence jargon.
  * A timed wait never implies OpenGeni proceeds by itself: only Retry or a new
  * message decides again, so the copy names when that becomes possible. */
+/** Times are shown to the minute; round up so a Retry at the shown minute is
+ * never refused for the remaining seconds. */
+function nextMinute(iso: string): string {
+  const time = Date.parse(iso);
+  return Number.isFinite(time) ? new Date(Math.ceil(time / 60_000) * 60_000).toISOString() : iso;
+}
+
 export function sandboxRecoveryBlocker(reason: string, availableAt?: string | null): string {
   const message = sandboxRecoveryBlockerMessage(reason);
   if (!TIMED_RECOVERY_WAITS.has(reason)) return message;
   return availableAt
-    ? `${message} You can retry after ${formatCheckpointTime(availableAt)}.`
+    ? `${message} You can retry after ${formatCheckpointTime(nextMinute(availableAt))}.`
     : `${message} You can retry later.`;
 }
 

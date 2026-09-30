@@ -47753,9 +47753,12 @@ async function automaticRecoveryLaneTx(
       // checkpoint is never discarded because restoring it kept failing.
       if (attempt > MAX_AUTOMATIC_CHECKPOINT_ATTEMPTS)
         return { kind: "unavailable", reason: "restore_retry_exhausted" };
-      const failedAt = Date.parse(
-        isoTimestamp(recovery.restore.completedAt, recovery.provider.observedAt),
-      );
+      // A failure with no recorded time starts no backoff, rather than one
+      // that restarts from the current clock on every evaluation.
+      const failedAt =
+        [recovery.restore.completedAt, recovery.provider.observedAt]
+          .map((value) => (typeof value === "string" ? Date.parse(value) : Number.NaN))
+          .find(Number.isFinite) ?? 0;
       const backoffMs =
         AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS[
           Math.min(automatic.attempt, AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS.length) - 1
