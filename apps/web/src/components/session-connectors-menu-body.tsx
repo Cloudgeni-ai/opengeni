@@ -284,12 +284,42 @@ export function ConnectorAction(props: {
   checked?: boolean;
   label?: string;
   disabled?: boolean;
+  /**
+   * Reachable with the keyboard and read as unavailable, but does nothing: a
+   * current value shown in a menu (Radix skips `disabled` items entirely).
+   */
+  readOnly?: boolean;
   locked?: boolean;
   className?: string;
   keepOpen?: boolean;
   onAction: () => void;
   children: ReactNode;
 }) {
+  if (props.readOnly) {
+    return props.presentation === "dialog" ? (
+      <button
+        type="button"
+        aria-label={props.label}
+        aria-disabled="true"
+        className={cn(
+          "flex w-full cursor-default items-center gap-2 px-2 py-1.5 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          props.className,
+        )}
+        onClick={(event) => event.preventDefault()}
+      >
+        {props.children}
+      </button>
+    ) : (
+      <DropdownMenuItem
+        aria-label={props.label}
+        aria-disabled="true"
+        className={cn("cursor-default", props.className)}
+        onSelect={(event) => event.preventDefault()}
+      >
+        {props.children}
+      </DropdownMenuItem>
+    );
+  }
   if (props.locked) {
     return (
       <div

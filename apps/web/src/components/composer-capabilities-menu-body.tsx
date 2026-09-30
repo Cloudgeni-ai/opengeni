@@ -135,15 +135,15 @@ export function ComposerCapabilitiesMenuBody(props: {
                       <ComposerMenuSwitchIndicator checked={on} />
                     </ConnectorAction>
                   ) : (
-                    // Read-only until "Customize for this chat" is on: a
-                    // disabled item that still reads as the current value.
+                    // Read-only until "Customize for this chat" is on: still
+                    // reachable with the arrow keys and read as the current value.
                     <ConnectorAction
                       presentation={props.presentation}
-                      disabled
+                      readOnly
                       label={`${capabilityLabel(id)}, ${
                         !available ? UNAVAILABLE_CAPABILITY_REASON : on ? "on" : "off"
                       }`}
-                      className="flex min-h-11 flex-1 items-center gap-3 rounded-md px-2 py-1.5 data-[disabled]:opacity-100 disabled:opacity-100"
+                      className="flex min-h-11 flex-1 items-center gap-3 rounded-md px-2 py-1.5"
                       onAction={() => {}}
                     >
                       {text}
@@ -191,9 +191,9 @@ export function ComposerCapabilitiesMenuBody(props: {
                   ) : (
                     <ConnectorAction
                       presentation={props.presentation}
-                      disabled
+                      readOnly
                       label={manage ? "Can also save and install Skills" : "Reads Skills only"}
-                      className="mr-11 flex min-h-9 items-center py-1 pr-2 pl-6 text-xs leading-4.5 text-fg-muted data-[disabled]:opacity-100 disabled:opacity-100"
+                      className="mr-11 flex min-h-9 items-center py-1 pr-2 pl-6 text-xs leading-4.5 text-fg-muted"
                       onAction={() => {}}
                     >
                       {manage ? "Can also save and install Skills" : "Reads Skills only"}

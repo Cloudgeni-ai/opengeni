@@ -127,9 +127,14 @@ test("composer capabilities: read-only until Customize for this chat, then toggl
     'button[aria-label="Customize for this chat"]',
   )!;
   expect(customize.getAttribute("aria-checked")).toBe("false");
-  expect(
-    container.querySelector<HTMLButtonElement>('button[aria-label="Goals, off"]')?.disabled,
-  ).toBe(true);
+  const readOnlyGoals = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Goals, off"]',
+  )!;
+  // Reachable (not disabled) but read as unavailable, and clicking changes nothing.
+  expect(readOnlyGoals.disabled).toBe(false);
+  expect(readOnlyGoals.getAttribute("aria-disabled")).toBe("true");
+  await act(async () => readOnlyGoals.click());
+  expect(onChange).not.toHaveBeenCalled();
   expect(container.textContent).toContain("2 of 3 connected apps on");
   await act(async () => customize.click());
   expect(onCustomizedChange).toHaveBeenCalledWith(true);
