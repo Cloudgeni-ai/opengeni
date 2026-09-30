@@ -98,6 +98,7 @@ describe("API-key service provenance acceptance", () => {
           await getSessionTurnPersonalConnectionDelegations(
             client.db,
             scope.workspaceId,
+            session.id,
             started.turn!.id,
           ),
         ).toEqual([]);
