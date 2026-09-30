@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Tighten 0543's receipts for the existing prepaid video/refund protocol.
+-- Tighten 0548's receipts for the existing prepaid video/refund protocol.
 -- No reservation, repricing, ledger replay, or provider lifecycle change.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';

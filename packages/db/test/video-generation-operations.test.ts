@@ -17,6 +17,7 @@ import {
 } from "../src/video-generation";
 import {
   bootstrapWorkspace,
+  withRlsContext,
   withSessionRlsActorContext,
   getFile,
   applyCreditLedgerEntry,
@@ -449,15 +450,20 @@ describe("durable video generation operation", () => {
     const admitted = await admitVideoGenerationOperation(client.db, common);
     expect(admitted.operation.creditState).toBe("debited");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(1_380_000);
-    const [attributedDebit] = await client.db
-      .select({ metadata: schema.creditLedgerEntries.metadata })
-      .from(schema.creditLedgerEntries)
-      .where(
-        eq(
-          schema.creditLedgerEntries.idempotencyKey,
-          `credit:video_generation_debit:${operationId}`,
-        ),
-      );
+    const [attributedDebit] = await withRlsContext(
+      client.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      (tx) =>
+        tx
+          .select({ metadata: schema.creditLedgerEntries.metadata })
+          .from(schema.creditLedgerEntries)
+          .where(
+            eq(
+              schema.creditLedgerEntries.idempotencyKey,
+              `credit:video_generation_debit:${operationId}`,
+            ),
+          ),
+    );
     expect(attributedDebit?.metadata).toMatchObject({ turnId: claim.turn.id });
     expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(620_000);
 

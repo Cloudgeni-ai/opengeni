@@ -15,13 +15,16 @@ import {
   clearWorkspaceAllowance,
   createDb,
   createSession,
+  ensureExternalIdentity,
   getWorkspaceAllowance,
   getWorkspaceUsage,
+  initializeSessionStartAtomically,
   grantWorkspaceCredits,
   maintainWorkspaceAllowances,
   migrate,
   provisionRoles,
   recordUsageEvent,
+  nestedPostgresSqlState,
   setMemberAllowance,
   setWorkspaceAllowance,
   UsageAllowanceVersionConflictError,
@@ -103,8 +106,10 @@ describe("usage allowance DB lifecycle", () => {
       where account_id=${scope.accountId} and subject_id=${scope.subjectId}`;
     expect((await getWorkspaceUsage(app.db, personal)).members).toEqual([]);
     await expect(
-      setMemberAllowance(app.db, { ...personal, rule: { credits: 50 }, expectedVersion: 1 }),
-    ).rejects.toThrow("workspace administrator");
+      setMemberAllowance(app.db, { ...personal, rule: { credits: 50 }, expectedVersion: 1 }).catch(
+        nestedPostgresSqlState,
+      ),
+    ).resolves.toBe("42501");
   });
   test("usage/get/check have no persisted read-side effects", async () => {
     const scope = await fixture();
@@ -242,10 +247,13 @@ describe("usage allowance DB lifecycle", () => {
   });
   test("external member mutation resolves only an active same-workspace identity", async () => {
     const scope = await fixture();
-    await shared.admin`insert into external_identities
-      (id,account_id,source,external_id,subject_id,organization_membership_id,personal_workspace_id)
-      select ${crypto.randomUUID()},account_id,'product','customer-member',subject_id,id,personal_workspace_id
-      from organization_memberships where account_id=${scope.accountId} and subject_id=${scope.subjectId}`;
+    const identity = await ensureExternalIdentity(app.db, {
+      accountId: scope.accountId,
+      source: "product",
+      externalId: "customer-member",
+    });
+    await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id)
+      values(${scope.accountId},${scope.workspaceId},${identity.subjectId})`;
     const result = await setMemberAllowance(app.db, {
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
@@ -254,7 +262,7 @@ describe("usage allowance DB lifecycle", () => {
       rule: { share: 1.5 },
       expectedVersion: 0,
     });
-    expect(result).toEqual({ subjectId: scope.subjectId, rule: { share: 1.5 }, version: 1 });
+    expect(result).toEqual({ subjectId: identity.subjectId, rule: { share: 1.5 }, version: 1 });
     await expect(
       setMemberAllowance(app.db, {
         accountId: scope.accountId,
@@ -263,8 +271,8 @@ describe("usage allowance DB lifecycle", () => {
         externalIdentity: { source: "product", externalId: "missing" },
         rule: null,
         expectedVersion: 0,
-      }),
-    ).rejects.toThrow("member not found");
+      }).catch(nestedPostgresSqlState),
+    ).resolves.toBe("23503");
   });
   test("live authority denies agents and workspace-only budget increases", async () => {
     const scope = await fixture();
@@ -275,8 +283,8 @@ describe("usage allowance DB lifecycle", () => {
         includedCredits: 100,
         period: "monthly",
         expectedVersion: 0,
-      }),
-    ).rejects.toThrow("actor scope");
+      }).catch(nestedPostgresSqlState),
+    ).resolves.toBe("42501");
     await shared.admin`update organization_memberships set role='member'
       where account_id=${scope.accountId} and subject_id=${scope.subjectId}`;
     await expect(
@@ -285,16 +293,18 @@ describe("usage allowance DB lifecycle", () => {
         includedCredits: 100,
         period: "monthly",
         expectedVersion: 0,
-      }),
-    ).rejects.toThrow("organization administrator");
+      }).catch(nestedPostgresSqlState),
+    ).resolves.toBe("42501");
     // bootstrap grants workspace administration, which may change member
     // limits without gaining organization budget authority.
     await setMemberAllowance(app.db, { ...scope, rule: { credits: 50 }, expectedVersion: 0 });
     await shared.admin`update organization_memberships set status='suspended'
       where account_id=${scope.accountId} and subject_id=${scope.subjectId}`;
     await expect(
-      setMemberAllowance(app.db, { ...scope, rule: { credits: 60 }, expectedVersion: 1 }),
-    ).rejects.toThrow("workspace administrator");
+      setMemberAllowance(app.db, { ...scope, rule: { credits: 60 }, expectedVersion: 1 }).catch(
+        nestedPostgresSqlState,
+      ),
+    ).resolves.toBe("42501");
   });
 
   test("historical period reads use retained config, grants and member rules after current edits", async () => {
@@ -311,7 +321,11 @@ describe("usage allowance DB lifecycle", () => {
         '{"includedCredits":100,"period":"monthly","memberDefault":"equal_share"}',
         '2000-01-01T00:00:00Z','2000-02-01T00:00:00Z',20,2,
         '[{"remaining":20,"expiresAt":null},{"remaining":80,"expiresAt":"2000-01-15T00:00:00Z"}]',
-        ${JSON.stringify({ [scope.subjectId]: { rule: { credits: 40 }, version: 3 } })}::jsonb)`;
+        '{"placeholder":{"rule":{"credits":40},"version":3}}'::jsonb)`;
+    await shared.admin`update workspace_allowance_periods
+      set member_rules=jsonb_build_object(${scope.subjectId}::text,
+        jsonb_build_object('rule',jsonb_build_object('credits',40),'version',3))
+      where workspace_id=${scope.workspaceId} and period_key='2000-01'`;
     await shared.admin`insert into workspace_allowance_counters(account_id,workspace_id,period_key,subject_id,used,grants_used)
       values(${scope.accountId},${scope.workspaceId},'2000-01','',70,0),
         (${scope.accountId},${scope.workspaceId},'2000-01',${scope.subjectId},30,0)`;
@@ -448,8 +462,10 @@ describe("usage allowance DB lifecycle", () => {
     await grantWorkspaceCredits(app.db, { ...scope, operationId: "late", credits: 80 });
     await grantWorkspaceCredits(app.db, { ...scope, operationId: "late", credits: 80 });
     await expect(
-      grantWorkspaceCredits(app.db, { ...scope, operationId: "late", credits: 81 }),
-    ).rejects.toThrow("operation conflict");
+      grantWorkspaceCredits(app.db, { ...scope, operationId: "late", credits: 81 }).catch(
+        nestedPostgresSqlState,
+      ),
+    ).resolves.toBe("23505");
     expect((await getWorkspaceUsage(app.db, scope)).members[0]!.limit).toBe(100);
     await charge(scope, 110);
     const usage = await getWorkspaceUsage(app.db, scope);
@@ -494,6 +510,13 @@ describe("usage allowance DB lifecycle", () => {
       sandboxBackend: "none",
       createdBy: { kind: "subject", subjectId: scope.subjectId },
       createdByContext: {},
+    });
+    await initializeSessionStartAtomically(app.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
     });
     const [turn] =
       await shared.admin`select id from session_turns where session_id=${session.id} order by created_at limit 1`;
@@ -558,6 +581,7 @@ describe("usage allowance DB lifecycle", () => {
 
   test("admission matrix covers equal share, fixed credits, fallback none and oversubscription", async () => {
     const scope = await fixture();
+    const workspaceScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
     const other = `user:other:${crypto.randomUUID()}`;
     await shared.admin`insert into workspace_memberships (account_id,workspace_id,subject_id)
       values (${scope.accountId},${scope.workspaceId},${other})`;
@@ -575,12 +599,14 @@ describe("usage allowance DB lifecycle", () => {
       expectedVersion: 0,
     });
     expect(
-      (await getWorkspaceUsage(app.db, scope)).members.find((m) => m.subjectId === other)!.limit,
+      (await getWorkspaceUsage(app.db, workspaceScope)).members.find((m) => m.subjectId === other)!
+        .limit,
     ).toBe(50);
     await setMemberAllowance(app.db, { ...scope, rule: { share: 2 }, expectedVersion: 0 });
     expect(
-      (await getWorkspaceUsage(app.db, scope)).members.find((m) => m.subjectId === scope.subjectId)!
-        .limit,
+      (await getWorkspaceUsage(app.db, workspaceScope)).members.find(
+        (m) => m.subjectId === scope.subjectId,
+      )!.limit,
     ).toBe(200);
     await setMemberAllowance(app.db, {
       ...scope,
@@ -661,7 +687,7 @@ describe("usage allowance DB lifecycle", () => {
   });
 });
 
-test("0542 portable owner capabilities cover every SELECT/INSERT/UPDATE and reject direct runtime writes", async () => {
+test("0547 portable owner capabilities cover every SELECT/INSERT/UPDATE and reject direct runtime writes", async () => {
   const owner = await acquireOwnerMigratedTestDatabase("allowance-owner");
   if (!owner) throw new Error("Owner-migrated PostgreSQL database unavailable");
   let ownerApp: ReturnType<typeof createDb> | undefined;
@@ -732,8 +758,8 @@ test("0542 portable owner capabilities cover every SELECT/INSERT/UPDATE and reje
           await tx.execute(
             sql`update workspace_usage_allowances set version=99 where workspace_id=${scope.workspaceId}`,
           ),
-      ),
-    ).rejects.toThrow("permission denied");
+      ).catch(nestedPostgresSqlState),
+    ).resolves.toBe("42501");
     const policies = await owner.admin`select tablename,cmd from pg_policies
       where policyname='usage_allowance_owner' order by tablename`;
     expect(policies).toHaveLength(7);
@@ -746,9 +772,6 @@ test("0542 portable owner capabilities cover every SELECT/INSERT/UPDATE and reje
       { tablename: "knowledge_index_jobs", cmd: "SELECT" },
       { tablename: "organization_memberships", cmd: "SELECT" },
       { tablename: "sandbox_leases", cmd: "SELECT" },
-      { tablename: "scheduled_task_runs", cmd: "SELECT" },
-      { tablename: "session_turns", cmd: "SELECT" },
-      { tablename: "usage_events", cmd: "SELECT" },
     ]);
   } finally {
     await ownerApp?.close();

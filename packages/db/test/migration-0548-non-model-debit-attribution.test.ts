@@ -3,12 +3,14 @@ import { readFile } from "node:fs/promises";
 
 test("non-model attribution freezes jobs/documents and admits no creator-based legacy backfill", async () => {
   const source = await readFile(
-    new URL("../drizzle/0543_non_model_debit_attribution.sql", import.meta.url),
+    new URL("../drizzle/0548_non_model_debit_attribution.sql", import.meta.url),
     "utf8",
   );
   expect(source).toContain('NOT NULL DEFAULT \'{"kind":"unknown"}\'::jsonb');
-  expect(source).toContain("causal_turn.initiating_human_subject_id");
-  expect(source).toContain("accepted->>'causalHumanSubjectId'");
+  expect(source).toContain("attribution:=causal_turn.attribution");
+  expect(source).toContain("FROM usage_allowance_attribution_receipts");
+  expect(source).not.toMatch(/FROM\s+(?:session_turns|scheduled_task_runs)\b/iu);
+  expect(source).toContain("attribution:=coalesce(accepted");
   expect(source).toContain("document_billing_attribution_immutable");
   expect(source).toContain("sandbox_warm_attribution_immutable");
   expect(source).toContain("knowledge_query_billing_receipt_immutable");

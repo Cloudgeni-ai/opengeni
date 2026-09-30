@@ -13,7 +13,7 @@ DECLARE
   anchor text:='''insufficient_credits'', ''monthly_model_cost_limit'', ''monthly_agent_run_limit'')';
 BEGIN
   IF strpos(definition,anchor)=0 OR strpos(substr(definition,strpos(definition,anchor)+length(anchor)),anchor)>0 THEN
-    RAISE EXCEPTION '0542 unexpected scheduled refusal guard definition' USING ERRCODE='55000';
+    RAISE EXCEPTION '0547 unexpected scheduled refusal guard definition' USING ERRCODE='55000';
   END IF;
   EXECUTE replace(definition,anchor,
     '''insufficient_credits'', ''monthly_model_cost_limit'', ''monthly_agent_run_limit'', ''allowance_exhausted'')');
@@ -123,6 +123,43 @@ CREATE TABLE opengeni_private.usage_allowance_capabilities (
 );
 REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM PUBLIC;
 
+-- Accounting facts, never source content or read authority. Keep receipts after
+-- source retention/deletion so late settlements retain their accepted payer;
+-- deleting the tenant still cascades. Only the lifecycle below may append.
+CREATE TABLE usage_allowance_attribution_receipts (
+  account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  source_kind text NOT NULL CHECK (source_kind IN ('turn','schedule','knowledge_query')),
+  source_id text NOT NULL,
+  session_id uuid,
+  attribution jsonb NOT NULL CHECK (jsonb_typeof(attribution)='object'),
+  quantity bigint,
+  idempotency_key text,
+  PRIMARY KEY (account_id,workspace_id,source_kind,source_id),
+  FOREIGN KEY (workspace_id,account_id) REFERENCES workspaces(id,account_id) ON DELETE CASCADE,
+  CHECK (octet_length(source_id) BETWEEN 1 AND 1024),
+  CHECK (coalesce(CASE attribution->>'kind'
+    WHEN 'unknown' THEN attribution='{"kind":"unknown"}'::jsonb
+    WHEN 'service' THEN attribution='{"kind":"service"}'::jsonb
+    WHEN 'human' THEN attribution=jsonb_build_object('kind','human',
+      'initiatingHumanSubjectId',attribution->'initiatingHumanSubjectId')
+      AND jsonb_typeof(attribution->'initiatingHumanSubjectId')='string'
+      AND octet_length(attribution->>'initiatingHumanSubjectId') BETWEEN 1 AND 1024
+    WHEN 'turn' THEN attribution=jsonb_build_object('kind','turn','turnId',attribution->'turnId',
+      'initiatingHumanSubjectId',attribution->'initiatingHumanSubjectId')
+      AND coalesce(attribution->>'turnId','') ~*
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND (attribution->'initiatingHumanSubjectId'='null'::jsonb
+        OR (jsonb_typeof(attribution->'initiatingHumanSubjectId')='string'
+          AND octet_length(attribution->>'initiatingHumanSubjectId') BETWEEN 1 AND 1024))
+    ELSE false END,false)),
+  CHECK (coalesce((source_kind='knowledge_query' AND session_id IS NULL AND quantity IS NOT NULL
+      AND idempotency_key='knowledge.query_cost:'||source_id)
+    OR (source_kind IN ('turn','schedule') AND quantity IS NULL AND idempotency_key IS NULL),false)),
+  CHECK (source_kind<>'turn' OR (session_id IS NOT NULL AND attribution->>'kind'='turn'
+    AND attribution->>'turnId'=source_id))
+);
+
 CREATE FUNCTION usage_allowance_capability_active(p_account uuid, p_workspace uuid)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT AS $$
   SELECT EXISTS (SELECT 1 FROM opengeni_private.usage_allowance_capabilities c
@@ -157,7 +194,7 @@ BEGIN
     owner_name,target_schema);
   -- Exact read-only authority for immutable debit attribution and identity
   -- projection. No locking reads are used against these SELECT-only policies.
-  FOREACH t IN ARRAY ARRAY['session_turns','scheduled_task_runs','sandbox_leases','usage_events']
+  FOREACH t IN ARRAY ARRAY['sandbox_leases']
   LOOP
     EXECUTE format('CREATE POLICY usage_allowance_owner_read ON %I FOR SELECT USING
       (current_user = %L AND %I.usage_allowance_capability_active(account_id, workspace_id))',
@@ -176,43 +213,169 @@ BEGIN
   END LOOP;
 END $policies$;
 
--- A permissive read policy alone cannot bypass the separate restrictive
--- Only-me boundary. Attribute private turns without exposing their content:
--- admit only SELECT while this exact owner-held tenant capability is live.
--- Every write keeps its original restrictive predicate unchanged.
-DO $private_turn_reads$
+-- Do not change ANY source visibility policy. 0473's
+-- organization_usage_expected_visibility was a temporary parse-tree comparison
+-- policy, not an installed policy. Its installed usage_events expression and
+-- every turn/schedule predicate remain exactly as they were before 0547.
+CREATE FUNCTION capture_usage_allowance_attribution()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
-  t text; target_schema text:=current_schema(); owner_name text:=current_user;
-  original_using text; original_check text; original_command "char"; expression text;
+  v_source_kind text; v_source_id text; v_session_id uuid; v_attribution jsonb;
+  v_quantity bigint; v_idempotency_key text; opened integer;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['session_turns','scheduled_task_runs','usage_events'] LOOP
-    SELECT pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid),p.polcmd
-      INTO original_using,original_check,original_command FROM pg_policy p
-      WHERE p.polrelid=format('%I.%I',target_schema,t)::regclass AND p.polname='session_visibility_isolation';
-    IF original_using IS NULL OR original_command NOT IN ('*','r') THEN
-      RAISE EXCEPTION '0542 unexpected restrictive visibility policy on %',t USING ERRCODE='55000';
+  IF TG_TABLE_NAME='session_turns' THEN
+    IF TG_OP='UPDATE' AND (NEW.id IS DISTINCT FROM OLD.id
+      OR NEW.account_id IS DISTINCT FROM OLD.account_id OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+      OR NEW.session_id IS DISTINCT FROM OLD.session_id
+      OR NEW.initiating_human_subject_id IS DISTINCT FROM OLD.initiating_human_subject_id) THEN
+      RAISE EXCEPTION 'Allowance turn attribution is immutable' USING ERRCODE='23514';
     END IF;
-    expression:=format('CASE WHEN current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id)
-      THEN true ELSE (%s) END',owner_name,target_schema,original_using);
-    IF original_command='r' THEN
-      EXECUTE format('ALTER POLICY session_visibility_isolation ON %I USING (%s)',t,expression);
-    ELSE
-      EXECUTE format('DROP POLICY session_visibility_isolation ON %I',t);
-      EXECUTE format('CREATE POLICY session_visibility_isolation ON %I AS RESTRICTIVE FOR SELECT USING (%s)',t,expression);
-      EXECUTE format('CREATE POLICY session_visibility_insert_isolation ON %I AS RESTRICTIVE FOR INSERT WITH CHECK (%s)',t,coalesce(original_check,original_using));
-      EXECUTE format('CREATE POLICY session_visibility_update_isolation ON %I AS RESTRICTIVE FOR UPDATE USING (%s) WITH CHECK (%s)',t,original_using,coalesce(original_check,original_using));
-      EXECUTE format('CREATE POLICY session_visibility_delete_isolation ON %I AS RESTRICTIVE FOR DELETE USING (%s)',t,original_using);
+    v_source_kind:='turn'; v_source_id:=NEW.id::text; v_session_id:=NEW.session_id;
+    v_attribution:=jsonb_build_object('kind','turn','turnId',NEW.id,
+      'initiatingHumanSubjectId',NEW.initiating_human_subject_id);
+  ELSIF TG_TABLE_NAME='scheduled_task_runs' THEN
+    IF TG_OP='UPDATE' AND (NEW.id IS DISTINCT FROM OLD.id
+      OR NEW.account_id IS DISTINCT FROM OLD.account_id OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+      OR NEW.accepted_execution_snapshot->'causalHumanSubjectId' IS DISTINCT FROM
+        OLD.accepted_execution_snapshot->'causalHumanSubjectId') THEN
+      RAISE EXCEPTION 'Allowance scheduled attribution is immutable' USING ERRCODE='23514';
     END IF;
-  END LOOP;
-  SELECT pg_get_expr(p.polqual,p.polrelid) INTO original_using FROM pg_policy p
-    WHERE p.polrelid='usage_events'::regclass AND p.polname='organization_usage_expected_visibility';
-  IF original_using IS NULL THEN
-    RAISE EXCEPTION '0542 missing usage receipt visibility policy' USING ERRCODE='55000';
+    v_source_kind:='schedule'; v_source_id:=NEW.id::text;
+    v_attribution:=CASE WHEN NOT coalesce(NEW.accepted_execution_snapshot ? 'causalHumanSubjectId',false)
+      THEN '{"kind":"unknown"}'::jsonb
+      WHEN NEW.accepted_execution_snapshot->>'causalHumanSubjectId' IS NULL THEN '{"kind":"service"}'::jsonb
+      ELSE jsonb_build_object('kind','human',
+        'initiatingHumanSubjectId',NEW.accepted_execution_snapshot->>'causalHumanSubjectId') END;
+  ELSIF TG_TABLE_NAME='usage_events' THEN
+    IF TG_OP='UPDATE' THEN
+      IF OLD.source_resource_type='knowledge_query' AND OLD.event_type='document.query_embedding_cost'
+        AND (NEW.account_id IS DISTINCT FROM OLD.account_id OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+          OR NEW.source_resource_type IS DISTINCT FROM OLD.source_resource_type
+          OR NEW.source_resource_id IS DISTINCT FROM OLD.source_resource_id
+          OR NEW.event_type IS DISTINCT FROM OLD.event_type OR NEW.quantity IS DISTINCT FROM OLD.quantity
+          OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+          OR NEW.initiator_context->'creditDebitAttribution' IS DISTINCT FROM
+            OLD.initiator_context->'creditDebitAttribution') THEN
+        RAISE EXCEPTION 'Allowance query attribution is immutable' USING ERRCODE='23514';
+      END IF;
+      RETURN NEW;
+    END IF;
+    IF NEW.source_resource_type IS DISTINCT FROM 'knowledge_query'
+      OR NEW.event_type IS DISTINCT FROM 'document.query_embedding_cost'
+      OR NEW.workspace_id IS NULL OR NEW.source_resource_id IS NULL
+      OR NEW.idempotency_key IS DISTINCT FROM 'knowledge.query_cost:'||NEW.source_resource_id THEN
+      RETURN NEW;
+    END IF;
+    v_source_kind:='knowledge_query'; v_source_id:=NEW.source_resource_id;
+    v_quantity:=NEW.quantity; v_idempotency_key:=NEW.idempotency_key;
+    -- Copy only attribution fields, never the initiator envelope/query/content.
+    v_attribution:=NEW.initiator_context->'creditDebitAttribution';
+    v_attribution:=CASE v_attribution->>'kind'
+      WHEN 'human' THEN jsonb_build_object('kind','human',
+        'initiatingHumanSubjectId',v_attribution->'initiatingHumanSubjectId')
+      WHEN 'turn' THEN jsonb_build_object('kind','turn','turnId',v_attribution->'turnId',
+        'initiatingHumanSubjectId',v_attribution->'initiatingHumanSubjectId')
+      WHEN 'service' THEN '{"kind":"service"}'::jsonb
+      ELSE '{"kind":"unknown"}'::jsonb END;
+  ELSE
+    RAISE EXCEPTION 'Unknown allowance attribution source' USING ERRCODE='55000';
   END IF;
-  EXECUTE format('ALTER POLICY organization_usage_expected_visibility ON usage_events USING
-    (CASE WHEN current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id)
-      THEN true ELSE (%s) END)',owner_name,target_schema,original_using);
-END $private_turn_reads$;
+  IF TG_OP='UPDATE' THEN RETURN NEW; END IF;
+  INSERT INTO opengeni_private.usage_allowance_capabilities VALUES
+    (pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,NEW.workspace_id)
+    ON CONFLICT DO NOTHING;
+  GET DIAGNOSTICS opened=ROW_COUNT;
+  INSERT INTO usage_allowance_attribution_receipts
+    (account_id,workspace_id,source_kind,source_id,session_id,attribution,quantity,idempotency_key)
+    VALUES(NEW.account_id,NEW.workspace_id,v_source_kind,v_source_id,v_session_id,v_attribution,v_quantity,v_idempotency_key);
+  IF opened=1 THEN
+    DELETE FROM opengeni_private.usage_allowance_capabilities
+      WHERE backend_pid=pg_backend_pid() AND transaction_id=pg_current_xact_id_if_assigned()
+        AND data_schema=TG_TABLE_SCHEMA AND account_id=NEW.account_id AND workspace_id=NEW.workspace_id;
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION capture_usage_allowance_attribution() FROM PUBLIC;
+CREATE TRIGGER allowance_turn_attribution AFTER INSERT OR UPDATE ON session_turns
+  FOR EACH ROW EXECUTE FUNCTION capture_usage_allowance_attribution();
+CREATE TRIGGER allowance_schedule_attribution AFTER INSERT OR UPDATE ON scheduled_task_runs
+  FOR EACH ROW EXECUTE FUNCTION capture_usage_allowance_attribution();
+CREATE TRIGGER allowance_query_attribution AFTER INSERT OR UPDATE ON usage_events
+  FOR EACH ROW EXECUTE FUNCTION capture_usage_allowance_attribution();
+
+-- DDL locks serialize source insertion with installation/backfill. NO FORCE
+-- relaxes only the actual table owner inside this atomic migration, never apps.
+ALTER TABLE session_turns NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE scheduled_task_runs NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE usage_events NO FORCE ROW LEVEL SECURITY;
+INSERT INTO usage_allowance_attribution_receipts
+  (account_id,workspace_id,source_kind,source_id,session_id,attribution)
+SELECT account_id,workspace_id,'turn',id::text,session_id,
+  jsonb_build_object('kind','turn','turnId',id,'initiatingHumanSubjectId',initiating_human_subject_id)
+FROM session_turns;
+INSERT INTO usage_allowance_attribution_receipts
+  (account_id,workspace_id,source_kind,source_id,attribution)
+SELECT account_id,workspace_id,'schedule',id::text,
+  CASE WHEN NOT coalesce(accepted_execution_snapshot ? 'causalHumanSubjectId',false)
+    THEN '{"kind":"unknown"}'::jsonb
+    WHEN accepted_execution_snapshot->>'causalHumanSubjectId' IS NULL THEN '{"kind":"service"}'::jsonb
+    ELSE jsonb_build_object('kind','human',
+      'initiatingHumanSubjectId',accepted_execution_snapshot->>'causalHumanSubjectId') END
+FROM scheduled_task_runs;
+INSERT INTO usage_allowance_attribution_receipts
+  (account_id,workspace_id,source_kind,source_id,attribution,quantity,idempotency_key)
+SELECT account_id,workspace_id,'knowledge_query',source_resource_id,
+  CASE initiator_context#>>'{creditDebitAttribution,kind}'
+    WHEN 'human' THEN jsonb_build_object('kind','human',
+      'initiatingHumanSubjectId',initiator_context#>'{creditDebitAttribution,initiatingHumanSubjectId}')
+    WHEN 'turn' THEN jsonb_build_object('kind','turn',
+      'turnId',initiator_context#>'{creditDebitAttribution,turnId}',
+      'initiatingHumanSubjectId',initiator_context#>'{creditDebitAttribution,initiatingHumanSubjectId}')
+    WHEN 'service' THEN '{"kind":"service"}'::jsonb ELSE '{"kind":"unknown"}'::jsonb END,
+  quantity,idempotency_key
+FROM usage_events WHERE source_resource_type='knowledge_query'
+  AND event_type='document.query_embedding_cost' AND workspace_id IS NOT NULL
+  AND source_resource_id IS NOT NULL AND idempotency_key='knowledge.query_cost:'||source_resource_id;
+DO $attribution_backfill_convergence$
+BEGIN
+  IF EXISTS (SELECT 1 FROM session_turns t WHERE NOT EXISTS (
+      SELECT 1 FROM usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
+        AND r.workspace_id=t.workspace_id AND r.source_kind='turn' AND r.source_id=t.id::text
+        AND r.session_id=t.session_id AND r.attribution=jsonb_build_object('kind','turn','turnId',t.id,
+          'initiatingHumanSubjectId',t.initiating_human_subject_id)))
+    OR EXISTS (SELECT 1 FROM scheduled_task_runs t WHERE NOT EXISTS (
+      SELECT 1 FROM usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
+        AND r.workspace_id=t.workspace_id AND r.source_kind='schedule' AND r.source_id=t.id::text
+        AND r.attribution=CASE WHEN NOT coalesce(t.accepted_execution_snapshot ? 'causalHumanSubjectId',false)
+          THEN '{"kind":"unknown"}'::jsonb
+          WHEN t.accepted_execution_snapshot->>'causalHumanSubjectId' IS NULL THEN '{"kind":"service"}'::jsonb
+          ELSE jsonb_build_object('kind','human',
+            'initiatingHumanSubjectId',t.accepted_execution_snapshot->>'causalHumanSubjectId') END))
+    OR EXISTS (SELECT 1 FROM usage_events t WHERE t.source_resource_type='knowledge_query'
+      AND t.event_type='document.query_embedding_cost' AND t.workspace_id IS NOT NULL
+      AND t.source_resource_id IS NOT NULL AND t.idempotency_key='knowledge.query_cost:'||t.source_resource_id
+      AND NOT EXISTS (SELECT 1 FROM usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
+        AND r.workspace_id=t.workspace_id AND r.source_kind='knowledge_query'
+        AND r.source_id=t.source_resource_id AND r.quantity=t.quantity AND r.idempotency_key=t.idempotency_key)) THEN
+    RAISE EXCEPTION 'Allowance attribution backfill did not converge' USING ERRCODE='55000';
+  END IF;
+END $attribution_backfill_convergence$;
+ALTER TABLE session_turns FORCE ROW LEVEL SECURITY;
+ALTER TABLE scheduled_task_runs FORCE ROW LEVEL SECURITY;
+ALTER TABLE usage_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE usage_allowance_attribution_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_allowance_attribution_receipts FORCE ROW LEVEL SECURITY;
+DO $attribution_policy$
+DECLARE owner_name text:=current_user; target_schema text:=current_schema();
+BEGIN
+  EXECUTE format('CREATE POLICY usage_allowance_attribution_owner ON usage_allowance_attribution_receipts
+    FOR SELECT USING(current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id))',
+    owner_name,target_schema);
+  EXECUTE format('CREATE POLICY usage_allowance_attribution_lifecycle ON usage_allowance_attribution_receipts
+    FOR INSERT WITH CHECK(current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id))',
+    owner_name,target_schema);
+END $attribution_policy$;
+REVOKE ALL ON TABLE usage_allowance_attribution_receipts FROM PUBLIC;
 
 CREATE FUNCTION usage_allowance_period(p_config jsonb, p_at timestamptz)
 RETURNS TABLE (period_key text, start_at timestamptz, end_at timestamptz)
@@ -438,7 +601,7 @@ DECLARE
   as_of timestamptz := clock_timestamp();
   read_config jsonb; historical workspace_allowance_periods%ROWTYPE;
   historical_read boolean:=false;
-  data_schema text := (SELECT n.nspname FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
+  v_data_schema text := (SELECT n.nspname FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
     WHERE t.oid='workspace_usage_allowances'::regclass);
 BEGIN
   IF opengeni_private.workspace_rls_visible(a, w) IS DISTINCT FROM true OR a IS NULL OR w IS NULL THEN
@@ -471,7 +634,7 @@ BEGIN
   -- One fence shared by policy mutations, reads and ledger counters.
   PERFORM pg_advisory_xact_lock(hashtextextended('usage-allowance:' || w::text, 0));
   INSERT INTO opengeni_private.usage_allowance_capabilities
-    VALUES (pg_backend_pid(), pg_current_xact_id(), data_schema, a, w)
+    VALUES (pg_backend_pid(), pg_current_xact_id(), v_data_schema, a, w)
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened = ROW_COUNT;
   SELECT * INTO prior FROM workspace_usage_allowances WHERE workspace_id = w AND account_id = a;
@@ -633,7 +796,8 @@ BEGIN
           SELECT eligible.subject_id FROM usage_allowance_members(a,w) eligible WHERE action<>'check' AND NOT historical_read
           UNION SELECT subject WHERE subject IS NOT NULL AND EXISTS (
             SELECT 1 FROM usage_allowance_members(a,w) eligible WHERE eligible.subject_id=subject)
-          UNION SELECT jsonb_object_keys(historical.member_rules) WHERE historical_read AND action<>'check'
+          UNION SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(historical.member_rules)='object'
+            THEN historical.member_rules ELSE '{}'::jsonb END) WHERE historical_read AND action<>'check'
           UNION SELECT subject_id FROM workspace_allowance_counters WHERE workspace_id=w
             AND period_key=period_row.period_key AND subject_id<>'' AND historical_read AND action<>'check'
         ) subjects
@@ -664,7 +828,7 @@ BEGIN
   IF opened = 1 THEN
     DELETE FROM opengeni_private.usage_allowance_capabilities WHERE backend_pid=pg_backend_pid()
       AND transaction_id=pg_current_xact_id_if_assigned()
-      AND usage_allowance_capabilities.data_schema=usage_allowance_command.data_schema AND workspace_id=w;
+      AND usage_allowance_capabilities.data_schema=v_data_schema AND workspace_id=w;
   END IF;
   RETURN result;
 END $$;
@@ -679,12 +843,12 @@ DECLARE
   opened integer; tenant_opened integer; processed integer:=0; seen integer;
   last_subject text; previous_account text:=current_setting('opengeni.account_id',true);
   previous_workspace text:=current_setting('opengeni.workspace_id',true);
-  data_schema text:=(SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  v_data_schema text:=(SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE c.oid='workspace_usage_allowances'::regclass);
   member_limit integer:=greatest(1,least(coalesce(p_member_limit,100),200));
 BEGIN
   INSERT INTO opengeni_private.usage_allowance_capabilities VALUES(pg_backend_pid(),pg_current_xact_id(),
-    data_schema,'00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000')
+    v_data_schema,'00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000')
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened=ROW_COUNT;
   FOR target IN SELECT account_id,workspace_id FROM workspace_usage_allowances
@@ -697,7 +861,7 @@ BEGIN
     IF NOT FOUND THEN CONTINUE; END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('usage-allowance:'||target.workspace_id::text,0));
     INSERT INTO opengeni_private.usage_allowance_capabilities VALUES(pg_backend_pid(),pg_current_xact_id(),
-      data_schema,target.account_id,target.workspace_id) ON CONFLICT DO NOTHING;
+      v_data_schema,target.account_id,target.workspace_id) ON CONFLICT DO NOTHING;
     GET DIAGNOSTICS tenant_opened=ROW_COUNT;
     BEGIN
       SELECT * INTO saved FROM workspace_usage_allowances WHERE workspace_id=target.workspace_id;
@@ -738,12 +902,12 @@ BEGIN
     END;
     IF tenant_opened=1 THEN DELETE FROM opengeni_private.usage_allowance_capabilities
       WHERE backend_pid=pg_backend_pid() AND transaction_id=pg_current_xact_id_if_assigned()
-        AND usage_allowance_capabilities.data_schema=maintain_usage_allowances.data_schema
+        AND usage_allowance_capabilities.data_schema=v_data_schema
         AND workspace_id=target.workspace_id; END IF;
   END LOOP;
   IF opened=1 THEN DELETE FROM opengeni_private.usage_allowance_capabilities
     WHERE backend_pid=pg_backend_pid() AND transaction_id=pg_current_xact_id_if_assigned()
-      AND usage_allowance_capabilities.data_schema=maintain_usage_allowances.data_schema
+      AND usage_allowance_capabilities.data_schema=v_data_schema
       AND workspace_id='00000000-0000-0000-0000-000000000000'::uuid; END IF;
   PERFORM set_config('opengeni.account_id',coalesce(previous_account,''),true);
   PERFORM set_config('opengeni.workspace_id',coalesce(previous_workspace,''),true);
@@ -795,15 +959,20 @@ BEGIN
     included_used=workspace_allowance_counters.included_used+excluded.included_used,
     grants_used=workspace_allowance_counters.grants_used+excluded.grants_used;
   -- Exact source receipts take precedence over caller metadata. to_jsonb
-  -- allows 0542 to coexist with old writers until 0543 adds the immutable
+  -- allows 0547 to coexist with old writers until 0548 adds the immutable
   -- attribution column; absent legacy receipts remain workspace-only.
   IF NEW.source_type='knowledge_query' THEN
-    SELECT receipt.initiator_context->'creditDebitAttribution' INTO attribution FROM usage_events receipt
+    SELECT receipt.attribution INTO attribution FROM usage_allowance_attribution_receipts receipt
     WHERE receipt.account_id=NEW.account_id AND receipt.workspace_id=NEW.workspace_id
-      AND receipt.source_resource_type='knowledge_query' AND receipt.source_resource_id=NEW.source_id
-      AND receipt.event_type='document.query_embedding_cost'
+      AND receipt.source_kind='knowledge_query' AND receipt.source_id=NEW.source_id
       AND receipt.idempotency_key='knowledge.query_cost:'||NEW.source_id
       AND receipt.quantity=amount;
+    attribution:=coalesce(attribution,'{"kind":"unknown"}'::jsonb);
+  ELSIF NEW.source_type='scheduled_task_run' THEN
+    SELECT receipt.attribution INTO attribution FROM usage_allowance_attribution_receipts receipt
+      WHERE receipt.account_id=NEW.account_id AND receipt.workspace_id=NEW.workspace_id
+        AND receipt.source_kind='schedule' AND receipt.source_id=NEW.source_id;
+    attribution:=coalesce(attribution,'{"kind":"unknown"}'::jsonb);
   ELSIF NEW.source_type='knowledge_revision' AND NEW.source_id ~* '^[0-9a-f-]{36}$' THEN
     SELECT to_jsonb(j)->'billing_attribution',
       CASE WHEN e.scope='personal' THEN coalesce(
@@ -829,15 +998,15 @@ BEGIN
   candidate := CASE WHEN attribution->>'kind'='turn' THEN attribution->>'turnId'
     WHEN attribution IS NOT NULL THEN NULL
     WHEN NEW.source_type IN ('session_turn','model_response')
-    THEN split_part(NEW.source_id,':',1) ELSE NEW.metadata->>'turnId' END;
+    THEN CASE WHEN split_part(NEW.source_id,':',1) ~*
+      '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN split_part(NEW.source_id,':',1) ELSE NEW.metadata->>'turnId' END
+    ELSE NEW.metadata->>'turnId' END;
   IF human IS NULL AND candidate ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
-    SELECT initiating_human_subject_id INTO human FROM session_turns
-      WHERE id=candidate::uuid AND workspace_id=NEW.workspace_id AND account_id=NEW.account_id;
-  END IF;
-  IF human IS NULL AND NEW.source_type='scheduled_task_run'
-    AND NEW.source_id ~* '^[0-9a-f-]{36}$' THEN
-    SELECT run.accepted_execution_snapshot->>'causalHumanSubjectId' INTO human FROM scheduled_task_runs run
-      WHERE run.id=NEW.source_id::uuid AND run.workspace_id=NEW.workspace_id;
+    SELECT receipt.attribution->>'initiatingHumanSubjectId' INTO human
+    FROM usage_allowance_attribution_receipts receipt
+      WHERE receipt.source_kind='turn' AND receipt.source_id=candidate::uuid::text
+        AND receipt.workspace_id=NEW.workspace_id AND receipt.account_id=NEW.account_id;
   END IF;
   IF human IS NOT NULL THEN
     INSERT INTO workspace_allowance_counters (workspace_id,account_id,period_key,subject_id,used)
@@ -873,7 +1042,7 @@ DO $acl$
 DECLARE role_name text; object_name text; function_name text; target_schema text := current_schema();
 BEGIN
   FOREACH function_name IN ARRAY ARRAY['usage_allowance_command(jsonb)',
-    'usage_allowance_period(jsonb,timestamptz)','count_workspace_allowance_debit()',
+    'usage_allowance_period(jsonb,timestamptz)','count_workspace_allowance_debit()','capture_usage_allowance_attribution()',
     'validate_usage_allowance_rule(jsonb)','validate_usage_allowance_config(jsonb)',
     'capture_usage_allowance_period(uuid,uuid,jsonb,timestamptz)',
     'usage_allowance_members(uuid,uuid)','usage_allowance_effective_period(uuid,jsonb,timestamptz)',
@@ -892,6 +1061,7 @@ BEGIN
     JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE (n.nspname=current_schema() AND c.relname IN ('workspace_usage_allowances',
       'workspace_member_allowances','workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods'))
+      OR (n.nspname=current_schema() AND c.relname='usage_allowance_attribution_receipts')
       OR (n.nspname='opengeni_private' AND c.relname='usage_allowance_capabilities')
   LOOP
     FOR role_name IN SELECT DISTINCT r.rolname FROM pg_class c,

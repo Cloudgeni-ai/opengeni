@@ -425,6 +425,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...organizationPrivateSessionAuthorityTables(),
       ...xaiAuthorityTables(),
       ...[
+        "usage_allowance_attribution_receipts",
         "workspace_usage_allowances",
         "workspace_member_allowances",
         "workspace_allowance_grants",
@@ -578,6 +579,33 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("attribution receipts require same-owner FORCE RLS and no public lifecycle execution", () => {
+    const posture = safePosture();
+    const receipt = posture.tables.find(
+      (table) => table.name === "usage_allowance_attribution_receipts",
+    )!;
+    const lifecycle = posture.targetRoutines.find(
+      (routine) => routine.name === "capture_usage_allowance_attribution()",
+    )!;
+    const receiptOptions = {
+      ...options,
+      protectedTables: ["tenant_rows", receipt.name],
+      protectedNoDirectDmlTables: [receipt.name],
+    };
+    receipt.rlsEnabled = true;
+    receipt.rlsForced = true;
+    receipt.rlsActive = true;
+    receipt.policyCount = 2;
+    expect(evaluateRuntimeDatabasePosture(posture, receiptOptions)).toEqual([]);
+    receipt.rlsForced = false;
+    lifecycle.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, receiptOptions)).toEqual(
+      expect.arrayContaining([
+        "usage allowance attribution receipts lack same-owner FORCE-RLS isolation",
+        "PUBLIC has forbidden owner-internal helper capture_usage_allowance_attribution()",
+      ]),
+    );
+  });
   test("video refund reversal remains a same-owner non-public internal helper", () => {
     const posture = safePosture();
     const routine = posture.targetRoutines.find(
@@ -907,7 +935,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 7 : 0) +
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
           // 0536 adds the workspace credential provider, webhook, and delivery tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -958,7 +986,7 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 7;
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8;
       for (const removed of [
         "workspace_packs",
         "pack_installations",

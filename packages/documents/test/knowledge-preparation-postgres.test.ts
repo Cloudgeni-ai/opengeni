@@ -138,6 +138,8 @@ test("new direct uploads freeze verified human before async source preparation",
     kind: "human",
     initiatingHumanSubjectId: subjectId,
   });
-  await expect(shared.admin`UPDATE documents SET billing_attribution='{"kind":"service"}'::jsonb
-    WHERE id=${document.id}`).rejects.toMatchObject({ code: "23514" });
+  await expect(
+    shared.admin`UPDATE documents SET billing_attribution='{"kind":"service"}'::jsonb
+      WHERE id=${document.id}`.then((rows) => rows),
+  ).rejects.toMatchObject({ code: "23514" });
 });

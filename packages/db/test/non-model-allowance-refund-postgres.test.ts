@@ -4,10 +4,12 @@ import {
   applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   getWorkspaceUsage,
   grantWorkspaceCredits,
+  initializeSessionStartAtomically,
   setWorkspaceAllowance,
 } from "../src";
 
@@ -73,7 +75,22 @@ test("video refund reverses exact original member/included/FEFO allocation, not 
     createdBy: { kind: "subject", subjectId },
     createdByContext: {},
   });
-  const [turn] = await shared.admin`SELECT id FROM session_turns WHERE session_id=${session.id}`;
+  await initializeSessionStartAtomically(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const claim = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("Video refund fixture turn was not claimed");
   const operationId = crypto.randomUUID();
   await applyCreditDebitAfterUse(client.db, {
     ...scope,
@@ -82,7 +99,7 @@ test("video refund reverses exact original member/included/FEFO allocation, not 
     sourceType: "video_generation_operation",
     sourceId: operationId,
     idempotencyKey: `credit:video_generation_debit:${operationId}`,
-    metadata: { turnId: turn!.id },
+    metadata: { turnId: claim.turn.id },
   });
   const [allocation] = await shared.admin`
     SELECT amount,included_used,grants_used,grant_allocations,human_subject_id,period_key

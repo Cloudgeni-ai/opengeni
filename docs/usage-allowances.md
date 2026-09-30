@@ -11,8 +11,13 @@ tenant-to-workspace mapping, and explicit external-member onboarding. Typed
 SDK details live in the [SDK reference](../packages/sdk/README.md); the
 allowance schemas live in `packages/contracts/src/usage-allowances.ts`.
 Storage/counter lifecycle: `packages/db/src/usage-allowances.ts` and
-`packages/db/drizzle/0542_usage_allowances.sql`; HTTP authority:
+`packages/db/drizzle/0547_usage_allowances.sql`; HTTP authority:
 `apps/api/src/routes/usage-allowances.ts`.
+
+Accounting reads frozen, content-free attribution receipts for accepted turns,
+scheduled runs, and paid Knowledge queries. Source lifecycle triggers copy only
+the exact tenant, source identity, and initiating human. They grant no session
+access and do not rewrite existing session/usage visibility policies.
 
 ## Rollout and activation
 
@@ -23,7 +28,7 @@ While disabled, those producer writes return HTTP 409. Authorized
 exact-version clear and `rule: null` recovery writes remain available; neither
 operation bypasses its normal authority or version checks.
 
-1. Apply the allowance migration and provision the matching database roles.
+1. Apply migrations 0547–0549 together and provision the matching database roles.
 2. Upgrade **every API, control-worker, and turn-worker consumer** to the
    allowance-aware release before allowing producers to write new policies.
 3. Enable `OPENGENI_USAGE_ALLOWANCES_ENABLED` for the API producers, then
@@ -35,6 +40,16 @@ accepted work without their allowance checks. Retain the compatible readers
 and use an authorized versioned clear/rule change for policy recovery.
 Migration rollout compatibility does not by itself authorize early activation.
 See [client/server compatibility](architecture.md#310-clientserver-compatibility-policy).
+
+## PostgreSQL verification
+
+The database suites use the existing shared fixture and its non-superuser
+application/owner roles. Docker remains the default. To use an already-running
+native PostgreSQL with `pgcrypto` and `vector` available, set
+`OPENGENI_TEST_PG_ADMIN_URL` to a loopback PostgreSQL superuser URL with an explicit
+port, then run the tests with `OPENGENI_REQUIRE_REAL_DB=1`. The native path fails
+closed instead of skipping when its server is unavailable; it still builds a
+fingerprinted template and creates an isolated database for each test file.
 
 ## Units and enforcement
 

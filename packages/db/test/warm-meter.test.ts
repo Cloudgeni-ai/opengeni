@@ -245,11 +245,13 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       SELECT coalesce(sum(used),0)::bigint AS used FROM workspace_allowance_counters
       WHERE workspace_id=${ws.workspaceId} AND subject_id='human:later-observer'`;
     expect(Number(observerUsage?.used)).toBe(0);
-    await expect(admin`UPDATE sandbox_leases SET
-      resume_state=resume_state #- '{opengeniWarmBilling,attribution}'
-      WHERE workspace_id=${ws.workspaceId} AND sandbox_group_id=${ws.groupId}`).rejects.toMatchObject(
-      { code: "23514" },
-    );
+    await expect(
+      admin`UPDATE sandbox_leases SET
+        resume_state=resume_state #- '{opengeniWarmBilling,attribution}'
+        WHERE workspace_id=${ws.workspaceId} AND sandbox_group_id=${ws.groupId}`.then(
+        (rows) => rows,
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
   }, 60_000);
   test("paid admissions fence zero balance before cold create, warm join and draining re-arm; unpriced modes remain usable", async () => {
     if (!available) return;

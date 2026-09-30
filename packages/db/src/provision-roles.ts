@@ -710,6 +710,7 @@ BEGIN
     IF to_regprocedure(format('%I.usage_allowance_command(jsonb)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.usage_allowance_capability_active(uuid,uuid) TO PUBLIC', ${literal(schema)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.usage_allowance_period(jsonb,timestamptz), %I.count_workspace_allowance_debit() FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.capture_usage_allowance_attribution() FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.validate_usage_allowance_config(jsonb), %I.validate_usage_allowance_rule(jsonb), %I.emit_usage_allowance_notifications(uuid,uuid,jsonb,text,timestamptz,text) FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.capture_usage_allowance_period(uuid,uuid,jsonb,timestamptz) FROM %I',${literal(schema)},${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.usage_allowance_members(uuid,uuid), %I.usage_allowance_effective_period(uuid,jsonb,timestamptz) FROM %I',${literal(schema)},${literal(schema)},${literal(role)});
@@ -718,7 +719,7 @@ BEGIN
       END IF;
       FOREACH runtime_table IN ARRAY ARRAY['workspace_usage_allowances','workspace_member_allowances',
         'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods',
-        'workspace_video_allowance_allocations']
+        'workspace_video_allowance_allocations','usage_allowance_attribution_receipts']
       LOOP
         EXECUTE format('REVOKE ALL ON TABLE %I.%I FROM %I', ${literal(schema)},runtime_table,${literal(role)});
       END LOOP;

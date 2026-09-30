@@ -141,6 +141,7 @@ import {
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitleWithEvent,
   withWorkspaceSubjectSessionActivityRls,
+  withWorkspaceSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
   type FrozenTurnInitiator,
@@ -3335,18 +3336,22 @@ async function createSessionForRequestInFileScope(
     });
   }
   if (payload.startMode !== "realtime") {
-    const frozenCreationInitiator = await frozenInitiatorForCommandActor(
+    const frozenCreationInitiator = await withWorkspaceSessionActivityRls(
       db,
       workspaceId,
-      creationInitiator.actor ??
-        (creationInitiator.initiator?.kind === "service"
-          ? {
-              type: "service",
-              subjectId: creationInitiator.initiator.subjectId,
-              ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
-            }
-          : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
-      grant.subjectLabel,
+      (scopedDb) => frozenInitiatorForCommandActor(
+        scopedDb,
+        workspaceId,
+        creationInitiator.actor ??
+          (creationInitiator.initiator?.kind === "service"
+            ? {
+                type: "service",
+                subjectId: creationInitiator.initiator.subjectId,
+                ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
+              }
+            : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
+        grant.subjectLabel,
+      ),
     );
     await requireLimit(deps, {
       accountId: grant.accountId,
@@ -3853,11 +3858,15 @@ async function acceptSessionUserMessageInFileScope(
       input.annotations ?? [],
     );
     const admissionActor = commandActor;
-    let frozenAdmissionInitiator = await frozenInitiatorForCommandActor(
+    let frozenAdmissionInitiator = await withWorkspaceSessionActivityRls(
       db,
       workspaceId,
-      admissionActor,
-      grant.subjectLabel,
+      (scopedDb) => frozenInitiatorForCommandActor(
+        scopedDb,
+        workspaceId,
+        admissionActor,
+        grant.subjectLabel,
+      ),
     );
     // Re-submitting a checked-out queue edit retains the original turn's
     // causal human, just as the locked prompt transaction does.

@@ -9,10 +9,12 @@ import postgres from "postgres";
 import {
   applyCreditLedgerEntry,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   getWorkspaceUsage,
   grantWorkspaceCredits,
+  initializeSessionStartAtomically,
   migrate,
   provisionRoles,
   setWorkspaceAllowance,
@@ -69,8 +71,22 @@ async function fixture(db = app.db, admin = shared.admin) {
     createdBy: { kind: "subject", subjectId },
     createdByContext: {},
   });
-  const [turn] = await admin`select id from session_turns where session_id=${session.id} limit 1`;
-  if (!turn) throw new Error("Video refund fixture turn unavailable");
+  await initializeSessionStartAtomically(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const claim = await claimSessionWorkForAttempt(db, scope.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("Video refund fixture turn was not claimed");
   await setWorkspaceAllowance(db, {
     ...scope,
     includedCredits: 100,
@@ -84,7 +100,7 @@ async function fixture(db = app.db, admin = shared.admin) {
     expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
   });
   await grantWorkspaceCredits(db, { ...scope, operationId: "late", credits: 80 });
-  return { ...scope, turnId: String(turn.id), operationId: crypto.randomUUID() };
+  return { ...scope, turnId: claim.turn.id, operationId: crypto.randomUUID() };
 }
 
 type Scope = Awaited<ReturnType<typeof fixture>>;
@@ -112,6 +128,16 @@ async function grantBalances(scope: Scope, admin = shared.admin) {
   return rows.map((row) => [row.operation_id, Number(row.remaining)]);
 }
 
+async function workspaceCounters(scope: Scope, period: string | null = null, admin = shared.admin) {
+  const [row] = await admin`
+    select used::integer as used,included_used::integer as "includedUsed",
+      grants_used::integer as "grantsUsed" from workspace_allowance_counters
+    where workspace_id=${scope.workspaceId} and subject_id=''
+      and (${period}::text is null or period_key=${period})
+    order by period_key desc limit 1`;
+  return row;
+}
+
 describe("existing prepaid video allowance refunds", () => {
   test("concurrent duplicate refund restores exact included/FEFO/member facts once and preserves another debit", async () => {
     const scope = await fixture();
@@ -134,7 +160,12 @@ describe("existing prepaid video allowance refunds", () => {
     });
     await Promise.all([refund(scope), refund(scope), refund(scope)]);
     const usage = await getWorkspaceUsage(app.db, scope);
-    expect(usage.workspace).toMatchObject({ used: 20, includedUsed: 0, grantsUsed: 20 });
+    expect(usage.workspace.used).toBe(20);
+    expect(await workspaceCounters(scope, allocation!.period_key)).toEqual({
+      used: 20,
+      includedUsed: 0,
+      grantsUsed: 20,
+    });
     expect(usage.members.find((member) => member.subjectId === scope.subjectId)?.used).toBe(20);
     expect(await grantBalances(scope)).toEqual([
       ["early", 30],
@@ -152,12 +183,18 @@ describe("existing prepaid video allowance refunds", () => {
   test("wrong amount or original ledger association aborts the entire refund; rollback can retry", async () => {
     const scope = await fixture();
     await debit(scope);
-    await expect(applyCreditLedgerEntry(app.db, ledgerInput(scope, true, 179))).rejects.toThrow(
-      "does not match its original debit",
-    );
+    const refundMismatch = {
+      cause: {
+        code: "23514",
+        message: "Video allowance refund does not match its original debit",
+      },
+    };
+    await expect(
+      applyCreditLedgerEntry(app.db, ledgerInput(scope, true, 179)),
+    ).rejects.toMatchObject(refundMismatch);
     await shared.admin`update credit_ledger_entries set type='unrelated_debit'
       where idempotency_key=${ledgerInput(scope, false).idempotencyKey}`;
-    await expect(refund(scope)).rejects.toThrow("does not match its original debit");
+    await expect(refund(scope)).rejects.toMatchObject(refundMismatch);
     await shared.admin`update credit_ledger_entries set type='video_generation_debit'
       where idempotency_key=${ledgerInput(scope, false).idempotencyKey}`;
     await expect(
@@ -199,18 +236,25 @@ describe("existing prepaid video allowance refunds", () => {
       idempotencyKey: crypto.randomUUID(),
     });
     await refund(scope);
-    expect((await getWorkspaceUsage(app.db, scope)).workspace).toMatchObject({
+    const current = await getWorkspaceUsage(app.db, scope);
+    expect(current.workspace).toMatchObject({
+      used: 20,
+      grantsRemaining: 80,
+    });
+    expect(await workspaceCounters(scope)).toEqual({
       used: 20,
       includedUsed: 20,
       grantsUsed: 0,
-      grantsRemaining: 80,
     });
     const historical = await getWorkspaceUsage(app.db, { ...scope, period: "2000-01" });
     expect(historical.workspace).toMatchObject({
       used: 0,
+      grantsRemaining: 80,
+    });
+    expect(await workspaceCounters(scope, "2000-01")).toEqual({
+      used: 0,
       includedUsed: 0,
       grantsUsed: 0,
-      grantsRemaining: 80,
     });
     expect(await grantBalances(scope)).toEqual([
       ["early", 30],
@@ -245,7 +289,7 @@ describe("existing prepaid video allowance refunds", () => {
   }, 60_000);
 });
 
-test("0544 non-superuser FORCE-RLS owner can read exact debit and restore all allocations; app cannot call/write internals", async () => {
+test("0549 non-superuser FORCE-RLS owner can read exact debit and restore all allocations; app cannot call/write internals", async () => {
   const owner = await acquireOwnerMigratedTestDatabase("video-refund-owner");
   if (!owner) throw new Error("Owner-migrated PostgreSQL database required");
   let ownerApp: ReturnType<typeof createDb> | undefined;
@@ -264,11 +308,15 @@ test("0544 non-superuser FORCE-RLS owner can read exact debit and restore all al
     const scope = await fixture(ownerApp.db, owner.admin);
     await debit(scope, ownerApp.db);
     await refund(scope, ownerApp.db);
-    expect((await getWorkspaceUsage(ownerApp.db, scope)).workspace).toMatchObject({
+    const usage = await getWorkspaceUsage(ownerApp.db, scope);
+    expect(usage.workspace).toMatchObject({
+      used: 0,
+      grantsRemaining: 110,
+    });
+    expect(await workspaceCounters(scope, null, owner.admin)).toEqual({
       used: 0,
       includedUsed: 0,
       grantsUsed: 0,
-      grantsRemaining: 110,
     });
     expect(await grantBalances(scope, owner.admin)).toEqual([
       ["early", 30],
@@ -288,12 +336,12 @@ test("0544 non-superuser FORCE-RLS owner can read exact debit and restore all al
         await tx.execute(sql`update workspace_video_allowance_allocations
         set reversed_by_ledger_id=null where workspace_id=${scope.workspaceId}`);
       }),
-    ).rejects.toThrow("permission denied");
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
     await expect(
       withRlsContext(ownerApp.db, scope, async (tx) => {
         await tx.execute(sql`select reverse_video_allowance_refund()`);
       }),
-    ).rejects.toThrow("permission denied");
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
   } finally {
     await ownerApp?.close();
     await ownerSql.end();

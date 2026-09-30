@@ -12499,7 +12499,33 @@ export const creditLedgerEntries = pgTable(
   }),
 );
 
-/** EXECUTE-only lifecycle/counter storage; migration 0542 owns FORCE-RLS policy. */
+/** Content-free immutable accepted billing facts; no runtime table privileges. */
+export const usageAllowanceAttributionReceipts = pgTable(
+  "usage_allowance_attribution_receipts",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceKind: text("source_kind").$type<"turn" | "schedule" | "knowledge_query">().notNull(),
+    sourceId: text("source_id").notNull(),
+    sessionId: uuid("session_id"),
+    attribution: jsonb("attribution")
+      .$type<import("./credit-debit-attribution").CreditDebitAttribution>()
+      .notNull(),
+    quantity: bigint("quantity", { mode: "number" }),
+    idempotencyKey: text("idempotency_key"),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.accountId, table.workspaceId, table.sourceKind, table.sourceId],
+    }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+/** EXECUTE-only lifecycle/counter storage; migration 0547 owns FORCE-RLS policy. */
 export const workspaceUsageAllowances = pgTable(
   "workspace_usage_allowances",
   {

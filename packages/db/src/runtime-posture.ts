@@ -704,6 +704,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
   "count_workspace_allowance_debit()",
+  "capture_usage_allowance_attribution()",
   "reverse_video_allowance_refund()",
   "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
   "emit_usage_allowance_notifications(uuid, uuid, jsonb, text, timestamp with time zone, text)",
@@ -1091,6 +1092,7 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "usage_allowance_attribution_receipts",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -1598,6 +1600,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "usage_allowance_attribution_receipts",
   "workspace_allowance_counters",
   "workspace_allowance_grants",
   "workspace_allowance_notifications",
@@ -2432,6 +2435,7 @@ export function evaluateRuntimeDatabasePosture(
       routine.name === "maintain_usage_allowances(integer, integer)"
     ) {
       const allowanceTables = [
+        "usage_allowance_attribution_receipts",
         "workspace_usage_allowances",
         "workspace_member_allowances",
         "workspace_allowance_grants",
@@ -3865,6 +3869,17 @@ export function evaluateRuntimeDatabasePosture(
       usageAllowanceCapability.delete)
   ) {
     violations.push("usage allowance capability has unsafe owner or direct runtime privileges");
+  }
+  const allowanceAttribution = tableByName.get("usage_allowance_attribution_receipts");
+  if (
+    allowanceAttribution &&
+    (!options.protectedTables || options.protectedTables.includes(allowanceAttribution.name)) &&
+    (allowanceAttribution.owner !== tableByName.get("workspace_usage_allowances")?.owner ||
+      !allowanceAttribution.rlsEnabled ||
+      !allowanceAttribution.rlsForced ||
+      !allowanceAttribution.rlsActive)
+  ) {
+    violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
   }
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",

@@ -57,7 +57,7 @@ describe("usage allowance projections and validation", () => {
   });
   test("rolling migration uses INSERT trigger, protected capabilities, no event sums", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0542_usage_allowances.sql", import.meta.url),
+      new URL("../drizzle/0547_usage_allowances.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).toContain("AFTER INSERT ON credit_ledger_entries");
@@ -68,10 +68,9 @@ describe("usage allowance projections and validation", () => {
     expect(source).not.toMatch(/sum\([^)]*(amount_micros|quantity)/);
     expect(source).toContain("transaction_id=pg_current_xact_id_if_assigned()");
     expect(source).toContain("period_row.period_key:=p_input->>'period';");
-    expect(source).toContain("AS RESTRICTIVE FOR SELECT USING");
-    expect(source).toContain("AS RESTRICTIVE FOR INSERT WITH CHECK");
-    expect(source).toContain("AS RESTRICTIVE FOR UPDATE USING");
-    expect(source).toContain("AS RESTRICTIVE FOR DELETE USING");
+    expect(source).toContain("CREATE TABLE usage_allowance_attribution_receipts");
+    expect(source).toContain("source_kind='schedule'");
+    expect(source).not.toMatch(/(?:ALTER|DROP|CREATE) POLICY session_visibility/iu);
     const usageBranch = source.slice(
       source.indexOf("ELSIF action IN ('usage','check')"),
       source.indexOf("RAISE EXCEPTION 'invalid allowance action'"),

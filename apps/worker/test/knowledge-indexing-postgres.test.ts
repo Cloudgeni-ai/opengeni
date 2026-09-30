@@ -426,10 +426,11 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
   expect(Number(memberUsage?.used)).toBe(
     1_000_000 - (await getBillingBalance(client.db, accountId)).balanceMicros,
   );
-  await expect(shared.admin`UPDATE knowledge_index_jobs SET
-    billing_attribution='{"kind":"service"}'::jsonb WHERE revision_id=${saved.revisionId}`).rejects.toMatchObject(
-    { code: "23514" },
-  );
+  await expect(
+    shared.admin`UPDATE knowledge_index_jobs SET
+      billing_attribution='{"kind":"service"}'::jsonb
+      WHERE revision_id=${saved.revisionId}`.then((rows) => rows),
+  ).rejects.toMatchObject({ code: "23514" });
   const balanceAfterFirstBatch = (await getBillingBalance(client.db, accountId)).balanceMicros;
 
   settings.documentEmbeddingBillingMode = "usage_only";

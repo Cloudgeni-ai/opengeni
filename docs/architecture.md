@@ -567,18 +567,14 @@ Canonical: `packages/contracts/src/work-claims.ts`,
 `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, and
 [`work-discovery.md`](work-discovery.md).
 
-### 3.12 Usage allowances constrain debits, never grant authority or reserve funds
+### 3.12 Usage allowances constrain debits, not authority
 
-Allowances constrain USD-micro debits, not funding or access. Organization
-authority writes budgets; workspace admins split members; agents write neither.
-Post-call settlement permits concurrent overshoot, never reservations.
-Schedules/children/continuations/recovery retain causal members. Shares may
-oversubscribe included credits plus remaining grants. Mutations use CAS/keyed
-grants; monthly boundaries use UTC clamping.
-Default-off `OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until all
-API/control/turn readers are upgraded, never persisted-policy enforcement.
-
-Canonical: [`usage-allowances.md`](usage-allowances.md), §5.7.
+Org admins set budgets; workspace admins split members; agents do neither.
+USD-micro counters permit overshoot without reservations. Shares may
+oversubscribe included credits and remaining grants. Default-off
+`OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until every consumer supports
+enforcement.
+Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 ---
 
@@ -989,8 +985,6 @@ Canonical: [`knowledge.md`](knowledge.md),
 ### 5.7 Usage, limits, and billing
 
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
-
-Allowances: [policy, counters, reads, notifications](usage-allowances.md).
 
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
@@ -1586,6 +1580,11 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
 - **RLS is a real boundary.** Standalone runtime roles are non-owner,
   non-superuser, and non-bypass. Missing or mismatched tenant context fails
   closed.
+- **Allowance attribution never widens visibility.** Source lifecycle triggers
+  mirror frozen payer facts into content-free FORCE-RLS receipts. Owner
+  capabilities read receipts, not private source content; existing visibility
+  policies stay unchanged. Receipts grant no authority and survive source
+  retention for late settlement, cascading with the workspace.
 - **Human, service, API-key, and agent identities are distinct.** Provenance is
   not authority. Personal-resource execution requires the exact permitted
   human snapshot; worker identity never substitutes for it.

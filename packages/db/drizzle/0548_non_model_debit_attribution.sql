@@ -34,7 +34,7 @@ CREATE OR REPLACE FUNCTION knowledge_enqueue_index() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   attribution jsonb := '{"kind":"unknown"}'::jsonb;
-  causal_turn session_turns%ROWTYPE;
+  causal_turn usage_allowance_attribution_receipts%ROWTYPE;
   preparation jsonb;
   accepted jsonb;
   document_attribution jsonb;
@@ -45,7 +45,8 @@ BEGIN
   IF NEW.change_kind='archive' THEN RETURN NEW; END IF;
   -- The accepted actor's publication transaction is trusted; the trigger
   -- needs only the same tenant's immutable initiating facts through FORCE-RLS,
-  -- including private turns. Reuse 0542's exact owner-only SELECT capability.
+  -- including private turns, without reading their content. Reuse 0547's exact
+  -- owner-only SELECT capability over content-free accounting receipts.
   INSERT INTO opengeni_private.usage_allowance_capabilities
     VALUES(pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,billing_workspace)
     ON CONFLICT DO NOTHING;
@@ -53,15 +54,15 @@ BEGIN
   -- knowledge_entry_apply already resolved the trusted actor and held the exact
   -- attempt/publication locks. Do not read a session's latest turn or creator.
   IF NEW.actor->>'kind'='agent' THEN
-    SELECT * INTO causal_turn FROM session_turns t
-      WHERE t.account_id=NEW.account_id AND t.id=NEW.created_by_turn_id
+    SELECT * INTO causal_turn FROM usage_allowance_attribution_receipts t
+      WHERE t.account_id=NEW.account_id AND t.workspace_id=billing_workspace
+        AND t.source_kind='turn' AND t.source_id=NEW.created_by_turn_id::text
         AND t.session_id=NEW.created_by_session_id
-        AND t.id::text=NEW.actor->>'turnId';
+        AND t.source_id=NEW.actor->>'turnId';
     IF NOT FOUND THEN
       RAISE EXCEPTION 'Knowledge initiating turn unavailable' USING ERRCODE='42501';
     END IF;
-    attribution:=jsonb_build_object('kind','turn','turnId',causal_turn.id,
-      'initiatingHumanSubjectId',causal_turn.initiating_human_subject_id);
+    attribution:=causal_turn.attribution;
   ELSIF NEW.actor->>'kind'='human' AND NEW.actor->>'principalKind'='human_session'
     AND current_setting('opengeni.knowledge_actor_kind',true)='human'
     AND NEW.actor->>'subjectId'=nullif(current_setting('opengeni.subject_id',true),'') THEN
@@ -79,14 +80,11 @@ BEGIN
         ON d.account_id=e.account_id AND d.id=e.legacy_document_id
       WHERE e.account_id=NEW.account_id AND e.id=NEW.entry_id;
     IF preparation->>'scheduledTaskRunId' IS NOT NULL THEN
-      SELECT r.accepted_execution_snapshot INTO accepted FROM scheduled_task_runs r
-        WHERE r.account_id=NEW.account_id AND r.id=(preparation->>'scheduledTaskRunId')::uuid;
-      IF accepted ? 'causalHumanSubjectId' THEN
-        attribution:=CASE WHEN accepted->>'causalHumanSubjectId' IS NULL
-          THEN '{"kind":"service"}'::jsonb
-          ELSE jsonb_build_object('kind','human',
-            'initiatingHumanSubjectId',accepted->>'causalHumanSubjectId') END;
-      END IF;
+      SELECT r.attribution INTO accepted FROM usage_allowance_attribution_receipts r
+        WHERE r.account_id=NEW.account_id AND r.workspace_id=billing_workspace
+          AND r.source_kind='schedule'
+          AND r.source_id=(preparation->>'scheduledTaskRunId')::uuid::text;
+      attribution:=coalesce(accepted,'{"kind":"unknown"}'::jsonb);
     ELSE
       attribution:=coalesce(document_attribution,'{"kind":"unknown"}'::jsonb);
     END IF;
@@ -194,7 +192,7 @@ BEGIN
 END $video_allocation_policy$;
 REVOKE ALL ON TABLE workspace_video_allowance_allocations FROM PUBLIC;
 
--- Amend only the current 0542 declaration/allocation/attribution boundaries.
+-- Amend only the current 0547 declaration/allocation/attribution boundaries.
 -- Exact unique anchors reject a changed implementation instead of silently
 -- losing either attribution or grant restoration during a future migration.
 -- The DO only installs a function body, never executes its embedded INSERT.
@@ -209,7 +207,7 @@ BEGIN
   anchor:='attribution jsonb; billing_workspace uuid;';
   replacement:=anchor||E'\n  grant_allocations jsonb := ''[]''::jsonb;';
   IF strpos(definition,anchor)=0 OR strpos(substr(definition,strpos(definition,anchor)+length(anchor)),anchor)>0 THEN
-    RAISE EXCEPTION '0543 unexpected allowance attribution declaration' USING ERRCODE='55000';
+    RAISE EXCEPTION '0548 unexpected allowance attribution declaration' USING ERRCODE='55000';
   END IF;
   definition:=replace(definition,anchor,replacement);
   anchor:='grant_used := grant_used+least(pending,g.remaining);';
@@ -217,14 +215,14 @@ BEGIN
         jsonb_build_object('operationId',g.operation_id,'credits',least(pending,g.remaining)));
       grant_used := grant_used+least(pending,g.remaining);$capture_grant$;
   IF strpos(definition,anchor)=0 OR strpos(substr(definition,strpos(definition,anchor)+length(anchor)),anchor)>0 THEN
-    RAISE EXCEPTION '0543 unexpected allowance grant allocation' USING ERRCODE='55000';
+    RAISE EXCEPTION '0548 unexpected allowance grant allocation' USING ERRCODE='55000';
   END IF;
   definition:=replace(definition,anchor,replacement);
   anchor:=$candidate$CASE WHEN attribution->>'kind'='turn' THEN attribution->>'turnId'
     WHEN attribution IS NOT NULL THEN NULL$candidate$;
   replacement:='CASE WHEN attribution IS NOT NULL THEN NULL';
   IF strpos(definition,anchor)=0 OR strpos(substr(definition,strpos(definition,anchor)+length(anchor)),anchor)>0 THEN
-    RAISE EXCEPTION '0543 unexpected allowance source candidate' USING ERRCODE='55000';
+    RAISE EXCEPTION '0548 unexpected allowance source candidate' USING ERRCODE='55000';
   END IF;
   definition:=replace(definition,anchor,replacement);
   anchor:='PERFORM capture_usage_allowance_period(NEW.account_id,NEW.workspace_id,cfg,clock_timestamp());';
@@ -239,7 +237,7 @@ BEGIN
   END IF;
   PERFORM capture_usage_allowance_period(NEW.account_id,NEW.workspace_id,cfg,clock_timestamp());$capture_video$;
   IF strpos(definition,anchor)=0 OR strpos(substr(definition,strpos(definition,anchor)+length(anchor)),anchor)>0 THEN
-    RAISE EXCEPTION '0543 unexpected allowance debit settlement boundary' USING ERRCODE='55000';
+    RAISE EXCEPTION '0548 unexpected allowance debit settlement boundary' USING ERRCODE='55000';
   END IF;
   EXECUTE replace(definition,anchor,replacement);
 END $video_allocation_capture$;
@@ -327,7 +325,7 @@ BEGIN
     PERFORM capture_usage_allowance_period(NEW.account_id,NEW.workspace_id,cfg,clock_timestamp());
   ELSE
     -- A refund of an old pre-allowance operation has no counters to reverse.
-    -- A debit committed while 0542 was active but before allocation capture
+    -- A debit committed while 0547 was active but before allocation capture
     -- is ambiguous: refuse atomic refund settlement instead of silently
     -- retaining phantom usage or guessing its included/grant allocation.
     SELECT EXISTS(SELECT 1 FROM credit_ledger_entries debit
