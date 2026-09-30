@@ -87,6 +87,8 @@ type AgentTopologyData = {
   nextCursor: string | null;
   humanAdvisoriesEnabled: boolean;
   error: Error | null;
+  /** The root page loaded, but workspace-wide activity is not known. */
+  supplementalError: Error | null;
 };
 
 const EMPTY_DATA: AgentTopologyData = {
@@ -99,6 +101,7 @@ const EMPTY_DATA: AgentTopologyData = {
   nextCursor: null,
   humanAdvisoriesEnabled: true,
   error: null,
+  supplementalError: null,
 };
 
 const FILTER_OPTIONS: { value: AgentTopologyFilter; label: string }[] = [
@@ -144,7 +147,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   const [manuallyCollapsed, setManuallyCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   // The numbers describe the workspace, not a search, so they keep the last
   // browse reading while a search is on.
-  const [summary, setSummary] = useState<AgentTopologySummary | null>(null);
+  const [summary, setSummary] = useState<AgentTopologySummary | "unavailable" | null>(null);
   const searching = query.trim().length > 0;
 
   const refresh = useCallback(
@@ -193,6 +196,12 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
         if (generation !== dataGeneration.current || rootRequest.current !== request) return;
         const live = liveRead.status === "fulfilled" ? liveRead.value : null;
         const failed = failedRead.status === "fulfilled" ? failedRead.value : null;
+        const rejectedRead = [liveRead, failedRead].find((read) => read.status === "rejected");
+        const supplementalError = rejectedRead
+          ? rejectedRead.reason instanceof Error
+            ? rejectedRead.reason
+            : new Error(String(rejectedRead.reason))
+          : null;
         const pageIds = page.sessions.map((session) => session.id);
         if (cursor) for (const id of pageIds) pagedRoots.current.add(id);
         let stale = new Set<string>();
@@ -233,6 +242,8 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
             nextCursor: page.nextCursor,
             humanAdvisoriesEnabled: page.humanAdvisoriesEnabled !== false,
             error: null,
+            // Loading another root page cannot repair an incomplete activity read.
+            supplementalError: readLive ? supplementalError : current.supplementalError,
           };
         });
         if (search) {
@@ -401,9 +412,11 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   }, [data.sessions]);
 
   useEffect(() => {
-    if (searching || data.loading || (data.error && data.sessions.length === 0)) return;
-    setSummary(summarizeAgentTopology(data.sessions));
-  }, [data.error, data.loading, data.sessions, searching]);
+    if (searching || data.loading) return;
+    setSummary(
+      data.error || data.supplementalError ? "unavailable" : summarizeAgentTopology(data.sessions),
+    );
+  }, [data.error, data.loading, data.sessions, data.supplementalError, searching]);
 
   const forest = useMemo(() => buildAgentTopology(data.sessions), [data.sessions]);
   const filteredForest = useMemo(() => filterAgentTopology(forest, filter, ""), [filter, forest]);
@@ -494,7 +507,12 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
     searching,
   ]);
 
-  const nothingAtAll = !searching && !data.loading && !data.error && data.sessions.length === 0;
+  const nothingAtAll =
+    !searching &&
+    !data.loading &&
+    !data.error &&
+    !data.supplementalError &&
+    data.sessions.length === 0;
   // Nothing to count or filter until the first read succeeds.
   const loadFailed = !data.loading && data.error !== null && data.sessions.length === 0;
   const bare = nothingAtAll || (loadFailed && !searching);
@@ -564,7 +582,8 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
       />
     );
   } else if (visibleForest.length === 0) {
-    body = (
+    // The partial-read notice is the truthful empty state until activity is known.
+    body = data.supplementalError ? null : (
       <FilteredEmpty
         filter={filter}
         query={query.trim()}
@@ -623,7 +642,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         title="Agents"
         description={
-          bare ? undefined : (
+          bare || summary === "unavailable" || data.error || data.supplementalError ? undefined : (
             <AgentSummaryLine summary={summary} filter={filter} onFilterChange={setFilter} />
           )
         }
@@ -659,6 +678,24 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           }
         >
           What you see may be out of date.
+        </ErrorMessage>
+      ) : data.supplementalError && !data.error ? (
+        <ErrorMessage
+          variant="inline"
+          className="mt-4"
+          title="Couldn't load every agent."
+          {...apiErrorDetails(data.supplementalError)}
+          action={
+            isPermissionDenied(data.supplementalError) ? undefined : (
+              <EmptyStateLink onClick={() => void refresh()} className="text-sm">
+                Try again
+              </EmptyStateLink>
+            )
+          }
+        >
+          {isPermissionDenied(data.supplementalError)
+            ? apiErrorAdvice(data.supplementalError)
+            : "Some work may be missing."}
         </ErrorMessage>
       ) : null}
       <div className={cn("flex min-w-0 flex-col", bare ? "" : "mt-4")}>{body}</div>

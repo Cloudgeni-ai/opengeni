@@ -444,11 +444,77 @@ test("the page shows when only the live or recently failed read fails", async ()
   const view = await renderPage();
   expect(view.container.textContent).not.toContain("Couldn't load agents");
   expect(view.container.textContent).not.toContain("Couldn't refresh agents");
+  expect(view.container.textContent).toContain("Couldn't load every agent.");
+  expect(view.container.querySelector("[data-agent-summary]")).toBeNull();
   // The first page and the live read that did answer both show.
   expect(rowTitles(view.container)).toContain("Merge the state split");
   expect(rowTitles(view.container)).toContain("Old approval");
   await view.unmount();
 });
+
+for (const supplemental of ["live", "failed"] as const) {
+  test(`a failed ${supplemental} read keeps rows but never claims complete activity or an empty filter`, async () => {
+    roots = [agent("quiet", { title: "Quiet workstream" })];
+    children = new Map();
+    olderLive = [
+      agent("older-approval", { title: "Older approval", status: "requires_action" }),
+      agent("older-failure", { title: "Older failure", status: "failed" }),
+    ];
+    failWhen = (options) =>
+      options.statuses?.includes(supplemental === "live" ? "requires_action" : "failed")
+        ? new Error(`${supplemental} activity unavailable`)
+        : null;
+    const view = await renderPage();
+    expect(rowTitles(view.container)).toContain("Quiet workstream");
+    expect(rowTitles(view.container)).toContain(
+      supplemental === "live" ? "Older failure" : "Older approval",
+    );
+    expect(view.container.querySelector("[data-agent-summary]")).toBeNull();
+    expect(view.container.textContent).toContain("Couldn't load every agent.");
+    expect(view.container.textContent).not.toContain("Nothing needs you");
+    const radios = Array.from(view.container.querySelectorAll<HTMLElement>("[role=radio]"));
+    await click(
+      radios.find(
+        (radio) => radio.textContent === (supplemental === "live" ? "Needs you" : "Failed"),
+      ),
+    );
+    expect(rowTitles(view.container)).toEqual([]);
+    expect(view.container.textContent).not.toContain("Nothing needs you right now.");
+    expect(view.container.textContent).not.toContain("No workstreams failed in the last day.");
+
+    failWhen = () => null;
+    await click(button(view.container, /^Try again$/));
+    expect(view.container.textContent).not.toContain("Couldn't load every agent.");
+    expect(rowTitles(view.container)).toContain(
+      supplemental === "live" ? "Older approval" : "Older failure",
+    );
+    expect(view.container.querySelector("[data-agent-summary]")?.textContent).toBe(
+      "1 needs you·1 failed in the last day",
+    );
+    await view.unmount();
+  });
+
+  test(`an empty first page with a failed ${supplemental} read is not an empty workspace`, async () => {
+    roots = [];
+    children = new Map();
+    failWhen = (options) =>
+      options.statuses?.includes(supplemental === "live" ? "requires_action" : "failed")
+        ? new Error(`${supplemental} activity unavailable`)
+        : null;
+    const view = await renderPage();
+    expect(view.container.textContent).toContain("Couldn't load every agent.");
+    expect(view.container.textContent).not.toContain("No agents yet");
+    expect(view.container.textContent).not.toContain("Nothing needs you");
+    expect(view.container.textContent).not.toContain("No agents to show.");
+    expect(view.container.querySelector("[data-agent-summary]")).toBeNull();
+
+    failWhen = () => null;
+    await click(button(view.container, /^Try again$/));
+    expect(view.container.textContent).toContain("No agents yet");
+    expect(view.container.textContent).not.toContain("Couldn't load every agent.");
+    await view.unmount();
+  });
+}
 
 test("in the tree, a branch that failed to load says so and can try again", async () => {
   failWhen = (options) =>
