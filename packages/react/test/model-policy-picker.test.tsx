@@ -1,8 +1,8 @@
 import { ModelPolicyPickerMenu } from "../src/components/model-policy-picker-menu";
 import { projectClientModelRows } from "../src/model-policy";
 import { afterEach, describe, expect, test } from "bun:test";
-import type { ClientModel } from "@opengeni/sdk";
-import { act } from "react";
+import type { ClientModel, ReasoningEffort } from "@opengeni/sdk";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   BillingClassMark,
@@ -574,7 +574,7 @@ describe("ModelPolicyPicker", () => {
     expect(trigger?.className).not.toContain("rounded-full");
   });
 
-  test("selects immediately, coerces unsupported effort and speed, and closes", async () => {
+  test("selects immediately and coerces unsupported effort and speed without closing", async () => {
     const calls: unknown[] = [];
     const container = await mount(
       <ModelPolicyPickerMenu
@@ -600,9 +600,53 @@ describe("ModelPolicyPicker", () => {
       ["model", "codex/gpt-5.6-terra"],
       ["effort", "low"],
       ["latency", "standard"],
-      ["open", false],
     ]);
   });
+
+  test.each(["codex/gpt-5.6-sol", "codex/gpt-5.6-terra"])(
+    "keeps the picker open to adjust effort after selecting %s",
+    async (modelId) => {
+      function Harness() {
+        const [open, setOpen] = useState(true);
+        const [model, setModel] = useState(MODELS[0]!.id);
+        const [effort, setEffort] = useState<ReasoningEffort>("medium");
+        return open ? (
+          <ModelPolicyPickerMenu
+            models={MODELS}
+            model={model}
+            effort={effort}
+            latencyMode="standard"
+            onModelChange={setModel}
+            onEffortChange={setEffort}
+            onLatencyModeChange={() => {}}
+            onOpenChange={setOpen}
+          />
+        ) : null;
+      }
+      const container = await mount(<Harness />);
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`[data-testid="model-picker-choice-${modelId}"]`)!
+          .click(),
+      );
+      expect(container.querySelector('[data-testid="model-picker-menu"]')).not.toBeNull();
+      expect(
+        container.querySelector(
+          `[data-testid="model-picker-choice-${modelId}"] [aria-label="Selected"]`,
+        ),
+      ).not.toBeNull();
+      expect(container.querySelectorAll('[role="radio"]').length).toBe(
+        modelId === MODELS[0]!.id ? 4 : 2,
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click(),
+      );
+      expect(container.querySelector('[data-testid="model-picker-menu"]')).not.toBeNull();
+      expect(
+        container.querySelector('[role="radio"][aria-label="High"]')?.getAttribute("aria-checked"),
+      ).toBe("true");
+    },
+  );
 
   test("commits supported effort after model selection and hides a model with only one level", async () => {
     const calls: string[] = [];

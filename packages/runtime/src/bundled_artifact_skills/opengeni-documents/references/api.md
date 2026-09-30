@@ -213,7 +213,13 @@ Import a ready workspace DOCX directly:
 const document = await openGeni.artifacts.import(fileId, "document", "Imported report");
 ```
 
-Export pins an immutable head and eventually returns a workspace file:
+Export availability is deployment-defined and listed in the
+`opengeni__editable_artifact_export` tool description. Current deployments
+serve spreadsheet XLSX only; a document export (DOCX, PDF, image) is refused
+with `unsupported_format`. Do not attempt or promise one: give the user the
+live artifact's `artifactReference` link instead. When the tool description
+lists a document format, export pins an immutable head and eventually returns a
+workspace file:
 
 ```js
 const job = await document.export("docx");

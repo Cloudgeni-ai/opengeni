@@ -60,3 +60,10 @@ export type ApplyWorkspaceSkillRevisionRequest = {
   expectedScopeVersion: number;
   reason: string;
 };
+
+export type RemoveWorkspaceSkillRequest = {
+  operationId: string;
+  expectedRevisionId: string | null;
+  expectedScopeVersion: number;
+  reason: string;
+};

@@ -41,7 +41,7 @@ model-facing names are the same identities prefixed with `opengeni__`:
 | `editable_artifact_get` | Read current identity, modality, title, head, and state hash. |
 | `editable_artifact_inspect` | Run one bounded modality query against an exact current-head reconstruction. |
 | `editable_artifact_apply` | Submit one atomic typed command batch fenced to the inspected head. |
-| `editable_artifact_export` | Pin the exact head and enqueue DOCX/XLSX/PPTX/PDF/PNG/WebP materialization. |
+| `editable_artifact_export` | Pin the exact head and enqueue a materialization. Only the formats in `EDITABLE_ARTIFACT_EXPORT_FORMATS` (`packages/core/src/domain/editable-artifacts/durable-export.ts`; today spreadsheet XLSX) are served; the tool description lists them and any other pair is refused with `unsupported_format` before a version is pinned. |
 | `editable_artifact_export_status` | Read export progress and, on success, obtain one durable workspace file receipt. |
 
 All state-changing calls use durable idempotency. Every agent mutation uses a

@@ -110,6 +110,7 @@ import {
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
+  PROVIDER_RATE_LIMIT_BACKOFF_MS,
   providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
   sessionTitleCodexRequestContext,
@@ -6016,6 +6017,21 @@ describe("transient provider error classifier", () => {
         retryAfterMs: 12_000,
       }),
     ).toEqual({ status: "recovering", continueDelayMs: 12_000 });
+    // A one-second retry-after on a per-minute limit still waits out the window.
+    expect(
+      [1, 2, 3, 4, 5].map((attemptNumber) =>
+        providerRecoveryResult({
+          failureCode: "provider_rate_limited",
+          attemptNumber,
+          retryAfterMs: 1_000,
+        }),
+      ),
+    ).toEqual(
+      PROVIDER_RATE_LIMIT_BACKOFF_MS.map((continueDelayMs) => ({
+        status: "recovering",
+        continueDelayMs,
+      })),
+    );
     expect(
       providerRecoveryResult({
         failureCode: "provider_unavailable",
@@ -6649,6 +6665,21 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   test("excludes registry providers such as Fireworks or Z.AI/GLM", () => {
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
+  });
+
+  test("passes stable session identity to native Claude without enabling unknown registry wires", () => {
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "claude-subscription-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "anthropic-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "anthropic-messages"))).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 });
 

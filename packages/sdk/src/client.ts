@@ -60,11 +60,13 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
+import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
 import type {
   SkillRecord,
   SkillSummary,
   SkillWriteReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 import {
@@ -706,6 +708,12 @@ export type OpenGeniClientOptions = {
   baseUrl: string;
   /** OpenGeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
+  /**
+   * Receives a notice (once per route per client) when the API advertises a
+   * `Deprecation`/`Sunset` header on a response. Defaults to a one-time
+   * `console.warn` per route; pass `false` to silence notices.
+   */
+  onDeprecation?: OpenGeniDeprecationHandler | false | undefined;
   /** Extra headers (static or computed per request) merged into every call. */
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
@@ -717,7 +725,28 @@ export type OpenGeniClientOptions = {
   beginSharedRead?: (() => number) | undefined;
   /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
   sessionCommandTimeoutMs?: number;
+  /**
+   * How this client treats an API that advertises a different
+   * `x-opengeni-api-contract` revision.
+   *
+   * - `"strict"`: fail with `OpenGeniApiContractMismatchError` so a browser
+   *   page served alongside the API can reload onto the matching bundle.
+   * - `"compatible"`: keep working. Within a major release train the API is
+   *   additive (see the compatibility policy), and the API admits bearer
+   *   (API key / delegated token) mutations from older SDK revisions, so a
+   *   backend pinned to an older SDK is not broken by every deployment.
+   *
+   * Defaults to `"strict"` in a browser client without an `apiKey`, and to
+   * `"compatible"` everywhere else.
+   */
+  apiContract?: "strict" | "compatible" | undefined;
 };
+
+function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "compatible" {
+  if (options.apiContract) return options.apiContract;
+  const browser = typeof window !== "undefined" && typeof document !== "undefined";
+  return browser && !options.apiKey ? "strict" : "compatible";
+}
 
 /** Per-request cancellation for operations whose caller owns an AbortSignal. */
 export type OpenGeniRequestOptions = {
@@ -911,10 +940,13 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
 
 export class OpenGeniClient {
   protected externalActorHeader?: string;
+  protected serviceInitiatorHeader?: string | undefined;
+  protected serviceContextHeader?: string | undefined;
   private readonly baseUrl: string;
   protected readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
+  private readonly apiContractStrict: boolean;
   private readonly active = new Map<string, SingleFlightReadEntry>();
   private readonly generations = new Map<string, number>();
   private readonly queued = new Map<string, SingleFlightReadEntry>();
@@ -927,12 +959,16 @@ export class OpenGeniClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
     // Bind lazily so variable sets that polyfill fetch after module load work.
-    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
+    this.fetchImpl = withDeprecationNotices<FetchResponse>(
+      options.fetch ?? ((input, init) => fetch(input, init)),
+      options.onDeprecation,
+    );
     const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
     if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
       throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
+    this.apiContractStrict = defaultApiContractMode(options) === "strict";
     this.interaction = new OpenGeniInteractionClient(this);
     this.tools = createLazyToolsFacade(this);
   }
@@ -977,7 +1013,7 @@ export class OpenGeniClient {
       if (input.signal?.aborted) throw error;
       throw mutationTransportError(correlationId);
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok)
       throw await apiErrorFromResponse(response, {
         method: "POST",
@@ -1085,7 +1121,7 @@ export class OpenGeniClient {
       if (input.signal?.aborted) throw error;
       throw mutationTransportError(correlationId);
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok)
       throw await apiErrorFromResponse(response, {
         method: "PUT",
@@ -2326,7 +2362,7 @@ export class OpenGeniClient {
         headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2548,7 +2584,7 @@ export class OpenGeniClient {
       headers: { ...this.headers(correlationId), Accept: "text/event-stream" },
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2798,7 +2834,7 @@ export class OpenGeniClient {
         headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2874,7 +2910,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2915,7 +2951,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -3131,7 +3167,9 @@ export class OpenGeniClient {
   ): Promise<FsReadResponse> {
     return await this.requestJson<FsReadResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
+      request.workspaceOnly
+        ? `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read-workspace`
+        : `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
       request,
       {},
       options,
@@ -3510,7 +3548,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -4566,7 +4604,7 @@ export class OpenGeniClient {
       {},
       options,
     );
-    if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+    if (this.apiContractStrict && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
       throw new OpenGeniApiContractMismatchError(
         OPENGENI_API_CONTRACT_REVISION,
         String(config.apiContractRevision || "(missing)"),
@@ -4706,6 +4744,50 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationModelProviderConnection>(
       "DELETE",
       `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+      request,
+    );
+  }
+
+  /** List workspace-owned Claude model slugs. */
+  async listWorkspaceClaudeCustomModels(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+  ): Promise<WorkspaceGatewayCustomModelsResponse> {
+    return await this.requestJson<WorkspaceGatewayCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+    );
+  }
+
+  /** Add an immutable workspace-owned Claude model generation. */
+  async createWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> {
+    return await this.requestJson<WorkspaceGatewayCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+      request,
+    );
+  }
+
+  /** Retire a workspace-owned Claude model generation. */
+  async deleteWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    customModelId: string,
+    request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    )
+      throw new TypeError("customModelId must be a UUID");
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}`,
       request,
     );
   }
@@ -4974,7 +5056,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Delete a shared workspace through organization-administrator authority. */
+  /**
+   * Delete an organization (shared) workspace. Accepts an organization owner
+   * session or an organization API key with `workspace:admin` (for tenant
+   * offboarding); never deletes a Personal workspace. 409 until quiescent.
+   */
   async deleteOrganizationWorkspace(organizationId: string, workspaceId: string): Promise<void> {
     await this.requestVoid(
       "DELETE",
@@ -6614,7 +6700,7 @@ export class OpenGeniClient {
       ...(options.signal ? { signal: options.signal } : {}),
     });
     try {
-      assertApiContractResponse(response);
+      assertApiContractResponse(response, this.apiContractStrict);
     } catch (error) {
       await cancelResponseBody(response, "retained artifact API contract mismatch");
       throw error;
@@ -7575,6 +7661,19 @@ export class OpenGeniClient {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
   }
 
+  /** Permanently remove a personal/workspace Skill and all its saved revisions. */
+  async removeWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: RemoveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/remove`,
+      request,
+    );
+  }
+
   async approveWorkspaceSkill(
     workspaceId: string,
     skillId: string,
@@ -8279,11 +8378,30 @@ export class OpenGeniClient {
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
+    const headerNames = Object.keys(headers).map((key) => key.toLowerCase());
+    const hasUser =
+      this.externalActorHeader !== undefined || headerNames.includes("x-opengeni-external-actor");
+    const hasService =
+      this.serviceInitiatorHeader !== undefined ||
+      headerNames.includes("x-opengeni-service-initiator") ||
+      headerNames.includes("x-opengeni-service-context");
+    if (hasUser && hasService)
+      throw new Error("asUser and asService attribution headers are mutually exclusive");
     if (this.externalActorHeader) {
       for (const key of Object.keys(headers)) {
         if (key.toLowerCase() === "x-opengeni-external-actor") delete headers[key];
       }
       headers["x-opengeni-external-actor"] = this.externalActorHeader;
+    }
+    if (this.serviceInitiatorHeader !== undefined) {
+      for (const key of Object.keys(headers)) {
+        const name = key.toLowerCase();
+        if (name === "x-opengeni-service-initiator" || name === "x-opengeni-service-context")
+          delete headers[key];
+      }
+      headers["x-opengeni-service-initiator"] = this.serviceInitiatorHeader;
+      if (this.serviceContextHeader !== undefined)
+        headers["x-opengeni-service-context"] = this.serviceContextHeader;
     }
     return headers;
   }
@@ -8484,7 +8602,13 @@ export class OpenGeniClient {
   async getModelConnectionAccess(target: {
     scope: "organizations" | "workspaces";
     scopeId: string;
-    kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+    kind:
+      | "codex"
+      | "supergrok"
+      | "vercel_gateway"
+      | "openrouter"
+      | "anthropic"
+      | "claude_subscription";
     connectionId: string;
   }): Promise<ModelConnectionAccessResponse> {
     return await this.requestJson(
@@ -8497,7 +8621,13 @@ export class OpenGeniClient {
     target: {
       scope: "organizations" | "workspaces";
       scopeId: string;
-      kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+      kind:
+        | "codex"
+        | "supergrok"
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription";
       connectionId: string;
     },
     policy: ModelConnectionAccessPolicy,
@@ -8706,13 +8836,14 @@ export class OpenGeniClient {
       if (abort.signal?.aborted) {
         throw abort.signal.reason ?? new DOMException("Request aborted", "AbortError");
       }
+      const headers = this.headers(correlationId);
       let response: FetchResponse;
       try {
         response = await awaitWithAbort(
           this.fetchImpl(this.url(path, query), {
             method,
             headers: {
-              ...this.headers(correlationId),
+              ...headers,
               Accept: "application/json",
               ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
             },
@@ -8728,7 +8859,7 @@ export class OpenGeniClient {
         }
         throw error;
       }
-      assertApiContractResponse(response);
+      assertApiContractResponse(response, this.apiContractStrict);
       try {
         if (!response.ok) {
           throw await awaitWithAbort(
@@ -8756,16 +8887,17 @@ export class OpenGeniClient {
     method: string,
     path: string,
     query: Record<string, string> = {},
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { accept?: string } = {},
   ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path, query), {
         method,
         headers: {
-          ...this.headers(correlationId),
-          Accept: "application/octet-stream",
+          ...headers,
+          Accept: options.accept ?? "application/octet-stream",
         },
         ...(options.signal ? { signal: options.signal } : {}),
       });
@@ -8773,7 +8905,7 @@ export class OpenGeniClient {
       if (isMutationMethod(method)) throw mutationTransportError(correlationId);
       throw error;
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
     }
@@ -8783,12 +8915,13 @@ export class OpenGeniClient {
   /** Contract-checked transport shared by opt-in typed SDK clients for 204 responses. */
   async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path), {
         method,
         headers: {
-          ...this.headers(correlationId),
+          ...headers,
           Accept: "application/json",
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },
@@ -8800,14 +8933,15 @@ export class OpenGeniClient {
       }
       throw error;
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
     }
   }
 }
 
-function assertApiContractResponse(response: FetchResponse): void {
+function assertApiContractResponse(response: FetchResponse, strict: boolean): void {
+  if (!strict) return;
   const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);

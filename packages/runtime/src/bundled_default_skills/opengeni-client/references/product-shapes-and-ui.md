@@ -1,40 +1,49 @@
-# Opening host-owned workbench tabs
-
-Use `SandboxWorkspace.openTabRequest={{ tab, requestId }}` to open a built-in or
-host-injected tab from the host's UI. Increment `requestId` for each intentional
-open, including repeated clicks on the same item. Keep artifact selection and
-internal-link recognition in the host; the workbench only selects an available
-tab and expands the dock. Preserve modified clicks and external navigation.
-When handing off to a full-page artifact route, retain an explicit originating
-session return path rather than relying on browser history.
-
 # Product shapes and UI
 
-## Choose the smallest suitable surface
+## Default to the full conversation
 
-OpenGeni supports several product shapes. Select from the product experience and host stack rather than assuming every integration needs a custom chat:
-
-| Need | Likely surface | Product owns |
+| Need | Surface | Product owns |
 | --- | --- | --- |
-| The complete OpenGeni experience is acceptable | Link or deep-link to stock OpenGeni | Entry point and product navigation |
-| Custom UI in any framework, mobile app, CLI, or automation | OpenGeni SDK or public API behind product backend | All user-facing presentation |
-| React product wants canonical session state without packaged visuals | Headless React session hooks and projections | Components, layout, and styling |
-| React product wants packaged chat/session controls | Focused styled React subpaths | Shell, domain UI, and theming |
-| Product exposes files, changes, terminal, or desktop compute | Optional workbench surfaces | Product shell and selected tabs |
+| Agent conversation in a React product (default) | `OpenGeniChat` (or `SessionConversation` for one record) + `compiled.css` behind `createSessionProxyHandler` | Shell, placement, and `--og-*` theme |
+| Materially different interaction model in React | Headless `@opengeni/react/session` hooks and projections | Components, layout, and styling |
+| Non-React frontend, mobile app, CLI, or automation | OpenGeni SDK or public API behind the product backend | All user-facing presentation |
+| Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |
+| Existing Vercel `useChat` or OpenAI-shaped chat UI to keep | `@opengeni/sdk/chat` fallback (text-only) | Its existing chat UI |
 
-Start with the narrowest surface that preserves the desired experience. Do not mount the full workbench for an ordinary analytics chat. Do not rebuild session streaming, replay, queueing, approval, or timeline projection when a compatible package already supplies the needed behavior.
+Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
 
-## Evaluate reuse before writing chat UI
+## When deviating in React
 
-For React hosts, inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Compare:
-
-- packaged components with customer theme tokens;
-- headless hooks with customer-native components; and
-- a fully custom SDK-driven UI.
-
-Choose based on UX requirements and dependency compatibility, then record why. Styling differences alone are not a reason to skip reusable components if their structure fits. Conversely, do not force a packaged component when the product needs a materially different interaction model.
+Inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Prefer, in order: `SessionConversation` customized through `composerProps` and `renderMessageText`; `MessageTimeline`, `ChatComposer`, and the session hooks composed into product layout; then a fully custom SDK-driven UI. Do not force a packaged component when the product needs a materially different interaction model.
 
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
+
+## Links, downloads, artifacts, and Sites
+
+Agent replies link OpenGeni objects as `artifact:<file uuid>`,
+`sandbox:<path>[:line]`, `/workspaces/<ws>/artifacts/editable/<id>` (live
+document, workbook, or presentation), and `/workspaces/<ws>/artifacts/<uuid>`
+(Site). None is navigable inside the product: the `/workspaces/...` forms are
+console routes and 404 on the product origin. Never pass them to a raw `<a>`.
+
+- `SessionConversation`/`OpenGeniChat` behind `createSessionProxyHandler`
+  download `artifact:` files by default. `sandbox:` reads require deliberate
+  proxy `sandboxFiles: true` (default off) plus `files:read`; they are confined
+  to the selected working directory, including on Connected Machines, and
+  refuse symlinked paths. Disabled sandbox links render unavailable.
+- Route editable artifacts and Sites to the product's own UI with
+  `resolveLink={(target) => ... ({ href } | { open } | null)}` on
+  `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
+  subtree; it also covers `Markdown` inside a custom `renderMessageText`.
+  Unresolved targets render as unavailable text, not broken links.
+- `MessageTimeline` alone has no defaults; add
+  `sessionLinkResolver({ client, workspaceId, sessionId })` for downloads.
+- Non-React or custom renderers: classify each href with
+  `parseOpenGeniLink(href)` from `@opengeni/sdk`, then use
+  `createFileDownloadUrl` / `fsRead`, or the product's artifact page.
+- Editable artifact export serves only the formats the export tool lists
+  (today spreadsheet XLSX). Do not build a "Download PDF" flow on it; open the
+  live artifact instead.
 
 ## Optional artifact library
 
@@ -89,7 +98,7 @@ may include fields deliberately omitted from the visible conversation.
 
 ## Browser/backend split
 
-The product browser normally sends product-shaped requests to its own same-origin backend. The backend authenticates, resolves the allowed mapping, and calls OpenGeni. Never bundle an organization key into frontend code.
+The product browser talks to its own same-origin backend: `createSessionProxyHandler` for the conversation, or product-shaped routes for a custom UI. The backend authenticates, resolves the allowed mapping, and calls OpenGeni as that user. Never bundle an organization key into frontend code, and never replace the packaged proxy with a raw passthrough that forwards arbitrary paths under the organization key.
 
 For live sessions, preserve event sequence, reconnect, replay, and duplicate suppression. The SDK's stream and proxy helpers are preferred where compatible. Treat unknown additive event types as forward-compatible data rather than crashing the UI.
 
@@ -108,6 +117,16 @@ OpenGeni's durable event stream can support different product projections:
 The customer frontend chooses which event types and fields to render. Hiding an event from the chat view does not remove it from OpenGeni's durable history or from authorized audit readers. Do not promise data erasure or secrecy from presentation filtering.
 
 Even a final-answer-only UI should surface states the user must act on: failure, cancellation, credit or policy denial, approval requests, human-input requests, reconnect status, and a way to retry safely. Avoid presenting tool failures as ordinary assistant prose when product state can represent them more clearly.
+
+## Opening host-owned workbench tabs
+
+Use `SandboxWorkspace.openTabRequest={{ tab, requestId }}` to open a built-in or
+host-injected tab from the host's UI. Increment `requestId` for each intentional
+open, including repeated clicks on the same item. Keep artifact selection and
+internal-link recognition in the host; the workbench only selects an available
+tab and expands the dock. Preserve modified clicks and external navigation.
+When handing off to a full-page artifact route, retain an explicit originating
+session return path rather than relying on browser history.
 
 ## Fit the host product
 

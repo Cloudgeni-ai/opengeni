@@ -2489,6 +2489,8 @@ export type FsListBatchRequest = { requests: FsListRequest[] };
 export type FsListBatchResponse = { results: FsListResponse[] };
 export type FsReadRequest = {
   path: string;
+  /** Confine this read to the session's working directory, refusing symlinks. */
+  workspaceOnly?: boolean;
   encoding?: FsEncoding;
   maxBytes?: number;
   route?: FileSystemRouteIdentity;
@@ -2911,6 +2913,8 @@ export type ScheduledTaskAgentConfig = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /** Seconds a run may wait on a person before the scheduler answers for it. */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type ScopedKnowledgeScope =
@@ -3436,7 +3440,7 @@ export type ClientModel = {
   /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
   provider: string;
   providerLabel: string;
-  api: "responses" | "chat";
+  api: "responses" | "chat" | "anthropic-messages";
   source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | "openrouter" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
@@ -3444,7 +3448,7 @@ export type ClientModel = {
   deployment?:
     | {
         upstreamModelId: string;
-        wireApi: "responses" | "chat";
+        wireApi: "responses" | "chat" | "anthropic-messages";
       }
     | undefined;
   executionLimits?:
@@ -3552,7 +3556,11 @@ export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGateway
 
 export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
-export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+export type OrganizationModelProviderKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
@@ -3566,6 +3574,7 @@ export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
   apiKey: string;
+  claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
 };
 
 export type RevokeOrganizationModelProviderConnectionRequest = {
@@ -3676,6 +3685,7 @@ export type CodexUsagePayload = {
     meteredFeature: string;
     fiveHour: CodexUsageWindow | null;
     weekly: CodexUsageWindow | null;
+    unknownWindowExhausted: boolean;
   }>;
   credits?: {
     hasCredits: boolean;
@@ -4007,8 +4017,14 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export type ClientConfig = {
   deploymentRevision: string;
-  apiContractRevision: typeof OPENGENI_API_CONTRACT_REVISION;
+  /**
+   * The API's contract revision. Equals `OPENGENI_API_CONTRACT_REVISION` for a
+   * `"strict"` client (it throws otherwise); a `"compatible"` client may
+   * receive a newer revision from an additive deployment within its major.
+   */
+  apiContractRevision: string;
   serverVersion?: string | undefined;
+  claudeSubscriptionEnabled?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -4024,6 +4040,14 @@ export type ClientConfig = {
       }
     | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /**
+   * `false` when a host's session proxy fixes the model policy
+   * (`createSessionProxyHandler({ modelSelection: false })`), so UIs hide the
+   * model picker. OpenGeni itself omits it.
+   */
+  modelSelection?: boolean | undefined;
+  /** Session proxy sandbox-path download opt-in; absent on native deployments. */
+  sandboxFiles?: boolean | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**
@@ -4788,7 +4812,12 @@ export type CreateWorkspaceRequest = {
 };
 
 export type EnsureWorkspaceRequest = {
-  accountId: string;
+  /**
+   * Owning organization id. An organization API key may omit it and the
+   * workspace is created in the key's own organization; every other caller
+   * must send it.
+   */
+  accountId?: string | undefined;
   externalSource: string;
   externalId: string;
   name: string;
@@ -5529,6 +5558,12 @@ export type ScheduledTaskAgentConfigInput = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /**
+   * Seconds a run's own turn may wait on a person (tool approval or structured
+   * question, 60 s - 30 days) before the scheduler rejects the approval / skips
+   * the question as a labelled system decision. Omitted: waits indefinitely.
+   */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -5580,6 +5615,11 @@ export type UpdateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
+  /** Lossless model defaults patch; cannot be combined with agentConfig replacement.
+   * Existing target/reusable sessions retain their own model and reasoning. */
+  agentConfigPatch?:
+    | { model?: string | undefined; reasoningEffort?: ReasoningEffort | undefined }
+    | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
@@ -5674,10 +5714,43 @@ export type ScheduledTaskRun = {
       }
     | null
     | undefined;
+  /**
+   * Why the scheduler refused this occurrence before running it; `error`
+   * equals `reason`. `retryable: true` (status `skipped`): a later occurrence
+   * runs once the condition clears. `retryable: false` (status `failed`):
+   * every occurrence is refused until the task or a resource it names changes.
+   */
+  admissionRefusal?: ScheduledTaskAdmissionRefusal | null | undefined;
+  /**
+   * This dispatched run's own turn is waiting on a person (tool approval or
+   * structured question) since `since`; `expiresAt` is when the task's
+   * `approvalTimeoutSeconds` answers for it (null: waits indefinitely).
+   */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
   createdAt: string;
   updatedAt: string;
   /** Connectors this run could not use; projected only for a viewer who can act on the task. */
   accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+};
+
+export type ScheduledTaskRunAwaitingHuman = {
+  since: string;
+  expiresAt: string | null;
+};
+
+export type ScheduledTaskAdmissionRefusal = {
+  version: 1;
+  reason:
+    | "scheduled_authority_unavailable"
+    | "machine_target_unavailable"
+    | "machine_enrollment_inactive"
+    | "variable_set_unavailable"
+    | "rig_version_unavailable"
+    | "insufficient_credits"
+    | "monthly_model_cost_limit"
+    | "monthly_agent_run_limit"
+    | (string & {});
+  retryable: boolean;
 };
 
 export type ScheduledTaskAccessFailureReason =
@@ -5714,6 +5787,8 @@ export type ScheduledTaskAccessAttention = {
   firedAt: string | null;
   failures: ScheduledTaskRunAccessFailure[];
   unavailableAccounts: ScheduledTaskAccessConnector[];
+  /** The latest run is waiting on a person (tool approval or question) right now. */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
 };
 
 export type ListScheduledTaskAccessAttentionResponse = {

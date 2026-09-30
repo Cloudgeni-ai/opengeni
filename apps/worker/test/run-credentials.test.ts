@@ -2,12 +2,37 @@ import { describe, expect, test } from "bun:test";
 import type { Session, SessionTurn } from "@opengeni/contracts";
 import type { NormalizedRunCredentialMaterial } from "@opengeni/runtime";
 import {
+  bindRunCredentialResolver,
   buildRunCredentialsRequest,
   runCredentialAuthNeededPayloads,
   runCredentialModelNote,
 } from "../src/activities/run-credentials";
 
 describe("host-owned run credential request", () => {
+  test("Connected Machines never look up or call a platform credential provider", async () => {
+    const result = await bindRunCredentialResolver({
+      db: new Proxy({} as never, {
+        get: () => {
+          throw new Error("must not query platform credentials");
+        },
+      }),
+      settings: {} as never,
+      connectionCredentials: {
+        runCredentials: async () => {
+          throw new Error("must not deliver platform credentials");
+        },
+      },
+      accountId: "account",
+      workspaceId: "workspace",
+      session: {} as Session,
+      turn: {} as SessionTurn,
+      attemptId: "attempt",
+      effectiveSandboxBackend: "selfhosted",
+      variableSet: null,
+    });
+    expect(result).toBeNull();
+  });
+
   test("carries frozen authority, lineage, backend, OS, and informational variable-set context", () => {
     const session = {
       id: "00000000-0000-4000-8000-000000000001",

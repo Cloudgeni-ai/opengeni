@@ -6,6 +6,7 @@ import { getSessionForSubject, readSkillRemovalScope } from "@opengeni/db";
 import {
   approveSkill,
   rejectSkill,
+  removeSkill,
   listSkills,
   readSkill,
   requireAccessGrant,
@@ -42,6 +43,8 @@ const revisionRequest = z
     reason: z.string().min(1).max(2000),
   })
   .strict();
+
+const removeRequest = revisionRequest.omit({ revisionId: true, removalOperationId: true });
 
 async function parseSkillRequest<S extends z.ZodType>(c: Context, schema: S): Promise<z.infer<S>> {
   const parsed = schema.safeParse(await c.req.json().catch(() => null));
@@ -186,6 +189,36 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       }),
     );
     return c.json(receipt);
+  });
+  app.post(`${base}/:skillId/remove`, async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const skillId = skillIdentifier(c.req.param("skillId"));
+    const request = await parseSkillRequest(c, removeRequest);
+    const context = {
+      accountId: access.grant.accountId,
+      workspaceId,
+      subjectId: access.grant.subjectId,
+    };
+    const current = await readSkill(deps.db, context, skillId);
+    const scope =
+      current?.scope ??
+      (await readSkillRemovalScope(deps.db, context, skillId, request.operationId));
+    if (!scope) throw new HTTPException(404, { message: "Skill not found" });
+    authorizePreferenceRegistryScopeMutation(access, scope);
+    if (scope === "organization")
+      throw new HTTPException(403, { message: "Organization skills cannot be removed here." });
+    return c.json(
+      await skillMutation(() =>
+        removeSkill(deps.db, {
+          ...request,
+          skillId,
+          accountId: context.accountId,
+          workspaceId,
+          actor: { kind: "human", principalKind: "human_session", subjectId: context.subjectId },
+        }),
+      ),
+    );
   });
   for (const operation of ["approve", "reject", "restore"] as const) {
     app.post(`${base}/:skillId/${operation}`, async (c) => {

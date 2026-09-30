@@ -6,7 +6,11 @@ import { type Database, setSubjectRlsContext, withRlsContext } from "./database"
 import { decryptEnvironmentValue } from "./environment-crypto";
 import * as schema from "./schema";
 
-export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+export type OrganizationModelProviderKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";

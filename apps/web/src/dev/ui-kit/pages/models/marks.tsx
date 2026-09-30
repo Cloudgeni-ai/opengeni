@@ -1,13 +1,13 @@
 import type { SVGProps } from "react";
-import { RouteIcon } from "lucide-react";
+import { OpenRouterMark } from "@opengeni/react";
 
 import { ChatGptMark } from "@/components/chatgpt-mark";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 
 /* ----------------------------------------------------------------------------
    Provider marks for the Models page preview. The ChatGPT mark is the app's
-   own; Vercel is the plain triangle; OpenRouter uses the route glyph the app
-   already shows for it. All draw in currentColor, so they follow the theme.
+   own; Vercel is the plain triangle; OpenRouter uses its brand mark.
+   All draw in currentColor, so they follow the theme.
    -------------------------------------------------------------------------- */
 
 export type ProviderId = "codex" | "vercel" | "openrouter";
@@ -29,7 +29,7 @@ export function ProviderMark({
 }) {
   if (provider === "codex") return <ChatGptMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
-  return <RouteIcon aria-hidden="true" className={className} />;
+  return <OpenRouterMark className={className} />;
 }
 
 /** The provider's logo on the shared tile. Size follows the list or sheet it sits in. */

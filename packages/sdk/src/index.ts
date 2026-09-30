@@ -12,6 +12,7 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export type { ServiceContext } from "./embedding-client";
 export {
   OPENGENI_WEBHOOK_HEADERS,
   OpenGeniSignatureError,
@@ -149,6 +150,8 @@ export {
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
+export { parseDeprecationNotice } from "./deprecation";
+export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveAutomaticSessionTitlePreview,
@@ -175,6 +178,25 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
+export { createSessionProxyHandler } from "./session-proxy";
+export type {
+  SessionProxyContext,
+  SessionProxyCreateInput,
+  SessionProxyHandlerOptions,
+  SessionProxyMessageExtras,
+  SessionProxyMessageInput,
+  SessionProxyResolution,
+  SessionProxyResolve,
+} from "./session-proxy";
+export {
+  openGeniConsolePath,
+  parseOpenGeniLink,
+  isReservedOpenGeniLink,
+  openGeniLinkScheme,
+  parseRetainedFileReference,
+  parseSandboxLink,
+} from "./message-links";
+export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
@@ -423,6 +445,7 @@ export type {
   SkillPublicationReceipt,
   SkillSourceReleaseReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 export type {

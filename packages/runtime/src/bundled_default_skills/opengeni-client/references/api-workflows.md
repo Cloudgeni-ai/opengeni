@@ -32,7 +32,7 @@ import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
 
 const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;
@@ -62,10 +62,10 @@ for await (const event of client.streamEvents(workspace.id, created.id)) {
 }
 ```
 
-This code belongs on the product server, not in a browser bundle. For a browser
-timeline, expose a tenant-scoped same-origin route and use the SDK's
-`proxySessionEventStream` helper. Authenticate the product user and resolve the
-allowed workspace/session before opening the upstream stream.
+This code belongs on the product server, not in a browser bundle. For the
+browser, mount `createSessionProxyHandler` (the default conversation backend) or,
+in a custom route, the SDK's `proxySessionEventStream` helper. Authenticate the
+product user and resolve the allowed workspace/session before any upstream call.
 
 `ensureWorkspace` maps through `PUT /v1/workspaces/external`. Use a stable
 external source/id pair and persist the returned opaque id. The returned
@@ -90,6 +90,25 @@ For a headless product, send an explicit minimal `firstPartyMcpTools` and
 `tools` selection. Omission inherits deployment/workspace defaults. Removing
 cross-session tools from a shared workspace is defense in depth, not a hard
 tenant boundary.
+
+## Automated work
+
+Use the server-side `client.asService(name, context?)` for product jobs, bots,
+and webhooks under an organization or workspace API key. It returns the same
+client class without mutating the original and sends
+`x-opengeni-service-initiator` plus optional `x-opengeni-service-context`.
+Names match `^[a-z0-9][a-z0-9:._-]{0,63}$`; context is a non-secret flat JSON
+object of strings, finite numbers, and booleans, at most 2 KiB of serialized
+header bytes. Reapplying replaces the name and context.
+
+Attribution grants no authority and cannot borrow a human's Personal workspace,
+personal Connections, Knowledge, or Variable Sets. Do not create a synthetic
+user for automation. `asService` and `asUser` / `asLinkedUser` are mutually
+exclusive; start from the unscoped client for each lane. The key's ordinary
+workspace permissions and the provider's own authorization remain required.
+See `docs/product-integration.md`'s Automated work section when source is
+available, and [Data tools and credentials](data-tools-and-credentials.md)
+for product-owned repository credentials.
 
 ## Existing APIs As Agent Tools
 

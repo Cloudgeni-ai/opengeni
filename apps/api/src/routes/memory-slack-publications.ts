@@ -25,6 +25,7 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { createOpenGeniSlackBotInteractionClient } from "../integrations/slack-bot";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/memory-slack-publications";
@@ -45,7 +46,7 @@ export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDe
   app.put(`${base}/configuration`, async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = UpdateMemorySlackPublicationConfigurationRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateMemorySlackPublicationConfigurationRequest);
     let slackTeamId: string | null = null;
     let channelName = payload.slackChannelName;
     if (payload.connectionId || payload.slackChannelId) {
@@ -179,7 +180,7 @@ export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDe
   app.post(`${base}/:publicationId/action`, async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = MemorySlackPublicationActionRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, MemorySlackPublicationActionRequest);
     const publication = await actOnMemorySlackPublication(deps.db, {
       workspaceId,
       publicationId: c.req.param("publicationId"),

@@ -139,6 +139,8 @@ RUN set -eux; \
                         "$runtime/node_modules/@opengeni/contracts" \
                         "$runtime/node_modules/@opengeni/sdk" \
                         "$runtime/node_modules/@opengeni/tool-gateway" \
+                        "$runtime/node_modules/@opengeni/observability" \
+                        "$runtime/node_modules/@opentelemetry" \
                         "$runtime/node_modules/@noble"; \
     install -m 0644 packages/codemode/package.json "$runtime/node_modules/@opengeni/codemode/package.json"; \
     cp -a packages/codemode/src "$runtime/node_modules/@opengeni/codemode/src"; \
@@ -148,6 +150,14 @@ RUN set -eux; \
     cp -a packages/sdk/src "$runtime/node_modules/@opengeni/sdk/src"; \
     install -m 0644 packages/tool-gateway/package.json "$runtime/node_modules/@opengeni/tool-gateway/package.json"; \
     cp -a packages/tool-gateway/src "$runtime/node_modules/@opengeni/tool-gateway/src"; \
+    install -m 0644 packages/observability/package.json "$runtime/node_modules/@opengeni/observability/package.json"; \
+    cp -a packages/observability/src "$runtime/node_modules/@opengeni/observability/src"; \
+    cp -aL packages/observability/node_modules/prom-client "$runtime/node_modules/prom-client"; \
+    prom_modules="$(dirname "$(readlink -f packages/observability/node_modules/prom-client)")"; \
+    cp -aL "$prom_modules/@opentelemetry/api" "$runtime/node_modules/@opentelemetry/api"; \
+    cp -aL "$prom_modules/tdigest" "$runtime/node_modules/tdigest"; \
+    tdigest_modules="$(dirname "$(readlink -f "$prom_modules/tdigest")")"; \
+    cp -aL "$tdigest_modules/bintrees" "$runtime/node_modules/bintrees"; \
     cp -aL packages/tool-gateway/node_modules/ajv "$runtime/node_modules/ajv"; \
     ajv_modules="$(dirname "$(readlink -f packages/tool-gateway/node_modules/ajv)")"; \
     for dependency in fast-deep-equal fast-uri json-schema-traverse require-from-string; do \

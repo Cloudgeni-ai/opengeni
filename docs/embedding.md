@@ -2,9 +2,10 @@
 
 > Most customer products do **not** need this integration shape. When OpenGeni
 > remains a standalone service and the product presents an OpenGeni-backed agent
-> in its own UI, use `@opengeni/sdk` through a tenant-scoped server proxy and add
-> only the `@opengeni/react` surfaces the product wants. See the package READMEs
-> and the `opengeni-client` skill. This guide is for the rarer case where the
+> in its own UI, mount `OpenGeniChat` or `SessionConversation` from
+> `@opengeni/react` behind the packaged `createSessionProxyHandler` from
+> `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
+> [product integration](product-integration.md) and the `opengeni-client` skill. This guide is for the rarer case where the
 > host mounts OpenGeni's router or calls its core domain packages in-process.
 
 This guide is for a host application that embeds OpenGeni instead of running it only as the stock API + worker service. Embedding means binding host-owned concerns (identity, tenancy, billing admission, credentials, persistence, worker process, and event bus) into the same OpenGeni domain/runtime code the standalone stack uses.
@@ -62,8 +63,9 @@ Resume is optional.
 **OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
 should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
-under `OpenGeniProvider`. It wires queue actions, composer drafts, model policy,
-pause/resume, human-input forms, optimistic delivery, and paged timeline history.
+under `OpenGeniProvider`. A standalone product backs both with
+`createSessionProxyHandler`. It wires queue actions, composer drafts, model policy,
+pause/resume, tool approvals, attachments, human-input forms, optimistic delivery, and paged timeline history.
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
@@ -71,6 +73,16 @@ The host owns available space; `SessionConversation` fills its container by
 default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
 children. The SDK scrolls the timeline internally and keeps the composer at
 the panel bottom. Do not add a second timeline scroller or fixed/sticky composer.
+
+Agent replies link files, sandbox paths, editable artifacts, and Sites with
+`artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
+host origin. `SessionConversation` downloads retained files by default;
+sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
+session working directory without following symlinks.
+route artifacts and Sites with its `resolveLink` prop (also on
+`MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
+`@opengeni/sdk` outside React. See
+[links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
 
 A host that mounts the styled React surfaces
 can import `@opengeni/react/compiled.css` once. That package-owned artifact is
@@ -1095,6 +1107,8 @@ maintenance disposition, while installations with no suspect population can appl
 the bounded rolling path. Child lifecycle remains child lifecycle—the root id is attribution
 context, not permission to settle a root run.
 Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
+The usage trigger locks the workspace before the session, turn, and attempt, matching lifecycle
+writers. Rolling migration 0541 repairs this ordering without changing validation or retained facts.
 Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
 new fact fails its source transaction instead of committing a poison export row, while standalone
 mode retains its prior input behavior.

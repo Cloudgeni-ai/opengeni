@@ -62,6 +62,7 @@ import {
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./scheduled-task-access";
+export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
   CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
@@ -116,6 +117,10 @@ import {
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
+  scheduledRunHumanWaitsInRlsContext,
+} from "./scheduled-human-wait";
 import {
   appendGoalReportRequirements,
   goalReportRequirements,
@@ -185,6 +190,7 @@ import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
   ConnectionAccountSelectionDiagnostic,
+  ScheduledTaskAdmissionRefusal,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
@@ -481,6 +487,7 @@ import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   creatorColumns,
   frozenInitiatorForCommandActor,
+  frozenScheduledOccurrenceInitiator,
   initiatorColumns,
   initiatorFromStorage,
   UNATTRIBUTED_LEGACY_INITIATOR,
@@ -10299,13 +10306,49 @@ async function withConnectionSubjectRls<T>(
     : await withWorkspaceRls(db, workspaceId, fn);
 }
 
+const connectionAccessPolicyColumns = {
+  allowedModelIds: schema.connections.allowedModelIds,
+  allowedWorkspaceIds: schema.connections.allowedWorkspaceIds,
+  allowPersonalWorkspaces: schema.connections.allowPersonalWorkspaces,
+  accessPolicyVersion: schema.connections.accessPolicyVersion,
+  accessPolicyUpdatedBy: schema.connections.accessPolicyUpdatedBy,
+  accessPolicyUpdatedAt: schema.connections.accessPolicyUpdatedAt,
+};
+
+// Internal-only: credential replacement preserves the locked connection's access policy.
+// Public connection creation must not accept these administration-owned fields.
+type ConnectionAccessPolicySnapshot = Pick<
+  typeof schema.connections.$inferSelect,
+  | "allowedModelIds"
+  | "allowedWorkspaceIds"
+  | "allowPersonalWorkspaces"
+  | "accessPolicyVersion"
+  | "accessPolicyUpdatedBy"
+  | "accessPolicyUpdatedAt"
+>;
+
+function connectionAccessPolicySnapshot(
+  row: ConnectionAccessPolicySnapshot,
+): ConnectionAccessPolicySnapshot {
+  return {
+    allowedModelIds: row.allowedModelIds,
+    allowedWorkspaceIds: row.allowedWorkspaceIds,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+    accessPolicyVersion: row.accessPolicyVersion,
+    accessPolicyUpdatedBy: row.accessPolicyUpdatedBy,
+    accessPolicyUpdatedAt: row.accessPolicyUpdatedAt,
+  };
+}
+
 async function createConnectionInScope(
   db: Database,
   input: CreateConnectionInput,
+  accessPolicy?: ConnectionAccessPolicySnapshot,
 ): Promise<ConnectionMetadataWithVerification> {
   const [row] = await db
     .insert(schema.connections)
     .values({
+      ...accessPolicy,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.subjectId ?? null,
@@ -10442,7 +10485,11 @@ export async function createConnection(
   );
 }
 
-type WorkspaceProviderApiKeyConnectionKind = "vercel_gateway" | "openrouter";
+export type WorkspaceProviderApiKeyConnectionKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 type WorkspaceProviderApiKeyConnectionSpec = {
   providerDomain: string;
@@ -10452,9 +10499,18 @@ type WorkspaceProviderApiKeyConnectionSpec = {
   label: string;
 };
 
-function workspaceProviderApiKeyConnectionSpec(
+export function workspaceProviderApiKeyConnectionSpec(
   providerKind: WorkspaceProviderApiKeyConnectionKind,
 ): WorkspaceProviderApiKeyConnectionSpec {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription") {
+    return {
+      providerDomain: "api.anthropic.com",
+      credentialRole: providerKind,
+      operationIdMetadataKey: `${providerKind}CredentialOperationId`,
+      operationDigestMetadataKey: `${providerKind}CredentialOperationDigest`,
+      label: providerKind === "anthropic" ? "Anthropic API" : "Claude subscription",
+    };
+  }
   return providerKind === "vercel_gateway"
     ? {
         providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -10480,11 +10536,11 @@ async function lockWorkspaceProviderApiKeyConnection(
   const lockKey =
     providerKind === "vercel_gateway"
       ? `workspace-vercel-ai-gateway:${workspaceId}`
-      : `workspace-openrouter:${workspaceId}`;
+      : `workspace-${providerKind}:${workspaceId}`;
   await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
 }
 
-async function upsertWorkspaceProviderApiKeyConnection(
+export async function upsertWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: UpsertWorkspaceProviderApiKeyConnectionInput,
@@ -10498,7 +10554,7 @@ async function upsertWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10532,25 +10588,30 @@ async function upsertWorkspaceProviderApiKeyConnection(
             : null;
         }
         if (rows.some((row) => row.status !== "revoked")) return null;
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          // Reconnecting cannot reset an administrator's restrictions. Rows are newest first.
+          rows[0] ? connectionAccessPolicySnapshot(rows[0]) : undefined,
+        );
       }),
   );
 }
 
-async function rotateWorkspaceProviderApiKeyConnection(
+export async function rotateWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RotateWorkspaceProviderApiKeyConnectionInput,
@@ -10564,7 +10625,7 @@ async function rotateWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10613,25 +10674,29 @@ async function rotateWorkspaceProviderApiKeyConnection(
             throw new Error(`${spec.label} connection changed during rotation`);
           }
         }
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          connectionAccessPolicySnapshot(targetRow),
+        );
       }),
   );
 }
 
-async function revokeWorkspaceProviderApiKeyConnections(
+export async function revokeWorkspaceProviderApiKeyConnections(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RevokeWorkspaceProviderApiKeyConnectionsInput,
@@ -14908,7 +14973,7 @@ export async function loadConnectionCredentialForBroker(
   );
 }
 
-async function getWorkspaceProviderApiKeyConnectionMetadata(
+export async function getWorkspaceProviderApiKeyConnectionMetadata(
   db: Database,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
@@ -14954,13 +15019,14 @@ export async function workspaceOpenRouterConnectionActive(
   return (await getWorkspaceOpenRouterConnectionMetadata(db, workspaceId)) !== null;
 }
 
-async function loadWorkspaceProviderApiKey(
+export async function loadWorkspaceProviderApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   turnModelId?: string | null,
 ): Promise<string | null> {
+  if (providerKind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return null;
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
     (connection) =>
@@ -18116,6 +18182,112 @@ export async function recordScheduledTaskAdmissionFailure(
   });
 }
 
+/** Reasons a scheduled occurrence is refused before accepting execution. */
+export type ScheduledTaskAdmissionRefusalReason =
+  | "scheduled_authority_unavailable"
+  | "machine_target_unavailable"
+  | "machine_enrollment_inactive"
+  | "variable_set_unavailable"
+  | "rig_version_unavailable"
+  | "insufficient_credits"
+  | "monthly_model_cost_limit"
+  | "monthly_agent_run_limit";
+
+/**
+ * Record a refused occurrence as an immutable run receipt under its producer
+ * identity (migration 0539). A transient refusal is `skipped`, a terminal one
+ * `failed`; neither carries accepted execution. An existing receipt for the
+ * producer wins, so redelivery never duplicates a run: the caller replays it.
+ */
+export async function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+    taskExecutionDigest: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+    scheduledAt?: Date | null;
+    reason: ScheduledTaskAdmissionRefusalReason;
+    retryable: boolean;
+  },
+): Promise<ScheduledTaskRun> {
+  if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  const refusal = ScheduledTaskAdmissionRefusal.parse({
+    version: 1,
+    reason: input.reason,
+    retryable: input.retryable,
+  });
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) throw new Error("Scheduled task not found");
+    const readPrior = async () => {
+      const [prior] = await tx
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (prior && (prior.taskId !== input.taskId || prior.triggerType !== input.triggerType)) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      return prior;
+    };
+    const prior = await readPrior();
+    if (prior) return mapScheduledTaskRun(prior);
+    if (
+      task.status !== "active" ||
+      task.deletedAt ||
+      task.authorityRevision !== input.taskAuthorityRevision ||
+      task.executionDigest !== input.taskExecutionDigest
+    ) {
+      throw new Error("scheduled task changed before refusal recording");
+    }
+    const now = new Date();
+    const [inserted] = await tx
+      .insert(schema.scheduledTaskRuns)
+      .values({
+        accountId: task.accountId,
+        workspaceId: input.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+        triggerType: input.triggerType,
+        producerKey: input.producerKey,
+        scheduledAt: input.scheduledAt ?? null,
+        firedAt: now,
+        completedAt: now,
+        actionKind: "agent_turn",
+        status: refusal.retryable ? "skipped" : "failed",
+        error: refusal.reason,
+        admissionRefusal: refusal,
+      })
+      .onConflictDoNothing({
+        target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+        where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+      })
+      .returning();
+    const result = inserted ?? (await readPrior());
+    if (!result) throw new Error("scheduled refusal receipt missing");
+    return mapScheduledTaskRun(result);
+  });
+}
+
 export async function createScheduledTaskRun(
   db: Database,
   input: {
@@ -19143,7 +19315,19 @@ export async function listScheduledTaskRuns(
       )
       .orderBy(desc(schema.scheduledTaskRuns.createdAt))
       .limit(limit);
-    return rows.map(mapScheduledTaskRun);
+    const runs = rows.map(mapScheduledTaskRun);
+    // A dispatched run whose own turn waits on a person is visible as such
+    // instead of looking merely "dispatched" until someone answers.
+    const waits = await scheduledRunHumanWaitsInRlsContext(scopedDb, workspaceId, {
+      runIds: runs.filter((run) => run.status === "dispatched").map((run) => run.id),
+    });
+    const byRun = new Map(waits.map((wait) => [wait.runId, wait]));
+    return runs.map((run) => {
+      const wait = byRun.get(run.id);
+      return wait
+        ? { ...run, awaitingHuman: { since: wait.since, expiresAt: wait.expiresAt } }
+        : run;
+    });
   });
 }
 
@@ -71829,6 +72013,21 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            // A task's accepted service provenance is immutable, just like
+            // its execution policy. Never consult a mutable task or borrow
+            // the session creator's human for this occurrence.
+            if (delivered.updates.every((update) => update.kind === "scheduled_occurrence")) {
+              internalInitiator = frozenScheduledOccurrenceInitiator(
+                accepted.task,
+                internalInitiator,
+              );
+              if (delivered.event) {
+                delivered.event.payload = {
+                  ...(delivered.event.payload as Record<string, unknown>),
+                  initiator: internalInitiator.initiator,
+                };
+              }
+            }
             frozenTurnExecutionPolicy = accepted.turnExecutionPolicy
               ? TurnExecutionPolicyV1.parse(accepted.turnExecutionPolicy)
               : null;
@@ -73429,6 +73628,8 @@ export type SessionWorkPeek =
       kind: "approval-wait";
       humanInputRequestId?: string;
       interactionInterventionId?: string;
+      /** The scheduled run's approval timeout is the earliest deadline. */
+      scheduledRunTimeout?: { runId: string; turnId: string };
       expiresAt?: string;
     }
   | {
@@ -74045,25 +74246,50 @@ export async function peekSessionWork(
             asc(schema.interactionInterventions.id),
           )
           .limit(1);
-        if (
-          expiringHumanInput?.expiresAt &&
-          (!expiringInteractionIntervention ||
-            expiringHumanInput.expiresAt.getTime() <=
-              expiringInteractionIntervention.expiresAt.getTime())
-        ) {
-          return {
-            kind: "approval-wait",
-            humanInputRequestId: expiringHumanInput.id,
-            expiresAt: expiringHumanInput.expiresAt.toISOString(),
-          };
+        // A scheduled run's frozen approval timeout joins the same earliest-
+        // deadline choice; the workflow sleeps on it with a durable timer.
+        const scheduledDeadline = await scheduledHumanWaitDeadlineInRlsContext(
+          scopedDb,
+          workspaceId,
+          turn,
+        );
+        const candidates: Array<{
+          at: number;
+          wait: Extract<SessionWorkPeek, { kind: "approval-wait" }>;
+        }> = [];
+        if (expiringHumanInput?.expiresAt) {
+          candidates.push({
+            at: expiringHumanInput.expiresAt.getTime(),
+            wait: {
+              kind: "approval-wait",
+              humanInputRequestId: expiringHumanInput.id,
+              expiresAt: expiringHumanInput.expiresAt.toISOString(),
+            },
+          });
         }
-        return expiringInteractionIntervention
-          ? {
+        if (expiringInteractionIntervention) {
+          candidates.push({
+            at: expiringInteractionIntervention.expiresAt.getTime(),
+            wait: {
               kind: "approval-wait",
               interactionInterventionId: expiringInteractionIntervention.id,
               expiresAt: expiringInteractionIntervention.expiresAt.toISOString(),
-            }
-          : { kind: "approval-wait" };
+            },
+          });
+        }
+        if (scheduledDeadline) {
+          candidates.push({
+            at: Date.parse(scheduledDeadline.expiresAt),
+            wait: {
+              kind: "approval-wait",
+              scheduledRunTimeout: { runId: scheduledDeadline.runId, turnId: turn.id },
+              expiresAt: scheduledDeadline.expiresAt,
+            },
+          });
+        }
+        // Stable: on a tie, the per-request deadlines keep their precedence.
+        candidates.sort((left, right) => left.at - right.at);
+        return candidates[0]?.wait ?? { kind: "approval-wait" };
       }
       if (turn.status === "running") {
         if (observerAccountId && turn.activeAttemptId) {
@@ -82441,6 +82667,190 @@ export type ExpireSessionInteractionInterventionResult = {
   events: SessionEvent[];
 };
 
+/**
+ * What the scheduler's approval timeout would answer for this exact
+ * requires_action turn: the first pending tool approval, else the first pending
+ * structured human-input request that a system response may settle (a Skill
+ * review needs a person, so it is never timed out). Null means the timeout has
+ * nothing it may settle, so no timer is offered for it.
+ */
+async function scheduledHumanWaitTargetInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  turn: { id: string; sessionId: string; executionGeneration: number },
+): Promise<{ kind: "approval"; approvalId: string } | { kind: "input"; requestId: string } | null> {
+  const [runState] = await scopedDb
+    .select({
+      pendingApprovals: schema.agentRunStates.pendingApprovals,
+      pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
+    })
+    .from(schema.agentRunStates)
+    .where(
+      and(
+        eq(schema.agentRunStates.workspaceId, workspaceId),
+        eq(schema.agentRunStates.sessionId, turn.sessionId),
+        eq(schema.agentRunStates.turnId, turn.id),
+      ),
+    )
+    .orderBy(desc(schema.agentRunStates.stateVersion))
+    .limit(1);
+  const pendingApprovals = runState
+    ? fromPostgresLosslessJson(runState.pendingApprovals, runState.pendingApprovalsCodecVersion)
+    : [];
+  const approvalId = (Array.isArray(pendingApprovals) ? pendingApprovals : [])
+    .map((pending) => approvalIdentifier(pending))
+    .find((id): id is string => typeof id === "string" && id.length > 0);
+  if (approvalId) return { kind: "approval", approvalId };
+  const requests = await scopedDb
+    .select({
+      id: schema.sessionHumanInputRequests.id,
+      questions: schema.sessionHumanInputRequests.questions,
+    })
+    .from(schema.sessionHumanInputRequests)
+    .where(
+      and(
+        eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+        eq(schema.sessionHumanInputRequests.sessionId, turn.sessionId),
+        eq(schema.sessionHumanInputRequests.turnId, turn.id),
+        eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
+        eq(schema.sessionHumanInputRequests.status, "pending"),
+      ),
+    )
+    .orderBy(
+      asc(schema.sessionHumanInputRequests.createdAt),
+      asc(schema.sessionHumanInputRequests.id),
+    )
+    .limit(16);
+  const request = requests.find(
+    (candidate) => !candidate.questions.some((question) => question.skillReview != null),
+  );
+  return request ? { kind: "input", requestId: request.id } : null;
+}
+
+/**
+ * The scheduled-run approval timeout deadline of this requires_action turn, when
+ * the task set one and there is something it may settle.
+ */
+async function scheduledHumanWaitDeadlineInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  turn: {
+    id: string;
+    sessionId: string;
+    executionGeneration: number;
+    scheduledTaskRunId: string | null;
+  },
+): Promise<{ runId: string; expiresAt: string } | null> {
+  if (!turn.scheduledTaskRunId) return null;
+  const [wait] = await scheduledRunHumanWaitsInRlsContext(scopedDb, workspaceId, {
+    turnId: turn.id,
+  });
+  if (!wait?.expiresAt || wait.runId !== turn.scheduledTaskRunId) return null;
+  const target = await scheduledHumanWaitTargetInRlsContext(scopedDb, workspaceId, turn);
+  return target ? { runId: wait.runId, expiresAt: wait.expiresAt } : null;
+}
+
+export type ExpireScheduledRunHumanWaitResult = {
+  action: "expired" | "stale" | "not_found";
+  events: SessionEvent[];
+};
+
+/**
+ * The scheduler's approval timeout for one scheduled run's turn: when the
+ * task's frozen `approvalTimeoutSeconds` elapsed with no person answering,
+ * reject the first pending approval (or skip the first pending structured
+ * question) through the exact same acceptance boundary a person uses, as a
+ * clearly labelled system decision with a deterministic client event id. It
+ * re-derives the deadline from durable facts and never acts early; a race with
+ * a person's answer settles as `stale`. Remaining approvals surface as a new
+ * wait whose deadline has already passed, so they are rejected in turn.
+ */
+export async function expireScheduledRunHumanWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    runId: string;
+  },
+): Promise<ExpireScheduledRunHumanWaitResult> {
+  const snapshot = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          sessionId: schema.sessionTurns.sessionId,
+          executionGeneration: schema.sessionTurns.executionGeneration,
+          scheduledTaskRunId: schema.sessionTurns.scheduledTaskRunId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .limit(1);
+      if (!turn || turn.sessionId !== input.sessionId || turn.scheduledTaskRunId !== input.runId) {
+        return null;
+      }
+      const [wait] = await scheduledRunHumanWaitsInRlsContext(scopedDb, input.workspaceId, {
+        turnId: turn.id,
+      });
+      if (!wait?.expiresAt) return null;
+      const target = await scheduledHumanWaitTargetInRlsContext(scopedDb, input.workspaceId, turn);
+      return target ? { turn, wait, target } : null;
+    },
+  );
+  if (!snapshot) return { action: "not_found", events: [] };
+  if (Date.parse(snapshot.wait.expiresAt!) > Date.now()) return { action: "stale", events: [] };
+  const { turn, wait, target } = snapshot;
+  const minutes = Math.max(1, Math.round((wait.timeoutSeconds ?? 0) / 60));
+  const clientEventId = `${SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX}${createHash("sha256")
+    .update(
+      `${turn.id}\0${turn.executionGeneration}\0${target.kind}\0${
+        target.kind === "approval" ? target.approvalId : target.requestId
+      }`,
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 32)}`;
+  if (target.kind === "approval") {
+    const result = await acceptSessionApprovalDecision(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      subjectId: "system:scheduled-approval-timeout",
+      respondedByKind: "system",
+      payload: {
+        approvalId: target.approvalId,
+        decision: "reject",
+        message: `Rejected automatically by the scheduler: no person decided within this scheduled task's approval timeout (${minutes} min).`,
+      },
+      clientEventId,
+    });
+    return result.action === "accepted"
+      ? { action: "expired", events: result.events }
+      : { action: "stale", events: [] };
+  }
+  const result = await acceptSessionHumanInputResponse(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    requestId: target.requestId,
+    response: { outcome: "skipped" },
+    respondedBy: "system:scheduled-approval-timeout",
+    respondedByKind: "system",
+    clientEventId,
+  });
+  return result.action === "accepted"
+    ? { action: "expired", events: result.events }
+    : { action: "stale", events: [] };
+}
+
 function deterministicSystemUuid(seed: string): string {
   const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
@@ -83981,6 +84391,10 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
       row.admissionDiagnostic == null
         ? null
         : ConnectionAccountSelectionDiagnostic.parse(row.admissionDiagnostic),
+    admissionRefusal:
+      row.admissionRefusal == null
+        ? null
+        : ScheduledTaskAdmissionRefusal.parse(row.admissionRefusal),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -84285,6 +84699,10 @@ function mapConnectionMetadata(row: {
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    anthropicCredentialOperationId: _anthropicOperationId,
+    anthropicCredentialOperationDigest: _anthropicOperationDigest,
+    claude_subscriptionCredentialOperationId: _claudeOperationId,
+    claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
     ...publicMetadata
   } = row.metadata;
   return {

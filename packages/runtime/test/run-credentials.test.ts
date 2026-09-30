@@ -222,6 +222,11 @@ describe("run credential response validation", () => {
     expect(script).toContain("command -v flock");
     expect(script).toContain("_opengeni_pointer_lock_dir");
     expect(script).toContain('mkdir "$_opengeni_pointer_lock_dir"');
+    // BSD chmod stops parsing options at the mode: "--" after it becomes a
+    // filename. Keep options before the mode on both Linux and macOS.
+    expect(script).toContain("chmod -- 0700 ");
+    expect(script).toContain("chmod -- 0600 ");
+    expect(script).not.toMatch(/chmod (?:0[0-7]{3}|'0[0-7]{3}') --/);
   });
 });
 

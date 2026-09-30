@@ -10,6 +10,47 @@ import type {
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
 
+/** Non-secret service attribution, serialized as a flat JSON object of at most 2 KiB. */
+export type ServiceContext = Record<string, string | number | boolean>;
+
+function hasStaticHeader(options: OpenGeniClientOptions, names: string[]): boolean {
+  return (
+    typeof options.headers !== "function" &&
+    Object.keys(options.headers ?? {}).some((key) => names.includes(key.toLowerCase()))
+  );
+}
+
+function serializeServiceContext(context: ServiceContext): string {
+  if (
+    !context ||
+    typeof context !== "object" ||
+    Array.isArray(context) ||
+    (Object.getPrototypeOf(context) !== Object.prototype && Object.getPrototypeOf(context) !== null)
+  )
+    throw new Error("Invalid service context: expected a flat JSON object");
+  const snapshot: ServiceContext = Object.create(null);
+  for (const [key, value] of Object.entries(context)) {
+    if (
+      typeof value !== "string" &&
+      typeof value !== "boolean" &&
+      !(typeof value === "number" && Number.isFinite(value))
+    )
+      throw new Error(
+        "Invalid service context: values must be strings, finite numbers, or booleans",
+      );
+    snapshot[key] = value;
+  }
+  // HTTP Headers require byte strings. JSON escapes preserve Unicode without
+  // percent-encoding the object or passing non-byte characters to fetch.
+  const json = JSON.stringify(snapshot).replace(
+    /[\u007f-\uffff]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+  if (new TextEncoder().encode(json).byteLength > 2048)
+    throw new Error("Invalid service context: serialized JSON must not exceed 2 KiB");
+  return json;
+}
+
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
   /** Recover this actor's connection creation result without resending secrets.
@@ -40,12 +81,32 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
+  /** Contract-checked successful JSON GET with its headers intact, for same-origin
+   * proxies that must forward paging metadata. Non-2xx responses throw. */
+  async requestJsonResponse(
+    path: string,
+    query: Record<string, string> = {},
+    options: import("./client").OpenGeniRequestOptions = {},
+  ): Promise<import("./client").FetchResponse> {
+    return await this.requestResponse("GET", path, query, {
+      ...options,
+      accept: "application/json",
+    });
+  }
+
   /** Server-side organization-key client scoped to one host-authenticated user.
    * Does not mutate this client, provision workspace membership, or link native
    * identities. The API verifies key and membership authority on each request. */
   asUser(externalId: string, options: { source?: string } = {}): this {
     if (typeof window !== "undefined")
       throw new Error("asUser is a server-side API; keep organization keys on your backend");
+    if (
+      this.serviceInitiatorHeader !== undefined ||
+      hasStaticHeader(this.options, ["x-opengeni-service-initiator", "x-opengeni-service-context"])
+    )
+      throw new Error(
+        "asUser and asService are mutually exclusive; start from the unscoped client",
+      );
     const source = options.source ?? "default";
     const validOpaqueText = (value: unknown, maxBytes: number): value is string =>
       typeof value === "string" &&
@@ -62,6 +123,34 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     client.externalActorHeader = encodeURIComponent(
       JSON.stringify({ mode: "external", identity: { externalId, source } }),
     );
+    return client;
+  }
+
+  /** Server-side automation attribution under this client's existing credential.
+   * Returns a new client of the same class; grants no permissions or human/personal
+   * resource authority. Cannot be combined with asUser or asLinkedUser.
+   * Reapplying asService replaces the name and context rather than merging them. */
+  asService(name: string, context?: ServiceContext): this {
+    if (typeof window !== "undefined")
+      throw new Error("asService is a server-side API; keep API keys on your backend");
+    if (
+      this.externalActorHeader !== undefined ||
+      hasStaticHeader(this.options, ["x-opengeni-external-actor"])
+    )
+      throw new Error(
+        "asUser and asService are mutually exclusive; start from the unscoped client",
+      );
+    if (
+      typeof name !== "string" ||
+      !/^[a-z0-9][a-z0-9:._-]{0,63}$/.test(name) ||
+      name.trim() !== name
+    )
+      throw new Error("Invalid service initiator name");
+    const serializedContext = context === undefined ? undefined : serializeServiceContext(context);
+    const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
+    const client = new Client({ ...this.options });
+    client.serviceInitiatorHeader = name;
+    client.serviceContextHeader = serializedContext;
     return client;
   }
 
@@ -202,6 +291,24 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     return this.requestJson(
       "POST",
       `/v1/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(membershipId)}/revoke`,
+      request,
+    );
+  }
+
+  /** Replace an existing external member's permissions in one shared
+   * workspace. Keyed by `operationId`: reuse the exact body after response
+   * loss. Narrowing makes live authority re-check; nothing is cancelled. */
+  async updateExternalWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    request: import("@opengeni/contracts/external-identities").UpdateExternalWorkspaceMemberRequest,
+  ): Promise<
+    import("@opengeni/contracts/external-identities").UpdateExternalWorkspaceMemberResponse
+  > {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/external-members/${encodeURIComponent(membershipId)}`,
       request,
     );
   }

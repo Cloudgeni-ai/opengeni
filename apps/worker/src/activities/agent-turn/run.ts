@@ -1,4 +1,8 @@
-import { getSessionAuthorityProjection, readActiveSandbox } from "@opengeni/db";
+import {
+  getSessionAuthorityProjection,
+  readActiveSandbox,
+  getWorkspaceCredentialProvider,
+} from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
@@ -16,6 +20,7 @@ import {
   sandboxOperationMetricObserver,
   turnExecutionTelemetryKey,
   withTraceContext,
+  withMcpTelemetry,
 } from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
@@ -30,11 +35,11 @@ import { buildCodexTokenResolver } from "../codex-auth";
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
-  CODEX_FALLBACK_MODEL_SLUGS,
   codexRequestStorage,
   withCodexRequestOverrides,
   type CodexRequestContext,
 } from "@opengeni/codex";
+import { codexUpstreamModelSlugs } from "@opengeni/config";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -610,10 +615,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sessionId: input.sessionId,
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
-                    resolveModel: buildModelResolver(
-                      CODEX_FALLBACK_MODEL_SLUGS,
-                      CODEX_FALLBACK_MODEL_SLUGS[0],
-                    ),
+                    resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally
@@ -1094,6 +1096,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // set. A Connected Machine receives no platform Git credential, so its
           // resources stay exactly as stored. Resolution never fails the turn;
           // an unusable bound repository stays bare and is reported visibly.
+          const hasCredentialProvider =
+            activeSandboxBackend !== "selfhosted" &&
+            (
+              await waitForTurnOperation(
+                getWorkspaceCredentialProvider(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                }),
+                cancellationSignal,
+                undefined,
+              )
+            )?.enabled === true;
           const boundResources = await waitForTurnOperation(
             applyTurnGitHubRepositoryBindings({
               db,
@@ -1101,6 +1115,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               activeSandboxBackend,
+              hasCredentialProvider,
               claimedTurnResources,
               claimedRuntimeResources,
               publish: async (events) => {
@@ -1813,14 +1828,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       { parent: null },
     );
     try {
-      return await withTraceContext(span, () => {
-        try {
-          resolvedServices.observability.info("worker execution started", { correlationId });
-        } catch {
-          // Correlation diagnostics never affect execution or admission.
-        }
-        return runAgentTurn(input, resolvedServices, span);
-      });
+      return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
+        withTraceContext(span, () => {
+          try {
+            resolvedServices.observability.info("worker execution started", { correlationId });
+          } catch {
+            // Correlation diagnostics never affect execution or admission.
+          }
+          return runAgentTurn(input, resolvedServices, span);
+        }),
+      );
     } catch (error) {
       span.end({ error });
       throw error;

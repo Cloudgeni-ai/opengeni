@@ -117,6 +117,18 @@
     "./chat": {
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"
+    },
+    "./next": {
+      "types": "./src/adapters/next.ts",
+      "default": "./src/adapters/next.ts"
+    },
+    "./express": {
+      "types": "./src/adapters/express.ts",
+      "default": "./src/adapters/express.ts"
+    },
+    "./hono": {
+      "types": "./src/adapters/hono.ts",
+      "default": "./src/adapters/hono.ts"
     }
   },
   "publishConfig": {

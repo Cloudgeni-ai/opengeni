@@ -76,7 +76,13 @@ describe("Codex status readiness semantics", () => {
       connectedBySubjectId: "secret-owner",
       credentialEncrypted: "must-not-leak",
     } as unknown as opengeniDb.CodexAccountStatus;
-    const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue(null);
+    // A visible workspace-shared session: request surfaces refuse an absent one.
+    const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue({
+      sessionId,
+      rootSessionId: sessionId,
+      visibility: "workspace_shared",
+      ownerSubjectId: null,
+    } as unknown as opengeniDb.SessionAuthorityProjection);
     const slack = spyOn(opengeniDb, "getSlackInteractionSessionAccessForSession").mockResolvedValue(
       null,
     );

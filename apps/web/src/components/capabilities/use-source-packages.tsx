@@ -79,6 +79,7 @@ const SourcePackageDialogs = lazy(async () => {
 });
 
 export function useSourcePackages({
+  refreshRevision = 0,
   client,
   workspaceId,
   connections,
@@ -96,6 +97,7 @@ export function useSourcePackages({
   restoreFocusRef?: RefObject<HTMLElement | null>;
   restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
   onManageSkills?: () => void;
+  refreshRevision?: number;
 }): SourcePackages {
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillSummary[]>([]);
   const [plugins, setPlugins] = useState<PluginInstallationSummary[]>([]);
@@ -131,7 +133,7 @@ export function useSourcePackages({
     }
   }, [client, workspaceId]);
 
-  useEffect(() => void load(), [load]);
+  useEffect(() => void load(), [load, refreshRevision]);
 
   function openNew(kind: SourceImportKind) {
     const hasDraft = Boolean(

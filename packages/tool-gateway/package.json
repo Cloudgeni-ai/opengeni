@@ -35,6 +35,7 @@
   },
   "dependencies": {
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/observability": "workspace:*",
     "ajv": "^8.20.0"
   },
   "devDependencies": {

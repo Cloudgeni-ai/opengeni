@@ -53,6 +53,7 @@ import {
 } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { parseRequestJson } from "../http/request-body";
 
 async function callerBundleSelection(
   deps: ApiRouteDeps,
@@ -87,7 +88,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     requirePermission(grant, "secrets:write");
-    const request = CreateAutomationSourceRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, CreateAutomationSourceRequest);
     assertGenericTriggerMutable(request);
     requireAutomationAdapter(request.adapterId).validateSourceConfiguration(request.configuration);
     const key = requireEncryptionKey(deps);
@@ -104,7 +105,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/automations/sources/:sourceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = UpdateAutomationSourceRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, UpdateAutomationSourceRequest);
     const current = await requireSource(
       deps,
       grant.accountId,
@@ -171,7 +172,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/automations/triggers", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = CreateAutomationTriggerRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, CreateAutomationTriggerRequest);
     request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
       deps,
       grant,
@@ -228,7 +229,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/automations/triggers/:triggerId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = UpdateAutomationTriggerRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, UpdateAutomationTriggerRequest);
     const existing = (await listAutomationTriggers(deps.db, workspaceId)).find(
       (trigger) => trigger.id === c.req.param("triggerId"),
     );
@@ -363,7 +364,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/automations/sources/:sourceId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = TriggerAutomationManuallyRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, TriggerAutomationManuallyRequest);
     const source = await requireSource(deps, grant.accountId, workspaceId, c.req.param("sourceId"));
     if (source.status !== "active") {
       throw new HTTPException(409, {
