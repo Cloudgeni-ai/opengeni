@@ -475,9 +475,8 @@ changes. Drain budgets include dispatch/capture/retry within the lifecycle ceili
 Warm-capture reclamation/heartbeat cleanup preserve holders through the original
 deadline despite turn closure: no takeover or extended authority.
 
-Legacy stopping-error containment requires owner quiescence and cancellation grace.
-Supervision-key presence—even malformed—blocks enrollment/capture/publication/teardown.
-Observation failure never proves exit; uncancelled running commands stay excluded.
+Supervision-key presence—even malformed—blocks legacy containment enrollment,
+capture, publication and teardown. Observation failure never proves exit.
 
 Acquisition/mutation waits extend once through the first durable capture deadline
 plus handoff grace (one-hour cap). Expired/replacement claims never replenish
@@ -1509,10 +1508,10 @@ losing readers reread without duplicating output or settling uncaptured tails.
 Router credentials remain in memory. Legacy batch readers only drain existing
 commands; their locators are never reinterpreted as offsets.
 
-Idle, unobservable Modal commands use the existing drain after group-wide agent,
-holder, mutation, and idle-grace checks. Records remain until termination;
-unobserved outcomes become lost. Command backoff never suppresses rotation's
-provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
+Legacy retained Modal commands, whatever their health, use the existing drain once
+the whole group is idle for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`; after a
+verified checkpoint they settle lost with a notice. Command backoff never suppresses
+rotation's provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
 `apps/worker/src/retained-process-retry.ts` caps retained observation backoff at
 the exact Modal lease's rotation lead boundary, then reaper cadence; cancellation,

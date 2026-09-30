@@ -57,3 +57,16 @@ The integration canary should run a non-PTY process and a
 PTY render against a real Modal sandbox, modify a file after the previous
 checkpoint, and verify the replacement has that file. It should also force a
 capture failure and verify the old sandbox stays live for retry.
+
+## Follow-up: idle containment (30 September 2026)
+
+Boxes held warm only by legacy commands still died uncaptured at the deadline
+after this change shipped. A single idle rule now contains those commands long
+before the deadline: once the whole sandbox group has been idle for
+`OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`, the same drain captures the
+current generation, stops the box and settles the commands `lost` with reason
+`idle_containment` and an agent-facing notice. It replaced the separate
+unobservable and stopping-with-provider-errors enrollment predicates. The
+deadline rule above is unchanged except that its commands now settle
+`provider_deadline_containment` with the same notice. See
+[`run-lifecycle.md`](../run-lifecycle.md).

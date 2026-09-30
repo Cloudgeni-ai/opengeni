@@ -2148,16 +2148,56 @@ missing SDK map entry nor failure to recover terminal output proves command loss
 including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
-An idle Modal lease held only by unobservable commands can enroll their exact
-identities into the existing drain. Enrollment requires every attempt in the
-sandbox group to be quiescent beyond idle grace, no other holders, and no child
-mutation admissions. It fences new admission while preserving command records
-and holders until provider termination. Capture excludes only enrolled parent
-admissions and holders; checkpoint publication, termination, cold commit, and
-durable wake remain owned by the existing lifecycle. Unknown commands settle
-lost, never successful; a real exit arriving during drain retains its exit code.
+
+**Idle command containment.** A legacy retained command keeps its Modal box warm through a non-expiring process
+holder, so the zero-holder idle drain never runs for it and the box would stay up
+until the provider deadline kills it uncaptured. One rule contains such commands,
+independent of command health: running, still draining output, stopping,
+unobservable, or repeatedly failing observation all qualify. The reaper
+inventories warm or draining Modal leases whose only holders are process holders
+of active non-supervised processes, with no capture or reaper hold. Exact
+enrollment then re-checks, under the workspace control fence and the
+process -> admission -> lease row locks:
+
+- every active process is on the lease's current epoch, provider and home route,
+  and none is supervised;
+- no holder other than those process holders, and no unsettled admission other
+  than their parent admissions;
+- no non-closed turn attempt and no pending quiescence (unsettled interruption,
+  undrained attempt writer) in any session of the sandbox group or owning a
+  process on the lease;
+- durable idleness for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` (default
+  30 minutes; it must exceed the idle grace and, when explicit, stay below the
+  rotation lead). The newest attempt close, lease holder-set change and
+  admission or settlement on the lease epoch must all be older than the window.
+  Migration 0541 stamps `sandbox_leases.holders_changed_at` in a trigger
+  whenever any writer changes the holder counters. Process age is never a fact.
+
+A holder or writer that committed first is seen and refuses enrollment; a later
+one observes the requested rotation and is fenced until the successor box.
+Enrollment preserves command records and holders until provider termination.
+Capture excludes only enrolled parent admissions and holders; checkpoint
+publication, termination, cold commit and durable wake remain owned by the
+existing drain, and the box is terminated immediately after capture, so the
+archive is the final state. The cold commit settles each still-active enrolled
+command `lost` with reason `idle_containment` (`provider_deadline_containment`
+on a deadline rotation), never an exit code. In the same transaction it appends
+`session.command.finished`, the typed `background_command_result` input and
+`system.update.pending`, exactly as ordinary exit/loss proof does; the notice
+names the command, says the sandbox was idle for N minutes and the workspace was
+saved, and asks the agent to restart it if still needed. A provider that
+disappeared before capture settles `provider_instance_lost` without a
+saved-workspace claim. A real exit arriving during the drain keeps its exit code.
 Failed checkpoints retain the provider and command holders for retry. Filesystem
 snapshots preserve neither running processes nor application transaction state.
+`opengeni_sandbox_command_containment_total{outcome}` counts inspections and
+enrolled cold commits.
+
+Supervised commands stay excluded. Native supervision is default-off, its
+durable cancellation intent accepts only `provider_deadline` or `explicit_stop`,
+and migration 0496 forbids legacy containment from releasing a supervised
+process without its proof; an idle supervised command therefore waits for an
+explicit stop or the deadline rotation.
 
 For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
@@ -2168,18 +2208,11 @@ closed (or its direct request returned),
 and no unrelated holder or mutation admission remains. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
-is captured; remaining commands settle lost. Supervised commands keep their
-separate proof gate. A prior explicit stop remains immutable; deadline intent
-starts its own grace. This path does not apply to idle or operator rotation.
-
-The same containment path covers an explicitly stopping managed command after
-at least five provider-error observations. Its cancellation request and owner
-quiescence (or normal completion and closed timestamp) must both predate idle
-grace. A failed/interrupted owner without a quiescence receipt remains blocked;
-provider errors alone never enroll a running command.
-All sandbox-group activity, other-holder and child-admission exclusions remain
-in force, and only verified provider termination settles an unknown result as
-lost. A failed checkpoint leaves the provider and holders intact for retry.
+is captured; remaining commands settle `provider_deadline_containment` with the
+same terminal event and notice. Supervised commands keep their separate proof
+gate. A prior explicit stop remains immutable; deadline intent starts its own
+grace. The two-minute grace applies only to provider-deadline rotation; any
+lease may still meet the idle rule above.
 
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
