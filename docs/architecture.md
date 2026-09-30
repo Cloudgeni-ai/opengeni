@@ -920,7 +920,7 @@ Repository `.agents/skills` holds maintainer and integration guidance. Runtime s
 ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
 `opengeni-client`, `opengeni-help`, `opengeni-visualize`, and `document-parsing`,
 unless explicitly overridden. `.agents/skills/opengeni-client` is canonical;
-`scripts/sync-client-skill.ts` generates bundled assets with drift tests.
+`scripts/sync-client-skill.ts` generates bundled assets and the docs-site mirror with drift tests.
 Every deployment can read it without installation or sandbox setup.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).

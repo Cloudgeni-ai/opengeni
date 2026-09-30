@@ -1,0 +1,63 @@
+---
+title: "Users, tenants & privacy"
+description: "Map tenants to workspaces, onboard users, and choose what each conversation can see and share."
+icon: "users-gear"
+---
+
+## Choose the workspace boundary
+
+A workspace is where sessions, files, knowledge, connections, and integrations are shared. Pick it from who may share those things:
+
+| Your product                                              | Workspace per | Notes                                                               |
+| --------------------------------------------------------- | ------------- | ------------------------------------------------------------------- |
+| A team or customer shares data and may share chats        | Tenant        | The usual choice                                                    |
+| Users share data but their chats are private              | Tenant        | Create sessions with `visibility: "user_private"` as the user       |
+| Each user is their own boundary                           | User          | Use the user id as `externalId`                                     |
+| Every conversation must have its own data and connections | Chat          | Most isolation, most lifecycle work: automate creation and deletion |
+
+A workspace is configuration, not a running machine. Hundreds of workspaces are normal. Call `ensureWorkspace` with a stable `externalSource` and `externalId` and persist the returned id; repeat calls return the same workspace.
+
+## Onboard users
+
+Make each user a member once, when your product admits them, not on every request:
+
+```ts
+await og.addExternalWorkspaceMember(workspaceId, {
+  identity: { externalId: user.id, source },
+  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+  operationId, // a UUID you persist first; reuse it only to retry this exact request
+});
+```
+
+Grant the final permission set at onboarding. Add `files:upload` and `files:read` for attachments and `mcp_servers:attach` for [per-session tools](/integrate/your-data). To change permissions, revoke with `cancelExternalWorkspaceMemberGrant` (this also cancels the user's running turns) and add the member again with a new `operationId`.
+
+Use the same `source` everywhere: onboarding, `asUser`, and the proxy's `resolve`.
+
+## Choose what each conversation shares
+
+Set these when your server creates the session. They do not change when it is reopened.
+
+| Product behavior                            | `agentAccess` | `memoryScope` |
+| ------------------------------------------- | ------------- | ------------- |
+| Each conversation works independently       | `"session"`   | `"off"`       |
+| Independent conversations remember the user | `"session"`   | `"user"`      |
+| One user's conversations can collaborate    | `"user"`      | `"user"`      |
+| The tenant's conversations can collaborate  | `"workspace"` | `"workspace"` |
+
+- `agentAccess` limits which other sessions the agent can reach. The default for raw session creation is `"workspace"`.
+- `memoryScope` chooses where the agent saves [knowledge](/concepts/memory-and-knowledge). `"off"` stops new saves; authorized retrieval stays available.
+- `visibility: "user_private"` hides a session from other members. It requires a session created as a verified user and private sessions enabled for the organization.
+
+## What is enforced where
+
+**OpenGeni enforces:** workspace membership on every call, private session ownership, the agent's session reach, and each member's permissions intersected with your API key's.
+
+**Your product enforces:** who your users are, which tenant they belong to, and which conversations they may open. Use the proxy's `resolve` for identity and `authorizeSession` for per-session checks, and authorize every tool call in your own API.
+
+The organization API key can read every session in the organization's shared workspaces. Keep it on your server.
+
+## Sign-out and account changes
+
+On sign-out or a user or tenant switch, abort in-flight requests and remount the conversation. When you remove a user, revoke their membership; when you remove a tenant, delete its workspace (see [Going to production](/integrate/production#clean-up)).
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

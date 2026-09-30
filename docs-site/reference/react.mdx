@@ -1,0 +1,48 @@
+---
+title: "React components"
+description: "The OpenGeni conversation, hooks, and styled surfaces for React."
+icon: "react"
+---
+
+```bash
+bun add @opengeni/react @opengeni/sdk
+```
+
+`@opengeni/react` renders OpenGeni sessions in your product. It uses the SDK client you pass to `OpenGeniProvider`, so it works unchanged behind [`createSessionProxyHandler`](/reference/sdk#createsessionproxyhandler). Install it from the same release as `@opengeni/sdk`.
+
+## Components
+
+| Export                      | Purpose                                                                                |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `OpenGeniProvider`          | Supplies the client and workspace to everything below it                               |
+| `OpenGeniChat`              | The default embed: the user's chats (sidebar or drawer) plus the conversation          |
+| `SessionConversation`       | The complete conversation for one session                                              |
+| `SessionList`               | The user's chats with rename and archive, for your own layout                          |
+| `MessageTimeline`           | The timeline alone: streaming replies, tool calls, approvals, and child-session status |
+| `ChatComposer`              | The composer alone, with queue, Steer, attachments, and model picker                   |
+| `createDefaultToolRegistry` | Register your own renderers for your tools                                             |
+
+See [Conversation UI & theming](/integrate/conversation-ui) for props, tool renderers, and branding.
+
+## Entry points
+
+| Import                         | Contents                                                                      |
+| ------------------------------ | ----------------------------------------------------------------------------- |
+| `@opengeni/react`              | Provider, conversation, timeline, composer, hooks, and the sandbox workbench  |
+| `@opengeni/react/session`      | Headless session hooks with no styles or optional peers                       |
+| `@opengeni/react/composer`     | Advanced composer composition                                                 |
+| `@opengeni/react/machines`     | Connected Machines dashboard and enrollment flow                              |
+| `@opengeni/react/realtime`     | Voice controls, lazily loadable                                               |
+| `@opengeni/react/diffs`        | `enablePierreDiffs()` for highlighted diffs with the optional `@pierre/diffs` |
+| `@opengeni/react/compiled.css` | Scoped styles; needs no Tailwind                                              |
+| `@opengeni/react/tokens.css`   | The `--og-*` design tokens alone                                              |
+
+## Hooks
+
+Build a custom interface on the same session behavior with `useSessionEvents`, `useSession`, `useTurnQueue`, `useComposer`, `useSessionControl`, and `useHumanInputRequests`. Each takes a session id and reads the client from `OpenGeniProvider`, or from `{ client, workspaceId }` passed per call.
+
+## Styling
+
+Import `@opengeni/react/compiled.css` once. Every style is scoped to the components and every visual choice is a `--og-*` variable. Dark is the default; set `data-og-theme="light"` on an ancestor for light and `data-og-density="compact"` for narrow panels.
+
+The full reference, including Tailwind integration and the workbench, is in [packages/react/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/README.md).
