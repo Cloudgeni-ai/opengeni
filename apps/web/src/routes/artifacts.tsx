@@ -154,7 +154,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
         <PageHeader
           icon={<PanelsTopLeftIcon />}
           title="Artifacts"
-          description="Sites, images, documents and files made with Geni"
+          description="Sites, images, documents and files made with Opengeni"
           actions={empty && filters.kind === "all" ? null : newArtifact}
           tabs={
             <LineTabsList aria-label="Artifact types">
@@ -423,7 +423,7 @@ export function ArtifactDetailRoute({
                       className="rounded-[10px] pointer-coarse:h-11"
                     >
                       <SparklesIcon aria-hidden="true" />
-                      Edit with Geni
+                      Edit with Opengeni
                     </Button>
                   )}
                   {archived ? null : (

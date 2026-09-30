@@ -272,7 +272,7 @@ function PreferenceProposalComposer({
             revisionId: revision.id,
             expectedCurrentRevisionId: null,
             expectedScopeVersion: preference.scopeVersion,
-            reason: "Saved by a user from Agent Knowledge",
+            reason: "Saved by a user from Knowledge",
           },
         );
         preference = activated.preference;
@@ -597,7 +597,7 @@ function PendingSkillActivation({
         revisionId: revision.id,
         expectedCurrentRevisionId: null,
         expectedScopeVersion: preference.scopeVersion,
-        reason: "Finished saving from Agent Knowledge",
+        reason: "Finished saving from Knowledge",
       });
       await onActivated();
     } catch (caught) {
