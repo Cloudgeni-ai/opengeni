@@ -58,6 +58,7 @@ import {
   requireWorkspace,
   scopedKnowledgeScopeKey,
   updateScheduledTask,
+  ScheduledTaskHeadChangedError,
   withWorkspaceSubjectRls,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
@@ -583,6 +584,10 @@ export async function withScheduledTaskAuthorityWriteErrors<T>(run: () => Promis
   try {
     return await run();
   } catch (error) {
+    if (error instanceof ScheduledTaskHeadChangedError)
+      throw new HTTPException(409, {
+        message: "Scheduled task changed. Reload it before saving.",
+      });
     if (nestedPostgresSqlState(error) === "40001")
       throw new HTTPException(409, {
         message: "Scheduled task learning settings changed. Reload the task before saving.",
@@ -1217,7 +1222,7 @@ export async function validatedScheduledTaskUpdate(input: {
       ),
     });
   }
-  if (input.payload.agentConfig !== undefined) {
+  if (input.payload.agentConfig !== undefined || input.payload.agentConfigPatch !== undefined) {
     // Editing the instructions of a task that injects workspace secrets is
     // equivalent to attaching those secrets to new instructions, so it
     // requires variable-sets:use even though plain task edits do not.
@@ -1228,6 +1233,32 @@ export async function validatedScheduledTaskUpdate(input: {
     if (willHaveVariableSet) {
       requirePermission(input.grant, "variable-sets:use");
     }
+  }
+  if (input.payload.agentConfigPatch) {
+    const patch = input.payload.agentConfigPatch;
+    const model =
+      patch.model === undefined ? undefined : canonicalConfiguredModel(input.settings, patch.model);
+    if (model !== undefined && model !== null) {
+      await assertWorkspaceModelPolicyAllows(
+        input.db,
+        input.settings,
+        input.existing.workspaceId,
+        model,
+      );
+    }
+    // Validate only the newly supplied model settings, not a reconstructed
+    // bounded input. Legacy stored text, resources and selections stay exact.
+    update.agentConfig = {
+      ...input.existing.agentConfig,
+      ...(model !== undefined && model !== null ? { model } : {}),
+      ...(patch.reasoningEffort !== undefined ? { reasoningEffort: patch.reasoningEffort } : {}),
+    };
+    // Validation performs asynchronous authority checks before persistence.
+    // Reuse the locked-row CAS so that merging this snapshot cannot erase a
+    // concurrent config edit. The caller receives 409, never an automatic retry.
+    update.expectedExecutionDigest = input.existing.executionDigest;
+  }
+  if (input.payload.agentConfig !== undefined) {
     const nextAgentConfig = await validateScheduledTaskAgentConfig({
       settings: input.settings,
       db: input.db,
@@ -1258,7 +1289,10 @@ export async function validatedScheduledTaskUpdate(input: {
     }
     update.agentConfig = nextAgentConfig;
   }
-  if (update.agentConfig || input.payload.connectionAccounts !== undefined) {
+  if (
+    (update.agentConfig && !input.payload.agentConfigPatch) ||
+    input.payload.connectionAccounts !== undefined
+  ) {
     update.agentConfig = {
       ...(update.agentConfig ?? input.existing.agentConfig),
       connectionAccounts:
@@ -1394,27 +1428,36 @@ export async function validatedScheduledTaskUpdate(input: {
         input.existing.agentConfig.connectionAccountsFrozen === true,
       ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
-    const routeIds = new Set(
-      (acceptedConnections.mcpAccountBindings ?? []).map((binding) => binding.serverId),
-    );
-    nextAgentConfig.connectionAccounts = [
-      ...(acceptedConnections.mcpAccountBindings ?? []).map(
-        ({ canonicalServerId, connectionId }) => ({
-          serverId: canonicalServerId,
-          connectionId,
-        }),
-      ),
-      ...acceptedConnections.personalConnectionDelegations
-        .filter(
-          (item) =>
-            !routeIds.has(item.serverId) &&
-            (!item.connectionType ||
-              item.connectionType === "mcp" ||
-              item.connectionType === "github_personal"),
-        )
-        .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
-    ];
-    nextAgentConfig.connectionAccountsFrozen = true;
+    // A model-only patch still revalidates authority above, but is not an
+    // access refresh. Preserve exact existing selections, including legacy
+    // absent fields, unless the caller also changed accounts or the target.
+    if (
+      !input.payload.agentConfigPatch ||
+      input.payload.connectionAccounts !== undefined ||
+      authorityTargetChanged
+    ) {
+      const routeIds = new Set(
+        (acceptedConnections.mcpAccountBindings ?? []).map((binding) => binding.serverId),
+      );
+      nextAgentConfig.connectionAccounts = [
+        ...(acceptedConnections.mcpAccountBindings ?? []).map(
+          ({ canonicalServerId, connectionId }) => ({
+            serverId: canonicalServerId,
+            connectionId,
+          }),
+        ),
+        ...acceptedConnections.personalConnectionDelegations
+          .filter(
+            (item) =>
+              !routeIds.has(item.serverId) &&
+              (!item.connectionType ||
+                item.connectionType === "mcp" ||
+                item.connectionType === "github_personal"),
+          )
+          .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
+      ];
+      nextAgentConfig.connectionAccountsFrozen = true;
+    }
     update.agentConfig = nextAgentConfig;
   }
   if (

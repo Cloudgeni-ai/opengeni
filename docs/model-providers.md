@@ -1249,3 +1249,112 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 - Health scoring and fleet pressure are observations consumed by the catalog,
   not computed here.
 - Tool capability metadata never grants or discovers tools.
+
+## Native Claude Messages
+
+Workspace and organization Models support **Anthropic API** keys and **Claude subscription**
+setup tokens as separate connections. Generate a subscription token with
+`claude setup-token`; OpenGeni does not refresh it. Replace expired or revoked
+credentials on the connection page. Claude setup offers a copyable terminal command
+and a local import of `~/.claude.json`; only its account/device identifiers are
+submitted with the token, never the settings file. Manual entry remains available
+in the setup disclosure. Token replacement uses the same full-page form. Named
+Opus/Sonnet choices add models without requiring model IDs; other IDs remain
+available under the model disclosure. Workspace setup creates a workspace-owned connection;
+organization setup creates a separate connection for shared workspaces. The two
+scopes never borrow or overwrite each other’s credentials. Both use existing encrypted
+connection storage and model access policy. Add exact upstream
+model IDs to each connection; connecting alone does not validate model entitlement
+or make a paid model call. Subscription usage consumes the connected plan's limits;
+API-key usage is billed by Anthropic. Neither uses OpenGeni credits.
+
+The `anthropic-messages` protocol is implemented by
+`packages/runtime/src/anthropic-messages.ts`, through the existing Agents SDK
+model interface and instrumented transport. It posts full projected history to
+`/v1/messages`, without remote conversation or thread state. Tool calls/results,
+parallel calls, images, streaming text, signed thinking and redacted thinking are
+preserved. Initial system/developer history items join the top-level system field
+in order; later system items keep their conversation position. Tool names unsupported on the wire receive stable reversible names.
+Native OpenAI hosted tools and opaque compaction tokens are not compatible;
+ordinary function tools and OpenGeni's text compaction remain available.
+
+Claude subscription connections require `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true`;
+the deployment default is off. Anthropic API-key connections are independent of
+this flag. When off, subscription setup endpoints and catalog/credential resolution
+are disabled, and subscription setup is hidden from model settings. Stored credentials
+are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
+
+Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
+:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the existing
+workspace connection create/rotate/revoke API. Model IDs are scoped under
+`workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
+`organization-anthropic/` and `organization-claude-subscription/`. Custom models use
+immutable generations: retiring one prevents fresh selection while preserving
+accepted execution history. Connection/model allowlists still govern execution.
+
+Registry providers can set `anthropic.auth` (`api-key` or `oauth`), `cacheTtl`
+(`5m`, `1h`, or `off`), `maxOutputTokens`, and `streamIdleTimeoutMs`. API keys use
+`x-api-key`; subscription tokens use Bearer authentication and the OAuth beta.
+Up to four cache breakpoints cover tools, instructions, the prefix before the
+latest assistant reply, and current history. The previous prefix remains directly
+addressable when a large tool batch exceeds the server's 20-block lookback.
+Signed thinking is never marked; canonical history is unchanged. One TTL applies
+to every marker: mixed TTLs and `scope: global` are not implemented. This is not
+a guarantee of a hit: prefix changes, expiration and minimum cache sizes still apply.
+Usage includes fresh input, cache reads, cache writes and output. Per-response SDK
+usage preserves reported 5-minute and 1-hour creation counts separately; downstream
+durable telemetry and UI currently show aggregate writes. Registry pricing has one
+cache-write rate, which must match its configured TTL (do not use a 5-minute write
+price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
+billing; OpenGeni does not debit these tokens as credits.
+Organization connections use conservative 200k context / 168k
+input / 150k compaction limits and 32k maximum output; configurable registry
+providers can declare model-specific limits. The managed connection catalog enables
+reasoning only for the captured adaptive models `claude-opus-5-5` and
+`claude-sonnet-5-5`; other model IDs
+remain available without a reasoning option. Registry providers can explicitly
+declare additional verified model capabilities. Invalid streams fail closed, incomplete tools
+are never executed, and truncated compaction summaries are rejected. The adapter
+does not silently retry failed requests or rotate credentials.
+
+
+### Claude subscription request identity
+
+OAuth requests use the pinned Claude Code 2.1.285 / Agent SDK 0.3.276 profile in
+`packages/runtime/src/claude-code-identity.ts`: `beta=true`, CLI user-agent,
+Stainless SDK 0.127.0, macOS/arm64 and Node v26.3.0 headers, `x-app: cli`, and
+the captured v2d dispatch selector. These are compatibility headers, not a
+statement about the actual worker runtime. API-key requests do not use this profile.
+
+Subscription connections also require the real account UUID and device ID from
+`oauthAccount.accountUuid` and `userID` in the signed-in machine's `~/.claude.json`.
+Both are encrypted with the token in the existing credential column; API reads
+return neither. Legacy token-only connections must be replaced with this metadata
+before use. Registry OAuth providers supply the same fields through
+`anthropic.identity`. Never hardcode a user's account IDs into source or borrow
+another connection's identity. The worker passes its stable session cache key to
+native Claude, preserving session identity across turns and activity retries;
+prompt IDs persist through the run's tool loop and client request IDs are fresh.
+
+Billing attribution is a system text block. Its `cc_version` suffix follows the
+locally inspected 2.1.285 fingerprint calculation; previous request and prompt
+IDs describe this request sequence. **The `cch` checksum is not implemented:** its
+algorithm has not been verified. No captured checksum is replayed. A single
+user-approved nonstreaming Opus 5.5 probe on 2026-09-30 returned HTTP 200 and the
+requested text with this profile and no `cch`. Omission therefore did not prevent
+that request; this does not establish a universal requirement or the cause of
+the earlier HTTP 429. The profile is not a byte-exact reproduction. Separately,
+98 completed captured response streams passed offline adapter replay. A user-requested
+full local OpenGeni session subsequently completed an SSB population chart with
+streaming tool loops, signed thinking, cache reads/writes, and retained PNG/SVG/CSV
+artifacts using this profile without `cch`.
+
+The profile enables `claude-code-20250219` and `oauth-2025-04-20`. Thinking requests
+also enable interleaved thinking, thinking token counts, effort, and summarized
+thinking display betas. One-hour caching adds the extended cache TTL beta;
+mid-conversation system messages add their existing beta. Thread, advisor,
+inline-tool, context-management, global-cache-scope and fallback-credit flags
+are not advertised without those features. Normal agent calls stream; title and
+compaction calls remain nonstreaming. The default output ceiling remains 32k,
+within the adapter's conservative context budget, rather than copying 128k from
+an unrelated request. No live subscription probe is part of these tests.

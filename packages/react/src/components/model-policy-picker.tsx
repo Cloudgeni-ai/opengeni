@@ -1,3 +1,5 @@
+import { ClaudeMark } from "./claude-mark";
+import { GrokMark } from "./grok-mark";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
   ChevronDownIcon,
@@ -101,6 +103,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
+    claude_subscription: "Claude plan",
     byok: "Billed to the workspace provider account",
     organization_byok: "Billed to the organization provider account",
   },
@@ -179,17 +182,6 @@ function ChatGptMark(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-function XaiMark(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 466.04 516.93" fill="currentColor" aria-hidden="true" {...props}>
-      <polygon points="0.12 182.71 234.14 516.92 338.15 516.92 104.13 182.71 0.12 182.71" />
-      <polygon points="0 516.92 104.08 516.92 156.08 442.67 104.04 368.34 0 516.92" />
-      <polygon points="466.04 0 361.96 0 182.1 256.86 234.15 331.18 466.04 0" />
-      <polygon points="380.78 516.92 466.04 516.92 466.04 37.16 380.78 158.92 380.78 516.92" />
-    </svg>
-  );
-}
-
 export function BillingClassMark(props: {
   billingClass: PickerBillingClass;
   presentation?: ModelPolicyPickerGroupPresentation[PickerBillingClass] | undefined;
@@ -201,6 +193,7 @@ export function BillingClassMark(props: {
     external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
+    claude_subscription: "Claude",
     byok: "Workspace provider account",
     organization_byok: "Organization provider account",
   };
@@ -229,8 +222,10 @@ export function BillingClassMark(props: {
         <Globe2Icon className={mark} aria-hidden />
       ) : props.billingClass === "codex_subscription" ? (
         <ChatGptMark className={mark} />
+      ) : props.billingClass === "claude_subscription" ? (
+        <ClaudeMark className={mark} />
       ) : props.billingClass === "supergrok_subscription" ? (
-        <XaiMark className={mark} />
+        <GrokMark className={mark} />
       ) : (
         <KeyRoundIcon className={mark} aria-hidden />
       )}
@@ -243,6 +238,10 @@ function isCodexModel(model: ClientModel): boolean {
 }
 
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("workspace-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("workspace-anthropic/")) return "byok";
+  if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
   // A deployment OpenRouter ID does not encode its workspace-facing cost.

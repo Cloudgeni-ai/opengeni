@@ -1,3 +1,11 @@
+import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+import {
+  ClaudeTokenInstructions,
+  useClaudeIdentityFields,
+  CLAUDE_MODEL_CHOICES,
+  claudeModelLabel,
+} from "@/components/models/claude-setup";
+import { Disclosure } from "@/components/ui/disclosure";
 import { trackModelConnection } from "@/lib/analytics-observer";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
@@ -58,13 +66,14 @@ import { apiErrorAdvice, apiErrorDetails, userErrorText } from "@/lib/api-error"
 
 // Workspace API-key providers (Vercel AI Gateway, OpenRouter) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list
-// row, the provider's own page, the Replace key prompt and the Connect page.
+// row, the provider's own page, the Replace credential prompt and the Connect page.
 
 type WorkspaceProviderCustomModel = WorkspaceGatewayCustomModel;
 
 type CustomModelCreateRequest = {
   operationId: string;
   upstreamModelId: string;
+  label?: string;
 };
 
 type CustomModelDeleteRequest = {
@@ -73,19 +82,20 @@ type CustomModelDeleteRequest = {
 };
 
 type ProviderConnectionConfig = {
-  id: "vercel-ai-gateway" | "openrouter";
+  id: "vercel-ai-gateway" | "openrouter" | "anthropic" | "claude_subscription";
   providerDomain: string;
   credentialRole: string;
   credentialLabel: string;
   readinessProvider: string;
   title: string;
-  provider: "vercel" | "openrouter";
+  provider: "vercel" | "openrouter" | "anthropic" | "claude_subscription";
   billedTo: string;
-  analyticsAction: AnalyticsAction;
+  analyticsAction?: AnalyticsAction;
   /** One sentence under the name, for the not-connected row and the Connect page. */
   summary: string;
   /** Where to get a key. */
   keyHelp: string;
+  credentialLabelText?: string;
   billingDescription: string;
   connectionManagerDescription: string;
   keyAriaLabel: string;
@@ -203,6 +213,45 @@ const OPENROUTER_CONFIG: ProviderConnectionConfig = {
     client.deleteWorkspaceOpenRouterCustomModel(workspaceId, customModelId, request),
 };
 
+function claudeWorkspaceConfig(
+  kind: "anthropic" | "claude_subscription",
+): ProviderConnectionConfig {
+  const meta = ORGANIZATION_PROVIDER_META[kind];
+  return {
+    ...meta,
+    id: kind,
+    providerDomain: "api.anthropic.com",
+    credentialRole: kind,
+    credentialLabel: meta.title,
+    readinessProvider:
+      kind === "anthropic" ? "workspace-anthropic" : "workspace-claude-subscription",
+    billedTo:
+      kind === "anthropic"
+        ? "The workspace's Anthropic API account"
+        : "The connected Claude subscription",
+    billingDescription:
+      kind === "anthropic"
+        ? "Anthropic bills this workspace connection's API account."
+        : "Calls use this workspace connection's Claude subscription limits.",
+    connectionManagerDescription:
+      "Members with connection-management access manage this workspace connection.",
+    keyPlaceholder: () => (kind === "anthropic" ? "sk-ant-api…" : "sk-ant-oat…"),
+    customModelsDescription:
+      "Choose models for this workspace. Availability depends on the connected account.",
+    customModelConnectedHelp:
+      "The model becomes selectable when workspace and connection access allow it.",
+    customModelDisconnectedHelp:
+      "Add models now; they become selectable after you connect this account.",
+    emptyCustomModelsDescription: "Add a Claude model to make it available in this workspace.",
+    listCustomModels: (client, workspaceId) =>
+      client.listWorkspaceClaudeCustomModels(workspaceId, kind),
+    createCustomModel: (client, workspaceId, request) =>
+      client.createWorkspaceClaudeCustomModel(workspaceId, kind, request),
+    deleteCustomModel: (client, workspaceId, modelId, request) =>
+      client.deleteWorkspaceClaudeCustomModel(workspaceId, kind, modelId, request),
+  };
+}
+
 function isProviderConnection(
   connection: ConnectionMetadata,
   config: ProviderConnectionConfig,
@@ -220,11 +269,14 @@ export type ProviderConnectionProps = {
   canManageConnection: boolean;
   canManageCustomModels: boolean;
   onConnectionChange?: (() => void) | undefined;
+  enabled?: boolean;
 };
 
 export const PROVIDER_CONNECTION_CONFIGS = {
   vercel: VERCEL_AI_GATEWAY_CONFIG,
   openrouter: OPENROUTER_CONFIG,
+  anthropic: claudeWorkspaceConfig("anthropic"),
+  claude_subscription: claudeWorkspaceConfig("claude_subscription"),
 } as const;
 
 export type ProviderConnection = ProviderConnectionView;
@@ -236,6 +288,7 @@ export type ProviderPresentation = Pick<
   | "provider"
   | "summary"
   | "keyHelp"
+  | "credentialLabelText"
   | "keyAriaLabel"
   | "customModelsHeading"
   | "customModelsDescription"
@@ -301,10 +354,13 @@ export interface ProviderConnectionView {
   refreshConnection(): Promise<unknown>;
   refreshCustomModels(): Promise<unknown>;
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  saveKey(apiKey: string): Promise<boolean>;
+  saveKey(
+    apiKey: string,
+    claudeIdentity?: { accountUuid: string; deviceId: string },
+  ): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
-  addCustomModel(): Promise<void>;
+  addCustomModel(upstreamModelId?: string): Promise<void>;
   removeCustomModel(model: CustomModelLike): Promise<boolean>;
 }
 
@@ -320,6 +376,7 @@ export function useProviderConnection(
 } {
   const client = props.client;
   const config = props.config;
+  const enabled = props.enabled !== false;
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [readOnlyConnected, setReadOnlyConnected] = useState(false);
   const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
@@ -382,6 +439,7 @@ export function useProviderConnection(
   const refreshCustomModels = useCallback(async (): Promise<
     WorkspaceProviderCustomModel[] | null
   > => {
+    if (!enabled) return null;
     const requestGeneration = ++customModelsRequestGenerationRef.current;
     try {
       const result = await config.listCustomModels(client, props.workspaceId);
@@ -400,9 +458,10 @@ export function useProviderConnection(
       setCustomModelsLoaded(true);
       return null;
     }
-  }, [client, config, props.workspaceId]);
+  }, [client, config, props.workspaceId, enabled]);
 
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
+    if (!enabled) return null;
     const requestGeneration = ++connectionRequestGenerationRef.current;
     try {
       if (props.canManageConnection) {
@@ -439,7 +498,7 @@ export function useProviderConnection(
       setLoaded(true);
       return null;
     }
-  }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId]);
+  }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId, enabled]);
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshConnection(), refreshCustomModels()]);
@@ -471,13 +530,24 @@ export function useProviderConnection(
   }, [customModels, modelPendingRemoval]);
 
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  async function saveKey(apiKey: string): Promise<boolean> {
-    const value = apiKey.trim();
-    if (!value) return false;
-    const recordOutcome = trackModelConnection(
-      config.id === "openrouter" ? "openrouter" : "ai-gateway",
-      props.workspaceId,
-    );
+  async function saveKey(
+    apiKey: string,
+    claudeIdentity?: { accountUuid: string; deviceId: string },
+  ): Promise<boolean> {
+    const token = apiKey.trim();
+    if (!token || !enabled || !props.canManageConnection || busy) return false;
+    if (config.id === "claude_subscription" && !claudeIdentity) return false;
+    const value =
+      config.id === "claude_subscription"
+        ? JSON.stringify({ version: 1, token, identity: claudeIdentity })
+        : token;
+    const recordOutcome =
+      config.id === "openrouter" || config.id === "vercel-ai-gateway"
+        ? trackModelConnection(
+            config.id === "openrouter" ? "openrouter" : "ai-gateway",
+            props.workspaceId,
+          )
+        : () => {};
     const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -549,6 +619,7 @@ export function useProviderConnection(
 
   /** Resolves true once no active key remains; toasts either way. */
   async function disconnect(): Promise<boolean> {
+    if (!enabled || !props.canManageConnection || busy) return false;
     if (!connection) return false;
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -597,9 +668,16 @@ export function useProviderConnection(
     }
   }
 
-  async function addCustomModel() {
-    if (modelBusy || !modelSlugValid || modelSlugExists) return;
-    const submittedSlug = modelSlug;
+  async function addCustomModel(upstreamModelId?: string) {
+    if (!enabled || !props.canManageCustomModels || modelBusy) return;
+    const submittedSlug = upstreamModelId ?? modelSlug;
+    if (
+      !submittedSlug ||
+      submittedSlug.length > WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH ||
+      !/^[!-{}-~]+$/.test(submittedSlug) ||
+      customModels.some((model) => model.upstreamModelId === submittedSlug)
+    )
+      return;
     const pending = pendingModelCreateRef.current;
     const operationId =
       pending?.upstreamModelId === submittedSlug ? pending.operationId : crypto.randomUUID();
@@ -634,6 +712,10 @@ export function useProviderConnection(
         config.createCustomModel(client, props.workspaceId, {
           operationId,
           upstreamModelId: submittedSlug,
+          ...((config.provider === "anthropic" || config.provider === "claude_subscription") &&
+          claudeModelLabel(submittedSlug) !== submittedSlug
+            ? { label: claudeModelLabel(submittedSlug) }
+            : {}),
         });
       let saved: WorkspaceProviderCustomModel;
       try {
@@ -663,6 +745,7 @@ export function useProviderConnection(
   }
 
   async function removeCustomModel(model: WorkspaceProviderCustomModel): Promise<boolean> {
+    if (!enabled || !props.canManageCustomModels) return false;
     const modelIndex = customModels.findIndex((candidate) => candidate.id === model.id);
     const focusModelId =
       customModels[modelIndex + 1]?.id ?? customModels[modelIndex - 1]?.id ?? null;
@@ -739,17 +822,17 @@ export function useProviderConnection(
     accessTarget: {
       client,
       workspaceId: props.workspaceId,
-      kind: config.credentialRole === "openrouter" ? "openrouter" : "vercel_gateway",
+      kind: config.provider === "vercel" ? "vercel_gateway" : config.provider,
       connectionId: "current",
     },
-    canManageConnection: props.canManageConnection,
-    canManageCustomModels: props.canManageCustomModels,
+    canManageConnection: enabled && props.canManageConnection,
+    canManageCustomModels: enabled && props.canManageCustomModels,
     connection,
     connected,
     loaded,
     customModelsLoaded,
-    settled,
-    hidden,
+    settled: !enabled || settled,
+    hidden: !enabled || hidden,
     error,
     customModelsError,
     customModels,
@@ -827,15 +910,19 @@ export function ProviderConnectionRow({
   const status = providerStatus(state);
   const models = state.customModels.length;
   const modelsLabel =
-    models === 0 ? null : models === 1 ? "1 custom model" : `${models} custom models`;
+    models === 0 ? "Choose models" : models === 1 ? "1 model" : `${models} models`;
   if (status.status === "loading") return <ListRowSkeleton count={1} />;
   return (
     <ListRow
       leading={<ProviderTile provider={config.provider} size="lg" />}
       title={config.title}
       meta={[
-        status.status === "connected" ? "API key" : status.label,
-        modelsLabel ?? (status.status === "connected" ? "Pay per token" : null),
+        status.status === "connected"
+          ? config.provider === "claude_subscription"
+            ? "Claude plan"
+            : "API key"
+          : status.label,
+        modelsLabel,
       ]}
       indicator={
         status.status === "unavailable" ? { kind: "unavailable", label: "Couldn't load" } : "open"
@@ -852,6 +939,7 @@ export function ProviderConnectionRow({
 function CustomModels({ state }: { state: ProviderConnection }) {
   const { config } = state;
   const modelSlugHelpId = useId();
+  const isClaude = config.provider === "anthropic" || config.provider === "claude_subscription";
   const readiness = state.error
     ? config.unavailableModelDescription
     : state.connected
@@ -860,59 +948,87 @@ function CustomModels({ state }: { state: ProviderConnection }) {
   return (
     <DetailSection title={config.customModelsHeading} description={config.customModelsDescription}>
       <div className="flex min-w-0 flex-col gap-4">
-        {state.canManageCustomModels ? (
-          <div ref={state.addWorkflowRef} className="flex min-w-0 flex-col gap-1.5">
-            <div className="flex min-w-0 gap-2">
-              <TextInput
-                ref={state.modelInputRef}
-                mono
-                value={state.modelSlug}
-                onChange={(event) => state.setModelSlug(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !state.modelBusy) {
-                    event.preventDefault();
-                    void state.addCustomModel();
-                  }
-                }}
-                disabled={state.modelBusy}
-                className="min-w-0 flex-1"
-                placeholder={config.customModelPlaceholder}
-                aria-label={config.customModelInputAriaLabel}
-                aria-describedby={modelSlugHelpId}
-                aria-invalid={state.modelSlugInvalid || undefined}
-                autoComplete="off"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
+        {isClaude && state.canManageCustomModels ? (
+          <SettingRowGroup>
+            {CLAUDE_MODEL_CHOICES.filter(
+              (model) =>
+                !state.customModels.some((current) => current.upstreamModelId === model.id),
+            ).map((model) => (
+              <SettingRow
+                key={model.id}
+                label={model.label}
+                description="Available if included in your account"
+                control={
+                  <RowButton
+                    disabled={state.modelBusy || !state.customModelsLoaded}
+                    onClick={() => void state.addCustomModel(model.id)}
+                  >
+                    <PlusIcon aria-hidden="true" />
+                    Add
+                  </RowButton>
+                }
               />
-              <Button
-                type="button"
-                variant="outline"
-                disabled={state.modelBusy || !state.modelSlugValid || state.modelSlugExists}
-                onClick={() => void state.addCustomModel()}
-                className="h-9 rounded-[10px] pointer-coarse:h-11"
+            ))}
+          </SettingRowGroup>
+        ) : null}
+        {state.canManageCustomModels ? (
+          <Disclosure
+            title={isClaude ? "Add another Claude model" : "Add a custom model"}
+            defaultOpen={!isClaude}
+          >
+            <div ref={state.addWorkflowRef} className="flex min-w-0 flex-col gap-1.5">
+              <div className="flex min-w-0 gap-2">
+                <TextInput
+                  ref={state.modelInputRef}
+                  mono
+                  value={state.modelSlug}
+                  onChange={(event) => state.setModelSlug(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !state.modelBusy) {
+                      event.preventDefault();
+                      void state.addCustomModel();
+                    }
+                  }}
+                  disabled={state.modelBusy}
+                  className="min-w-0 flex-1"
+                  placeholder={config.customModelPlaceholder}
+                  aria-label={config.customModelInputAriaLabel}
+                  aria-describedby={modelSlugHelpId}
+                  aria-invalid={state.modelSlugInvalid || undefined}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={state.modelBusy || !state.modelSlugValid || state.modelSlugExists}
+                  onClick={() => void state.addCustomModel()}
+                  className="h-9 rounded-[10px] pointer-coarse:h-11"
+                >
+                  {state.modelBusy ? (
+                    <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
+                  ) : (
+                    <PlusIcon aria-hidden="true" />
+                  )}
+                  Add model
+                </Button>
+              </div>
+              <p
+                id={modelSlugHelpId}
+                className={
+                  state.modelSlugInvalid
+                    ? "text-xs leading-4.5 text-danger"
+                    : "text-xs leading-4.5 text-fg-muted"
+                }
+                aria-live="polite"
+                aria-atomic="true"
               >
-                {state.modelBusy ? (
-                  <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
-                ) : (
-                  <PlusIcon aria-hidden="true" />
-                )}
-                Add model
-              </Button>
+                {state.modelSlugHelp}
+              </p>
             </div>
-            <p
-              id={modelSlugHelpId}
-              className={
-                state.modelSlugInvalid
-                  ? "text-xs leading-4.5 text-danger"
-                  : "text-xs leading-4.5 text-fg-muted"
-              }
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              {state.modelSlugHelp}
-            </p>
-          </div>
+          </Disclosure>
         ) : null}
 
         {state.customModelsError ? (
@@ -951,7 +1067,10 @@ function CustomModels({ state }: { state: ProviderConnection }) {
                 key={model.id}
                 role="listitem"
                 label={
-                  <span className="font-mono text-xs font-normal">{model.upstreamModelId}</span>
+                  <span>
+                    {model.label ??
+                      (isClaude ? claudeModelLabel(model.upstreamModelId) : model.upstreamModelId)}
+                  </span>
                 }
                 description={readiness}
                 control={
@@ -1017,7 +1136,6 @@ function CustomModels({ state }: { state: ProviderConnection }) {
   );
 }
 
-/** Replace key: a one-field prompt. */
 export function ReplaceKeyDialog({
   state,
   open,
@@ -1029,25 +1147,30 @@ export function ReplaceKeyDialog({
 }) {
   const [key, setKey] = useState("");
   const { config } = state;
+  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
+  const resetIdentity = claude.reset;
   useEffect(() => {
-    if (!open) setKey("");
-  }, [open]);
+    if (!open) {
+      setKey("");
+      resetIdentity();
+    }
+  }, [open, resetIdentity]);
   return (
     <FormDialog
       open={open}
       onOpenChange={onOpenChange}
       size="sm"
       leading={<ProviderTile provider={config.provider} />}
-      title={`Replace the ${config.title} key`}
-      description="New work uses the new key right away. Work already running finishes on the old one."
-      submitLabel="Replace key"
+      title={`Replace the ${config.title} ${config.credentialLabelText === "Setup token" ? "token" : "key"}`}
+      description="New work uses the new credential right away. Work already running finishes on the old one."
+      submitLabel={config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
       pendingLabel="Saving…"
-      submitDisabled={!key.trim()}
-      onSubmit={async () => await state.saveKey(key)}
+      submitDisabled={!key.trim() || !claude.valid}
+      onSubmit={async () => await state.saveKey(key, claude.identity)}
       onSubmitted={() => onOpenChange(false)}
     >
       <Field
-        label="API key"
+        label={config.credentialLabelText ?? "API key"}
         hint={`${config.keyHelp} It's stored encrypted and never shown again.`}
       >
         <SecretInput
@@ -1057,6 +1180,7 @@ export function ReplaceKeyDialog({
           onChange={(event) => setKey(event.target.value)}
         />
       </Field>
+      {claude.fields}
     </FormDialog>
   );
 }
@@ -1081,10 +1205,12 @@ export function ProviderDisconnectDialog({
       title={`Disconnect ${config.title}?`}
       consequences={[
         models > 0
-          ? `Models billed to this key, including ${models === 1 ? "its custom model" : `its ${models} custom models`}, stop working for new work.`
+          ? `The ${models === 1 ? "model" : `${models} models`} using this connection stop working for new work.`
           : `Models billed to ${config.title} stop working for new work.`,
         "Work already running finishes first.",
-        "The key is deleted. You'll need a new one to reconnect.",
+        config.provider === "claude_subscription"
+          ? "The saved token is removed from OpenGeni. Your Claude subscription stays active."
+          : "The saved API key is removed from OpenGeni. You can reconnect with a valid key.",
       ]}
       confirmLabel="Disconnect"
       pendingLabel="Disconnecting…"
@@ -1151,13 +1277,21 @@ export function ProviderConnectionPage({
           </StatusBadge>
         )
       }
-      meta={["API key", scopeName ?? state.scopeLabel]}
+      meta={[
+        config.provider === "claude_subscription" ? "Claude plan" : "API key",
+        scopeName ?? state.scopeLabel,
+      ]}
       actions={
         state.canManageConnection ? (
           state.connected ? (
             <>
-              <RowButton onClick={() => setReplacing(true)} disabled={state.busy}>
-                Replace key
+              <RowButton
+                onClick={() =>
+                  config.provider === "claude_subscription" ? onConnect() : setReplacing(true)
+                }
+                disabled={state.busy}
+              >
+                {config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
                 <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
@@ -1189,8 +1323,17 @@ export function ProviderConnectionPage({
       <DetailPageBody
         aside={
           <DetailAside label={`About ${config.title}`}>
-            <DetailAsideItem label="Key" icon={<KeyRoundIcon />}>
-              {state.connected ? "Stored encrypted" : "No key yet"}
+            <DetailAsideItem
+              label={config.credentialLabelText ?? "API key"}
+              icon={<KeyRoundIcon />}
+            >
+              {status.status === "loading"
+                ? "Loading…"
+                : status.status === "unavailable"
+                  ? "Unavailable"
+                  : state.connected
+                    ? "Stored encrypted"
+                    : "Not connected"}
             </DetailAsideItem>
             <DetailAsideItem
               label="Belongs to"
@@ -1226,6 +1369,14 @@ export function ProviderConnectionPage({
         {!state.canManageConnection ? (
           <DetailSection>
             <p className="text-sm text-fg-muted">{config.connectionManagerDescription}</p>
+          </DetailSection>
+        ) : null}
+        {config.provider === "claude_subscription" ? (
+          <DetailSection title="Subscription">
+            <p className="text-sm text-fg-muted">
+              Model calls use your Claude plan. Usage limits and renewal are managed in Claude.
+              Replace the token here if it expires or is revoked.
+            </p>
           </DetailSection>
         ) : null}
         <CustomModels state={state} />
@@ -1267,28 +1418,45 @@ export function ProviderConnectPage({
 }) {
   const { config } = state;
   const [key, setKey] = useState("");
+  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
   return (
     <ModelsFormPage
-      title={`Connect ${config.title}`}
+      backLabel={state.connected ? config.title : "Models"}
+      headerAside={<ProviderTile provider={config.provider} />}
+      title={
+        state.connected
+          ? `Replace ${config.provider === "claude_subscription" ? "Claude token" : config.title + " API key"}`
+          : `Connect ${config.title}`
+      }
       description={config.summary}
       onClose={onClose}
-      submitLabel={`Connect ${config.title}`}
+      submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
-      submitDisabled={!key.trim() || !state.canManageConnection}
+      submitDisabled={!key.trim() || !claude.valid || !state.canManageConnection}
       disabledReason={
         state.canManageConnection
           ? undefined
           : "Only people who can manage connections can add a key."
       }
-      footerStart={footerStart}
-      onSubmit={async () => await state.saveKey(key)}
+      footerStart={
+        footerStart ??
+        (state.organization
+          ? "Shared with your organization’s workspaces. You can limit access on the account page."
+          : undefined)
+      }
+      onSubmit={async () => await state.saveKey(key, claude.identity)}
       onSubmitted={onConnected}
     >
       <FieldStack>
+        {config.provider === "claude_subscription" ? <ClaudeTokenInstructions /> : null}
         <Field
-          label="API key"
-          hint={`${config.keyHelp} It's stored encrypted and never shown again. Connecting doesn't run a model or spend credits.`}
+          label={config.credentialLabelText ?? "API key"}
+          hint={
+            config.provider === "claude_subscription"
+              ? "Paste the setup token from Claude Code. It is stored encrypted. Connecting makes no model calls."
+              : `${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`
+          }
         >
           <SecretInput
             value={key}
@@ -1297,6 +1465,7 @@ export function ProviderConnectPage({
             onChange={(event) => setKey(event.target.value)}
           />
         </Field>
+        {claude.fields}
       </FieldStack>
     </ModelsFormPage>
   );

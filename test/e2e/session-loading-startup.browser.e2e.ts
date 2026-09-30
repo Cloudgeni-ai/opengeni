@@ -717,6 +717,9 @@ for (const width of [1280, 390]) {
       for (const phase of ["config", "access", "detail", "history"] as const) {
         await state.gates[phase].entered;
         await page.locator("[data-page-loading]").waitFor();
+        // Compare the same font metrics across staged API transitions. A cold
+        // font swap can otherwise move the first anchor before any transition.
+        if (anchor === null) await page.evaluate(() => document.fonts.ready.then(() => {}));
         const loading = page.locator("[data-page-loading]");
         const box = await loading.boundingBox();
         assert(box);

@@ -1,6 +1,10 @@
 import { modelAllowedByConnections, type ConnectionModelRestrictions } from "@opengeni/db";
 import {
   applyModelCatalogDocument,
+  CLAUDE_CONNECTION_KINDS,
+  claudeProviderId,
+  withClaudeConnectionCatalog,
+  type ClaudeConnectionCatalog,
   configuredGatewayWorkspaceProductModelIds,
   configuredGatewayOrganizationProductModelIds,
   configuredModels,
@@ -33,6 +37,9 @@ import {
 } from "@opengeni/contracts";
 import {
   getDeploymentModelCatalog,
+  listWorkspaceProviderCustomModels,
+  getWorkspaceProviderCustomModelForExecution,
+  lockActiveWorkspaceProviderCustomModelForAdmission,
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
   getOrganizationModelProviderCustomModelForExecution,
@@ -40,8 +47,6 @@ import {
   listWorkspaceOpenRouterCustomModels,
   listOrganizationModelProviderCustomModelsForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
-  lockActiveWorkspaceGatewayCustomModelForAdmission,
-  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   type Database,
 } from "@opengeni/db";
 
@@ -73,7 +78,7 @@ export function isWorkspaceOpenRouterCustomModelId(settings: Settings, modelId: 
 
 export type WorkspaceCustomModelReference = {
   scope: "workspace" | "organization";
-  providerKind: "vercel_gateway" | "openrouter";
+  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
   upstreamModelId: string;
 };
 
@@ -81,6 +86,16 @@ export function workspaceCustomModelReference(
   settings: Settings,
   modelId: string,
 ): WorkspaceCustomModelReference | null {
+  for (const scope of ["workspace", "organization"] as const)
+    for (const kind of CLAUDE_CONNECTION_KINDS) {
+      const prefix = claudeProviderId(kind, scope) + "/";
+      if (modelId.startsWith(prefix))
+        return {
+          scope,
+          providerKind: kind,
+          upstreamModelId: modelId.slice(prefix.length),
+        };
+    }
   if (isWorkspaceGatewayCustomModelId(settings, modelId)) {
     return {
       scope: "workspace",
@@ -141,17 +156,12 @@ export async function lockActiveCustomModelForAdmission(
     );
   }
   return Boolean(
-    input.reference.providerKind === "openrouter"
-      ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          upstreamModelId: input.reference.upstreamModelId,
-        })
-      : await lockActiveWorkspaceGatewayCustomModelForAdmission(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          upstreamModelId: input.reference.upstreamModelId,
-        }),
+    await lockActiveWorkspaceProviderCustomModelForAdmission(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      providerKind: input.reference.providerKind,
+      upstreamModelId: input.reference.upstreamModelId,
+    }),
   );
 }
 
@@ -348,17 +358,67 @@ export async function resolveWorkspaceCatalogSettings(
     organizationOpenRouterCustomModels,
     retainedOrganizationOpenRouterCustomModels,
   );
+  const claudeConnections: ClaudeConnectionCatalog = {};
+  if (supportsOrganizationProviderReads)
+    for (const kind of CLAUDE_CONNECTION_KINDS) {
+      const models = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKind: kind,
+      });
+      const prefix = claudeProviderId(kind) + "/";
+      for (const productId of retainedProductModelIds)
+        if (productId?.startsWith(prefix)) {
+          const retained = await getOrganizationModelProviderCustomModelForExecution(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: kind,
+            upstreamModelId: productId.slice(prefix.length),
+          });
+          if (retained && !models.some((model) => model.id === retained.id)) models.push(retained);
+        }
+      claudeConnections[kind] = { models };
+    }
+  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+  if (supportsOrganizationProviderReads)
+    for (const kind of CLAUDE_CONNECTION_KINDS) {
+      if (kind === "claude_subscription" && !resolved.settings.claudeSubscriptionEnabled) continue;
+      const models = await listWorkspaceProviderCustomModels(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKind: kind,
+      });
+      const prefix = claudeProviderId(kind, "workspace") + "/";
+      for (const productId of retainedProductModelIds) {
+        if (!productId?.startsWith(prefix)) continue;
+        const retained = await getWorkspaceProviderCustomModelForExecution(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          providerKind: kind,
+          upstreamModelId: productId.slice(prefix.length),
+        });
+        if (retained && !models.some((model) => model.id === retained.id)) models.push(retained);
+      }
+      workspaceClaudeConnections[kind] = { models };
+    }
   return {
     ...resolved,
-    settings: withOrganizationOpenRouterCatalogProvider(
-      withOrganizationGatewayCatalogProvider(
-        withWorkspaceOpenRouterCatalogProvider(
-          withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
-          openRouterCustomModels,
+    settings: withClaudeConnectionCatalog(
+      withClaudeConnectionCatalog(
+        withOrganizationOpenRouterCatalogProvider(
+          withOrganizationGatewayCatalogProvider(
+            withWorkspaceOpenRouterCatalogProvider(
+              withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
+              openRouterCustomModels,
+            ),
+            organizationGatewayModels,
+          ),
+          organizationOpenRouterModels,
         ),
-        organizationGatewayModels,
+        claudeConnections,
       ),
-      organizationOpenRouterModels,
+      workspaceClaudeConnections,
+      "workspace",
     ),
   };
 }
@@ -388,6 +448,8 @@ export type WorkspaceModelSelectionInput = {
   xaiSubscriptionActive?: boolean;
   workspaceGatewayConnectionActive?: boolean;
   workspaceOpenRouterConnectionActive?: boolean;
+  claudeConnections?: ClaudeConnectionCatalog;
+  workspaceClaudeConnections?: ClaudeConnectionCatalog;
   organizationGatewayConnectionActive?: boolean;
   organizationOpenRouterConnectionActive?: boolean;
   workspaceGatewayCustomModels?: readonly {
@@ -488,6 +550,8 @@ function credentialReadinessFor(input: {
   xaiSubscriptionActive: boolean;
   workspaceGatewayConnectionActive: boolean;
   workspaceOpenRouterConnectionActive: boolean;
+  claudeConnections?: ClaudeConnectionCatalog | undefined;
+  workspaceClaudeConnections?: ClaudeConnectionCatalog | undefined;
   organizationGatewayConnectionActive: boolean;
   organizationOpenRouterConnectionActive: boolean;
   observation: ModelCredentialReadinessObservation | undefined;
@@ -508,8 +572,12 @@ function credentialReadinessFor(input: {
         };
   }
   if (source.kind === "workspace_connection") {
-    const connectionActive =
-      input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+    const claudeKind = CLAUDE_CONNECTION_KINDS.find(
+      (kind) => claudeProviderId(kind, "workspace") === input.model.providerId,
+    );
+    const connectionActive = claudeKind
+      ? input.workspaceClaudeConnections?.[claudeKind]?.active === true
+      : input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
         ? input.workspaceOpenRouterConnectionActive
         : input.workspaceGatewayConnectionActive;
     return connectionActive
@@ -522,8 +590,12 @@ function credentialReadinessFor(input: {
         };
   }
   if (source.kind === "organization_connection") {
-    const connectionActive =
-      input.model.providerId === ORGANIZATION_OPENROUTER_PROVIDER_ID
+    const claudeKind = CLAUDE_CONNECTION_KINDS.find(
+      (kind) => claudeProviderId(kind) === input.model.providerId,
+    );
+    const connectionActive = claudeKind
+      ? input.claudeConnections?.[claudeKind]?.active === true
+      : input.model.providerId === ORGANIZATION_OPENROUTER_PROVIDER_ID
         ? input.organizationOpenRouterConnectionActive
         : input.organizationGatewayConnectionActive;
     return connectionActive
@@ -684,15 +756,25 @@ export function resolveWorkspaceModelSelection(
   const xaiSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(codexSettings)
     : codexSettings;
-  const catalogSettings = withOrganizationOpenRouterCatalogProvider(
-    withOrganizationGatewayCatalogProvider(
-      withWorkspaceOpenRouterCatalogProvider(
-        withWorkspaceGatewayCatalogProvider(xaiSettings, input.workspaceGatewayCustomModels ?? []),
-        input.workspaceOpenRouterCustomModels ?? [],
+  const catalogSettings = withClaudeConnectionCatalog(
+    withClaudeConnectionCatalog(
+      withOrganizationOpenRouterCatalogProvider(
+        withOrganizationGatewayCatalogProvider(
+          withWorkspaceOpenRouterCatalogProvider(
+            withWorkspaceGatewayCatalogProvider(
+              xaiSettings,
+              input.workspaceGatewayCustomModels ?? [],
+            ),
+            input.workspaceOpenRouterCustomModels ?? [],
+          ),
+          input.organizationGatewayCustomModels ?? [],
+        ),
+        input.organizationOpenRouterCustomModels ?? [],
       ),
-      input.organizationGatewayCustomModels ?? [],
+      input.claudeConnections ?? {},
     ),
-    input.organizationOpenRouterCustomModels ?? [],
+    input.workspaceClaudeConnections ?? {},
+    "workspace",
   );
   const providers = new Map(
     configuredProviders(catalogSettings).map((provider) => [provider.id, provider]),
@@ -725,6 +807,8 @@ export function resolveWorkspaceModelSelection(
         xaiSubscriptionActive: input.xaiSubscriptionActive === true,
         workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
         workspaceOpenRouterConnectionActive: input.workspaceOpenRouterConnectionActive === true,
+        claudeConnections: input.claudeConnections,
+        workspaceClaudeConnections: input.workspaceClaudeConnections,
         organizationGatewayConnectionActive: input.organizationGatewayConnectionActive === true,
         organizationOpenRouterConnectionActive:
           input.organizationOpenRouterConnectionActive === true,
