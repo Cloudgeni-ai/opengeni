@@ -193,8 +193,9 @@ for (const reason of ["restore_retry_backoff", "provider_lifetime_unexpired"] as
         throw new Error("unexpected mutation");
       },
     });
+    // Shown to the minute and rounded up, so a Retry at the shown time is never early.
     expect(container.textContent).toContain(
-      `You can retry after ${new Date(availableAt).toLocaleString(undefined, {
+      `You can retry after ${new Date("2026-09-18T07:25:00.000Z").toLocaleString(undefined, {
         dateStyle: "medium",
         timeStyle: "short",
       })}.`,
