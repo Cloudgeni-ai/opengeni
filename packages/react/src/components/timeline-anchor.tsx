@@ -9,6 +9,19 @@ type Anchor = {
 };
 export type TimelineAnchor = Anchor[];
 
+/** Read ownership synchronously: selectionchange may follow the next React commit. */
+export function timelineHasReader(scroller: HTMLElement | null): boolean {
+  if (!scroller) return false;
+  const focused = scroller.ownerDocument.activeElement;
+  const selection = scroller.ownerDocument.getSelection();
+  return Boolean(
+    (focused && focused !== scroller && scroller.contains(focused)) ||
+    (selection &&
+      !selection.isCollapsed &&
+      (scroller.contains(selection.anchorNode) || scroller.contains(selection.focusNode))),
+  );
+}
+
 /** Read the old DOM immediately before React changes it, not when a fetch starts. */
 export class TimelineBeforeLayout extends Component<{
   capture: () => void;

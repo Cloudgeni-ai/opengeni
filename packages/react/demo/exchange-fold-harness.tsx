@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { MessageTimeline, SessionConversation } from "@opengeni/react/session-ui";
 import { latestQuestionClient } from "../test/fixtures/latest-question-client";
 import { SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
@@ -29,7 +30,9 @@ type Draft = { type: string; payload: unknown; turnId: string | null; at: number
 type ExchangeFoldHarness = {
   total: number;
   /** Show the first `count` events of the scripted exchange. */
-  show(count: number): void;
+  show(count: number, synchronous?: boolean): void;
+  /** Mirror SessionConversation's keyed session boundary. */
+  switchSession(): void;
   /**
    * Show events `[start, count)` with older history available before them;
    * loading older history prepends everything before `start`.
@@ -443,6 +446,30 @@ function machineFollowUpScenario(): Draft[] {
 }
 
 const SCENARIOS: Record<string, () => Draft[]> = {
+  overlap: () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Earlier work is still pending." }, null);
+    add("turn.started", {}, "earlier");
+    add(
+      "agent.toolCall.created",
+      { id: "pending", name: "exec_command", arguments: {} },
+      "earlier",
+    );
+    return [...drafts, ...tailScenario().map((draft) => ({ ...draft, at: draft.at + 10 }))];
+  },
+  "startup-recovery": () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Check the signup totals." }, null);
+    add("turn.started", {}, "failed-startup");
+    add("turn.startup.phase.started", { phase: "tools" }, "failed-startup");
+    add(
+      "turn.startup.phase.failed",
+      { phase: "tools", durationMs: 275, error: "Fixture tool setup failed" },
+      "failed-startup",
+    );
+    add("turn.failed", { error: "Fixture tool setup failed" }, "failed-startup");
+    return [...drafts, ...startupTailScenario().map((draft) => ({ ...draft, at: draft.at + 10 }))];
+  },
   startup: startupTailScenario,
   tail: tailScenario,
   delegated: delegatedScenario,
@@ -554,6 +581,7 @@ function App() {
   );
   const drafts = useMemo(() => (SCENARIOS[scenarioName] ?? delegatedScenario)(), [scenarioName]);
   const [count, setCount] = useState(0);
+  const [session, setSession] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
   const [historyMode, setHistoryMode] = useState(false);
   // The regression suite delivers older history on demand, so it can measure
@@ -570,11 +598,23 @@ function App() {
   useEffect(() => {
     window.exchangeFoldHarness = {
       total: drafts.length,
-      show: (value) => {
-        setHistoryMode(false);
-        setPlaying(false);
-        setWindowStart(0);
-        setCount(value);
+      switchSession: () =>
+        flushSync(() => {
+          setSession((value) => value + 1);
+          setCount(0);
+          setWindowStart(0);
+          setHistoryMode(false);
+          setPlaying(false);
+        }),
+      show: (value, synchronous) => {
+        const update = () => {
+          setHistoryMode(false);
+          setPlaying(false);
+          setWindowStart(0);
+          setCount(value);
+        };
+        if (synchronous) flushSync(update);
+        else update();
       },
       showWindow: (start, value) => {
         setHistoryMode(true);
@@ -683,7 +723,7 @@ function App() {
           />
         ) : (
           <MessageTimeline
-            key={compact ? "compact" : "classic"}
+            key={`${session}:${compact ? "compact" : "classic"}`}
             className="h-full"
             events={events}
             turnSummary={{ rolling: compact }}

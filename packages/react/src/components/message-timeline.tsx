@@ -68,6 +68,7 @@ import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
   timelineAnchorCorrection,
+  timelineHasReader,
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
@@ -625,6 +626,11 @@ export function MessageTimeline({
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
   const settlementRef = useRef<TimelineSettlement | null>(null);
+  const settlementAnimationRef = useRef<Animation | null>(null);
+  const stopSettlement = useCallback(() => {
+    settlementAnimationRef.current?.cancel();
+    settlementAnimationRef.current = null;
+  }, []);
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
@@ -632,6 +638,9 @@ export function MessageTimeline({
     () => groupTimeline(resolvedItems, { readableTurns }),
     [resolvedItems, readableTurns],
   );
+  // A new timeline revision (including session/turn replacement) owns layout.
+  // Never leave an old decorative transform running on its retained rows.
+  useLayoutEffect(() => stopSettlement, [projectedGroups, stopSettlement]);
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
     for (const item of resolvedItems) {
@@ -654,6 +663,7 @@ export function MessageTimeline({
   const { groups: allGroups, release: releaseProgress } = useReadingProgress(
     projectedGroups,
     autoFollow && pinned && !hasNewer,
+    scrollRef.current,
   );
   const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
   const canSkipTipCatchupRef = useRef(false);
@@ -912,13 +922,14 @@ export function MessageTimeline({
         node.contains(selection.anchorNode) &&
         node.contains(selection.focusNode)
       ) {
+        stopSettlement();
         releasePinFromReader();
         disclosureKeepsUnpinnedRef.current = true;
       }
     };
     node.ownerDocument.addEventListener("selectionchange", onSelection);
     return () => node.ownerDocument.removeEventListener("selectionchange", onSelection);
-  }, [readableTurns, releasePinFromReader]);
+  }, [readableTurns, releasePinFromReader, stopSettlement]);
 
   /**
    * Settled away from the tip while the camera is idle — Vimium / unfocused
@@ -989,6 +1000,7 @@ export function MessageTimeline({
     if (wheelConsumedByNestedScrollable(event)) {
       return;
     }
+    stopSettlement();
     disclosureKeepsUnpinnedRef.current = false;
     programmaticScrollRef.current = 0;
     if (event.deltaY >= 0) {
@@ -1008,6 +1020,7 @@ export function MessageTimeline({
     if (event.button && event.pointerType === "mouse") {
       return;
     }
+    stopSettlement();
     // Clicks on chips/buttons/links must not arm — their settle collapse
     // also drops scrollTop and would false-unpin. Drag on prose/scroller may.
     if (
@@ -1034,6 +1047,7 @@ export function MessageTimeline({
       event.key === "Home" ||
       event.key === "End"
     ) {
+      stopSettlement();
       disclosureKeepsUnpinnedRef.current = false;
     }
     if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
@@ -1667,7 +1681,7 @@ export function MessageTimeline({
           : null;
     }
 
-    if (settlement) animateTimelineSettlement(settlement);
+    if (settlement) settlementAnimationRef.current = animateTimelineSettlement(settlement);
 
     // Promise settlement is not itself permission to retry. A receipt-marked
     // accepted page retires its exact owner on this commit even when projection
@@ -2197,6 +2211,7 @@ export function MessageTimeline({
                       onScrollEnd={onScrollEnd}
                       onWheel={onWheel}
                       onTouchStart={(event) => {
+                        stopSettlement();
                         const touch = event.touches.length === 1 ? event.touches[0] : undefined;
                         touchPositionRef.current = touch
                           ? { x: touch.clientX, y: touch.clientY }
@@ -2245,6 +2260,7 @@ export function MessageTimeline({
                       }}
                       onFocusCapture={(event) => {
                         if (readableTurns && event.target !== event.currentTarget) {
+                          stopSettlement();
                           releasePinFromReader();
                           disclosureKeepsUnpinnedRef.current = true;
                         }
@@ -2263,6 +2279,9 @@ export function MessageTimeline({
                     >
                       <TimelineBeforeLayout
                         capture={() => {
+                          if (readableTurns && timelineHasReader(scrollRef.current)) {
+                            releasePinFromReader();
+                          }
                           readingAnchorRef.current =
                             !pinnedRef.current && scrollRef.current
                               ? captureTimelineAnchor(scrollRef.current)
@@ -2534,6 +2553,18 @@ export function MessageTimeline({
                           exit={{ opacity: 0, y: 8 }}
                           transition={{ duration: 0.15, ease: "easeOut" }}
                           onClick={() => {
+                            // Returning to the tip explicitly releases reader-owned
+                            // prose. Clear only this timeline's selection before the
+                            // synchronous ownership check on the next commit.
+                            const viewport = scrollRef.current;
+                            const selection = viewport?.ownerDocument.getSelection();
+                            if (
+                              selection &&
+                              !selection.isCollapsed &&
+                              (viewport?.contains(selection.anchorNode) ||
+                                viewport?.contains(selection.focusNode))
+                            )
+                              selection.removeAllRanges();
                             disclosureKeepsUnpinnedRef.current = false;
                             if (hasNewer) {
                               // Do not pin against the current history page — its bottom
