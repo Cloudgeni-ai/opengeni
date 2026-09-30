@@ -40,8 +40,6 @@ export function sanitizedTestEnvironment(
     Object.entries(source).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
   const requireRealDatabase = environment.OPENGENI_REQUIRE_REAL_DB === "1";
-  const nativeDatabaseUrl = environment.OPENGENI_TEST_PG_ADMIN_URL;
-  const nativeAppPassword = environment.OPENGENI_TEST_PG_APP_PASSWORD;
   for (const name of Object.keys(environment)) {
     if (name.startsWith("OPENGENI_")) delete environment[name];
   }
@@ -53,13 +51,6 @@ export function sanitizedTestEnvironment(
   // scrubbed. Local focused checks remain infrastructure-free unless their
   // caller deliberately requires the real database boundary.
   if (requireRealDatabase) environment.OPENGENI_REQUIRE_REAL_DB = "1";
-  // Explicit fixture selection is test configuration, not application state.
-  // shared-pg validates the loopback connection before any native acquisition.
-  if (nativeDatabaseUrl !== undefined) {
-    environment.OPENGENI_TEST_PG_ADMIN_URL = nativeDatabaseUrl;
-    if (nativeAppPassword !== undefined)
-      environment.OPENGENI_TEST_PG_APP_PASSWORD = nativeAppPassword;
-  }
   return environment;
 }
 

@@ -126,7 +126,10 @@ const budgets = {
   // gzip bytes there: main 6eb431b03 measures 80,769 and the head 82,325 on
   // Bun 1.3.14 macOS/arm64. Keep the standard whole-KiB headroom.
   initialFileGzip: wholeKibEnvelope(82_325),
-  initialFiles: 17,
+  // Usage allowances add typed refusal rendering to the session timeline and
+  // usage event types to shared contracts; Rolldown splits one shared members
+  // chunk into two (807 gzip bytes). Aggregate initial gzip stays under its cap.
+  initialFiles: 18,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
   // direct-session raw envelope to the next whole KiB; its gzip, file-count,

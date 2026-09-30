@@ -974,26 +974,6 @@ describe("deterministic bounded execution", () => {
     });
   });
 
-  test("test environments retain explicitly selected native PostgreSQL fixtures", () => {
-    expect(
-      sanitizedTestEnvironment({
-        OPENGENI_TEST_PG_ADMIN_URL: "postgres://fixture@127.0.0.1:61440/postgres",
-        OPENGENI_TEST_PG_APP_PASSWORD: "fixture-password",
-        OPENGENI_OTHER: "application-state",
-      }),
-    ).toEqual({
-      NODE_ENV: "test",
-      OPENGENI_TEST_HERMETIC: "1",
-      OPENGENI_TEST_PG_ADMIN_URL: "postgres://fixture@127.0.0.1:61440/postgres",
-      OPENGENI_TEST_PG_APP_PASSWORD: "fixture-password",
-    });
-    expect(
-      sanitizedTestEnvironment({
-        OPENGENI_TEST_PG_APP_PASSWORD: "unused-without-native-url",
-      }),
-    ).toEqual({ NODE_ENV: "test", OPENGENI_TEST_HERMETIC: "1" });
-  });
-
   test("missing or stale timing evidence falls back to source-byte planning", () => {
     const resolution = integrationShardWeights(process.cwd());
     expect(resolution.mode).toBe("source-bytes");

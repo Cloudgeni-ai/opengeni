@@ -63,11 +63,10 @@ See [client/server compatibility](architecture.md#310-clientserver-compatibility
 
 The database suites use the existing shared fixture and its non-superuser
 application/owner roles. Docker remains the default. To use an already-running
-native PostgreSQL with `pgcrypto` and `vector` available, set
-`OPENGENI_TEST_PG_ADMIN_URL` to a loopback PostgreSQL superuser URL with an explicit
-port, then run the tests with `OPENGENI_REQUIRE_REAL_DB=1`. The native path fails
-closed instead of skipping when its server is unavailable; it still builds a
-fingerprinted template and creates an isolated database for each test file.
+native PostgreSQL with `pgcrypto` and `vector` available, follow the shared
+fixture's `OPENGENI_TEST_PG_NATIVE=1` contract in `packages/testing/src/shared-pg.ts`
+(see `AGENTS.md`); it builds a fingerprinted template and creates an isolated
+database for each test file.
 
 ## Units and enforcement
 
