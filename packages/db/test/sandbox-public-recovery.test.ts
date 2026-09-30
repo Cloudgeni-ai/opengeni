@@ -24,6 +24,8 @@ import {
   markSandboxRestoreVerifying,
   readLease,
   readRecentSandboxRecoveryObservations,
+  reapStaleLeaseHolders,
+  releaseLeaseHolder,
   readPublicSandboxRecovery,
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
@@ -1776,6 +1778,108 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id)).toContain(
       "new empty workspace",
     );
+  });
+
+  test("draining an unpublished fresh box preserves its empty-workspace decision", async () => {
+    const f = await fixture();
+    await withoutAnyArchive(f);
+    const initiator = await claimedAttempt(f, f.session.id);
+    const authorization = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+      ...f.scope,
+      sessionId: f.session.id,
+      attemptId: initiator.attemptId,
+    });
+    if (authorization.status === "not_eligible" || authorization.lane !== "fresh_workspace")
+      throw new Error("expected a fresh-workspace decision");
+    const first = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "unpublished-fresh-box",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    await recordWarmingSandboxCreated(client.db, {
+      ...groupLease(f),
+      expectedEpoch: first.lease.leaseEpoch,
+      rematerializationId: null,
+      instanceId: "unpublished-fresh-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "unpublished-fresh-box" } },
+      },
+      leaseTtlMs: 60_000,
+    });
+    await releaseLeaseHolder(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "unpublished-fresh-box",
+      idleGraceMs: 0,
+    });
+    // The provider create returned, but its worker never published the warm box.
+    await shared.admin`update sandbox_leases set expires_at = now() - interval '1 minute'
+      where workspace_id = ${f.workspaceId} and sandbox_group_id = ${f.session.sandboxGroupId}`;
+    await reapStaleLeaseHolders(client.db, {
+      workspaceId: f.workspaceId,
+      viewerHolderTtlMs: 60_000,
+      idleGraceMs: 0,
+    });
+    const draining = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(draining?.liveness).toBe("draining");
+    expect(
+      await confirmDrainCold(client.db, {
+        ...groupLease(f),
+        expectedEpoch: draining!.leaseEpoch,
+      }),
+    ).toEqual({ wentCold: true });
+    const cold = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(cold?.resumeState?.opengeniFreshWorkspaceRecovery).toMatchObject({
+      status: "accepted",
+      operationId: authorization.operationId,
+    });
+    expect(cold).toMatchObject({
+      instanceId: null,
+      recovery: { restore: { status: "unrecoverable" }, workspace: { status: "unrecoverable" } },
+    });
+    const second = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "retry-unpublished-fresh-box",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(second).toMatchObject({
+      role: "spawner",
+      lease: { freshWorkspaceRecoveryId: authorization.operationId },
+    });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch: second.lease.leaseEpoch,
+        instanceId: "published-fresh-box",
+        leaseTtlMs: 60_000,
+        freshWorkspace: { operationId: authorization.operationId },
+      }),
+    ).toMatchObject({ committed: true });
+    // Once publication consumes the decision, an ordinary archive-free drain
+    // must not perpetually carry a fresh-recovery instruction into later starts.
+    await releaseLeaseHolder(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "retry-unpublished-fresh-box",
+      idleGraceMs: 0,
+    });
+    const publishedDrain = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(publishedDrain?.liveness).toBe("draining");
+    expect(
+      await confirmDrainCold(client.db, {
+        ...groupLease(f),
+        expectedEpoch: publishedDrain!.leaseEpoch,
+      }),
+    ).toEqual({ wentCold: true });
+    expect(
+      (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.resumeState,
+    ).toBeNull();
   });
 
   test("a failed empty create keeps the decision; the next spawner still publishes an empty box", async () => {
