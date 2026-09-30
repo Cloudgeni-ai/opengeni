@@ -10,11 +10,14 @@ export function confinedFileReadScript(root: string, path: string, maxBytes: num
     "fds = []",
     "try:",
     "    if not root.startswith('/') or not hasattr(os, 'O_NOFOLLOW'): raise ValueError()",
-    "    parts = root.split('/') + path.split('/')",
-    "    if any(p == '..' for p in parts): raise ValueError()",
+    // The root is trusted (the session's workspace); canonicalize it once so a
+    // platform symlink in its ancestry (macOS /var -> /private/var) is allowed.
+    // Only the caller-supplied path is walked without following links.
+    "    parts = path.split('/')",
+    "    if path.startswith('/') or any(p == '..' for p in parts): raise ValueError()",
     "    parts = [p for p in parts if p not in ('', '.')]",
     "    if not parts: raise ValueError()",
-    "    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)",
+    "    fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY)",
     "    fds.append(fd)",
     "    for part in parts[:-1]:",
     "        expected = os.stat(part, dir_fd=fd, follow_symlinks=False)",
