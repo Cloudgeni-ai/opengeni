@@ -1800,6 +1800,13 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
+  // Turn identity and settlement exist even when a final-only turn has no
+  // disclosure. A late receipt must not become a new turn or revive its clock.
+  const seenTurns = new Set<string>();
+  const settlements = new Map<
+    string,
+    { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
+  >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
   const messages = new Map<string, AgentMessageItem[]>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
@@ -1812,15 +1819,19 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
     if (
-      (("turnId" in item && item.turnId) ||
-        isActivityItem(item) ||
-        (item.kind === "agent-message" && item.text.trim())) &&
-      key !== currentTurn &&
-      !turns.has(key)
+      ("turnId" in item && item.turnId) ||
+      isActivityItem(item) ||
+      (item.kind === "agent-message" && item.text.trim())
     ) {
-      const previous = turns.get(currentTurn);
-      if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
-      currentTurn = key;
+      if (key !== currentTurn && !seenTurns.has(key)) {
+        const previous = turns.get(currentTurn);
+        if (!settlements.has(currentTurn)) {
+          settlements.set(currentTurn, { endedAt: item.occurredAt });
+        }
+        if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
+        currentTurn = key;
+      }
+      seenTurns.add(key);
     }
     const workForTurn = () => {
       let group = turns.get(key);
@@ -1831,14 +1842,25 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           ? messageStart
           : item.occurredAt;
       if (!group) {
+        const settlement = settlements.get(key);
         group = {
           kind: "activity",
           id: `work-${key}`,
           items: [],
           work: { startedAt, details: [] },
         };
+        if (settlement) {
+          group.work!.endedAt = settlement.endedAt;
+          if (settlement.outcome) group.outcome = settlement.outcome;
+          if (settlement.failureText) group.failureText = settlement.failureText;
+        }
         turns.set(key, group);
-        groups.push(group);
+        const firstMessageIndex =
+          settlement && firstMessage
+            ? groups.findIndex((entry) => entry.kind === "item" && entry.item === firstMessage)
+            : -1;
+        if (firstMessageIndex >= 0) groups.splice(firstMessageIndex, 0, group);
+        else groups.push(group);
       } else if (Date.parse(startedAt) < Date.parse(group.work!.startedAt)) {
         // Completion-only startup receipts can reveal an earlier phase start
         // after another activity has already established the work row.
@@ -1863,6 +1885,13 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
     } else if (item.kind === "turn-end") {
+      if (!item.resumedAt) {
+        settlements.set(key, {
+          endedAt: item.occurredAt,
+          outcome: item.outcome,
+          ...(item.failureText ? { failureText: item.failureText } : {}),
+        });
+      }
       const group = turns.get(key);
       if (group?.work) {
         if (item.resumedAt) {
@@ -1944,7 +1973,11 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         messages.set(key, prose);
         // A text-only turn still has one overall activity surface. An explicit
         // final-only response does not manufacture an empty work disclosure.
-        if (item.phase !== "final_answer" || prose.length > 1) workForTurn();
+        if (
+          (item.phase !== "final_answer" || prose.length > 1) &&
+          (turns.has(key) || !settlements.has(key))
+        )
+          workForTurn();
       }
     }
   }

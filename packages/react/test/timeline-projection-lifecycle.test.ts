@@ -29,6 +29,51 @@ const prose = (groups: TimelineGroup[]) =>
   );
 
 describe("projection lifecycle audit regressions", () => {
+  for (const newerTurn of [false, true]) {
+    test(`a late final-only receipt cannot create live old work (newer turn=${newerTurn})`, () => {
+      const events = [
+        event(1, "agent.message.completed", {
+          messageId: "first",
+          phase: "final_answer",
+          text: "Original final",
+        }),
+        event(2, "turn.completed"),
+        ...(newerTurn
+          ? [event(3, "agent.message.delta", { messageId: "next", text: "New work" }, "turn-2")]
+          : []),
+        event(4, "agent.message.completed", {
+          messageId: "late",
+          phase: "final_answer",
+          text: "Late final",
+        }),
+      ];
+      const groups = fold(events);
+      expect(work(groups).map((group) => group.id)).toEqual(newerTurn ? ["work-turn-2"] : []);
+      if (newerTurn) expect(work(groups)[0]!.work!.endedAt).toBeUndefined();
+      expect(prose(groups)).toEqual(
+        newerTurn ? ["Original final", "New work", "Late final"] : ["Original final", "Late final"],
+      );
+    });
+  }
+
+  test("a seen final-only turn cannot settle its successor even without the old end receipt", () => {
+    const groups = fold([
+      event(1, "agent.message.completed", {
+        messageId: "first",
+        phase: "final_answer",
+        text: "Original final",
+      }),
+      event(3, "agent.message.delta", { messageId: "next", text: "New work" }, "turn-2"),
+      event(4, "agent.message.completed", {
+        messageId: "late",
+        phase: "final_answer",
+        text: "Late final",
+      }),
+    ]);
+    expect(work(groups).map((group) => group.id)).toEqual(["work-turn-2"]);
+    expect(work(groups)[0]!.work!.endedAt).toBeUndefined();
+  });
+
   test("startup details cannot coalesce across intervening folded prose", () => {
     const groups = fold([
       event(1, "turn.startup.phase.completed", { phase: "tools", durationMs: 200 }),
