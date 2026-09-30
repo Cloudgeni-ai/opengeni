@@ -25,6 +25,7 @@ import {
   useOrganizationInvitations,
 } from "@/components/organization-invitations";
 import { useRail } from "@/components/rail/rail-context";
+import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -69,6 +70,7 @@ export function RailFooter() {
     context.accessContext.subjectId;
   const secondary = context.authSession?.user.email ?? context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
+  const newOrganization = useNewOrganizationMenuItem();
   const organizationInvitations = useOrganizationInvitations({
     client: context.client,
     enabled: managed && !browserAccounts,
@@ -168,6 +170,7 @@ export function RailFooter() {
                 {managed ? (
                   <OrganizationInvitationsMenuItem controller={organizationInvitations} />
                 ) : null}
+                {newOrganization.item}
                 <AppearanceMenu />
                 {managed ? (
                   <DropdownMenuItem asChild>
@@ -266,6 +269,7 @@ export function RailFooter() {
       {managed && !browserAccounts ? (
         <OrganizationInvitationsDialog controller={organizationInvitations} />
       ) : null}
+      {newOrganization.dialog}
     </div>
   );
 }

@@ -40,6 +40,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useRail } from "@/components/rail/rail-context";
+import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
   OrganizationInvitationCountBadge,
@@ -89,6 +90,7 @@ export function BrowserAccountMenu() {
     context.authSession?.user.email ??
     context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
+  const newOrganization = useNewOrganizationMenuItem();
   const organizationInvitations = useOrganizationInvitations({
     client: context.client,
     enabled: true,
@@ -319,6 +321,7 @@ export function BrowserAccountMenu() {
             className="forced-colors:text-[CanvasText]!"
             disabled={busy}
           />
+          {newOrganization.item}
           <AppearanceMenu />
           <DropdownMenuItem asChild disabled={busy}>
             <Link to="/settings/security">
@@ -366,6 +369,7 @@ export function BrowserAccountMenu() {
       </DropdownMenu>
 
       <OrganizationInvitationsDialog controller={organizationInvitations} />
+      {newOrganization.dialog}
 
       <Dialog open={logoutTarget !== null} onOpenChange={(open) => !open && setLogoutTarget(null)}>
         <DialogContent className="motion-reduce:duration-0">

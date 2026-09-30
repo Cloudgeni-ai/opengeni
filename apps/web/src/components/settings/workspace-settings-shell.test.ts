@@ -314,9 +314,9 @@ describe("settings rail", () => {
       const labels = menuItems().map((item) => item.textContent ?? "");
       expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
       expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
-      expect(labels).toContain("New workspace in Acme Robotics");
-      expect(labels).toContain("Organization settings");
-      expect(labels.slice(-3)).toEqual(["Beta Partners", "Northwind Labs", "New organization"]);
+      expect(labels.some((label) => label.startsWith("New workspace"))).toBe(false);
+      expect(labels).not.toContain("Organization settings");
+      expect(labels.slice(-2)).toEqual(["Beta Partners", "Northwind Labs"]);
       // Switching workspace keeps the settings page.
       await act(async () =>
         menuItems()

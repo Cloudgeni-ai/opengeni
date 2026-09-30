@@ -27,7 +27,6 @@ import {
   organizationSettingsLabel,
 } from "./organization-settings-pages";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
-import { useCreateOrganizationFlow } from "@/components/rail/switcher-block";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
@@ -280,23 +279,15 @@ export function useSettingsRail(input: {
 
   // The same picker as the main rail: switching workspace or organization keeps
   // the same kind of settings page. A workspace managed without access has none.
-  const createOrganizationFlow = useCreateOrganizationFlow(openWorkspace);
   const picker =
     workspace && !managedWorkspace ? (
-      <>
-        <WorkspaceSwitcherMenu
-          workspaceId={workspace.id}
-          collapsed={false}
-          align="start"
-          onSelect={openWorkspace}
-          onCreateOrganization={
-            createOrganizationFlow.canCreate ? createOrganizationFlow.start : undefined
-          }
-          createReturnLabel={hereLabel}
-          className="w-full"
-        />
-        {createOrganizationFlow.dialog}
-      </>
+      <WorkspaceSwitcherMenu
+        workspaceId={workspace.id}
+        collapsed={false}
+        align="start"
+        onSelect={openWorkspace}
+        className="w-full"
+      />
     ) : null;
 
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
