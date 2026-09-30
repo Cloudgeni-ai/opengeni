@@ -508,6 +508,8 @@ export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
   kind: "turn-end";
+  /** A durable Retry reopened this failed logical turn; its failure is history. */
+  resumedAt?: string;
   /** Keep an existing answer visible when a recorded input wait ends without final output. */
   preserveWaitResponse?: true;
   id: string;

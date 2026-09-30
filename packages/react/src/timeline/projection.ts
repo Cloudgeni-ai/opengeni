@@ -174,6 +174,7 @@ export function buildTimeline(
   // receipts have no row. Carry resume evidence on the attention landmarks so
   // grouping cannot mistake historical approval for a live wait.
   const presentationWaits = new Map<string | null, Array<NoticeItem | SessionStatusItem>>();
+  const presentationFailures = new Map<string | null, SessionStatusItem[]>();
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
     item: NoticeItem | SessionStatusItem,
@@ -1000,7 +1001,15 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         if (status === "requires_action") rememberPresentationWait(item, turnId);
-        else items.push(item);
+        else {
+          items.push(item);
+          if (status === "failed") {
+            const key = turnId ?? presentationTurnId;
+            const failures = presentationFailures.get(key) ?? [];
+            failures.push(item);
+            presentationFailures.set(key, failures);
+          }
+        }
         break;
       }
 
@@ -1097,6 +1106,23 @@ export function buildTimeline(
             turnId,
             (startupRecoveryRevisionByTurn.get(turnId) ?? 0) + 1,
           );
+          if (
+            !event.duplicateOfEventId &&
+            (!event.turnAssociation || event.turnAssociation === "current")
+          ) {
+            // Human Retry reopens the existing logical turn, unlike a new
+            // prompt. Keep failure evidence, but do not let its old settlement
+            // close the recovered turn's work surface.
+            for (const item of items) {
+              if (item.kind === "turn-end" && item.turnId === turnId && item.outcome === "failed") {
+                item.resumedAt ??= event.occurredAt;
+              }
+            }
+            for (const item of presentationFailures.get(turnId) ?? []) {
+              item.resolvedAt = event.occurredAt;
+            }
+            presentationFailures.delete(turnId);
+          }
         }
         break;
       }
@@ -1305,11 +1331,12 @@ export function buildTimeline(
         break;
       }
 
+      case "turn.superseded":
       case "turn.cancelled": {
         // A retraction of a never-started queued turn is not a turn ending —
         // the message was withdrawn before any work happened; show nothing.
         // A null turnId proves nothing, so it keeps the legacy finalize path.
-        if (turnId && !prescan.startedTurnIds.has(turnId)) {
+        if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
         takeAgentResponse(turnId);
@@ -1825,7 +1852,12 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       const previous = group.work!.details.at(-1);
       const preparing = (entry: ActivityItem) =>
         entry.kind === "startup-phase" || (entry.kind === "reasoning" && !entry.text.trim());
-      if (preparing(item) && previous?.kind === "activity" && previous.items.every(preparing))
+      if (
+        preparing(item) &&
+        previous?.kind === "activity" &&
+        previous.items.every(preparing) &&
+        previous.items.at(-1) === items[(itemOrder.get(item.id) ?? 0) - 1]
+      )
         previous.items.push(item);
       else
         group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
@@ -1833,6 +1865,19 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     } else if (item.kind === "turn-end") {
       const group = turns.get(key);
       if (group?.work) {
+        if (item.resumedAt) {
+          group.work.details.push({
+            kind: "item",
+            item: {
+              kind: "notice",
+              id: item.id,
+              tone: "failed",
+              text: item.failureText ?? "The turn failed before retrying.",
+              occurredAt: item.occurredAt,
+            },
+          });
+          continue;
+        }
         group.outcome = item.outcome;
         if (item.failureText) group.failureText = item.failureText;
         group.work.endedAt = item.occurredAt;
@@ -1886,7 +1931,8 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           current.waiting = { label: "Waiting for you", since: item.occurredAt };
         } else if (
           item.kind === "session-status" &&
-          ["paused", "cancelled", "failed"].includes(item.status)
+          ["paused", "cancelled", "failed"].includes(item.status) &&
+          !item.resolvedAt
         ) {
           current.endedAt = item.occurredAt;
           delete current.waiting;
@@ -2262,6 +2308,7 @@ export function isTurnExecutionEvidence(type: string): boolean {
     isAgentActivityEvent(type) ||
     type === "turn.completed" ||
     type === "turn.failed" ||
+    type === "turn.superseded" ||
     type === "turn.recovery.requested" ||
     type === "turn.capacity_waiting" ||
     type === "session.requiresAction" ||

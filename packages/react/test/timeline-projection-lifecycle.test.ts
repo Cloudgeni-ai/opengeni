@@ -29,6 +29,124 @@ const prose = (groups: TimelineGroup[]) =>
   );
 
 describe("projection lifecycle audit regressions", () => {
+  test("startup details cannot coalesce across intervening folded prose", () => {
+    const groups = fold([
+      event(1, "turn.startup.phase.completed", { phase: "tools", durationMs: 200 }),
+      event(2, "agent.message.completed", {
+        messageId: "progress",
+        phase: "commentary",
+        text: "Tools ready",
+      }),
+      event(3, "turn.startup.phase.completed", { phase: "model_preparation", durationMs: 300 }),
+      event(4, "agent.message.completed", {
+        messageId: "final",
+        phase: "final_answer",
+        text: "Ready",
+      }),
+      event(5, "turn.completed"),
+    ]);
+    const details = work(groups)[0]!.work!.details.flatMap((group) =>
+      group.kind === "activity"
+        ? group.items.map((item) => item.id)
+        : group.kind === "item"
+          ? [group.item.id]
+          : [],
+    );
+    expect(details).toEqual(["lifecycle-1", "lifecycle-2", "lifecycle-3"]);
+  });
+
+  test("Steer supersession settles the old turn before its replacement starts", () => {
+    const superseded = event(4, "turn.superseded", { reason: "steer" });
+    const events = [
+      event(1, "turn.started"),
+      event(2, "agent.message.completed", { messageId: "before", text: "Checking" }),
+      event(3, "agent.toolCall.created", { id: "read", name: "exec_command", arguments: {} }),
+      superseded,
+    ];
+    const groups = fold(events);
+    expect(work(groups)[0]!.work!.endedAt).toBe(superseded.occurredAt);
+    expect(work(groups)[0]!.outcome).toBe("cancelled");
+    expect(work(groups)[0]!.items[0]).toMatchObject({ kind: "tool-call", status: "cancelled" });
+    const replacement = fold([
+      ...events,
+      event(8, "turn.started", {}, "turn-2"),
+      event(9, "agent.message.delta", { messageId: "next", text: "Revised check" }, "turn-2"),
+    ]);
+    expect(work(replacement)[0]!.work!.endedAt).toBe(superseded.occurredAt);
+    expect(work(replacement)[1]!.work!.endedAt).toBeUndefined();
+  });
+
+  test("human Retry reopens the failed logical turn without prematurely folding its progress", () => {
+    const failed = [
+      event(1, "agent.message.completed", { messageId: "before", text: "Checking records" }),
+      event(2, "agent.toolCall.created", { id: "read", name: "exec_command", arguments: {} }),
+      event(3, "turn.failed", { error: "Provider unavailable" }),
+      event(4, "session.status.changed", { status: "failed" }),
+    ];
+    expect(work(fold(failed))[0]!.outcome).toBe("failed");
+    const recovering = [
+      ...failed,
+      event(5, "turn.recovery.requested", { reason: "human_retry", failureEventId: failed[2]!.id }),
+      event(6, "session.status.changed", { status: "recovering" }),
+    ];
+    const resumed = [
+      ...recovering,
+      event(7, "turn.started"),
+      event(8, "session.status.changed", { status: "running" }),
+      event(9, "agent.message.delta", { messageId: "after", text: "Retrying the check" }),
+    ];
+    for (const events of [recovering, resumed]) {
+      const groups = fold(events);
+      expect(work(groups)).toHaveLength(1);
+      expect(work(groups)[0]!.work!.endedAt).toBeUndefined();
+      expect(work(groups)[0]!.outcome).toBeUndefined();
+      expect(groups.at(-1)?.kind).toBe("activity");
+    }
+    expect(prose(fold(resumed))).toEqual(["Checking records", "Retrying the check"]);
+    const completed = fold([
+      ...resumed,
+      event(10, "agent.message.completed", {
+        messageId: "final",
+        phase: "final_answer",
+        text: "Verified",
+      }),
+      event(11, "turn.completed"),
+    ]);
+    expect(prose(completed)).toEqual(["Verified"]);
+    expect(work(completed)[0]!.outcome).toBe("complete");
+    expect(
+      work(completed)[0]!.work!.details.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "notice" &&
+          group.item.text === "Provider unavailable",
+      ),
+    ).toBe(true);
+  });
+
+  test("foreign, duplicate and late recovery receipts cannot reopen another failed turn", () => {
+    const failed = [
+      event(1, "agent.message.completed", { messageId: "before", text: "Checking" }),
+      event(2, "turn.failed", { error: "Unavailable" }),
+      event(3, "session.status.changed", { status: "failed" }),
+    ];
+    for (const retry of [
+      event(4, "turn.recovery.requested", { reason: "human_retry" }, "other-turn"),
+      {
+        ...event(4, "turn.recovery.requested", { reason: "human_retry" }),
+        duplicateOfEventId: "prior",
+      },
+      {
+        ...event(4, "turn.recovery.requested", { reason: "human_retry" }),
+        turnAssociation: "late_rejected" as const,
+      },
+    ]) {
+      const groups = fold([...failed, retry]);
+      expect(work(groups)[0]!.outcome).toBe("failed");
+      expect(work(groups)[0]!.work!.endedAt).toBe(failed[1]!.occurredAt);
+    }
+  });
+
   test("settled final-only corrections fold the superseded final, without an empty single-final row", () => {
     const first = event(1, "agent.message.completed", {
       messageId: "first",
