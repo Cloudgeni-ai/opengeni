@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
+import { z } from "zod";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import { ClientConfig, signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import {
@@ -108,12 +109,21 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
     );
     expect(response.status).toBe(200);
     const clientConfig = ClientConfig.parse(await response.json());
-    expect(clientConfig.allowedModels).toEqual(clientConfig.models.map((model) => model.id));
+    if (clientConfig.models.length > 0) {
+      expect(clientConfig.allowedModels).toEqual(clientConfig.models.map((model) => model.id));
+      expect(clientConfig.legacyModelFallback).toBeUndefined();
+    } else {
+      expect(clientConfig.allowedModels).toEqual([clientConfig.legacyModelFallback!.id]);
+      expect(clientConfig.legacyModelFallback!.availability).toMatchObject({
+        status: "unavailable",
+        selectable: false,
+      });
+    }
     return clientConfig;
   }
   async function parity(rejected: string[] = []) {
     const current = await config();
-    for (const model of current.allowedModels) {
+    for (const { id: model } of current.models) {
       const response = await request(`/v1/workspaces/${grant.workspaceId}/sessions`, {
         model,
         initialMessage: "Test model selection",
@@ -127,7 +137,7 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
       expect((await response.json()).model).toBe(model);
     }
     for (const model of rejected) {
-      expect(current.allowedModels).not.toContain(model);
+      expect(current.models.map((entry) => entry.id)).not.toContain(model);
       const response = await request(`/v1/workspaces/${grant.workspaceId}/sessions`, {
         model,
         initialMessage: "Test model selection",
@@ -150,7 +160,92 @@ test("PG: disconnected Codex is never advertised or freshly creatable", async ()
   const implicit = await f.request("/v1/config/client");
   expect(ClientConfig.parse(await implicit.json()).allowedModels).toEqual(config.allowedModels);
   const readOnly = { ...f.grant, permissions: ["workspace:read"] as AccessGrant["permissions"] };
-  expect((await f.config(readOnly)).models).toEqual([]);
+  const readOnlyConfig = await f.config(readOnly);
+  expect(readOnlyConfig.models).toEqual([]);
+  expect(readOnlyConfig.legacyModelFallback?.availability.reason).toBe("policy_blocked");
+}, 180_000);
+
+test("review: advertised default is also selected by an omitted model create", async () => {
+  if (!client) throw new Error("Real PostgreSQL required");
+  const f = await fixture({
+    openaiModel: "codex/gpt-6-sol",
+    openaiAllowedModels: "gpt-5.6-sol",
+  });
+  const config = await f.config();
+  expect(config.defaultModel).toBe("gpt-5.6-sol");
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    initialMessage: "Use the default model",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(202);
+  const created = await response.json();
+  expect(created.model).toBe(config.defaultModel);
+  expect(created.reasoningEffort).toBe(config.defaultReasoningEffort);
+}, 180_000);
+
+test("PG: policy fallback advertises the exact omitted-create model and reasoning", async () => {
+  if (!client) return;
+  const f = await fixture({ openaiModel: "gpt-5.6-sol", openaiReasoningEffort: "low" });
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    allowedProviders: null,
+    allowedModels: ["gpt-5.6-luna"],
+  });
+  const result = await f.config();
+  expect(result.defaultModel).toBe("gpt-5.6-luna");
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    initialMessage: "Use the policy fallback",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(202);
+  const created = await response.json();
+  expect(created.model).toBe(result.defaultModel);
+  expect(created.reasoningEffort).toBe(result.defaultReasoningEffort);
+}, 180_000);
+
+test("PG: fallback reasoning comes from the admitted model, not the blocked deployment", async () => {
+  if (!client) return;
+  const capabilities = configuredModels(testSettings())[0]!.capabilities;
+  const f = await fixture({
+    openaiReasoningEffort: "low",
+    modelProvidersJson: JSON.stringify([
+      {
+        id: "reasoning-fixture",
+        kind: "anonymous",
+        baseUrl: "https://reasoning.example.test/v1",
+        models: [
+          {
+            id: "reasoning-fixture/model",
+            capabilities: {
+              ...capabilities,
+              reasoning: { ...capabilities.reasoning, defaultEffort: "high" },
+            },
+          },
+        ],
+      },
+    ]),
+  });
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    allowedProviders: ["reasoning-fixture"],
+    allowedModels: null,
+  });
+  const result = await f.config();
+  expect(result.defaultModel).toBe("reasoning-fixture/model");
+  expect(result.defaultReasoningEffort).toBe("high");
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    initialMessage: "Use the fallback reasoning",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(202);
+  const created = await response.json();
+  expect(created.model).toBe(result.defaultModel);
+  expect(created.reasoningEffort).toBe(result.defaultReasoningEffort);
 }, 180_000);
 
 test("PG: ready Codex model permissions and workspace policy affect list and create identically", async () => {
@@ -232,7 +327,14 @@ test("PG: workspace Claude custom models use the same readiness and model permis
 test("PG: no usable model yields empty lists, not a fabricated selectable default", async () => {
   if (!client) return;
   const f = await fixture({ openaiApiKey: undefined });
-  expect((await f.parity(["gpt-5.6-sol", "codex/gpt-6-sol"])).allowedModels).toEqual([]);
+  const result = await f.parity(["gpt-5.6-sol", "codex/gpt-6-sol"]);
+  expect(result.models).toEqual([]);
+  expect(result.allowedModels).toHaveLength(1);
+  expect(result.legacyModelFallback?.availability.reason).toBe("missing_credential");
+  const legacyParser = ClientConfig.omit({ legacyModelFallback: true }).extend({
+    allowedModels: z.array(z.string()).min(1),
+  });
+  expect(legacyParser.safeParse(result).success).toBe(true);
   const readOnly = { ...f.grant, permissions: ["workspace:read"] as AccessGrant["permissions"] };
   expect((await f.config(readOnly)).models).toEqual([]);
 }, 180_000);

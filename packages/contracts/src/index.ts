@@ -17512,7 +17512,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     cost: ModelCostClassV1.optional(),
     capabilities: ModelCapabilitiesV1.optional(),
     pricing: ModelPricingScheduleV1.optional(),
-    /** Transient health/readiness hint; allowedModels determines create admission. */
+    /** Transient health/readiness hint; membership in config models determines admission. */
     availability: z.lazy(() => ModelAvailabilityV1).optional(),
     definitionVersion: z
       .string()
@@ -17671,11 +17671,22 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
     defaultModel: z.string(),
-    // No usable selection is a valid state (e.g. a disconnected subscription).
-    allowedModels: z.array(z.string()),
+    // Legacy parsers require a nonempty list. If models is empty, this contains
+    // only the explicitly unavailable legacyModelFallback hint, not admission.
+    allowedModels: z.array(z.string()).min(1),
     // Richer model list (provider-grouped) for the picker. Defaults to [] for
     // back-compat: callers that only read allowedModels are unaffected.
     models: z.array(ClientModel).default([]),
+    /** Only present when no model is admitted; preserves older min(1) parsers. */
+    legacyModelFallback: z
+      .object({
+        id: z.string(),
+        availability: ModelAvailabilityV1.extend({
+          status: z.literal("unavailable"),
+          selectable: z.literal(false),
+        }),
+      })
+      .optional(),
     defaultReasoningEffort: ReasoningEffort,
     allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
     // Client-safe execution default. The schedule editor uses this to avoid

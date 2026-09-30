@@ -156,7 +156,10 @@ function creditsCandidate(
  *    credits-billed model when that one is not selectable. Skipped when the
  *    deployment default is already a selectable credits-billed model, so an
  *    operator's paid default is never replaced.
- * 4. `deployment`: the deployment default with the deployment reasoning effort.
+ * 4. `deployment`: the deployment default with the deployment reasoning effort
+ *    when stably admissible; otherwise the first stably admissible catalog
+ *    model with its own default effort. With no admitted models, retain the
+ *    deployment hint and let fresh creation refuse it.
  *
  * An explicit model on the request, the scheduled task, or the person's
  * new-chat draft is never passed through this function.
@@ -196,13 +199,21 @@ export function selectDefaultSessionModel(input: DefaultSessionModelInput): Defa
     const credits = creditsCandidate(input);
     if (credits) return credits;
   }
-  return {
-    model:
-      deployment?.model.id ??
-      canonicalizeConfiguredModelId(input.settings, input.settings.openaiModel),
-    reasoningEffort: fallbackEffort,
-    source: "deployment",
-  };
+  if (deployment && isWorkspaceModelAdmissible(deployment)) {
+    return { model: deployment.model.id, reasoningEffort: fallbackEffort, source: "deployment" };
+  }
+  const fallback = input.selections.find(isWorkspaceModelAdmissible);
+  return fallback
+    ? {
+        model: fallback.model.id,
+        reasoningEffort: defaultReasoningEffortForConfiguredModel(fallback.model, fallbackEffort),
+        source: "deployment",
+      }
+    : {
+        model: canonicalizeConfiguredModelId(input.settings, input.settings.openaiModel),
+        reasoningEffort: fallbackEffort,
+        source: "deployment",
+      };
 }
 
 /**

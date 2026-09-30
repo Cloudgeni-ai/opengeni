@@ -2034,8 +2034,12 @@ describe("GET /v1/config/client", () => {
     const config = await fetchClientConfig(settings);
 
     expect(config.defaultModel).toBe("codex/gpt-6-sol");
-    expect(config.allowedModels).toEqual([]);
+    expect(config.allowedModels).toEqual(["codex/gpt-6-sol"]);
     expect(config.models).toEqual([]);
+    expect(config.legacyModelFallback).toMatchObject({
+      id: "codex/gpt-6-sol",
+      availability: { status: "unavailable", selectable: false, reason: "needs_reauth" },
+    });
   });
 
   test("public bootstrap hides enabled subscriptions and missing deployment credentials", async () => {
@@ -2046,8 +2050,13 @@ describe("GET /v1/config/client", () => {
         openaiApiKey: undefined,
       }),
     );
-    expect(config.allowedModels).toEqual([]);
+    expect(config.allowedModels).toHaveLength(1);
     expect(config.models).toEqual([]);
+    expect(config.legacyModelFallback?.availability).toMatchObject({
+      status: "unavailable",
+      selectable: false,
+      reason: "missing_credential",
+    });
   });
 
   test("stale browser cookies preserve public bootstrap but explicit workspace requests require auth", async () => {
@@ -2057,6 +2066,33 @@ describe("GET /v1/config/client", () => {
     ).toBe(200);
     expect((await app.request("/v1/config/client?workspaceId=workspace")).status).toBe(401);
     expect((await app.request("/v1/config/client?workspaceId=")).status).toBe(422);
+  });
+
+  test("unscoped browser bootstrap does not require selected-actor reconciliation", async () => {
+    let authReads = 0;
+    const app = createApp({
+      settings: testSettings({ productAccessMode: "managed" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: {
+        handler: async () => Response.json({}),
+        api: {
+          getSession: async () => {
+            authReads += 1;
+            throw new HTTPException(409, { message: "managed_auth_actor_changed" });
+          },
+        },
+      } as never,
+    });
+    const headers = { cookie: "opengeni.session_set=browser-authority-not-reconciled" };
+    const bootstrap = await app.request("/v1/config/client", { headers });
+    expect(bootstrap.status).toBe(200);
+    expect(ClientConfig.parse(await bootstrap.json()).auth.mode).toBe("managedSession");
+    expect(authReads).toBe(0);
+    const scoped = await app.request("/v1/config/client?workspaceId=workspace", { headers });
+    expect(scoped.status).toBe(409);
+    expect(authReads).toBe(1);
   });
 
   test("includes a registry model when OPENGENI_MODEL_PROVIDERS_JSON is set", async () => {

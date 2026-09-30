@@ -17,7 +17,6 @@ import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
-  canonicalizeConfiguredModelId,
   codeSearchDeploymentPolicy,
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
@@ -106,7 +105,7 @@ import {
   resolveWorkspaceCatalogSettings,
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
-  admissibleWorkspaceModel,
+  selectDefaultSessionModel,
   isWorkspaceModelAdmissible,
   resolveWorkspaceModelSelection,
   validateManagedAuthRequestActorLease,
@@ -1072,10 +1071,13 @@ export function createAppComposition(deps: AppDependencies): {
       policy: null,
       codexSubscriptionActive: false,
     });
-    let defaultSelection = {
-      model: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
-      reasoningEffort: catalogSettings.openaiReasoningEffort,
-    };
+    let defaultSelection = selectDefaultSessionModel({
+      settings: catalogSettings,
+      selections,
+      workspaceDefaults: null,
+      creditsAvailable: false,
+    });
+    let modelSelectionForbidden = false;
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
       throw new HTTPException(422, { message: "workspaceId must not be empty" });
@@ -1084,7 +1086,9 @@ export function createAppComposition(deps: AppDependencies): {
       requestedWorkspaceId !== undefined ||
       deps.settings.productAccessMode !== "managed" ||
       c.req.header("authorization") !== undefined ||
-      c.req.header("cookie") !== undefined ||
+      // Browser bootstrap precedes session-set reconciliation. A cookie alone
+      // cannot scope this public read (broker/changed actors need an epoch).
+      c.req.header("x-opengeni-actor-epoch") !== undefined ||
       c.req.header("x-opengeni-external-actor") !== undefined;
     if (callerScoped) {
       let context: Awaited<ReturnType<typeof requireAccessContext>> | null = null;
@@ -1097,6 +1101,7 @@ export function createAppComposition(deps: AppDependencies): {
           !(error instanceof HTTPException && error.status === 401) ||
           requestedWorkspaceId !== undefined ||
           c.req.header("authorization") !== undefined ||
+          c.req.header("x-opengeni-actor-epoch") !== undefined ||
           c.req.header("x-opengeni-external-actor") !== undefined
         ) {
           throw error;
@@ -1117,7 +1122,10 @@ export function createAppComposition(deps: AppDependencies): {
             workspaceId,
             subjectId: grant.subjectId,
           });
-          if (!hasPermission(grant.permissions, "sessions:create")) selections = [];
+          if (!hasPermission(grant.permissions, "sessions:create")) {
+            modelSelectionForbidden = true;
+            selections = [];
+          }
           const workspace = await getWorkspace(deps.db, workspaceId);
           defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
             settings: catalogSettings,
@@ -1130,13 +1138,28 @@ export function createAppComposition(deps: AppDependencies): {
         // An organization key has no implicit workspace. Do not advertise
         // another workspace's authority; it can request an exact workspace.
         selections = [];
+        modelSelectionForbidden = true;
       }
     }
     const models = selections.filter(isWorkspaceModelAdmissible);
-    const defaultModel =
-      admissibleWorkspaceModel(models, defaultSelection.model)?.model.id ??
-      models[0]?.model.id ??
-      defaultSelection.model;
+    const defaultModel = defaultSelection.model;
+    const fallbackDefinition = selections.find(
+      ({ model }) => model.id === defaultModel || model.aliases.includes(defaultModel),
+    );
+    const legacyModelFallback =
+      models.length === 0
+        ? {
+            id: defaultModel,
+            availability: {
+              status: "unavailable" as const,
+              selectable: false as const,
+              reason: modelSelectionForbidden
+                ? ("policy_blocked" as const)
+                : (fallbackDefinition?.availability.reason ?? ("unsupported" as const)),
+              checkedAt: fallbackDefinition?.availability.checkedAt ?? null,
+            },
+          }
+        : undefined;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -1144,7 +1167,8 @@ export function createAppComposition(deps: AppDependencies): {
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel,
-        allowedModels: models.map(({ model }) => model.id),
+        allowedModels: models.length > 0 ? models.map(({ model }) => model.id) : [defaultModel],
+        ...(legacyModelFallback ? { legacyModelFallback } : {}),
         // Availability remains an observation hint, not the admission predicate.
         models: models.map(({ model, availability }) => ({
           ...projectClientModel(model),
