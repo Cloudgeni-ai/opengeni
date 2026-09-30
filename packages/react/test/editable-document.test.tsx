@@ -128,7 +128,36 @@ class FakeDocumentSession {
     for (const listener of this.listeners) listener(this.view);
     return { paragraphId: PARAGRAPH_ID, pending: pending("document") };
   }
+  inFlightQueries = 0;
+  maxInFlightQueries = 0;
+  queryDelayMs = 0;
+  /** Applies committed history one revision at a time, as a durable replay does. */
+  async replayCommitted(count: number, text: string): Promise<void> {
+    this.text = text;
+    this.hasParagraph = true;
+    for (let index = 0; index < count; index += 1) {
+      this.revision += 1n;
+      this.view = {
+        ...this.view,
+        headSequence: this.view.headSequence + 1,
+        cursor: this.view.cursor + 1,
+      };
+      for (const listener of this.listeners) listener(this.view);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
   async queryDocument(query: DocumentArtifactQuery): Promise<DocumentArtifactProjection> {
+    this.inFlightQueries += 1;
+    this.maxInFlightQueries = Math.max(this.maxInFlightQueries, this.inFlightQueries);
+    try {
+      if (this.queryDelayMs > 0)
+        await new Promise((resolve) => setTimeout(resolve, this.queryDelayMs));
+      return this.projectDocument(query);
+    } finally {
+      this.inFlightQueries -= 1;
+    }
+  }
+  private projectDocument(query: DocumentArtifactQuery): DocumentArtifactProjection {
     this.queries.push(query);
     if (query.kind === "summary") {
       return projection(this.revision, [
@@ -219,6 +248,31 @@ describe("SDK-backed editable document", () => {
     await flush();
     expect(rendered.container.textContent).not.toContain("Confidential board material");
     expect(rendered.container.textContent).toContain("You no longer have access");
+    await rendered.unmount();
+  });
+
+  test("composes one projection at a time while a long history replays", async () => {
+    const fake = new FakeDocumentSession(null);
+    fake.queryDelayMs = 1;
+    const rendered = await renderComponent(
+      <EditableDocumentArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Weekly report"
+      />,
+    );
+    await fake.replayCommitted(150, "Replayed paragraph");
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await flush(5);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (rendered.container.textContent?.includes("Replayed paragraph")) break;
+    }
+    expect(rendered.container.textContent).toContain("Replayed paragraph");
+    expect(rendered.container.textContent).not.toContain("Could not open this document");
+    // One composition at a time, and a revision superseded while it waits never
+    // starts one, so the Worker queue stays at one request instead of a burst
+    // per replayed transaction.
+    expect(fake.maxInFlightQueries).toBe(1);
+    expect(fake.queries.filter((query) => query.kind === "summary").length).toBeLessThan(150);
     await rendered.unmount();
   });
 

@@ -33,6 +33,7 @@ import {
   type PresentationSlideProjection,
 } from "./presentation-editor";
 import { ArtifactSurface } from "./artifact-surface";
+import { createLatestTaskRunner } from "./latest-task-runner";
 import {
   asEditableArtifactError,
   editableArtifactAccessRevoked,
@@ -105,31 +106,35 @@ export function EditablePresentationArtifactSurface({
     error: null,
   });
   const loadGeneration = useRef(0);
+  const [scheduleLoad] = useState(createLatestTaskRunner);
   const sceneNodes = useRef(new Map<string, PresentationArtifactEditorSceneNode>());
 
   useEffect(() => {
     const generation = ++loadGeneration.current;
     let cancelled = false;
     setState((current) => ({ ...current, loading: true, error: null }));
-    void composePresentationEditorProjection(session).then(
-      (composed) => {
-        if (cancelled || generation !== loadGeneration.current) return;
-        sceneNodes.current = new Map(composed.sceneNodes);
-        setState({ composed, loading: false, error: null });
-      },
-      (cause) => {
-        if (cancelled || generation !== loadGeneration.current) return;
-        setState({
-          composed: null,
-          loading: false,
-          error: asEditableArtifactError(cause, "Could not open this presentation"),
-        });
-      },
-    );
+    scheduleLoad(async () => {
+      if (cancelled || generation !== loadGeneration.current) return;
+      await composePresentationEditorProjection(session).then(
+        (composed) => {
+          if (cancelled || generation !== loadGeneration.current) return;
+          sceneNodes.current = new Map(composed.sceneNodes);
+          setState({ composed, loading: false, error: null });
+        },
+        (cause) => {
+          if (cancelled || generation !== loadGeneration.current) return;
+          setState({
+            composed: null,
+            loading: false,
+            error: asEditableArtifactError(cause, "Could not open this presentation"),
+          });
+        },
+      );
+    });
     return () => {
       cancelled = true;
     };
-  }, [invalidator, retryEpoch, session]);
+  }, [invalidator, retryEpoch, scheduleLoad, session]);
 
   const refresh = useCallback(() => setRetryEpoch((value) => value + 1), []);
   const writable = !readOnly && view.writable;
