@@ -318,6 +318,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxViewerHolderTtlMs: 90_000,
     sandboxInteractionHolderTtlMs: 180_000,
     sandboxIdleGraceMs: 900_000,
+    sandboxIdleCommandContainmentMs: 1_800_000,
     sandboxSnapshotIntervalMs: 900_000,
     sandboxSnapshotTimeoutMs: 60_000,
     sandboxRotationLeadMs: 3_600_000,

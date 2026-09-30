@@ -9597,6 +9597,12 @@ export const sandboxLeases = pgTable(
     unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {
       withTimezone: true,
     }),
+    // Stamped by a database trigger (0541) whenever the holder counters change,
+    // for every writer generation. Idle command containment measures holder
+    // release from this durable fact.
+    holdersChangedAt: timestamp("holders_changed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
     refcount: integer("refcount").notNull().default(0),
     turnHolders: integer("turn_holders").notNull().default(0),

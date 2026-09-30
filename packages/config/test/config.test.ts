@@ -2593,6 +2593,37 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(settings.sandboxRotationLeadMs).toBe(290_001);
   });
 
+  test("idle command containment defaults to 30 minutes between idle grace and rotation lead", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.sandboxIdleCommandContainmentMs).toBe(1_800_000);
+    expect(settings.sandboxIdleCommandContainmentMs).toBeGreaterThan(settings.sandboxIdleGraceMs);
+    expect(settings.sandboxIdleCommandContainmentMs).toBeLessThan(settings.sandboxRotationLeadMs);
+    const shortLived = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      () => getSettings(),
+    );
+    // Derived strictly between the 150s idle grace and the 250.001s lead.
+    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(200_000);
+  });
+
+  test("an explicit idle command containment window must exceed idle grace and precede the deadline", () => {
+    expect(
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "2400000" }, () => getSettings())
+        .sandboxIdleCommandContainmentMs,
+    ).toBe(2_400_000);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "900000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(900000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "3600000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(3600000\) must be strictly less than/);
+  });
+
   test("an explicit rotation lead overrides the provider-relative default", () => {
     const settings = withEnv(
       {

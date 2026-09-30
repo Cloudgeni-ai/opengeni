@@ -4,7 +4,7 @@ import type {
 } from "@opengeni/contracts";
 import { SessionCommandFailure } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, getTableColumns, gte, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gte, inArray, sql, type SQL } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
 import { withRlsContext, withSessionActivityRlsContext } from "./database";
@@ -82,6 +82,25 @@ function commandPreview(value: string): string {
   return `${preview}…`;
 }
 
+/** Reconciliation outcomes under which the retained process cannot currently be
+ * observed. This is a read projection and a probe-backoff hint only; it is never
+ * containment policy or exit proof. */
+export const UNOBSERVABLE_RETAINED_PROCESS_OUTCOMES = [
+  "process_observation_unavailable",
+  "quarantined_process_observation_unavailable",
+  "provider_binding_missing",
+  "quarantined_provider_binding_missing",
+  "provider_binding_mismatch",
+  "quarantined_provider_binding_mismatch",
+] as const;
+
+export function unobservableRetainedProcessOutcomeSql(outcome: SQL): SQL<boolean> {
+  return sql<boolean>`${outcome} in (${sql.join(
+    UNOBSERVABLE_RETAINED_PROCESS_OUTCOMES.map((value) => sql`${value}`),
+    sql`, `,
+  )})`;
+}
+
 const commandObservationUnavailable = sql<boolean>`
   ${schema.sessionBackgroundCommands.state} in ('running','stopping') and exists (
     select 1 from sandbox_retained_processes process
@@ -90,10 +109,7 @@ const commandObservationUnavailable = sql<boolean>`
       and process.workspace_id = ${schema.sessionBackgroundCommands.workspaceId}
       and process.session_id = ${schema.sessionBackgroundCommands.sessionId}
       and process.state = 'active'
-      and process.last_reconcile_outcome in ('process_observation_unavailable',
-        'quarantined_process_observation_unavailable', 'provider_binding_missing',
-        'quarantined_provider_binding_missing', 'provider_binding_mismatch',
-        'quarantined_provider_binding_mismatch'))`;
+      and ${unobservableRetainedProcessOutcomeSql(sql`process.last_reconcile_outcome`)})`;
 
 const commandReadColumns = {
   ...getTableColumns(schema.sessionBackgroundCommands),

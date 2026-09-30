@@ -565,6 +565,7 @@ import {
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
   settleConnectedMachineSessionBackgroundCommandWithMutation,
   settleSessionBackgroundCommandForRetainedProcessInTransaction,
+  unobservableRetainedProcessOutcomeSql,
   type ConnectedMachineBackgroundCommandClaim,
 } from "./session-background-commands";
 import {
@@ -50533,15 +50534,7 @@ const LOST_PROVIDER_PROCESS_REASON = "provider_instance_lost";
  * tuple is revalidated under FOR UPDATE after these locks are acquired. */
 async function lockExactLostProviderWorkspaceBlockersTx(
   tx: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    leaseId: string;
-    sandboxGroupId: string;
-    lostEpoch: number;
-    lostBackend: string;
-    lostInstanceId: string;
-  },
+  input: LostProviderBlockerScope,
 ): Promise<void> {
   await tx.execute(sql`
     select id from sandbox_retained_processes
@@ -50584,18 +50577,66 @@ async function lockExactLostProviderWorkspaceBlockersTx(
   `);
 }
 
+type LostProviderBlockerScope = {
+  accountId: string;
+  workspaceId: string;
+  leaseId: string;
+  sandboxGroupId: string;
+  lostEpoch: number;
+  lostBackend: string;
+  lostInstanceId: string;
+};
+
+/** Take the session-event write prefix (workspace control share, workspace,
+ * sessions, cursors) for every session whose background command is linked to
+ * an active process in the exact lost-provider scope. Call it before the
+ * process/admission/PTY/lease locks so terminal command delivery keeps the
+ * canonical control -> session -> process -> admission -> lease order. */
+async function lockLostProviderCommandSessionsTx(
+  tx: Database,
+  input: LostProviderBlockerScope,
+): Promise<void> {
+  const sessions = await rawRows<{ session_id: string }>(
+    tx,
+    sql`
+      select distinct command.session_id
+      from session_background_commands command
+      join sandbox_retained_processes process on process.id = command.retained_process_id
+        and process.workspace_id = command.workspace_id
+        and process.session_id = command.session_id
+      where process.account_id = ${input.accountId}
+        and process.workspace_id = ${input.workspaceId}
+        and process.lease_id = ${input.leaseId}
+        and process.sandbox_group_id = ${input.sandboxGroupId}
+        and process.lease_epoch = ${input.lostEpoch}
+        and process.provider_backend = ${input.lostBackend}
+        and process.provider_instance_id = ${input.lostInstanceId}
+        and process.state = 'active'
+        and command.state in ('running', 'stopping')
+    `,
+  );
+  if (!sessions.length) return;
+  await lockSessionEventWriteRows(tx, {
+    workspaceId: input.workspaceId,
+    controlLock: "share",
+    sessionIds: sessions.map((row) => row.session_id),
+  });
+}
+
 async function settleExactLostProviderWorkspaceBlockersTx(
   tx: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    leaseId: string;
-    sandboxGroupId: string;
-    lostEpoch: number;
-    lostBackend: string;
-    lostInstanceId: string;
-  },
+  input: LostProviderBlockerScope,
+  options: {
+    /** Enrolled legacy commands that containment stopped after a verified
+     * checkpoint settle with this truthful reason instead of plain loss. */
+    containment?: { processIds: readonly string[]; reason: string };
+    /** Append each linked command's terminal event and agent input in this
+     * transaction, like ordinary exit/loss settlement. Requires a session
+     * activity scope and lockLostProviderCommandSessionsTx beforehand. */
+    deliverCommandResults?: { idleContainmentMinutes: number | null; events: SessionEvent[] };
+  } = {},
 ): Promise<LostProviderWorkspaceSettlement> {
+  const containedIds = options.containment?.processIds ?? [];
   // Only callers that locked and revalidated this exact provider tuple reach
   // here. Migration0495 independently checks the cold missing-provider outcome
   // at commit. This is loss classification, not a supervision/EOF receipt.
@@ -50610,7 +50651,11 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     .set({
       state: "lost",
       exitCode: null,
-      settlementReason: LOST_PROVIDER_PROCESS_REASON,
+      settlementReason:
+        options.containment && containedIds.length
+          ? sql`case when ${schema.sandboxRetainedProcesses.id} = any(${`{${containedIds.join(",")}}`}::uuid[])
+              then ${options.containment.reason} else ${LOST_PROVIDER_PROCESS_REASON} end`
+          : LOST_PROVIDER_PROCESS_REASON,
       settledAt: new Date(),
     })
     .where(
@@ -50628,6 +50673,8 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     .returning({
       id: schema.sandboxRetainedProcesses.id,
       holderId: schema.sandboxRetainedProcesses.holderId,
+      sessionId: schema.sandboxRetainedProcesses.sessionId,
+      settlementReason: schema.sandboxRetainedProcesses.settlementReason,
     });
   await tx.execute(sql`
     select set_config('opengeni.supervised_provider_loss_binding', ${priorLossBinding?.value ?? ""}, true)
@@ -50701,6 +50748,46 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     ) as counts
     where lease.id = ${input.leaseId}
   `);
+
+  const delivery = options.deliverCommandResults;
+  if (delivery && lostProcesses.length) {
+    // The retained-process trigger already moved each linked command row to
+    // this terminal state. Append the same event/input/wake that ordinary
+    // exit/loss settlement commits, in this transaction and in stable order.
+    const linked = await rawRows<{ session_id: string; retained_process_id: string }>(
+      tx,
+      sql`
+        select session_id, retained_process_id from session_background_commands
+        where workspace_id = ${input.workspaceId}
+          and retained_process_id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by session_id, retained_process_id
+      `,
+    );
+    for (const command of linked) {
+      const process = lostProcesses.find((p) => p.id === command.retained_process_id);
+      if (!process) continue;
+      const mutation = backgroundCommandTerminalMutation({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: command.session_id,
+        idleContainmentMinutes: delivery.idleContainmentMinutes,
+      });
+      await settleSessionBackgroundCommandForRetainedProcessInTransaction(
+        tx as SessionActivityDatabase,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: command.session_id,
+          retainedProcessId: process.id,
+          outcome: "lost",
+          exitCode: null,
+          reason: process.settlementReason ?? LOST_PROVIDER_PROCESS_REASON,
+        },
+        mutation,
+      );
+      delivery.events.push(...mutation.events);
+    }
+  }
 
   return {
     processesLost: lostProcesses.length,
@@ -52185,24 +52272,130 @@ export async function reapStaleLeaseHolders(
   );
 }
 
-// §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
-// SECURITY-DEFINER opengeni_private.reap_sandbox_leases() fn so the global
-// reaper Temporal Schedule (P1.3) sees stale rows across ALL workspaces in ONE
-// pass, bypassing per-workspace FORCE RLS. DB-only — returns the drainable rows;
-// the provider stop() is the caller's concern. No RLS GUC is set (the DEFINER fn
-// is the sanctioned cross-workspace read). Each invocation runs in its own
-// transaction and opts into the recovery protocol fence; this also makes the
-// legacy fallback safe after PostgreSQL aborts an undefined-function call.
-export async function enrollUnobservableCommandIdleDrain(
+/** Settlement reasons for legacy retained commands that containment stopped
+ * after a verified checkpoint. Neither is exit proof: the command settles
+ * `lost` with no exit code. */
+export const IDLE_COMMAND_CONTAINMENT_REASON = "idle_containment";
+export const DEADLINE_COMMAND_CONTAINMENT_REASON = "provider_deadline_containment";
+
+/** Bounded per-candidate containment inspection outcomes (metric labels). */
+export type CommandContainmentInspection =
+  | "idle_enrolled"
+  | "deadline_enrolled"
+  | "resumed_enrolled"
+  | "not_eligible"
+  | "inspection_failed";
+
+export type CommandContainmentEnrollment = ReapDrainable & {
+  /** `idle`/`deadline` newly enrolled this call; `resumed` continues an
+   * existing enrollment whose drain has not committed yet. */
+  mode: "idle" | "deadline" | "resumed";
+};
+
+/** Whole-group idleness from durable facts only: no non-closed attempt or
+ * pending quiescence in any member session, and the newest attempt close,
+ * holder-set change and admission (or settlement) on this lease epoch are all
+ * older than the window. Process age is deliberately not a fact here. */
+async function sandboxGroupIdleForCommandContainmentTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    lease: LeaseRow;
+    windowMs: number;
+  },
+): Promise<boolean> {
+  const [facts] = await rawRows<{ idle: boolean; session_ids: string[] }>(
+    tx,
+    sql`
+      with member_sessions as (
+        select session.id from sessions session
+        where session.workspace_id = ${input.workspaceId}
+          and session.sandbox_group_id = ${input.sandboxGroupId}
+        union
+        select process.session_id from sandbox_retained_processes process
+        where process.lease_id = ${input.lease.id} and process.state = 'active'
+      ), attempts as (
+        select attempt.state,
+          coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at) as settled_at
+        from session_turn_attempts attempt
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id in (select id from member_sessions)
+      )
+      select
+        not exists (select 1 from attempts where state <> 'closed')
+          and coalesce(greatest(
+            (select lease.holders_changed_at from sandbox_leases lease
+              where lease.id = ${input.lease.id}),
+            (select max(settled_at) from attempts),
+            (select max(coalesce(admission.settled_at, admission.admitted_at))
+              from sandbox_workspace_mutation_admissions admission
+              where admission.lease_id = ${input.lease.id}
+                and admission.lease_epoch = ${Number(input.lease.lease_epoch)})
+          ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false) as idle,
+        array(select id from member_sessions order by id) as session_ids
+    `,
+  );
+  if (!facts?.idle) return false;
+  for (const sessionId of facts.session_ids) {
+    if (
+      await hasPendingSessionAttemptQuiescenceTx(tx, { workspaceId: input.workspaceId, sessionId })
+    )
+      return false;
+  }
+  return true;
+}
+
+/**
+ * Contain legacy retained commands that are the only thing keeping a Modal box
+ * warm. One rule decides, independent of command health: the lease holds only
+ * process holders and their parent admissions, no supervised process, capture
+ * or reaper hold, and either the whole sandbox group has been idle for
+ * `idleCommandContainmentMs`, or a provider-deadline rotation's bounded stop
+ * grace has elapsed for every command. Enrollment is lifecycle intent, not exit
+ * proof: the existing drain captures the current generation excluding exactly
+ * these holders/admissions, terminates the box, and settles the commands.
+ *
+ * The workspace control fence plus process -> admission -> lease row locks
+ * serialize this decision with every new holder or admission: an arrival that
+ * committed first is seen and refuses enrollment; a later one observes the
+ * requested rotation and is fenced until the successor box.
+ */
+export async function enrollRetainedCommandContainment(
   db: Database,
-  input: { accountId: string; workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
-): Promise<ReapDrainable | null> {
-  await withRlsContext(db, input, async (tx) => {
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    /** Omit to evaluate only the provider-deadline rule. */
+    idleCommandContainmentMs?: number;
+  },
+): Promise<CommandContainmentEnrollment | null> {
+  const screened = await withRlsContext(db, input, async (tx) => {
     // Round-robin inventory: an ineligible live lease cannot starve later rows.
     // This updates only the inspection cursor, never provider/holder authority.
-    await tx.execute(sql`update sandbox_leases set unobservable_command_checked_at = now()
-      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}`);
+    const [lease] = await tx.execute<LeaseRow>(sql`update sandbox_leases
+      set unobservable_command_checked_at = now()
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+      returning *`);
+    // Cheap unlocked screen so a busy group with a long-running command does
+    // not take the exclusive workspace-control fence on every sweep. Only the
+    // locked re-check below may enroll.
+    if (!lease) return false;
+    // Enrolled drains resume; any requested rotation also refreshes command
+    // observation backoff below and may meet the deadline rule.
+    if (lease.unobservable_command_drain_ids?.length || lease.rotation_requested_at !== null)
+      return true;
+    return (
+      input.idleCommandContainmentMs !== undefined &&
+      (await sandboxGroupIdleForCommandContainmentTx(tx, {
+        ...input,
+        lease,
+        windowMs: input.idleCommandContainmentMs,
+      }))
+    );
   });
+  if (!screened) return null;
   return await withRlsContext(db, input, async (tx) => {
     await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
     const initial = await readLease(tx, input.workspaceId, input.sandboxGroupId);
@@ -52219,19 +52412,15 @@ export async function enrollUnobservableCommandIdleDrain(
       await tx.execute(sql`
         update sandbox_retained_processes set reconcile_after = least(reconcile_after, now())
         where lease_id = ${initial.id} and state = 'active' and reconcile_claim_id is null
-          and last_reconcile_outcome in ('process_observation_unavailable',
-            'quarantined_process_observation_unavailable', 'provider_binding_missing',
-            'quarantined_provider_binding_missing', 'provider_binding_mismatch',
-            'quarantined_provider_binding_mismatch')
+          and ${unobservableRetainedProcessOutcomeSql(sql`last_reconcile_outcome`)}
       `);
     }
     // A deadline gives a legacy command two minutes after cancellation intent
-    // to exit. Even when the provider cannot signal or observe that command,
-    // capture its current files while the old box still exists. Ordinary idle
-    // containment retains its longer grace.
+    // to exit, then captures its current files while the old box still exists.
     const deadlineStopGraceMs = SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS;
     const deadlineRotation =
       initial.rotationReason === "provider_deadline" && initial.rotationRequestedAt !== null;
+    const deadlineGrace = sql`now() - (${deadlineStopGraceMs}::bigint * interval '1 millisecond')`;
     // Normal completion closes an attempt without the interruption-only
     // quiesced_at receipt. A failed/interrupted owner without that receipt must
     // remain fenced; a completed and closed owner has finished its own writes.
@@ -52243,8 +52432,9 @@ export async function enrollUnobservableCommandIdleDrain(
       id: string;
       parent_admission_id: string;
       holder_id: string;
-      eligible: boolean;
       supervised: boolean;
+      owned: boolean;
+      deadline_ready: boolean;
     }>(
       tx,
       sql`
@@ -52252,62 +52442,17 @@ export async function enrollUnobservableCommandIdleDrain(
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
-          and process.provider_backend = 'modal' and process.route_target_id is null
+          and process.provider_backend = 'modal' and process.route_target_id is null) as owned,
+        coalesce(${deadlineRotation}
+          and process.deadline_cancellation_requested_at < ${deadlineGrace}
+          and process.reconcile_attempts >= 1
           and (
-            process.last_reconcile_outcome in ('process_observation_unavailable',
-              'quarantined_process_observation_unavailable')
-            or (
-              process.last_reconcile_outcome = 'provider_error'
-              and process.reconcile_attempts >= 5
+            (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
               and ${settledOwnerAt} is not null
-              and exists (
-                select 1 from session_background_commands command
-                where command.retained_process_id = process.id
-                  and command.workspace_id = process.workspace_id
-                  and command.session_id = process.session_id
-                  and command.provider = 'managed'
-                  and command.state = 'stopping'
-                  and command.cancel_requested_at < now() -
-                    (${input.idleGraceMs}::bigint * interval '1 millisecond')
-              )
-            )
-            or (
-              ${deadlineRotation}
-              and process.deadline_cancellation_requested_at < now() -
-                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
-              and process.reconcile_attempts >= 1
-              and (
-                (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
-                  and ${settledOwnerAt} is not null
-                  and greatest(${settledOwnerAt}, process.started_at) < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
-                  and process.started_at < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-              )
-            )
-          )
-          and (attempt.state = 'closed' or (
-            ${deadlineRotation}
-            and process.owner_actor_kind = 'direct' and process.owner_attempt_id is null))
-          and (
-            (attempt.state = 'closed' and
-              greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
-                (${input.idleGraceMs}::bigint * interval '1 millisecond'))
-            or (
-              ${deadlineRotation}
-              and process.deadline_cancellation_requested_at < now() -
-                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
-              and (
-                (process.owner_actor_kind = 'turn' and ${settledOwnerAt} is not null
-                  and greatest(${settledOwnerAt}, process.started_at) < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
-                  and process.started_at < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-              )
-            )
-          )) as eligible
+              and greatest(${settledOwnerAt}, process.started_at) < ${deadlineGrace})
+            or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+              and process.started_at < ${deadlineGrace})
+          ), false) as deadline_ready
       from sandbox_retained_processes process
       left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
         and attempt.workspace_id = process.workspace_id and attempt.session_id = process.session_id
@@ -52339,7 +52484,7 @@ export async function enrollUnobservableCommandIdleDrain(
     if (
       !ids.length ||
       processes.some((p) => p.supervised) ||
-      (!enrolled && processes.some((p) => !p.eligible)) ||
+      (!enrolled && processes.some((p) => !p.owned)) ||
       processes.some((p) => !ids.includes(p.id))
     )
       return null;
@@ -52357,31 +52502,53 @@ export async function enrollUnobservableCommandIdleDrain(
       )
     )
       return null;
-    if (!enrolled) {
-      if (
-        lease.archive_capture_id !== null ||
-        (await hasSandboxGroupAttemptActivityTx(tx, {
-          ...input,
-          idleGraceMs: deadlineRotation ? deadlineStopGraceMs : input.idleGraceMs,
-        }))
-      )
-        return null;
-      await tx.execute(sql`
-        update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
-          liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
-          rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
-        where id = ${lease.id}
-      `);
-    }
-    return {
+    const target = {
       workspaceId: input.workspaceId,
       sandboxGroupId: input.sandboxGroupId,
       instanceId: initial.instanceId,
       leaseEpoch: initial.leaseEpoch,
     };
+    if (enrolled) return { ...target, mode: "resumed" };
+    if (lease.archive_capture_id !== null) return null;
+    let mode: "idle" | "deadline" | null = null;
+    if (
+      deadlineRotation &&
+      processes.every((p) => p.deadline_ready) &&
+      !(await hasSandboxGroupAttemptActivityTx(tx, {
+        ...input,
+        idleGraceMs: deadlineStopGraceMs,
+      }))
+    ) {
+      mode = "deadline";
+    } else if (
+      input.idleCommandContainmentMs !== undefined &&
+      (await sandboxGroupIdleForCommandContainmentTx(tx, {
+        ...input,
+        lease,
+        windowMs: input.idleCommandContainmentMs,
+      }))
+    ) {
+      mode = "idle";
+    }
+    if (!mode) return null;
+    await tx.execute(sql`
+      update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+        liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
+        rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
+      where id = ${lease.id}
+    `);
+    return { ...target, mode };
   });
 }
 
+// §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
+// SECURITY-DEFINER opengeni_private.reap_sandbox_leases() fn so the global
+// reaper Temporal Schedule (P1.3) sees stale rows across ALL workspaces in ONE
+// pass, bypassing per-workspace FORCE RLS. DB-only — returns the drainable rows;
+// the provider stop() is the caller's concern. No RLS GUC is set (the DEFINER fn
+// is the sanctioned cross-workspace read). Each invocation runs in its own
+// transaction and opts into the recovery protocol fence; this also makes the
+// legacy fallback safe after PostgreSQL aborts an undefined-function call.
 export async function reapStaleLeaseHoldersGlobal(
   db: Database,
   input: {
@@ -52391,7 +52558,11 @@ export async function reapStaleLeaseHoldersGlobal(
     turnHolderTtlMs?: number;
     interactionHolderTtlMs?: number;
     idleGraceMs: number;
-    onUnobservableCommandDrainError?: (error: unknown) => void;
+    /** Whole-group idle window for legacy retained-command containment.
+     * Omitted: only the provider-deadline rule may enroll commands. */
+    idleCommandContainmentMs?: number;
+    onCommandContainment?: (outcome: CommandContainmentInspection) => void;
+    onCommandContainmentError?: (error: unknown) => void;
   },
 ): Promise<ReapDrainable[]> {
   // Active interaction holders represent durable BrowserSession/ComputerSession
@@ -52440,10 +52611,10 @@ export async function reapStaleLeaseHoldersGlobal(
     instanceId: r.instance_id,
     leaseEpoch: Number(r.lease_epoch),
   }));
-  const reportDrainError =
-    input.onUnobservableCommandDrainError ??
+  const reportContainmentError =
+    input.onCommandContainmentError ??
     ((error: unknown) => {
-      console.warn("sandbox reaper: unobservable command drain inspection failed", error);
+      console.warn("sandbox reaper: retained command containment inspection failed", error);
     });
   const candidates = await rawRows<{
     account_id: string;
@@ -52451,20 +52622,25 @@ export async function reapStaleLeaseHoldersGlobal(
     sandbox_group_id: string;
   }>(db, sql`select * from opengeni_private.list_unobservable_command_drain_candidates(32)`).catch(
     (error) => {
-      reportDrainError(error);
+      reportContainmentError(error);
       return [];
     },
   );
   for (const candidate of candidates) {
-    const enrolled = await enrollUnobservableCommandIdleDrain(db, {
+    const enrolled = await enrollRetainedCommandContainment(db, {
       accountId: candidate.account_id,
       workspaceId: candidate.workspace_id,
       sandboxGroupId: candidate.sandbox_group_id,
-      idleGraceMs: input.idleGraceMs,
-    }).catch((error) => {
-      reportDrainError(error);
-      return null;
+      ...(input.idleCommandContainmentMs === undefined
+        ? {}
+        : { idleCommandContainmentMs: input.idleCommandContainmentMs }),
+    }).catch((error: unknown) => {
+      reportContainmentError(error);
+      input.onCommandContainment?.("inspection_failed");
+      return undefined;
     });
+    if (enrolled === undefined) continue;
+    input.onCommandContainment?.(enrolled ? `${enrolled.mode}_enrolled` : "not_eligible");
     if (
       enrolled &&
       !ordinary.some(
@@ -52472,7 +52648,12 @@ export async function reapStaleLeaseHoldersGlobal(
           r.workspaceId === enrolled.workspaceId && r.sandboxGroupId === enrolled.sandboxGroupId,
       )
     )
-      ordinary.push(enrolled);
+      ordinary.push({
+        workspaceId: enrolled.workspaceId,
+        sandboxGroupId: enrolled.sandboxGroupId,
+        instanceId: enrolled.instanceId,
+        leaseEpoch: enrolled.leaseEpoch,
+      });
   }
   return ordinary;
 }
@@ -52761,9 +52942,14 @@ export async function confirmDrainCold(
      *  With no durable archive this must become typed unrecoverable, never a
      *  clean cold lease that can expose an empty replacement. */
     providerMissingBeforeCapture?: boolean;
+    /** The idle window named in contained commands' agent notice. */
+    idleCommandContainmentMs?: number;
   },
-): Promise<{ wentCold: boolean }> {
-  return await withRlsContext(
+): Promise<{ wentCold: boolean; backgroundCommandEvents?: SessionEvent[] }> {
+  const backgroundCommandEvents: SessionEvent[] = [];
+  // Settling a command appends its terminal session event and agent input, so
+  // the cold commit runs inside the session activity gate.
+  const result = await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -52816,10 +53002,11 @@ export async function confirmDrainCold(
               }
             : null;
         // Provider loss settles process/admission/PTY rows before taking the
-        // lease lock, matching the canonical blocker -> lease lock order used
-        // by retained-process settlement. Revalidate the lease after locking
-        // the entire exact provider-owned blocker set.
+        // lease lock, matching the canonical session -> blocker -> lease lock
+        // order used by retained-process settlement. Revalidate the lease after
+        // locking the entire exact provider-owned blocker set.
         if (blockerScope) {
+          await lockLostProviderCommandSessionsTx(tx, blockerScope);
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         }
         const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
@@ -52846,7 +53033,31 @@ export async function confirmDrainCold(
           return { wentCold: false };
         }
         if (blockerScope) {
-          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+          // Enrolled commands are contained only when this drain published the
+          // current checkpoint before stopping the box; otherwise the truthful
+          // reason is provider loss and no saved-workspace claim is made.
+          const contained =
+            !input.providerMissingBeforeCapture &&
+            row.archive_capture_published_at !== null &&
+            row.unobservable_command_drain_ids?.length
+              ? row.unobservable_command_drain_ids
+              : [];
+          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
+            containment: {
+              processIds: contained,
+              reason:
+                row.rotation_reason === "provider_deadline"
+                  ? DEADLINE_COMMAND_CONTAINMENT_REASON
+                  : IDLE_COMMAND_CONTAINMENT_REASON,
+            },
+            deliverCommandResults: {
+              idleContainmentMinutes:
+                input.idleCommandContainmentMs === undefined
+                  ? null
+                  : Math.max(1, Math.round(input.idleCommandContainmentMs / 60_000)),
+              events: backgroundCommandEvents,
+            },
+          });
         }
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
@@ -53002,6 +53213,7 @@ export async function confirmDrainCold(
         return { wentCold: rows.length > 0 };
       }),
   );
+  return backgroundCommandEvents.length ? { ...result, backgroundCommandEvents } : result;
 }
 
 // §4.8b — persist the /workspace snapshot archive onto the lease BEFORE the
@@ -80703,6 +80915,8 @@ function backgroundCommandTerminalMutation(input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  /** Idle window named in an idle-containment notice, when known. */
+  idleContainmentMinutes?: number | null;
 }): {
   events: SessionEvent[];
   prepare: (tx: SessionActivityDatabase) => Promise<void>;
@@ -80818,13 +81032,18 @@ function backgroundCommandTerminalMutation(input: {
           ? "success"
           : "failure";
       const commandLabel = command.commandPreview || "Background command";
+      const idleMinutes = input.idleContainmentMinutes;
       const summary = command.failure
         ? `${commandLabel}: output delivery failed (${command.failure.code}); process exit code ${command.exitCode ?? "unknown"} is not a successful command result.`
-        : command.state === "lost"
-          ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
-          : command.exitCode === 0
-            ? `${commandLabel}: completed successfully.`
-            : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+        : command.state === "lost" && reason === IDLE_COMMAND_CONTAINMENT_REASON
+          ? `\`${commandLabel}\` was stopped because the sandbox was idle${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"}` : ""}; the workspace was saved. Restart it if you still need it.`
+          : command.state === "lost" && reason === DEADLINE_COMMAND_CONTAINMENT_REASON
+            ? `\`${commandLabel}\` was stopped because the sandbox reached its maximum lifetime; the workspace was saved. Restart it if you still need it.`
+            : command.state === "lost"
+              ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
+              : command.exitCode === 0
+                ? `${commandLabel}: completed successfully.`
+                : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,

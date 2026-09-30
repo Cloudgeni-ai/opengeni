@@ -1206,6 +1206,23 @@ const SettingsSchema = z.object({
   // getSettings caps the default at half a shorter configured Modal lifetime so
   // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
   sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  // Idle command containment. A legacy retained background command (a dev
+  // server, a command whose output is still draining, a stopped command the
+  // provider no longer answers for) keeps its box warm through a non-expiring
+  // process holder, so the zero-holder drain never runs and the box would stay
+  // up until the provider deadline kills it uncaptured. Once every session of
+  // the sandbox group has been idle this long - no open turn, no other holder
+  // or writer, measured from durable turn-close/holder/admission facts - the
+  // reaper checkpoints the workspace, stops the box and settles those commands
+  // `lost` with reason `idle_containment`. Default 30min: twice the default
+  // idle grace, so a lease that is only waiting for a "glanced away" user is
+  // never contained earlier than an idle lease would drain, and well inside
+  // the 1h provider-deadline rotation lead, so an idle box is saved long before
+  // the deadline path has to act. Must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
+  // an explicit value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS.
+  // getSettings derives the unset default between those two for short-lived
+  // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
+  sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().default(1_800_000),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
   // that dies any other way (Modal's hard creation-time timeout on a session
@@ -3495,6 +3512,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
+    sandboxIdleCommandContainmentMs: optional("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
@@ -3626,6 +3644,17 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
+  if (raw.sandboxIdleCommandContainmentMs === undefined) {
+    // Strictly between the idle grace and the rotation lead whenever that
+    // interval exists (short test/canary lifetimes), never above 30 minutes.
+    settings.sandboxIdleCommandContainmentMs = Math.max(
+      settings.sandboxIdleGraceMs + 1,
+      Math.min(
+        1_800_000,
+        Math.floor((settings.sandboxIdleGraceMs + settings.sandboxRotationLeadMs) / 2),
+      ),
+    );
+  }
   validateSettings(settings, source);
   return settings;
 }
@@ -7470,6 +7499,25 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
           `legacy command stop grace, largest durable snapshot or drain capture timeout, and two reaper periods ` +
           `(${requiredRotationLeadMs}), including for persisted Modal ` +
           `leases after a default-backend rollout.`,
+      );
+    }
+    const containmentMs = settings.sandboxIdleCommandContainmentMs;
+    if (!(containmentMs > settings.sandboxIdleGraceMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS (${containmentMs}) must exceed ` +
+          `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}): a box kept warm only by ` +
+          `retained commands must stay available at least as long as an idle box awaiting drain.`,
+      );
+    }
+    if (
+      optionalEnvironmentValue("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS", source) !==
+        undefined &&
+      !(containmentMs < rotationLeadMs)
+    ) {
+      throw new Error(
+        `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS (${containmentMs}) must be strictly less than ` +
+          `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}): an idle box must be checkpointed ` +
+          `and stopped well before its provider deadline.`,
       );
     }
     if (settings.sandboxBackend === "modal") {

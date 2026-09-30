@@ -165,6 +165,7 @@ import {
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
+  recordSandboxCommandContainment,
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
@@ -542,10 +543,15 @@ export function createSandboxLeaseActivities(
     try {
       const { db, settings, observability } = await services();
       const timing = sandboxDrainTiming(settings);
-      const onUnobservableCommandDrainError = (error: unknown) => {
-        observability.warn("sandbox reaper: unobservable command drain inspection failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+      const commandContainment = {
+        idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+        onCommandContainment: (outcome: Parameters<typeof recordSandboxCommandContainment>[1]) =>
+          recordSandboxCommandContainment(observability, outcome),
+        onCommandContainmentError: (error: unknown) => {
+          observability.warn("sandbox reaper: retained command containment inspection failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
       };
       if (!settings.sandboxOwnershipEnabled) {
         // Turns skip leases when the flag is off, but Computer/Browser attach
@@ -553,7 +559,7 @@ export function createSandboxLeaseActivities(
         // behind rotation_in_progress forever. Inventory and drain those rows;
         // do not request NEW deadline rotations or meter warm time.
         const drainableInventory = await reapStaleLeaseHoldersGlobal(db, {
-          onUnobservableCommandDrainError,
+          ...commandContainment,
           viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
           turnHolderTtlMs: settings.sandboxLeaseTtlMs,
           interactionHolderTtlMs: settings.sandboxInteractionHolderTtlMs,
@@ -590,7 +596,7 @@ export function createSandboxLeaseActivities(
       // Billing, reconciliation, provider-orphan cleanup, artifact GC, and gauges
       // run only after every drainable box has its own durable child.
       const drainableInventory = await reapStaleLeaseHoldersGlobal(db, {
-        onUnobservableCommandDrainError,
+        ...commandContainment,
         viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
         // Dead-worker turn holders: a live holder is touched every 10s from the
         // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
@@ -634,7 +640,7 @@ export function createSandboxLeaseActivities(
       instanceId: input.target.instanceId,
     });
     try {
-      const { db, settings, observability, objectStorage } = await services();
+      const { db, settings, observability, objectStorage, bus } = await services();
       assertSandboxDrainInputTiming(input);
       const drainSettings =
         settings.sandboxSnapshotTimeoutMs === input.snapshotTimeoutMs
@@ -658,6 +664,7 @@ export function createSandboxLeaseActivities(
           probeDrainableProvider,
           captureAttempt,
           objectStorage,
+          bus,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
       } catch (error) {
@@ -2731,6 +2738,7 @@ async function terminateDrainableBox(
   probeDrainableProvider: DrainableProviderProbeFn,
   attempt: SandboxDrainCaptureAttempt,
   objectStorage: ObjectStorage | null,
+  bus: ActivityServices["bus"] | null = null,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -3191,20 +3199,45 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold } = await confirmDrainCold(db, {
+  const { wentCold, backgroundCommandEvents } = await confirmDrainCold(db, {
     accountId,
     workspaceId: row.workspaceId,
     sandboxGroupId: row.sandboxGroupId,
     expectedEpoch: row.leaseEpoch,
     ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
     providerMissingBeforeCapture: providerMissing,
+    idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
   });
+  // The command terminal events and agent inputs are already durable in the
+  // cold commit; this is only best-effort live fanout.
+  if (bus && backgroundCommandEvents?.length) {
+    for (const sessionId of new Set(backgroundCommandEvents.map((event) => event.sessionId))) {
+      await bus
+        .publish(
+          row.workspaceId,
+          sessionId,
+          backgroundCommandEvents.filter((event) => event.sessionId === sessionId),
+        )
+        .catch((error: unknown) => {
+          observability.warn("sandbox reaper: contained command event fanout failed", {
+            sandboxGroupId: row.sandboxGroupId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
+  }
   if (wentCold) {
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another
     // observed loss. Keep this outside the best-effort session event writer.
     if (providerMissing) {
       recordSandboxProviderMissingBeforeCapture(observability, backend);
+    }
+    if (lease.unobservableCommandDrainIds?.length) {
+      recordSandboxCommandContainment(
+        observability,
+        providerMissing ? "provider_missing" : "contained",
+      );
     }
     // Durable termination record (sandbox-file-persistence observability): who
     // ended this box and whether its /workspace was captured first, appended to
