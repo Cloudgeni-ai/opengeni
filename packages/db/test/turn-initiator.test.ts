@@ -135,6 +135,7 @@ function sessionInput(grant: Awaited<ReturnType<typeof fixture>>) {
 async function addAcceptedScheduledOccurrence(
   grant: Awaited<ReturnType<typeof fixture>>,
   sessionId: string,
+  service?: { name: string; context: Record<string, string | number | boolean> },
 ): Promise<{ taskId: string; runId: string }> {
   const task = await createScheduledTask(client.db, {
     accountId: grant.accountId,
@@ -146,7 +147,8 @@ async function addAcceptedScheduledOccurrence(
     runMode: "existing_session",
     overlapPolicy: "allow_concurrent",
     agentConfig: { prompt: "Scheduled work", resources: [], tools: [], metadata: {} },
-    createdBy: { kind: "service", subjectId: "scheduler" },
+    createdBy: { kind: "service", subjectId: service?.name ?? "scheduler" },
+    createdByContext: service?.context ?? {},
     targetSessionId: sessionId,
     metadata: {},
   });
@@ -287,6 +289,28 @@ async function turnSurface(turnId: string): Promise<string | null> {
 }
 
 describe("immutable session turn initiators", () => {
+  test("scheduled occurrences freeze their accepted task's service name and context with no human", async () => {
+    const grant = await fixture();
+    const session = await createSession(client.db, sessionInput(grant));
+    const scheduled = await addAcceptedScheduledOccurrence(grant, session.id, {
+      name: "cloudgeni:drift",
+      context: { job: "drift-42", automated: true },
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("scheduled service occurrence was not claimed");
+    expect(claim.turn.initiator).toEqual({ kind: "service", subjectId: "cloudgeni:drift" });
+    expect(claim.turn.initiatorContext).toMatchObject({ job: "drift-42", automated: true });
+    expect(claim.turn.initiatingHumanSubjectId).toBeNull();
+    expect(claim.turn.scheduledTaskRunId).toBe(scheduled.runId);
+  });
+
   test("uses a caller-preallocated UUID and rejects collisions", async () => {
     const grant = await fixture();
     const requestedSessionId = crypto.randomUUID();
@@ -681,6 +705,9 @@ describe("immutable session turn initiators", () => {
       label: "External scheduler",
     });
     expect(turn?.initiator.subjectId).not.toBe(authorizationSubject);
+    const [stored] =
+      await shared.admin`select initiating_human_subject_id from session_turns where id = ${submitted.turnId}`;
+    expect(stored?.initiating_human_subject_id).toBeNull();
   });
 
   test("the database rejects mutation of a persisted initiator", async () => {

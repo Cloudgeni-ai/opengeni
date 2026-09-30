@@ -71260,6 +71260,32 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            // A task's accepted service provenance is immutable, just like
+            // its execution policy. Never consult a mutable task or borrow
+            // the session creator's human for this occurrence.
+            if (
+              delivered.updates.every((update) => update.kind === "scheduled_occurrence") &&
+              accepted.task.createdBy.kind === "service"
+            ) {
+              const { label: _label, ...serviceContext } = accepted.task.createdByContext;
+              internalInitiator = {
+                initiator:
+                  accepted.task.createdBy.subjectId === "scheduler" &&
+                  !accepted.task.createdBy.label
+                    ? { ...accepted.task.createdBy, label: "OpenGeni scheduler" }
+                    : accepted.task.createdBy,
+                context: {
+                  ...serviceContext,
+                  ...internalInitiator.context,
+                },
+              };
+              if (delivered.event) {
+                delivered.event.payload = {
+                  ...(delivered.event.payload as Record<string, unknown>),
+                  initiator: internalInitiator.initiator,
+                };
+              }
+            }
             frozenTurnExecutionPolicy = accepted.turnExecutionPolicy
               ? TurnExecutionPolicyV1.parse(accepted.turnExecutionPolicy)
               : null;
