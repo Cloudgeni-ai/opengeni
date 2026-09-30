@@ -4,6 +4,8 @@ import {
   deferCompactionToModelBoundary,
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
+import { AnthropicMessagesModel } from "./anthropic-messages";
+import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
@@ -1029,13 +1031,20 @@ export async function generateSessionTitle(
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
-  const response = binding
-    ? await new CompactionResponsesModel(
-        binding.client,
-        binding.modelId,
-        binding.provider,
-      ).fetchResponse(request)
-    : await options.model!.getResponse(request);
+  const response =
+    binding?.provider.api === "anthropic-messages"
+      ? await new AnthropicMessagesModel(
+          binding.provider,
+          binding.modelId,
+          instrumentedModelFetch(binding.provider.id, globalThis.fetch),
+        ).getResponse(request)
+      : binding
+        ? await new CompactionResponsesModel(
+            binding.client,
+            binding.modelId,
+            binding.provider,
+          ).fetchResponse(request)
+        : await options.model!.getResponse(request);
   return {
     title: normalizeGeneratedSessionTitle(
       extractResponseOutputText(response),
@@ -1092,7 +1101,10 @@ async function generateChatSessionTitle(
  */
 function responseStoppedAtOutputLimit(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
-  return (response as { status?: unknown }).status === "incomplete";
+  return (
+    (response as { status?: unknown }).status === "incomplete" ||
+    (response as ModelResponse).providerData?.anthropic?.stopReason === "max_tokens"
+  );
 }
 
 const INLINE_REASONING_CLOSE_TAG = /<\/(?:think|thinking|reasoning)>/giu;
@@ -1269,7 +1281,14 @@ export async function summarizeForCompaction(
       };
   let response: unknown;
   try {
-    response = await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
+    response =
+      provider.api === "anthropic-messages"
+        ? await new AnthropicMessagesModel(
+            provider,
+            model,
+            instrumentedModelFetch(provider.id, globalThis.fetch),
+          ).getResponse(request)
+        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1277,7 +1296,10 @@ export async function summarizeForCompaction(
   if (usage) {
     await options.onUsage?.(usage);
   }
-  if (isFailedCompactionProviderResponse(response)) {
+  if (
+    (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
+    isFailedCompactionProviderResponse(response)
+  ) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
   }
   const summary = extractResponseOutputText(response).trim();

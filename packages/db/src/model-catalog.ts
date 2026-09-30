@@ -9,7 +9,11 @@ export type DeploymentModelCatalogRow = {
   updatedAt: Date;
 };
 
-export type WorkspaceCustomModelProviderKind = "vercel_gateway" | "openrouter";
+export type WorkspaceCustomModelProviderKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 export type WorkspaceProviderCustomModel = {
   id: string;
@@ -74,15 +78,30 @@ export class WorkspaceOpenRouterCustomModelHistoryLimitError extends Error {
 }
 
 function customModelLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription")
+    return new WorkspaceClaudeCustomModelLimitError(false);
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelLimitError()
     : new WorkspaceOpenRouterCustomModelLimitError();
 }
 
 function customModelHistoryLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription")
+    return new WorkspaceClaudeCustomModelLimitError(true);
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelHistoryLimitError()
     : new WorkspaceOpenRouterCustomModelHistoryLimitError();
+}
+
+export class WorkspaceClaudeCustomModelLimitError extends Error {
+  constructor(history: boolean) {
+    super(
+      history
+        ? "Workspace Claude custom model history limit reached"
+        : "Workspace Claude custom model limit reached",
+    );
+    this.name = "WorkspaceClaudeCustomModelLimitError";
+  }
 }
 
 function workspaceCustomModelLockKey(
@@ -91,7 +110,7 @@ function workspaceCustomModelLockKey(
 ): string {
   return providerKind === "vercel_gateway"
     ? `workspace-gateway-custom-models:${workspaceId}`
-    : `workspace-openrouter-custom-models:${workspaceId}`;
+    : `workspace-${providerKind}-custom-models:${workspaceId}`;
 }
 
 /** Serialize one provider's custom-model mutations while allowing concurrent acceptance reads. */
@@ -204,7 +223,7 @@ export async function getDeploymentModelCatalog(
   return row ?? null;
 }
 
-async function listWorkspaceProviderCustomModels(
+export async function listWorkspaceProviderCustomModels(
   db: Database,
   input: {
     accountId: string;
@@ -260,7 +279,7 @@ export async function listWorkspaceOpenRouterCustomModels(
   ).map(asOpenRouterCustomModel);
 }
 
-async function lockActiveWorkspaceProviderCustomModelForAdmission(
+export async function lockActiveWorkspaceProviderCustomModelForAdmission(
   db: Database,
   input: {
     accountId: string;
@@ -318,7 +337,7 @@ type ReplayWorkspaceProviderCustomModelCreateResult =
   | { outcome: "conflict" }
   | { outcome: "success"; model: WorkspaceProviderCustomModel };
 
-async function replayWorkspaceProviderCustomModelCreate(
+export async function replayWorkspaceProviderCustomModelCreate(
   db: Database,
   input: {
     accountId: string;
@@ -403,7 +422,7 @@ type CreateWorkspaceProviderCustomModelInput = {
   createdBySubjectId: string;
 };
 
-async function createWorkspaceProviderCustomModel(
+export async function createWorkspaceProviderCustomModel(
   db: Database,
   input: CreateWorkspaceProviderCustomModelInput & {
     providerKind: WorkspaceCustomModelProviderKind;
@@ -524,7 +543,7 @@ type DeleteWorkspaceProviderCustomModelResult =
   | { outcome: "conflict" }
   | { outcome: "not_found" };
 
-async function deleteWorkspaceProviderCustomModel(
+export async function deleteWorkspaceProviderCustomModel(
   db: Database,
   input: DeleteWorkspaceProviderCustomModelInput & {
     providerKind: WorkspaceCustomModelProviderKind;
@@ -628,7 +647,7 @@ export async function deleteWorkspaceOpenRouterCustomModel(
 }
 
 /** Retired rows remain executable for an accepted turn or existing continuation. */
-async function getWorkspaceProviderCustomModelForExecution(
+export async function getWorkspaceProviderCustomModelForExecution(
   db: Database,
   input: {
     accountId: string;

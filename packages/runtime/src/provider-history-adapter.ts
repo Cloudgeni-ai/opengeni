@@ -1,4 +1,4 @@
-export type HistoryProviderApi = "responses" | "chat";
+export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
 const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
 const HISTORICAL_FACT_MAX_CHARS = 32_000;
@@ -92,6 +92,15 @@ export function projectHistoryForProvider(
     );
   }
 
+  if (providerApi === "anthropic-messages") {
+    if (items.some((item) => item.type === "compaction"))
+      throw new ProviderHistoryIncompatibleError(providerApi, "compaction");
+    return items.some((item) => item.type === "message" && item.role === "developer")
+      ? items.map((item) =>
+          item.type === "message" && item.role === "developer" ? { ...item, role: "system" } : item,
+        )
+      : items;
+  }
   const incompatibleCallIds = new Set<string>();
   for (const item of items) {
     if (item.type === "compaction") {

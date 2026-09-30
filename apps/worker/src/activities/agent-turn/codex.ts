@@ -3,7 +3,7 @@ import {
   fetchCodexUsageForAccount,
   type CodexAccountStatus,
 } from "@opengeni/db";
-import { type ResolvedModelProvider, type Settings } from "@opengeni/config";
+import { type ModelProviderApi, type ResolvedModelProvider, type Settings } from "@opengeni/config";
 import { codexAccountNeedsLiveCapacityRefresh } from "../codex-rotation";
 import {
   refreshCodexUsageAndRepairCapacityWaiters,
@@ -19,14 +19,18 @@ export function codexWorkspaceMetricKey(workspaceId: string): string {
 /** Stable public request identity across partial resumes and activity retries. */
 export function acceptsPromptCacheKeyForTurn(
   resolvedModel: {
-    provider: { kind: ResolvedModelProvider["kind"]; builtin?: boolean };
+    provider: { kind: ResolvedModelProvider["kind"]; builtin?: boolean; api?: ModelProviderApi };
   } | null,
 ): boolean {
   if (!resolvedModel) {
     return true;
   }
   return (
-    resolvedModel.provider.builtin === true || resolvedModel.provider.kind === "codex-subscription"
+    resolvedModel.provider.builtin === true ||
+    resolvedModel.provider.kind === "codex-subscription" ||
+    // Native Claude consumes this internal key as session identity; it never
+    // sends OpenAI's prompt_cache_key field to the Messages endpoint.
+    resolvedModel.provider.api === "anthropic-messages"
   );
 }
 
