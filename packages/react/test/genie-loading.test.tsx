@@ -150,6 +150,70 @@ test("startup-only timeline groups have no verbose step-count shell", async () =
   await r.unmount();
 });
 
+test("readable startup stays primary through phase gaps and first byte, then hands its clock to Working", async () => {
+  const start = new Date(Date.now() - 12_000).toISOString();
+  const first = phase({ startedAt: start, occurredAt: start });
+  const r = await renderComponent(
+    <MessageTimeline items={[first]} turnSummary={{ rolling: true }} />,
+  );
+  try {
+    const orb = r.container.querySelector("canvas");
+    expect(orb).not.toBeNull();
+    expect(r.container.querySelector("[data-og-work-header]")).toBeNull();
+    const ready = [
+      { ...first, status: "complete" as const },
+      phase({ id: "byte", phase: "provider_first_byte", status: "complete" }),
+    ];
+    await r.rerender(<MessageTimeline items={ready} turnSummary={{ rolling: true }} />);
+    expect(r.container.querySelector("canvas")).toBe(orb);
+    const progress = {
+      kind: "agent-message" as const,
+      id: "progress",
+      turnId: "turn",
+      text: "Checking the **ledger**",
+      streaming: false,
+      occurredAt: new Date().toISOString(),
+    };
+    await r.rerender(
+      <MessageTimeline items={[...ready, progress]} turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+    expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toMatch(
+      /^Working · 1[2-4]s$/,
+    );
+    const trigger = r.container.querySelector<HTMLButtonElement>("[data-og-work-header]")!;
+    await act(async () => trigger.click());
+    expect(r.container.querySelector("[data-og-fold-content] .og-genie-loading")).toBeNull();
+    await r.rerender(
+      <MessageTimeline
+        items={[...ready, progress, phase({ id: "late" })]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+  } finally {
+    await r.unmount();
+  }
+});
+
+test("readable startup failure and cancellation never hide behind a closed Working row", async () => {
+  for (const status of ["failed", "cancelled"] as const) {
+    const r = await renderComponent(
+      <MessageTimeline items={[phase({ status })]} turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+    expect(r.container.querySelector("[data-og-work-header]")?.getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+    expect(r.container.textContent).toContain(
+      status === "failed" ? "Sandbox didn’t start" : "Sandbox startup interrupted",
+    );
+    await r.unmount();
+  }
+});
+
 test("the same orb survives gaps between startup phases", async () => {
   const first = phase();
   const r = await renderComponent(<MessageTimeline items={[first]} />);

@@ -151,6 +151,50 @@ const workRows = (groups: TimelineGroup[]) =>
   groups.filter((group) => group.kind === "activity" && group.work);
 
 describe("readable per-turn grouping", () => {
+  test("presented media in earlier prose remains primary beside the final response", () => {
+    sequence = 0;
+    const preview = "![Preview](artifact:9c1e4b7a-5d2f-4e3a-8b6c-0f1a2b3c4d5f)";
+    const groups = fold([
+      ...tool("render", "exec_command", "turn-1"),
+      event("agent.message.completed", {
+        messageId: "preview",
+        phase: "commentary",
+        text: preview,
+      }),
+      ...tool("check", "exec_command", "turn-1"),
+      ...answer("Ready for review.", "turn-1", "final_answer"),
+      event("turn.completed", {}),
+    ]);
+    expect(visibleProse(groups)).toEqual([preview, "Ready for review."]);
+    const work = workRows(groups)[0]!;
+    expect(work.kind === "activity" && visibleProse(work.work!.details)).toEqual([]);
+  });
+
+  test("a corrected final response after recovery stays primary, not the first final declaration", () => {
+    sequence = 0;
+    const events = [
+      ...tool("first", "exec_command", "turn-1"),
+      event("agent.message.completed", {
+        messageId: "initial",
+        phase: "final_answer",
+        text: "Initial result: 10.",
+      }),
+      ...tool("recheck", "exec_command", "turn-1"),
+      event("agent.message.completed", {
+        messageId: "corrected",
+        phase: "final_answer",
+        text: "Corrected result: 12.",
+      }),
+    ];
+    expect(visibleProse(fold(events))).toEqual(["Initial result: 10.", "Corrected result: 12."]);
+    const settled = fold([...events, event("turn.completed", {})]);
+    expect(visibleProse(settled)).toEqual(["Corrected result: 12."]);
+    const work = workRows(settled)[0]!;
+    expect(work.kind === "activity" && visibleProse(work.work!.details)).toEqual([
+      "Initial result: 10.",
+    ]);
+  });
+
   test("live prose precedes one stable trailing work row, including text-only and waiting turns", () => {
     sequence = 0;
     const first = recordedDelta("First **progress**", "first");
@@ -172,7 +216,7 @@ describe("readable per-turn grouping", () => {
     }
   });
 
-  test("explicit final streaming freezes duration without folding progress until settlement", () => {
+  test("explicit final streaming records response start without folding progress until settlement", () => {
     sequence = 0;
     const live = [
       recordedDelta("First progress", "first"),
@@ -193,8 +237,8 @@ describe("readable per-turn grouping", () => {
     expect(kinds(streaming)).toEqual([
       "agent-message",
       "agent-message",
-      "activity",
       "agent-message",
+      "activity",
     ]);
     const settled = fold([...live, final, event("turn.completed", {})]);
     expect(visibleProse(settled)).toEqual(["Final response"]);
@@ -433,7 +477,7 @@ describe("readable per-turn grouping", () => {
     );
   });
 
-  test("a settled work row ends at the first answer delta and retains its identity", () => {
+  test("a settled work row retains its response-start evidence and identity", () => {
     sequence = 0;
     const events = [event("turn.started", {}), ...tool("read", "exec_command", "turn-1")];
     const start = event("agent.message.delta", {

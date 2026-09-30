@@ -195,7 +195,60 @@ function tailScenario(): Draft[] {
     },
     "turn-tail",
   );
+  tool(
+    "after-final",
+    "exec_command",
+    { cmd: "record-analysis-metadata" },
+    "Analysis metadata saved.",
+    "turn-tail",
+  );
   add("turn.completed", {}, "turn-tail");
+  return drafts;
+}
+
+function startupTailScenario(): Draft[] {
+  const { drafts, add } = script();
+  add("user.message", { text: "Check the signup totals." }, null);
+  add("turn.started", {}, "startup", 0.1);
+  add("turn.startup.phase.started", { phase: "model_preparation" }, "startup", 0.1);
+  add("sandbox.operation.started", { name: "sandbox.provision" }, "startup", 0.1);
+  add("sandbox.operation.completed", { name: "sandbox.provision", durationMs: 2000 }, "startup", 2);
+  add(
+    "turn.startup.phase.completed",
+    { phase: "model_preparation", durationMs: 2200 },
+    "startup",
+    0.1,
+  );
+  add("agent.model.request", { phase: "started" }, "startup", 0.1);
+  add("agent.model.request", { phase: "first_byte", durationMs: 2000 }, "startup", 2);
+  add(
+    "agent.message.completed",
+    {
+      messageId: "startup-progress",
+      phase: "commentary",
+      text: "I’m checking the **source totals** against the [ledger](#source-ledger).",
+    },
+    "startup",
+    0.1,
+  );
+  add(
+    "agent.toolCall.created",
+    { id: "read", name: "exec_command", arguments: { cmd: "psql -f totals.sql" } },
+    "startup",
+    0.2,
+  );
+  add("agent.toolCall.output", { id: "read", output: "171 signups" }, "startup", 0.3);
+  add(
+    "agent.message.delta",
+    {
+      messageId: "startup-final",
+      phase: "final_answer",
+      text: "**171 signups**, verified against the ledger.",
+    },
+    "startup",
+    0.2,
+  );
+  add("turn.completed", {}, "startup", 0.2);
   return drafts;
 }
 
@@ -390,6 +443,7 @@ function machineFollowUpScenario(): Draft[] {
 }
 
 const SCENARIOS: Record<string, () => Draft[]> = {
+  startup: startupTailScenario,
   tail: tailScenario,
   delegated: delegatedScenario,
   "follow-up": followUpScenario,

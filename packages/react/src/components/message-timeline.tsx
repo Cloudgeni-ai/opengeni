@@ -647,7 +647,7 @@ export function MessageTimeline({
   const [pinned, setPinned] = useState(true);
   const { groups: allGroups, release: releaseProgress } = useReadingProgress(
     projectedGroups,
-    pinned,
+    autoFollow && pinned && !hasNewer,
   );
   const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
   const canSkipTipCatchupRef = useRef(false);
@@ -893,6 +893,26 @@ export function MessageTimeline({
       setOlderPrefetchArmed(true);
     }
   }, [autoFollow, applyPinned, clearPendingReaderLeave, clearReaderIntent, stopFollow]);
+
+  useEffect(() => {
+    if (!readableTurns) return;
+    const node = scrollRef.current;
+    if (!node) return;
+    const onSelection = () => {
+      const selection = node.ownerDocument.getSelection();
+      if (
+        selection &&
+        !selection.isCollapsed &&
+        node.contains(selection.anchorNode) &&
+        node.contains(selection.focusNode)
+      ) {
+        releasePinFromReader();
+        disclosureKeepsUnpinnedRef.current = true;
+      }
+    };
+    node.ownerDocument.addEventListener("selectionchange", onSelection);
+    return () => node.ownerDocument.removeEventListener("selectionchange", onSelection);
+  }, [readableTurns, releasePinFromReader]);
 
   /**
    * Settled away from the tip while the camera is idle — Vimium / unfocused
@@ -2213,6 +2233,12 @@ export function MessageTimeline({
                           disclosureKeepsUnpinnedRef.current = true;
                         }
                       }}
+                      onFocusCapture={(event) => {
+                        if (readableTurns && event.target !== event.currentTarget) {
+                          releasePinFromReader();
+                          disclosureKeepsUnpinnedRef.current = true;
+                        }
+                      }}
                       onPointerDown={onPointerDown}
                       onKeyDown={onKeyDown}
                       style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
@@ -2824,7 +2850,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
                     key={
                       !startupDismissed &&
                       group.kind === "activity" &&
-                      !group.work?.details?.length &&
+                      !group.work &&
                       group.items.every(
                         (item) =>
                           item.kind === "startup-phase" ||
@@ -2962,7 +2988,35 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (group.work) {
-        const end = group.work.responseStartedAt ?? group.work.endedAt;
+        const phases = group.items.filter((item) => item.kind === "startup-phase");
+        const preparing =
+          !startupDetails &&
+          !startupDismissed &&
+          !group.work.endedAt &&
+          !group.work.waiting &&
+          phases.length > 0 &&
+          group.items.every(
+            (item) =>
+              item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
+          ) &&
+          !phases.some((item) => item.status === "failed" || item.status === "cancelled");
+        if (preparing) {
+          // Preparation is primary, never hidden in an activity disclosure.
+          // Keep work.startedAt unchanged for the handoff and settled duration.
+          return (
+            <ActivityRail
+              items={group.items}
+              startupActive
+              bare
+              toolRegistry={toolRegistry}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
+            />
+          );
+        }
+        const end = group.work.endedAt;
         const status: TurnSummaryStatus = end
           ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
           : group.work.waiting
@@ -2980,13 +3034,19 @@ const TimelineGroupView = memo(function TimelineGroupView({
               };
         return (
           <TurnSummary
-            key={containsPresentedImage ? "primary-image" : "work"}
+            key="work"
             items={group.items}
             status={status}
             outcome={group.outcome}
             failureText={group.failureText}
             foldKey={group.id}
-            defaultOpen={containsPresentedImage || group.outcome === "failed" ? true : undefined}
+            defaultOpen={
+              containsPresentedImage ||
+              group.outcome === "failed" ||
+              phases.some((item) => item.status === "failed" || item.status === "cancelled")
+                ? true
+                : undefined
+            }
             facets={turnSummary?.facets}
             contextCompactionCount={compactedLandmarkCount(group.work.details)}
           >
@@ -3083,6 +3143,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           return (
             <ActivityRail
               items={group.items}
+              startupActive={startupDismissed ? false : undefined}
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
@@ -3291,7 +3352,7 @@ function renderFoldedGroups(
               : undefined
           }
         >
-          <TimelineGroupView {...behavior} group={child} insideTurn />
+          <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
         </div>
       ) : (
         <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />

@@ -247,6 +247,13 @@ export function TurnSummary({
   const initialSettle = Boolean(settleFold) && !restingOpen && remembered === undefined;
   const [settling, setSettling] = useState(initialSettle);
   const [open, setOpen] = useState(initialSettle ? true : restingOpen);
+  const readerOwnsOpen = useRef(remembered !== undefined);
+  useEffect(() => {
+    // Readable work can produce primary media or fail after mounting. Reveal
+    // that output without remounting existing tool controls, while preserving
+    // every explicit reader-owned open/closed choice.
+    if (status && defaultOpen && remembered === undefined && !readerOwnsOpen.current) setOpen(true);
+  }, [status, defaultOpen, remembered]);
   // While true, a close uses the slow settle collapse. Cleared after that
   // auto-collapse finishes (or on first user interaction) so later manual
   // closes are the fast disclose pair.
@@ -358,6 +365,7 @@ export function TurnSummary({
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [searchReveal]);
   const onOpenChange = (next: boolean) => {
+    readerOwnsOpen.current = true;
     // The reader took over — cancel the pending auto-collapse for good.
     // Clear settle CSS phase immediately (fast collapse) but keep nest latch
     // through the disclose window so nested chips stay force-open mid-close

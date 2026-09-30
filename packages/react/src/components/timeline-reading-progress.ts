@@ -56,7 +56,7 @@ export function useReadingProgress(projected: TimelineGroup[], pinned: boolean) 
   useLayoutEffect(() => {
     previous.current = groups;
     if (pinned && released.size) setReleased(new Set());
-  });
+  }, [groups, pinned, released]);
   const release = useCallback(
     (id: string | null) => {
       if (
@@ -66,7 +66,7 @@ export function useReadingProgress(projected: TimelineGroup[], pinned: boolean) 
         )
       )
         return;
-      setReleased((previous) => (previous.has(id) ? previous : new Set([...previous, id])));
+      setReleased((current) => (current.has(id) ? current : new Set([...current, id])));
     },
     [projected],
   );

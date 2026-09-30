@@ -1929,13 +1929,17 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         )
       : prose;
     const response =
-      responseCandidates.find((message) => message.phase === "final_answer") ??
+      responseCandidates.filter((message) => message.phase === "final_answer").at(-1) ??
       (settledAt
-        ? (responseCandidates.at(-1) ?? prose.find((message) => message.phase === "final_answer"))
+        ? (responseCandidates.at(-1) ??
+          prose.filter((message) => message.phase === "final_answer").at(-1))
         : undefined);
     if (settledAt) {
       for (const message of responseCandidates) {
-        if (message === response) continue;
+        // Markdown image syntax also carries retained video/audio previews.
+        // Keep potential primary media visible rather than guessing whether a
+        // partial/reference-style embed can safely disappear into history.
+        if (message === response || message.text.includes("![")) continue;
         foldedProse.add(message);
         group.work!.details.push({ kind: "item", item: message });
       }
@@ -1957,11 +1961,15 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      if ((positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)) {
+      if (
+        settledAt &&
+        (positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)
+      ) {
         beforeRows.set(groups[positions.get(response)!]!, group);
         movedRows.add(group);
       }
-    } else if (!settledAt) {
+    }
+    if (!settledAt) {
       // Keep the same row at the tail of this turn, after every live progress
       // message and attention surface, without crossing a newer input/turn.
       let tailIndex = (nextBoundary.get(group) ?? groups.length) - 1;

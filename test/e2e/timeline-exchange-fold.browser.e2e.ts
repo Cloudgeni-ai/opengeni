@@ -111,6 +111,53 @@ describe("readable timeline browser regression", () => {
   }
 
   for (const width of [390, 1280]) {
+    for (const intent of ["selection", "focus"] as const) {
+      test(`pinned ${intent} owns progress through settlement at ${width}px`, async () => {
+        const page = await openHarness("startup", width, width === 390);
+        try {
+          await page.evaluate(() => {
+            const driver = window.exchangeFoldHarness!;
+            driver.show(driver.indexOf("agent.message.delta", { messageId: "startup-final" })[0]!);
+          });
+          await page.waitForTimeout(350);
+          expect((await sample(page)).following).toBe(true);
+          const selected = await page.evaluate((kind) => {
+            const paragraph = document.querySelector<HTMLElement>(
+              "[data-og-wide-table-message] p",
+            )!;
+            paragraph.dataset.pinnedReader = "true";
+            if (kind === "selection") {
+              const range = document.createRange();
+              range.selectNodeContents(paragraph);
+              window.getSelection()!.removeAllRanges();
+              window.getSelection()!.addRange(range);
+            } else {
+              const link = paragraph.querySelector<HTMLAnchorElement>("a")!;
+              link.dataset.pinnedFocus = "true";
+              link.focus({ preventScroll: true });
+            }
+            return paragraph.textContent;
+          }, intent);
+          await nextPaint(page);
+          expect((await sample(page)).following).toBe(false);
+          await page.evaluate(() =>
+            window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+          );
+          await nextPaint(page);
+          expect(await page.locator("[data-pinned-reader]").count()).toBe(1);
+          if (intent === "selection")
+            expect(await page.evaluate(() => window.getSelection()!.toString())).toBe(selected!);
+          else
+            expect(
+              await page.evaluate(() => document.activeElement?.hasAttribute("data-pinned-focus")),
+            ).toBe(true);
+          expect((await sample(page)).following).toBe(false);
+        } finally {
+          await page.context().close();
+        }
+      }, 30_000);
+    }
+
     test(`manual reader keeps prose, selection and focus through settlement at ${width}px`, async () => {
       const page = await openHarness("tail", width, width === 390);
       try {
@@ -556,6 +603,55 @@ describe("readable timeline browser regression", () => {
 
   for (const width of [1280, 390]) {
     for (const theme of ["dark", "light"]) {
+      test(`standalone startup hands its elapsed clock to Working: ${width}px ${theme}`, async () => {
+        const page = await openHarness("startup", width, width === 390);
+        try {
+          await page.setViewportSize({ width, height: 900 });
+          if (theme === "light")
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+          const steps = await page.evaluate(() => {
+            const driver = window.exchangeFoldHarness!;
+            return {
+              starting: driver.indexOf("sandbox.operation.started")[0]! + 1,
+              ready: driver.indexOf("agent.model.request", { phase: "first_byte" })[0]! + 1,
+              progress:
+                driver.indexOf("agent.message.completed", { messageId: "startup-progress" })[0]! +
+                1,
+            };
+          });
+          await page.evaluate((count) => window.exchangeFoldHarness!.show(count), steps.starting);
+          await page.waitForTimeout(300);
+          const orb = page.locator(".og-genie-loading");
+          expect(await orb.count()).toBe(1);
+          expect(await page.locator("[data-og-work-header]").count()).toBe(0);
+          await orb.evaluate((node) => node.setAttribute("data-startup-identity", "same"));
+          const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+          if (output) {
+            mkdirSync(output, { recursive: true });
+            await page.screenshot({ path: `${output}/startup-${width}-${theme}-orb.png` });
+          }
+          await page.evaluate((count) => window.exchangeFoldHarness!.show(count), steps.ready);
+          await nextPaint(page);
+          expect(await orb.getAttribute("data-startup-identity")).toBe("same");
+          expect(await page.locator("[data-og-work-header]").count()).toBe(0);
+          await page.evaluate((count) => window.exchangeFoldHarness!.show(count), steps.progress);
+          await nextPaint(page);
+          expect(await orb.count()).toBe(0);
+          const header = page.locator('[data-og-work-header="outer"]');
+          expect(await header.count()).toBe(1);
+          expect(await header.textContent()).toMatch(/Working · [5-9]s/);
+          if (output)
+            await page.screenshot({ path: `${output}/startup-${width}-${theme}-working.png` });
+          await header.click();
+          expect(await page.locator("[data-og-fold-content] .og-genie-loading").count()).toBe(0);
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+          ).toBe(false);
+        } finally {
+          await page.context().close();
+        }
+      }, 30_000);
+
       test(`tail activity and settled chronology preview: ${width}px ${theme}`, async () => {
         const page = await openHarness("tail", width, width === 390);
         try {
@@ -609,12 +705,20 @@ describe("readable timeline browser regression", () => {
           await nextPaint(page);
           expect(await page.locator("[data-og-wide-table-message]").count()).toBe(4);
           const duration = await header.textContent();
-          expect(duration).toContain("Worked for");
+          expect(duration).toContain("Working");
           await capture("answering");
+          await page.evaluate((count) => window.exchangeFoldHarness!.show(count), stages.total - 1);
+          await nextPaint(page);
+          expect(await header.textContent()).toContain("Working");
+          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(4);
+          await page
+            .locator("[data-og-exchange-preview]")
+            .getByText("record-analysis-metadata", { exact: false })
+            .waitFor({ state: "visible" });
           await page.evaluate((count) => window.exchangeFoldHarness!.show(count), stages.total);
           await nextPaint(page);
           expect(await header.getAttribute("data-tail-identity")).toBe("same");
-          expect(await header.textContent()).toBe(duration);
+          expect(await header.textContent()).toContain("Worked for");
           expect(await header.getAttribute("aria-expanded")).toBe("false");
           expect(await page.locator("[data-og-wide-table-message]").count()).toBe(1);
           expect(await page.locator("[data-og-wide-table-message] table").count()).toBe(1);
@@ -623,7 +727,7 @@ describe("readable timeline browser regression", () => {
           expect(
             await page.locator("[data-og-fold-content] [data-og-wide-table-message]").count(),
           ).toBe(3);
-          expect(await header.textContent()).toContain("25 steps");
+          expect(await header.textContent()).toContain("26 steps");
           await capture("expanded");
         } finally {
           await page.context().close();
