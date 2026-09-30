@@ -9124,7 +9124,7 @@
         "$": "object",
         "$.aliases": "array?",
         "$.aliases[]": "string",
-        "$.api": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.api": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
         "$.contextWindowTokens": "integer?",
@@ -9133,7 +9133,7 @@
         "$.definitionVersion": "string?",
         "$.deployment": "object?",
         "$.deployment.upstreamModelId": "string!",
-        "$.deployment.wireApi": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.deployment.wireApi": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.executionLimits": "object?",
         "$.executionLimits.autoCompactTokenLimit": "integer! null",
         "$.executionLimits.contextWindowTokens": "integer! null",
@@ -15527,7 +15527,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
+        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
     "OrganizationProviderCustomModel": {
@@ -20892,6 +20892,9 @@
       "shape": {
         "$": "object",
         "$.apiKey": "string!",
+        "$.claudeIdentity": "object?",
+        "$.claudeIdentity.accountUuid": "string!",
+        "$.claudeIdentity.deviceId": "string!",
         "$.expectedVersion": "integer?",
         "$.operationId": "string!"
       }
@@ -22178,7 +22181,7 @@
         "$": "object",
         "$.aliases": "array?",
         "$.aliases[]": "string",
-        "$.api": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.api": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.availability": "ref(ModelAvailabilityV1)!",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
@@ -22189,7 +22192,7 @@
         "$.definitionVersion": "string?",
         "$.deployment": "object?",
         "$.deployment.upstreamModelId": "string!",
-        "$.deployment.wireApi": "enum!=[\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.deployment.wireApi": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
         "$.executionLimits": "object?",
         "$.executionLimits.autoCompactTokenLimit": "integer! null",
         "$.executionLimits.contextWindowTokens": "integer! null",
@@ -24948,6 +24951,7 @@
       "advancedSourceSummary": "value",
       "AgentMessageItem": "type",
       "answersFromDrafts": "value",
+      "AnthropicMark": "value",
       "appendFinalTranscript": "value",
       "ApplyPatchOperation": "type",
       "applyPatchOps": "value",
@@ -24974,6 +24978,7 @@
       "ChatComposer": "value",
       "ChatComposerMessages": "type",
       "ChatComposerProps": "type",
+      "ClaudeMark": "value",
       "ClientOverride": "type",
       "cn": "value",
       "CodeEditor": "value",
