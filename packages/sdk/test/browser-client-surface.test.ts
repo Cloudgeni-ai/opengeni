@@ -14,6 +14,8 @@ const legacyBrowserUnusedMethods = [
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
   "browseAtlassianSources",
+  // Only the removed Agents page cancelled sessions from the web client.
+  "cancelSession",
   "captureComputerTarget",
   "codexAccountUsage",
   "codexDisconnect",
