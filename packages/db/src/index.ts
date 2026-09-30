@@ -97,7 +97,7 @@ import {
 import { z } from "zod";
 import {
   latestStartedSessionTurnQuery,
-  withLatestStartedSessionPolicy,
+  withEffectiveSessionPolicy,
 } from "./session-execution-policy";
 import {
   assignedConnectionDefault,
@@ -649,6 +649,7 @@ export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
+export * from "./session-model-settings";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
@@ -35849,7 +35850,7 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
-  return withLatestStartedSessionPolicy(
+  return withEffectiveSessionPolicy(
     db,
     workspaceId,
     (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
@@ -37547,7 +37548,7 @@ export async function getSessionForSubject(
     ) {
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
-    const [session] = await withLatestStartedSessionPolicy(
+    const [session] = await withEffectiveSessionPolicy(
       scopedDb,
       workspaceId,
       await withCurrentSessionInputWait(scopedDb, workspaceId, [
@@ -71974,6 +71975,11 @@ export async function claimSessionWorkForAttempt(
               workspaceId,
               sessionId,
             );
+            const [effectivePolicy] = await withEffectiveSessionPolicy(
+              tx as unknown as Database,
+              workspaceId,
+              [session],
+            );
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const [compactionTurn] = await tx
               .insert(schema.sessionTurns)
@@ -71997,13 +72003,13 @@ export async function claimSessionWorkForAttempt(
                     prompt: "",
                     resources: [],
                     tools: [],
-                    model: latestStarted?.model ?? session.model,
+                    model: effectivePolicy!.model,
                     reasoningEffort: reasoningEffortForMetadata(
-                      { reasoningEffort: latestStarted?.reasoningEffort },
+                      { reasoningEffort: effectivePolicy!.reasoningEffort },
                       session.reasoningEffort as ReasoningEffort,
                     ),
                     latencyMode: latencyModeForMetadata(
-                      { latencyMode: latestStarted?.latencyMode },
+                      { latencyMode: effectivePolicy!.latencyMode },
                       session.latencyMode as LatencyMode,
                     ),
                     sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
@@ -72304,19 +72310,22 @@ export async function claimSessionWorkForAttempt(
             workspaceId,
             sessionId,
           );
+          const [effectivePolicy] = await withEffectiveSessionPolicy(
+            tx as unknown as Database,
+            workspaceId,
+            [session],
+          );
           let model =
-            typeof goalPolicy?.model === "string"
-              ? goalPolicy.model
-              : (latestStarted?.model ?? session.model);
+            typeof goalPolicy?.model === "string" ? goalPolicy.model : effectivePolicy!.model;
           let reasoningEffort = reasoningEffortForMetadata(
             {
-              reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
+              reasoningEffort: goalPolicy?.reasoningEffort ?? effectivePolicy!.reasoningEffort,
             },
             session.reasoningEffort as ReasoningEffort,
           );
           let latencyMode = latencyModeForMetadata(
             {
-              latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
+              latencyMode: goalPolicy?.latencyMode ?? effectivePolicy!.latencyMode,
             },
             session.latencyMode as LatencyMode,
           );
@@ -79649,12 +79658,9 @@ export async function getSessionTurnForAttempt(
  * turn's `started_at` is set before worker admission, so it is not sufficient
  * evidence that the turn's model/reasoning policy was actually used. The
  * durable `turn.started` event is emitted only after admission succeeds and is
- * therefore the continuation boundary used by goal and parent-wake synthesis.
- *
- * Preflight-rejected turns (credit/limit/config failures) deliberately do not
- * override the last effective policy. This matters when an explicit per-turn
- * model differs from the persisted session default: follow-up work must keep
- * the model that actually ran rather than reverting to a stale default.
+ * therefore actual causal execution evidence. It is not the effective defaults:
+ * those also respect explicit model-setting boundaries through the shared
+ * session read projection. Preflight-rejected turns are not execution evidence.
  */
 export async function getLatestStartedSessionTurn(
   db: Database,
@@ -79721,6 +79727,7 @@ export async function getScheduledTargetSessionExecution(
       )
       .orderBy(asc(schema.sessionMcpServers.serverId));
     const latestStarted = await latestStartedSessionTurnRow(scopedDb, workspaceId, sessionId);
+    const [effectivePolicy] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
     const variableSets = await Promise.all(
       ((session.variableSetIds as string[]) ?? []).map(async (variableSetId) => {
         const variableSet = await getVariableSet(
@@ -79779,13 +79786,13 @@ export async function getScheduledTargetSessionExecution(
       sessionId: session.id,
       visibility: session.visibility as "user_private" | "workspace_shared",
       authorityEpoch: session.authorityEpoch,
-      model: latestStarted?.model ?? session.model,
+      model: effectivePolicy!.model,
       reasoningEffort: reasoningEffortForMetadata(
-        { reasoningEffort: latestStarted?.reasoningEffort },
+        { reasoningEffort: effectivePolicy!.reasoningEffort },
         session.reasoningEffort as ReasoningEffort,
       ),
       latencyMode: latencyModeForMetadata(
-        { latencyMode: latestStarted?.latencyMode },
+        { latencyMode: effectivePolicy!.latencyMode },
         session.latencyMode as LatencyMode,
       ),
       // A turn stores omitted `tools` as the non-null database default `[]`.
@@ -84280,7 +84287,7 @@ async function mapSessionWithControl(
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  const [effective] = await withLatestStartedSessionPolicy(
+  const [effective] = await withEffectiveSessionPolicy(
     db,
     row.workspaceId,
     await withCurrentSessionInputWait(db, row.workspaceId, [row]),

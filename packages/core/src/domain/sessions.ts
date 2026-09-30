@@ -3,6 +3,8 @@ import { knowledgeContextForAccess } from "./knowledge";
 import {
   getSessionEvent,
   getSessionRetryReceiptInTransaction,
+  setSessionModelInTransaction,
+  withWorkspaceSessionActivityRls,
   retryFailedSessionInTransaction,
   SessionRetryConflictError,
 } from "@opengeni/db";
@@ -77,6 +79,7 @@ import {
   type SessionSkill,
   type SessionEvent,
   SessionMcpApprovalPolicy,
+  SetSessionModelRequest,
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
@@ -86,6 +89,7 @@ import {
   type UpdateSessionMcpApprovalPolicyResponse,
   type UpdateSessionToolPolicyRequest,
   type SessionAuthorizationPort,
+  type SessionAuthorizationSurface,
   type SessionToolPolicy,
   type SessionTurn,
   type SessionPromptRouting,
@@ -4051,6 +4055,102 @@ export async function updateSessionTitle(
     title: result.title,
     relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
   };
+}
+
+/** Change future defaults without accepting a prompt or touching accepted work. */
+export async function setSessionModel(
+  deps: Pick<
+    ApiRouteDeps,
+    "db" | "bus" | "settings" | "catalogSourceSettings" | "sessionAuthorization"
+  >,
+  grant: AccessGrant,
+  sessionId: string,
+  request: SetSessionModelRequest,
+  surface: SessionAuthorizationSurface = "core",
+) {
+  requirePermission(grant, "sessions:control");
+  const input = SetSessionModelRequest.parse(request);
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.model.write",
+    surface,
+  });
+  const settings = await resolveWorkspaceModelBoundarySettings(deps, grant, grant.workspaceId, [
+    input.model,
+  ]);
+  const model = canonicalConfiguredModel(settings, input.model)!;
+  await assertWorkspaceModelPolicyAllows(deps.db, settings, grant.workspaceId, model);
+  const caller = authorization?.actor;
+  const service = serviceInitiatorForGrant(grant);
+  const actor: SessionCommandActor =
+    caller?.kind === "agent_attempt"
+      ? {
+          type: "agent_attempt",
+          sessionId: caller.callerSessionId,
+          turnId: caller.turnId,
+          attemptId: caller.attemptId,
+          executionGeneration: caller.executionGeneration,
+        }
+      : service
+        ? { type: "service", subjectId: service.initiator.subjectId, context: service.context }
+        : { type: "human", subjectId: grant.subjectId };
+  const result = await runIdempotentPersistenceTransaction(
+    {
+      stage: "session.model_settings",
+      eventTypes: ["session.model_settings.updated"],
+      maxAttempts: 3,
+    },
+    async () => {
+      const write = async (tx: Parameters<typeof setSessionModelInTransaction>[0]) =>
+        await setSessionModelInTransaction(tx, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          actor,
+          operationKey: input.idempotencyKey,
+          model,
+          reasoningEffort: input.reasoningEffort,
+          validate: (session) => {
+            try {
+              assertSessionAllowsProductModel(
+                {
+                  codexCompactionMode:
+                    session.codexCompactionMode as Session["codexCompactionMode"],
+                },
+                model,
+              );
+              // Validate fresh selection/provider and preserved latency exactly as
+              // prompt admission does; never silently clamp requested settings.
+              resolveTurnExecutionPolicyV1(settings, {
+                modelId: model,
+                requestedModelId: input.model,
+                modelSource: "explicit",
+                reasoningEffort: input.reasoningEffort,
+                reasoningSource: "explicit",
+                latencyMode: session.latencyMode as Session["latencyMode"],
+                latencyModeSource: "session",
+              });
+            } catch (error) {
+              throw new HTTPException(422, {
+                message: error instanceof Error ? error.message : "Invalid model settings",
+                cause: error,
+              });
+            }
+          },
+        });
+      return actor.type === "agent_attempt"
+        ? await withWorkspaceSessionActivityRls(deps.db, grant.workspaceId, write)
+        : await withWorkspaceSubjectSessionActivityRls(
+            deps.db,
+            grant.workspaceId,
+            grant.subjectId,
+            write,
+          );
+    },
+  );
+  const event = await getSessionEvent(deps.db, grant.workspaceId, result.eventId);
+  if (event) await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [event]);
+  return { sessionId, ...result, effectiveFrom: "future_turns" as const };
 }
 
 /**

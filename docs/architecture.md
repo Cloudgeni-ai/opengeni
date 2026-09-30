@@ -712,7 +712,9 @@ metered separately. Normal completion joins it before atomic settlement;
 exceptional/cancelled exits abort and join. Generic title writes lose to human
 renames. Runtimes without this seam retain serialized `set_session_title`.
 
-`packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
+`packages/db/src/session-execution-policy.ts` projects defaults;
+`packages/db/src/session-model-settings.ts` records boundaries, preserving accepted
+execution. [Semantics](mcp-surfaces.md).
 
 Active-source message-point forks preserve the current active model-history
 prefix through the selected boundary, including authenticated compaction summaries.
