@@ -129,6 +129,8 @@ describe("the exclusion rule", () => {
       "home/.Azure",
       ".config/opengeni",
       ".config/OpenGeni/agent",
+      ".config/./opengeni",
+      ".config//opengeni/agent",
       "a/../.opengeni",
     ])
       expect(cleanPrefix(p)).toBeNull();

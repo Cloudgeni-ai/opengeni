@@ -398,7 +398,11 @@ const CODE_SEARCH_CREDENTIAL_EXCLUDES = CODE_SEARCH_CREDENTIAL_DIRS.flatMap((dir
 
 /** Whether a relative path names a credential directory (or something inside one), in any case. */
 function isCodeSearchCredentialPath(path: string): boolean {
-  const segs = path.toLowerCase().split("/");
+  // `a/./b` and `a//b` name `a/b`
+  const segs = path
+    .toLowerCase()
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".");
   return CODE_SEARCH_CREDENTIAL_DIRS.some((dir) =>
     segs.some((_, i) => dir.every((d, j) => segs[i + j] === d)),
   );

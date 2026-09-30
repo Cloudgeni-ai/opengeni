@@ -165,6 +165,8 @@ describe("code search ripgrep arguments", () => {
       ".OpenGeni/x",
       ".azure",
       ".config/opengeni/agent",
+      ".config/./opengeni",
+      ".config//opengeni",
     ]) {
       expect(() => validateCodeSearchRipgrepArgs(["-e", "x", "--", path])).toThrow(
         ChannelAValidationError,
