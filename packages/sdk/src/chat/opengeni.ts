@@ -79,6 +79,7 @@ export class OpenGeni {
       organizationId: this.organizationId,
       source: this.source,
       workspaceName: options.workspaceName,
+      memberPermissions: options.memberPermissions,
     });
     this.sessions = { list: (listOptions) => this.listSessions(listOptions) };
   }

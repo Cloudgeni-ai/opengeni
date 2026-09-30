@@ -227,6 +227,18 @@ needs the `OpenGeni` facade as the proxy target and a `resolve` that returns
 membership through `og.workspaceIdFor({ tenant, user }, { isolation: "user" })`
 (standalone: `createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`).
 
+Isolated users receive workspace read, session create/read/control (including
+Send), file upload/read, and `mcp_servers:attach` for the host's per-session
+servers, never admin permissions by default. `memberPermissions` in the facade
+constructor or resolver options replaces this initial permission list; it does
+not change existing or revoked memberships. The organization key remains a
+permission ceiling. Supply MCP URLs and credentials only in the server's
+`createSession` hook, not browser input.
+Existing users need an explicit `updateExternalWorkspaceMember` to gain newly
+added permissions. A conflicting or cancelled onboarding operation returns only
+the workspace address; it never restores access, and `asUser` still checks the
+live membership on each request.
+
 `agentAccess` is enforced for agents in the single session-authorization seam:
 a session's own tree is always reachable, and peers are reachable when the
 caller's task scope and ordinary target authorization allow it. Personal

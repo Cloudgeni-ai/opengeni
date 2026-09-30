@@ -1,5 +1,6 @@
 import type { FetchLike } from "../client";
 import type { Chats } from "../chats";
+import type { WorkspaceIdResolverOptions } from "../tenant-workspaces";
 import type {
   CreateSessionRequest,
   AgentConfigRequest,
@@ -38,6 +39,14 @@ export type OpenGeniOptions = {
   fetch?: FetchLike | undefined;
   /** Display name for a tenant workspace created on first use. Defaults to the tenant id. */
   workspaceName?: ((tenant: string) => string) | undefined;
+  /**
+   * Permissions for newly provisioned isolated users. Replaces the default
+   * workspace read, session create/read/control (including sending messages),
+   * file upload/read, and per-session MCP attachment permissions; no admin
+   * permissions by default. Does not update existing or revoked memberships.
+   * The organization API key must also allow these permissions.
+   */
+  memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
 };
 
 export type ChatTarget =

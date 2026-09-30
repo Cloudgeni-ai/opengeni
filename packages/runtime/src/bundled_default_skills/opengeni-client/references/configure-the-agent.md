@@ -126,6 +126,15 @@ The session proxy and the chat facade take `chats`:
   `og.workspaceIdFor({ tenant, user }, { isolation: "user" })`. The standalone
   resolver is `createWorkspaceIdResolver` from the server-only
   `@opengeni/sdk/tenant-workspaces` subpath.
+  Initial member permissions allow workspace read, session create/read/control
+  (including Send), file upload/read, and the host's per-session MCP attachment,
+  with no admin permissions. `memberPermissions` on the facade constructor or
+  resolver options replaces this list; it never updates existing or revoked
+  memberships. The organization key must also allow each operation. Keep MCP
+  URLs and credentials in the server's `createSession` hook.
+  Existing users need an explicit `updateExternalWorkspaceMember` to gain new
+  permissions. Returning a workspace address after an onboarding conflict or
+  cancellation does not authorize the user; every `asUser` request checks live access.
 
 `chats` is SDK sugar over `visibility`, `agentAccess` and `memoryScope`; the API
 still authorizes each one.

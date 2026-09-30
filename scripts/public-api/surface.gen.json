@@ -26321,6 +26321,9 @@
       "ClientOverride": "type",
       "cn": "value",
       "CodeEditor": "value",
+      "CodeEditorLanguage": "type",
+      "CodeEditorLanguages": "type",
+      "CodeEditorPeers": "type",
       "CodeEditorProps": "type",
       "CodexAccountsClientLike": "type",
       "coerceReasoningEffortForModel": "value",
@@ -26584,7 +26587,10 @@
       "QueueSurfaceProps": "type",
       "rawTypeOf": "value",
       "ReasoningItem": "type",
+      "registerCodeEditor": "value",
+      "registerDesktopViewer": "value",
       "registerPierreDiffs": "value",
+      "registerSandboxTerminal": "value",
       "ResponsiveBasis": "type",
       "RetainedArtifactLoader": "type",
       "retainedImageId": "value",
@@ -26601,6 +26607,7 @@
       "SandboxGitFileDiff": "type",
       "SandboxItem": "type",
       "SandboxTerminal": "value",
+      "SandboxTerminalPeers": "type",
       "SandboxTerminalProps": "type",
       "SandboxWorkspace": "value",
       "SandboxWorkspaceProps": "type",
@@ -26868,6 +26875,7 @@
       "WORKBENCH_TAB_TERMINAL": "value",
       "WorkbenchChanges": "value",
       "WorkbenchChangesProps": "type",
+      "WorkbenchPeerLoader": "type",
       "WorkerItem": "type",
       "WorkspaceDock": "value",
       "WorkspaceDockProps": "type",
@@ -27253,10 +27261,28 @@
       "useConnect": "value"
     },
     "@opengeni/react/connect.css": {},
+    "@opengeni/react/desktop": {
+      "DesktopViewer": "value",
+      "DesktopViewerProps": "type",
+      "enableDesktopViewer": "value",
+      "registerDesktopViewer": "value",
+      "useDesktopStream": "value",
+      "UseDesktopStreamOptions": "type",
+      "UseDesktopStreamResult": "type"
+    },
     "@opengeni/react/diffs": {
       "enablePierreDiffs": "value",
       "PierreDiffsLoader": "type",
       "registerPierreDiffs": "value"
+    },
+    "@opengeni/react/editor": {
+      "CodeEditor": "value",
+      "CodeEditorLanguage": "type",
+      "CodeEditorLanguages": "type",
+      "CodeEditorProps": "type",
+      "enableCodeEditor": "value",
+      "languageForPath": "value",
+      "registerCodeEditor": "value"
     },
     "@opengeni/react/interaction": {
       "AttachedBrowsersClient": "type",
@@ -27636,6 +27662,13 @@
     },
     "@opengeni/react/styles.css": {
       "default": "value"
+    },
+    "@opengeni/react/terminal": {
+      "enableSandboxTerminal": "value",
+      "registerSandboxTerminal": "value",
+      "SandboxTerminal": "value",
+      "SandboxTerminalProps": "type",
+      "XtermTheme": "type"
     },
     "@opengeni/react/tokens.css": {
       "default": "value"

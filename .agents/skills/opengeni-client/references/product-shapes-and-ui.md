@@ -58,6 +58,24 @@ console routes and 404 on the product origin. Never pass them to a raw `<a>`.
   (today spreadsheet XLSX). Do not build a "Download PDF" flow on it; open the
   live artifact instead.
 
+## Optional workbench peers
+
+The React root keeps all existing exports and builds in Next.js/Vite without
+optional workbench peers. Do not install compute packages for an ordinary chat.
+When mounting compute surfaces, install only their peers and call
+`enableSandboxTerminal()` from `@opengeni/react/terminal`, `enableDesktopViewer()`
+from `@opengeni/react/desktop`, or `enableCodeEditor()` from
+`@opengeni/react/editor` once in the corresponding client route. Libraries load
+on mount, not at registration or SSR. Root component imports still work after
+setup. Supply only installed grammars to `enableCodeEditor`, for example
+`{ javascript: async () => (await import("@codemirror/lang-javascript")).javascript() }`.
+For optional WebGL, pass `{ webgl: () => import("@xterm/addon-webgl") }` to
+`enableSandboxTerminal`; otherwise the DOM renderer is used. Highlighted diffs
+still use `enablePierreDiffs()` from `@opengeni/react/diffs`. Never hide optional
+imports behind bare runtime strings or `@vite-ignore`; use bundler-resolvable
+loaders. Test the packed root with optional peers absent, and the enabled
+surface's mount path with its peers installed.
+
 ## Optional artifact library
 
 Use `client.listArtifactCatalog(workspaceId, options)` for a workspace output

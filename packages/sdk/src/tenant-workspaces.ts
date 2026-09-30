@@ -1,4 +1,6 @@
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
+import type { Permission } from "./types";
+import { OpenGeniApiError } from "./errors";
 import { uuidV5 } from "./chat/ids";
 
 const ISOLATION_NAMESPACE = "fc398712-b4db-5b0b-8842-57cb4f2a65f9";
@@ -9,6 +11,7 @@ const CONVERSATION_PERMISSIONS = [
   "sessions:control",
   "files:upload",
   "files:read",
+  "mcp_servers:attach",
 ] as const;
 
 export type WorkspaceIdTarget = {
@@ -27,16 +30,28 @@ export type WorkspaceIdResolverOptions = {
   organizationId: string;
   source: string;
   workspaceName?: ((tenant: string) => string) | undefined;
+  /**
+   * Permissions for a newly provisioned isolated user. Replaces the defaults:
+   * workspace read, session create/read/control (including sending messages),
+   * file upload/read, and attaching the host's per-session MCP servers. No admin
+   * permissions are granted by default. Tenant isolation does not add members.
+   * Existing or revoked grants are not changed; use explicit membership updates.
+   * The organization API key must also allow the selected permissions.
+   */
+  memberPermissions?: readonly Permission[] | undefined;
 };
 
 /**
  * Server-only tenant resolution using external workspace/member provisioning.
  * User isolation admits only the authenticated user; keyed retries never restore a revoked grant.
+ * Changed or cancelled onboarding returns only the workspace address, without
+ * changing membership. Every later asUser request still checks live access.
  */
 export function createWorkspaceIdResolver(
   client: Pick<OpenGeniEmbeddingClient, "ensureWorkspace" | "addExternalWorkspaceMember">,
   options: WorkspaceIdResolverOptions,
 ): (target: WorkspaceIdTarget, resolution: WorkspaceIdOptions) => Promise<string> {
+  const memberPermissions = [...(options.memberPermissions ?? CONVERSATION_PERMISSIONS)];
   const cache = new Map<string, Promise<string>>();
   return async (target, resolution) => {
     if (!target.tenant) throw new TypeError("workspaceIdFor requires a tenant.");
@@ -68,14 +83,29 @@ export function createWorkspaceIdResolver(
           name: options.workspaceName?.(target.tenant) ?? target.tenant,
         });
         if (isolated) {
-          await client.addExternalWorkspaceMember(workspace.id, {
-            identity: { source, externalId: target.user! },
-            permissions: [...CONVERSATION_PERMISSIONS],
-            operationId: await uuidV5(
-              JSON.stringify(["member", workspace.id, source, target.user]),
-              ISOLATION_NAMESPACE,
-            ),
-          });
+          try {
+            await client.addExternalWorkspaceMember(workspace.id, {
+              identity: { source, externalId: target.user! },
+              permissions: [...memberPermissions],
+              operationId: await uuidV5(
+                JSON.stringify(["member", workspace.id, source, target.user]),
+                ISOLATION_NAMESPACE,
+              ),
+            });
+          } catch (error) {
+            // Defaults/custom permissions may have changed since this stable
+            // onboarding key committed, or the grant may have been cancelled.
+            // A definitive conflict must never mint a new key or update access.
+            // Return only the address: every asUser operation still checks the
+            // live membership, including reduced or withdrawn permissions.
+            if (
+              !(error instanceof OpenGeniApiError) ||
+              error.status !== 409 ||
+              error.code !== "conflict" ||
+              error.outcomeUnknown
+            )
+              throw error;
+          }
         }
         return workspace.id;
       })();

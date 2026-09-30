@@ -115,6 +115,11 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 deployment enables uploads (`attachments={false}` opts out), pending tool
 approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
 
+The root keeps all existing exports, including workbench components, but never
+imports their optional peers. Conversation-only Next.js/Vite hosts do not need
+terminal, desktop, editor, or diff packages. Hosts mounting those surfaces opt
+in through the [per-surface setup entries](#optional-peer-dependencies).
+
 Highlighted diffs use the optional `@pierre/diffs` peer only after an explicit
 opt-in, so a host without it still builds with any bundler (Turbopack resolves
 every reachable `import()`). Hosts that install it call `enablePierreDiffs()`
@@ -1116,9 +1121,10 @@ end-to-end embedder story (create-on-machine, discover, swap, enroll, revoke).
 
 ## Optional peer dependencies
 
-The chat/timeline surface has none. The sandbox workspace and diff surfaces pull
-their heavy libraries from **optional** `peerDependencies`, so you install only
-what the surfaces you mount need:
+The chat/timeline surface needs only the required React/React DOM peers. All
+existing root exports remain available without optional workbench peers, even
+when a bundler resolves every reachable dynamic import. Install and enable
+only the surfaces you mount, once in their client route or bootstrap:
 
 - Terminal (`SandboxTerminal`): `@xterm/xterm`, `@xterm/addon-fit`,
   `@xterm/addon-web-links`.
@@ -1127,6 +1133,37 @@ what the surfaces you mount need:
 - Code editor (`CodeEditor`): `@uiw/react-codemirror` + the `@codemirror/lang-*`
   language packs you need (`css`, `html`, `javascript`, `json`, `markdown`,
   `python`).
+
+```ts
+import { enableSandboxTerminal } from "@opengeni/react/terminal";
+import { enableDesktopViewer } from "@opengeni/react/desktop";
+import { enableCodeEditor } from "@opengeni/react/editor";
+
+enableSandboxTerminal();
+enableDesktopViewer();
+enableCodeEditor({
+  javascript: async () =>
+    (await import("@codemirror/lang-javascript")).javascript({ jsx: true, typescript: true }),
+});
+```
+
+Omit imports and calls for surfaces you do not use. These entries also re-export
+their components; root component imports continue to work after setup. The
+libraries load on mount, not during setup or SSR. Import the setup from a lazy
+route to keep its peer chunks outside the initial conversation graph.
+
+For optional terminal WebGL acceleration, install `@xterm/addon-webgl` and call
+`enableSandboxTerminal({ webgl: () => import("@xterm/addon-webgl") })`. Without
+it, or if it fails, the terminal uses its DOM renderer. Only supply editor
+grammar loaders for packages you installed; absent/failed grammars use plain
+CodeMirror. Without editor setup, the existing textarea fallback remains usable.
+Without terminal/VNC setup, those surfaces show a setup error; relay-frame
+desktops and a custom `rfbFactory` need no noVNC setup.
+
+Custom hosts may supply `registerSandboxTerminal`, `registerCodeEditor`, or
+`registerDesktopViewer` loaders from the root instead. Mounted fallbacks retry
+when registration changes. Do not hide peer imports behind runtime bare strings
+or `@vite-ignore`: browsers cannot resolve those without an import map.
 
 ## Demo harness
 

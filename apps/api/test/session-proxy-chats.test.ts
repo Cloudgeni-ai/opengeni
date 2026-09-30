@@ -15,6 +15,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { OpenGeni } from "../../../packages/sdk/src/chat";
+import { uuidV5 } from "../../../packages/sdk/src/chat/ids";
 import { OpenGeniClient } from "../../../packages/sdk/src/client";
 import { OpenGeniEmbeddingClient } from "../../../packages/sdk/src/embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "../../../packages/sdk/src/errors";
@@ -82,6 +84,10 @@ async function fixture(privateSessionsEnabled: boolean) {
       "sessions:create",
       "sessions:control",
       "account:admin",
+      "workspace:create",
+      "files:upload",
+      "files:read",
+      "mcp_servers:attach",
     ],
   });
   const app = createApp({
@@ -101,10 +107,12 @@ async function fixture(privateSessionsEnabled: boolean) {
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
   } as unknown as AppDependencies);
+  const fetch: typeof globalThis.fetch = async (input, init) =>
+    await app.fetch(new Request(input, init));
   const service = new OpenGeniEmbeddingClient({
     baseUrl: "http://fixture",
     apiKey: token,
-    fetch: async (input, init) => await app.fetch(new Request(input, init)),
+    fetch,
   });
   const source = "sdk-chats:instance";
   const owner = await ensureExternalIdentity(db.db, {
@@ -147,8 +155,209 @@ async function fixture(privateSessionsEnabled: boolean) {
     fetch: async (input, init) => await handler(new Request(input, init)),
   });
   const endpoint = `${productUrl}/v1/workspaces/${workspace.id}/sessions`;
-  return { accountId, workspace, service, source, owner, other, handler, browser, endpoint };
+  const facadeOptions = {
+    apiKey: token,
+    organizationId: accountId,
+    source,
+    baseUrl: "http://fixture",
+    fetch,
+  };
+  return {
+    accountId,
+    workspace,
+    service,
+    source,
+    owner,
+    other,
+    handler,
+    browser,
+    endpoint,
+    facadeOptions,
+  };
 }
+
+test("isolated users can create, read and send with a host per-session MCP server, never administer", async () => {
+  const f = await fixture(true);
+  const og = new OpenGeni(f.facadeOptions);
+  const tenant = crypto.randomUUID();
+  const workspaceId = await og.workspaceIdFor(
+    { tenant, user: f.owner.externalId },
+    { isolation: "user" },
+  );
+  const server = { id: "host-tools", url: "https://product.example.test/mcp" };
+  const handler = createSessionProxyHandler(og, {
+    chats: "isolated",
+    resolve: () => ({ tenant, user: f.owner.externalId }),
+    createSession: (input) => ({ ...input, model: "scripted-model", mcpServers: [server] }),
+  });
+  const browser = new OpenGeniClient({
+    baseUrl: productUrl,
+    fetch: async (input, init) => await handler(new Request(input, init)),
+  });
+  const session = await browser.createSession(workspaceId, {
+    initialMessage: "Use the host's tools",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(await browser.getSession(workspaceId, session.id)).toMatchObject({
+    id: session.id,
+    mcpServers: [server],
+    tools: [{ kind: "mcp", id: server.id }],
+    tenancy: { visibility: "private", ownedByCurrentUser: true },
+  });
+  const [stored] = await shared.admin`
+    select server_id, url from session_mcp_servers
+    where workspace_id = ${workspaceId} and session_id = ${session.id}`;
+  expect(stored).toEqual({ server_id: server.id, url: server.url });
+  expect(await browser.sendMessage(workspaceId, session.id, "Read my app data")).toMatchObject({
+    type: "user.message",
+  });
+  await expect(
+    og.client.asUser(f.owner.externalId, { source: f.source }).listApiKeys(workspaceId),
+  ).rejects.toMatchObject({ status: 403 });
+  await expect(
+    og.client.asUser(f.other.externalId, { source: f.source }).getSession(workspaceId, session.id),
+  ).rejects.toMatchObject({ status: 403 });
+}, 60_000);
+
+test("custom isolated member permissions can deny MCP attachment without denying ordinary chat", async () => {
+  const f = await fixture(true);
+  const og = new OpenGeni({
+    ...f.facadeOptions,
+    memberPermissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+  });
+  const workspaceId = await og.workspaceIdFor(
+    { tenant: crypto.randomUUID(), user: f.owner.externalId },
+    { isolation: "user" },
+  );
+  const actor = og.client.asUser(f.owner.externalId, { source: f.source });
+  await expect(
+    actor.createSession(workspaceId, {
+      initialMessage: "Tools are disabled for this user",
+      model: "scripted-model",
+      mcpServers: [{ id: "host-tools", url: "https://product.example.test/mcp" }],
+    }),
+  ).rejects.toMatchObject({ status: 403 });
+  const session = await actor.createSession(workspaceId, {
+    initialMessage: "Ordinary chat is allowed",
+    model: "scripted-model",
+  });
+  expect(await actor.getSession(workspaceId, session.id)).toMatchObject({ id: session.id });
+}, 60_000);
+
+/** Seed persisted withdrawal/cancellation, not the separate revoke lifecycle.
+ * Keep its immutable grant receipt and native RLS/triggers intact. */
+async function seedGrantCancellation(
+  f: Awaited<ReturnType<typeof fixture>>,
+  workspaceId: string,
+  grantOperationId: string,
+) {
+  const operationId = crypto.randomUUID();
+  const command = {
+    organizationId: f.accountId,
+    workspaceId,
+    membershipId: f.owner.organizationMembershipId,
+    action: "revoke",
+    operationId,
+    cancelGrantOperationId: grantOperationId,
+  };
+  await shared.admin.begin(async (tx) => {
+    const removed = await tx`delete from workspace_memberships
+      where account_id = ${f.accountId} and workspace_id = ${workspaceId}
+        and subject_id = ${f.owner.subjectId} returning id`;
+    await tx`insert into organization_workspace_operation_receipts
+      (account_id, operation_id, action, input_hash, result)
+      values (${f.accountId}, ${operationId}, 'revoke',
+        encode(sha256(convert_to(${tx.json(command)}::jsonb::text, 'UTF8')), 'hex'),
+        ${tx.json({ workspaceId, removed: removed.length > 0, replay: false, fencedGrantOperationId: grantOperationId })})`;
+  });
+}
+
+test.each([
+  [
+    "old defaults",
+    [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+      "files:upload",
+      "files:read",
+    ],
+  ],
+  [
+    "custom permissions",
+    ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+  ],
+] as const)(
+  "changed onboarding options preserve %s, including persisted reduction and withdrawal",
+  async (_label, permissions) => {
+    const f = await fixture(true);
+    const target = { tenant: crypto.randomUUID(), user: f.owner.externalId };
+    const original = new OpenGeni({ ...f.facadeOptions, memberPermissions: permissions });
+    const workspaceId = await original.workspaceIdFor(target, { isolation: "user" });
+    const resolveAgain = () =>
+      new OpenGeni(f.facadeOptions).workspaceIdFor(target, { isolation: "user" });
+    expect(await resolveAgain()).toBe(workspaceId);
+    const members = () => f.service.listWorkspaceMembers(workspaceId);
+    expect((await members()).map((member) => member.permissions)).toEqual([
+      [...permissions].sort(),
+    ]);
+    await f.service.updateExternalWorkspaceMember(
+      f.accountId,
+      workspaceId,
+      f.owner.organizationMembershipId,
+      {
+        permissions: ["workspace:read"],
+        operationId: crypto.randomUUID(),
+      },
+    );
+    expect(await resolveAgain()).toBe(workspaceId);
+    expect((await members()).map((member) => member.permissions)).toEqual([["workspace:read"]]);
+    const actor = f.service.asUser(f.owner.externalId, { source: f.source });
+    await expect(
+      actor.createSession(workspaceId, {
+        initialMessage: "No longer allowed",
+        model: "scripted-model",
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    const grantOperationId = await uuidV5(
+      JSON.stringify(["member", workspaceId, f.source, target.user]),
+      "fc398712-b4db-5b0b-8842-57cb4f2a65f9",
+    );
+    await seedGrantCancellation(f, workspaceId, grantOperationId);
+    expect(await resolveAgain()).toBe(workspaceId);
+    expect(await members()).toEqual([]);
+    await expect(actor.getWorkspace(workspaceId)).rejects.toMatchObject({ status: 403 });
+  },
+  60_000,
+);
+
+test("a persisted cancellation before the first isolated grant remains fenced after permission changes", async () => {
+  const f = await fixture(true);
+  const target = { tenant: crypto.randomUUID(), user: f.owner.externalId };
+  const namespace = "fc398712-b4db-5b0b-8842-57cb4f2a65f9";
+  const key = JSON.stringify(["user", f.source, f.source, target.tenant, target.user]);
+  const { workspace } = await f.service.ensureWorkspace({
+    accountId: f.accountId,
+    externalSource: `opengeni-sdk:user-isolation:${await uuidV5(f.source, namespace)}`,
+    externalId: await uuidV5(key, namespace),
+    name: target.tenant,
+  });
+  await seedGrantCancellation(
+    f,
+    workspace.id,
+    await uuidV5(JSON.stringify(["member", workspace.id, f.source, target.user]), namespace),
+  );
+  const og = new OpenGeni(f.facadeOptions);
+  expect(await og.workspaceIdFor(target, { isolation: "user" })).toBe(workspace.id);
+  expect(await f.service.listWorkspaceMembers(workspace.id)).toEqual([]);
+  await expect(
+    og.client.asUser(target.user, { source: f.source }).createSession(workspace.id, {
+      initialMessage: "The cancelled user is still denied",
+      model: "scripted-model",
+    }),
+  ).rejects.toMatchObject({ status: 403 });
+}, 60_000);
 
 test("chats: private creates an external asUser-owned user_private session through the proxy", async () => {
   const f = await fixture(true);

@@ -43,6 +43,7 @@ function fakeApi() {
     requests,
     client,
     og,
+    fetch,
     fail: (error: typeof failure) => {
       failure = error;
     },
@@ -158,7 +159,15 @@ describe("session proxy chats", () => {
       { source: "app", externalId: "alice" },
       { source: "app", externalId: "bob" },
     ]);
-    expect(members[0]!.body.permissions).not.toContain("workspace:admin");
+    expect(members[0]!.body.permissions).toEqual([
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+      "files:upload",
+      "files:read",
+      "mcp_servers:attach",
+    ]);
     const again = createWorkspaceIdResolver(api.client, {
       organizationId: ORGANIZATION_ID,
       source: "app",
@@ -180,6 +189,96 @@ describe("session proxy chats", () => {
       await otherProduct({ tenant: "acme", user: "alice", source: "app" }, { isolation: "user" }),
     ).not.toBe(alice);
   });
+
+  test("custom member permissions replace defaults and are copied at resolver creation", async () => {
+    const api = fakeApi();
+    const permissions = ["workspace:read", "sessions:read"];
+    const resolver = createWorkspaceIdResolver(api.client, {
+      organizationId: ORGANIZATION_ID,
+      source: "app",
+      memberPermissions: permissions,
+    });
+    permissions.push("workspace:admin");
+    await resolver({ tenant: "acme", user: "alice" }, { isolation: "user" });
+    expect(api.requests.at(-1)!.body.permissions).toEqual(["workspace:read", "sessions:read"]);
+    await resolver({ tenant: "acme" }, { isolation: "tenant" });
+    expect(
+      api.requests.filter((request) => request.path.endsWith("/external-members")),
+    ).toHaveLength(1);
+  });
+
+  test("the chat facade forwards custom isolated member permissions", async () => {
+    const api = fakeApi();
+    const og = new OpenGeni({
+      organizationId: ORGANIZATION_ID,
+      apiKey: "og_test",
+      baseUrl: API,
+      fetch: api.fetch,
+      memberPermissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+    });
+    await og.workspaceIdFor({ tenant: "acme", user: "alice" }, { isolation: "user" });
+    expect(api.requests.at(-1)!.body.permissions).toEqual([
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+  });
+
+  test("a definitive onboarding conflict returns only the address without retrying the grant", async () => {
+    const api = fakeApi();
+    let grants = 0;
+    const resolver = createWorkspaceIdResolver(
+      {
+        ensureWorkspace: (request) => api.client.ensureWorkspace(request),
+        addExternalWorkspaceMember: async () => {
+          grants++;
+          throw new OpenGeniApiError(
+            409,
+            "External membership operation changed or was cancelled",
+            { code: "conflict" },
+          );
+        },
+      },
+      { organizationId: ORGANIZATION_ID, source: "app" },
+    );
+    const workspaceId = await resolver({ tenant: "acme", user: "alice" }, { isolation: "user" });
+    expect(workspaceId).toBe(api.requests[0]!.body.externalId as string);
+    expect(await resolver({ tenant: "acme", user: "alice" }, { isolation: "user" })).toBe(
+      workspaceId,
+    );
+    expect(grants).toBe(1);
+  });
+
+  test.each([
+    new OpenGeniApiError(403, "membership exceeds key authority"),
+    new OpenGeniApiError(409, "unknown outcome", { code: "conflict", outcomeUnknown: true }),
+    new OpenGeniApiError(409, "contract changed", { code: "API_CONTRACT_CHANGED" }),
+    new OpenGeniSetupError(new OpenGeniApiError(409, "private chats require setup")),
+    new OpenGeniApiError(503, "unavailable"),
+  ])(
+    "other or uncertain onboarding failures propagate and evict the cache (%s)",
+    async (failure) => {
+      const api = fakeApi();
+      let grants = 0;
+      const resolver = createWorkspaceIdResolver(
+        {
+          ensureWorkspace: (request) => api.client.ensureWorkspace(request),
+          addExternalWorkspaceMember: async () => {
+            grants++;
+            throw failure;
+          },
+        },
+        { organizationId: ORGANIZATION_ID, source: "app" },
+      );
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(
+          resolver({ tenant: "acme", user: "alice" }, { isolation: "user" }),
+        ).rejects.toBe(failure);
+      }
+      expect(grants).toBe(2);
+    },
+  );
 
   test("rejected mutations never provision isolated workspaces or members", async () => {
     const api = fakeApi();

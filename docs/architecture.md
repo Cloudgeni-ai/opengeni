@@ -1390,6 +1390,12 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
+React root exports stay additive and optional-peer-free. `terminal`, `editor`,
+`desktop`, and `diffs` subpaths explicitly register bundler-resolvable peer
+loaders; grammars and terminal WebGL remain host-selected. Canonical registry:
+`packages/react/src/lib/workbench-peers.ts`; packed-root boundary:
+`scripts/react-root-package-contract.test.ts`.
+
 `ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share console/embed
 connection inventory and OAuth setup. Presentation filters never authorize
 acquisition. Session-targeted setup preserves exact personal consent/tool

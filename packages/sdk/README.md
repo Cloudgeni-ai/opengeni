@@ -87,6 +87,20 @@ so retries do not restore revoked access. Other modes need explicit onboarding.
 The standalone resolver is on the server-only `@opengeni/sdk/tenant-workspaces`
 subpath. Keep tenant and user values host-authenticated.
 
+Isolated members get only workspace read, session create/read/control (including
+sending messages), file upload/read, and `mcp_servers:attach` for host-provided
+per-session servers. No admin permissions are included. Pass `memberPermissions`
+to the `OpenGeni` constructor or `createWorkspaceIdResolver` options to replace
+that list, for example to disable file uploads or MCP attachment. The organization
+key must also permit each operation. This is initial onboarding, not a membership
+update: changing the option does not update existing grants or restore revoked access.
+Keep MCP URLs and credentials in the server's `createSession` hook; the browser
+cannot choose them through the proxy.
+An existing onboarding conflict returns the workspace address without retrying
+or changing the grant. The address is not authorization: later `asUser` calls
+still enforce current permissions. Existing isolated users need an explicit
+`updateExternalWorkspaceMember` to gain newly added permissions such as MCP attachment.
+
 The facade also accepts `agent` (identity, capabilities, instructions, renderer)
 and defaults its renderer to `"markdown"` when the server admits agent configuration.
 Only an implicit renderer retries once without `agent` on `422 agent_config_not_enabled`,
