@@ -9,7 +9,8 @@
  * keyword or symbol leads to. ArtifactList.tsx is too large to show whole, and its handleRetry handler sits in
  * a tile the fake scores 0.1, so the coverage map must name it among the not-shown declarations.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import {
+  codeSearchConfig, afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { codeSearchConfig, runCodeSearch } from "../src";
 import { fakeJevClient, makeFixtureRepo, packPassages } from "./helpers/fixture";
@@ -94,6 +95,8 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
       question: "How does the artifact list load more rows?",
       keywords: ["ArtifactList", "onLoadMore"],
       workspace: new LocalCodeSearchWorkspace(root),
+      // two symbol rounds and no name index, so each round's sources are asserted exactly
+      config: codeSearchConfig({ symbols: { maxRounds: 2 }, recall: { nameIndex: false } }),
       jev: fakeJevClient({
         good: ["useArtifactPaging", "fetchRowPage"],
         symbolGood: ["useArtifactPaging"],
