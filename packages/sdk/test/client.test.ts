@@ -73,6 +73,52 @@ function makeClient(
 const STRICT = { apiContract: "strict" } as const;
 
 describe("OpenGeniClient", () => {
+  test("Claude sign-in uses scoped JSON browser mutations without passing tokens or requesting inference", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ connected: true, credentialVersion: 1 }),
+    );
+    const input = {
+      attemptId: "22222222-2222-4222-8222-222222222222",
+      code: "one-use-code#state",
+    };
+    await client.startWorkspaceClaudeSubscriptionOAuth(WORKSPACE_ID);
+    await client.completeWorkspaceClaudeSubscriptionOAuth(WORKSPACE_ID, input);
+    await client.startOrganizationClaudeSubscriptionOAuth("organization");
+    await client.completeOrganizationClaudeSubscriptionOAuth("organization", input);
+    expect(
+      requests.map((r) => [
+        new URL(r.url).pathname,
+        r.method,
+        r.headers["content-type"],
+        JSON.parse(r.body!),
+      ]),
+    ).toEqual([
+      [
+        `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/oauth/start`,
+        "POST",
+        "application/json",
+        {},
+      ],
+      [
+        `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/oauth/complete`,
+        "POST",
+        "application/json",
+        input,
+      ],
+      [
+        "/v1/organizations/organization/model-providers/claude_subscription/oauth/start",
+        "POST",
+        "application/json",
+        {},
+      ],
+      [
+        "/v1/organizations/organization/model-providers/claude_subscription/oauth/complete",
+        "POST",
+        "application/json",
+        input,
+      ],
+    ]);
+  });
   test("Claude quota reads and refreshes preserve workspace/organization scope and never request inference", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({
@@ -95,6 +141,15 @@ describe("OpenGeniClient", () => {
       ["GET", "/v1/organizations/organization/model-providers/claude_subscription/usage"],
       ["POST", "/v1/organizations/organization/model-providers/claude_subscription/usage/refresh"],
     ]);
+    for (const request of requests) {
+      if (request.method === "POST") {
+        // Browser mutation routes require JSON even when no input fields are needed.
+        expect(request.headers["content-type"]).toBe("application/json");
+        expect(JSON.parse(request.body!)).toEqual({});
+      } else {
+        expect(request.body).toBeNull();
+      }
+    }
   });
   test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
     const projection = {
@@ -1084,8 +1139,11 @@ describe("OpenGeniClient", () => {
     expect(observedGenerations).toEqual([1, 2]);
 
     expect(
-      ((await client.getSession(WORKSPACE_ID, SESSION_ID)) as Session & { request: number })
-        .request,
+      (
+        (await client.getSession(WORKSPACE_ID, SESSION_ID)) as Session & {
+          request: number;
+        }
+      ).request,
     ).toBe(3);
     expect(requests).toBe(3);
     expect(causalGeneration).toBe(3);

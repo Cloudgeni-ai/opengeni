@@ -225,7 +225,11 @@ export function WorkspaceModelsPage({
       <ProviderConnectPage
         key={id}
         state={gateways[id]}
-        onClose={backToList}
+        onClose={
+          id === "claude_subscription" && gateways[id].connected
+            ? () => nav.openAccount(`gateway:${id}`)
+            : backToList
+        }
         onConnected={() => nav.openAccount(`gateway:${id}`)}
       />
     );

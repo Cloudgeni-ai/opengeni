@@ -1,4 +1,5 @@
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
+import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
 import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
@@ -1504,6 +1505,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
   registerWorkspaceModelProviderRoutes(app, routeDeps);
+  registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);

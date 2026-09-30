@@ -9,8 +9,8 @@ export function ClaudeTokenInstructions() {
       </p>
       <CopyField value="claude setup-token" label="Create a Claude setup token" variant="field" />
       <p className="text-xs text-fg-muted">
-        Usage comes from your Claude plan. OpenGeni does not refresh setup tokens; replace yours
-        here if it expires or is revoked.
+        Setup tokens allow model calls but cannot check current usage. Use browser sign-in for usage
+        checks and automatic token renewal. Replace setup tokens when they expire or are revoked.
       </p>
     </div>
   );

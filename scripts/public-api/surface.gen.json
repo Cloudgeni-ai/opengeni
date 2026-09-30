@@ -582,6 +582,30 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth/complete",
+      "sdk": [
+        "OpenGeniClient.completeOrganizationClaudeSubscriptionOAuth"
+      ],
+      "request": [
+        "ClaudeSubscriptionOAuthCompleteRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth/start",
+      "sdk": [
+        "OpenGeniClient.startOrganizationClaudeSubscriptionOAuth"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionOAuthStartResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/organizations/:organizationId/overview",
       "sdk": [
@@ -4543,6 +4567,30 @@
       "request": [],
       "response": [
         "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/model-providers/claude_subscription/oauth/complete",
+      "sdk": [
+        "OpenGeniClient.completeWorkspaceClaudeSubscriptionOAuth"
+      ],
+      "request": [
+        "ClaudeSubscriptionOAuthCompleteRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/model-providers/claude_subscription/oauth/start",
+      "sdk": [
+        "OpenGeniClient.startWorkspaceClaudeSubscriptionOAuth"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionOAuthStartResponse"
       ]
     },
     {
@@ -9591,6 +9639,37 @@
         "$.sortOrder": "integer!",
         "$.updatedAt": "string!",
         "$.workspaceId": "string!"
+      }
+    },
+    "ClaudeSubscriptionOAuthCompleteRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.attemptId": "string!",
+        "$.code": "string!"
+      }
+    },
+    "ClaudeSubscriptionOAuthCompleteResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connected": "const!=[\"true\"]",
+        "$.credentialVersion": "integer!"
+      }
+    },
+    "ClaudeSubscriptionOAuthStartResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.attemptId": "string!",
+        "$.authorizationUrl": "string!",
+        "$.expiresAt": "string!"
       }
     },
     "ClaudeSubscriptionUsage": {
@@ -23676,6 +23755,9 @@
       "CapabilityUnavailableReason": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
+      "ClaudeSubscriptionOAuthCompleteRequest": "type",
+      "ClaudeSubscriptionOAuthCompleteResponse": "type",
+      "ClaudeSubscriptionOAuthStartResponse": "type",
       "ClaudeSubscriptionUsage": "type",
       "ClaudeUsageWindow": "type",
       "ClientAuthConfig": "type",
@@ -27549,6 +27631,8 @@
       "codexUsage",
       "compactSessionContext",
       "completeFileUpload",
+      "completeOrganizationClaudeSubscriptionOAuth",
+      "completeWorkspaceClaudeSubscriptionOAuth",
       "configureIntegrationFacet",
       "configureOrganizationRecoveryPolicy",
       "connectTransport",
@@ -27976,9 +28060,11 @@
       "startConnectionOAuth",
       "startFikenOAuth",
       "startOpenGeniSlackBotInstall",
+      "startOrganizationClaudeSubscriptionOAuth",
       "startOrganizationRecoveryOperation",
       "startPersonalGitHubOAuth",
       "startSocialOAuth",
+      "startWorkspaceClaudeSubscriptionOAuth",
       "steerMessage",
       "steerQueueItem",
       "streamEvents",

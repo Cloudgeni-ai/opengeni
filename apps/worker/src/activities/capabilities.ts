@@ -40,6 +40,8 @@ import {
   listWorkspaceProviderCustomModels,
   getWorkspaceProviderCustomModelForExecution,
   loadWorkspaceProviderApiKey,
+  loadClaudeSubscriptionUsageCredential,
+  assertModelConnectionAllowsTurn,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -303,12 +305,30 @@ export async function settingsWithOrganizationProviderCredentials(
     if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
     const models = await buildModels(kind, claudeProviderId(kind) + "/");
     result = withClaudeConnectionCatalog(result, { [kind]: { models } });
-    const credential = await loadOrganizationModelProviderApiKey(db, settings, {
-      accountId,
-      workspaceId,
-      providerKind: kind,
-    });
-    if (credential) result = withClaudeConnectionCredential(result, kind, credential);
+    const binding =
+      kind === "claude_subscription"
+        ? await loadClaudeSubscriptionUsageCredential(db, settings, {
+            accountId,
+            workspaceId,
+            scope: "organization",
+          })
+        : null;
+    const credential =
+      kind === "claude_subscription"
+        ? binding?.serializedCredential
+        : await loadOrganizationModelProviderApiKey(db, settings, {
+            accountId,
+            workspaceId,
+            providerKind: kind,
+          });
+    if (credential)
+      result = withClaudeConnectionCredential(
+        result,
+        kind,
+        credential,
+        "organization",
+        binding ?? undefined,
+      );
     const workspaceModels = await listWorkspaceProviderCustomModels(db, {
       accountId,
       workspaceId,
@@ -333,15 +353,33 @@ export async function settingsWithOrganizationProviderCredentials(
       { [kind]: { models: workspaceModels } },
       "workspace",
     );
-    const workspaceCredential = await loadWorkspaceProviderApiKey(
-      db,
-      settings,
-      workspaceId,
-      kind,
-      workspaceModelId,
-    );
+    const workspaceBinding =
+      kind === "claude_subscription"
+        ? await loadClaudeSubscriptionUsageCredential(db, settings, {
+            accountId,
+            workspaceId,
+            scope: "workspace",
+          })
+        : null;
+    if (workspaceBinding && workspaceModelId)
+      await assertModelConnectionAllowsTurn(db, {
+        workspaceId,
+        subjectId: "worker:model-access",
+        modelId: workspaceModelId,
+        workspaceProviderConnectionId: workspaceBinding.connectionId,
+      });
+    const workspaceCredential =
+      kind === "claude_subscription"
+        ? workspaceBinding?.serializedCredential
+        : await loadWorkspaceProviderApiKey(db, settings, workspaceId, kind, workspaceModelId);
     if (workspaceCredential)
-      result = withClaudeConnectionCredential(result, kind, workspaceCredential, "workspace");
+      result = withClaudeConnectionCredential(
+        result,
+        kind,
+        workspaceCredential,
+        "workspace",
+        workspaceBinding ?? undefined,
+      );
   }
   return result;
 }

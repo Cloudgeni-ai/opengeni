@@ -252,6 +252,9 @@ import type {
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -1320,7 +1323,11 @@ export class OpenGeniClient {
   /** Only this principal's submissions. No session filter means general feedback only. */
   async listOwnFeedback(
     workspaceId: string,
-    options: { sessionId?: string; limit?: number; includeTurns?: boolean } = {},
+    options: {
+      sessionId?: string;
+      limit?: number;
+      includeTurns?: boolean;
+    } = {},
   ): Promise<{ feedback: Feedback[] }> {
     const query = new URLSearchParams();
     if (options.sessionId) query.set("sessionId", options.sessionId);
@@ -4722,12 +4729,56 @@ export class OpenGeniClient {
     );
   }
 
+  /** Sign in with model and profile access; no inference request is made. */
+  async startWorkspaceClaudeSubscriptionOAuth(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionOAuthStartResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/start`,
+      {},
+    );
+  }
+
+  async completeWorkspaceClaudeSubscriptionOAuth(
+    workspaceId: string,
+    request: ClaudeSubscriptionOAuthCompleteRequest,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/complete`,
+      request,
+    );
+  }
+
+  async startOrganizationClaudeSubscriptionOAuth(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionOAuthStartResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/start`,
+      {},
+    );
+  }
+
+  async completeOrganizationClaudeSubscriptionOAuth(
+    organizationId: string,
+    request: ClaudeSubscriptionOAuthCompleteRequest,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/complete`,
+      request,
+    );
+  }
+
   async refreshWorkspaceClaudeSubscriptionUsage(
     workspaceId: string,
   ): Promise<ClaudeSubscriptionUsage> {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage/refresh`,
+      {},
     );
   }
 
@@ -4746,6 +4797,7 @@ export class OpenGeniClient {
     return this.requestJson(
       "POST",
       `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage/refresh`,
+      {},
     );
   }
 
@@ -6099,10 +6151,9 @@ export class OpenGeniClient {
   async listScheduledTaskAccessAttention(
     workspaceId: string,
   ): Promise<ScheduledTaskAccessAttention[]> {
-    const response = await this.requestJson<{ tasks: ScheduledTaskAccessAttention[] }>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`,
-    );
+    const response = await this.requestJson<{
+      tasks: ScheduledTaskAccessAttention[];
+    }>("GET", `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`);
     return response.tasks;
   }
 
@@ -7356,7 +7407,12 @@ export class OpenGeniClient {
 
   async discoverPlugins(
     workspaceId: string,
-    options: { id?: string; query?: string; provider?: string; offset?: number } = {},
+    options: {
+      id?: string;
+      query?: string;
+      provider?: string;
+      offset?: number;
+    } = {},
   ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
     return this.requestJson(
       "GET",
@@ -8687,11 +8743,10 @@ export class OpenGeniClient {
     sessionId: string,
     target: string,
   ): Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }> {
-    return await this.requestJson<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
-      { target },
-    );
+    return await this.requestJson<{
+      pinned: string;
+      appliedTo?: "waiting_turn" | "next_turn";
+    }>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`, { target });
   }
 
   // --- SuperGrok/xAI connected subscriptions ------------------------------------------------------

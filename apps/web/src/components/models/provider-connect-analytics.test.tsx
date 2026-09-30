@@ -116,6 +116,10 @@ test("Claude credentials use distinct accessible forms and explain subscription 
     const state = {
       config,
       canManageConnection: true,
+      accessTarget: {
+        client: {},
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+      },
       saveKey: async () => true,
     } as unknown as ProviderConnection;
     await act(async () =>
@@ -123,6 +127,19 @@ test("Claude credentials use distinct accessible forms and explain subscription 
         <ProviderConnectPage key={kind} state={state} onClose={() => {}} onConnected={() => {}} />,
       ),
     );
+    if (kind === "claude_subscription") {
+      expect(submitButton().textContent).toContain("Sign in to Claude");
+      expect(submitButton().disabled).toBe(false);
+      expect(
+        container
+          .querySelector('input[aria-label="Claude subscription setup token"]')
+          ?.closest('[data-state="closed"]') !== null,
+      ).toBe(true);
+      const setup = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.textContent?.includes("Use a setup token"),
+      )!;
+      await act(async () => setup.click());
+    }
     const input = container.querySelector<HTMLInputElement>(
       `input[aria-label="${config.keyAriaLabel}"]`,
     )!;
@@ -138,7 +155,7 @@ test("Claude credentials use distinct accessible forms and explain subscription 
         container.querySelector<HTMLInputElement>('input[aria-label="Create a Claude setup token"]')
           ?.value,
       ).toBe("claude setup-token");
-      expect(container.textContent).toContain("does not refresh");
+      expect(container.textContent).toContain("cannot check current usage");
     }
   }
 });
@@ -152,7 +169,7 @@ test("subscription replacement identifies the credential as a token", async () =
   await act(async () =>
     root.render(<ReplaceKeyDialog state={state} open onOpenChange={() => {}} />),
   );
-  expect(document.body.textContent).toContain("Replace the Claude subscription token");
+  expect(document.body.textContent).toContain("Replace Claude setup token");
   expect(document.body.textContent).not.toContain("Replace the Claude subscription key");
   expect(
     document

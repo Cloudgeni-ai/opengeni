@@ -266,7 +266,7 @@ type ManagedCookieHuman = {
   browserSessionHash: string;
 };
 
-async function managedCookieHuman(
+export async function managedCookieHuman(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<ManagedCookieHuman | null> {

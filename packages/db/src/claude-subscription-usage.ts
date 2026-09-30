@@ -93,22 +93,30 @@ function usage(row: Awaited<ReturnType<typeof connection>>) {
     ? parsed.data
     : emptyClaudeUsage(row.version);
 }
-function token(
+function plaintext(
   settings: Settings,
   scope: ClaudeUsageScope,
   row: NonNullable<Awaited<ReturnType<typeof connection>>>,
 ) {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) throw new Error("Claude credential encryption is unavailable");
-  let plaintext = decryptEnvironmentValue(key, row.credentialEncrypted);
+  let serializedCredential = decryptEnvironmentValue(key, row.credentialEncrypted);
   if (scope.scope === "workspace") {
-    const credential = JSON.parse(plaintext) as { apiKey?: unknown };
+    const credential = JSON.parse(serializedCredential) as { apiKey?: unknown };
     if (typeof credential.apiKey !== "string") throw new Error("Claude credential is invalid");
-    plaintext = credential.apiKey;
+    serializedCredential = credential.apiKey;
   }
-  return plaintext.startsWith("{")
-    ? ClaudeSubscriptionCredential.parse(JSON.parse(plaintext)).token
-    : plaintext;
+  return serializedCredential;
+}
+function token(
+  settings: Settings,
+  scope: ClaudeUsageScope,
+  row: NonNullable<Awaited<ReturnType<typeof connection>>>,
+) {
+  const value = plaintext(settings, scope, row);
+  return value.startsWith("{")
+    ? ClaudeSubscriptionCredential.parse(JSON.parse(value)).token
+    : value;
 }
 function sameToken(left: string, right: string) {
   const a = Buffer.from(left),
@@ -133,6 +141,8 @@ export async function loadClaudeSubscriptionUsageCredential(
           connectionId: row.id,
           credentialVersion: row.version,
           token: token(settings, scope, row),
+          serializedCredential: plaintext(settings, scope, row),
+          credentialEncrypted: row.credentialEncrypted,
           usage: usage(row),
         }
       : null;
@@ -147,7 +157,10 @@ export async function recordClaudeSubscriptionUsage(
   input: {
     token: string;
     observation?: ClaudeUsageObservation;
-    refresh?: { status: ClaudeSubscriptionUsage["refreshStatus"]; checkedAt: string };
+    refresh?: {
+      status: ClaudeSubscriptionUsage["refreshStatus"];
+      checkedAt: string;
+    };
     expectedConnectionId?: string;
     expectedCredentialVersion?: number;
   },
