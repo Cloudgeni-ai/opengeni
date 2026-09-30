@@ -58,6 +58,18 @@ export function isPermissionDenied(error: unknown): boolean {
   return isApiError(error) && /\bmissing permission\b/iu.test(serverMessage ?? "");
 }
 
+const NETWORK_FAILURE =
+  /failed to fetch|fetch failed|networkerror|load failed|network request failed/iu;
+
+/**
+ * A request that never got a response (offline, DNS, CORS). `fetch` rejects
+ * with a TypeError for these, but so do input checks and plain bugs, so the
+ * message decides.
+ */
+function isNetworkFailure(error: unknown): boolean {
+  return error instanceof TypeError && NETWORK_FAILURE.test(error.message);
+}
+
 /** A server sentence that is safe to show: short, and not a JSON or schema dump. */
 function readableServerSentence(message: string | undefined): string | undefined {
   if (!message || message.length > 160 || /^[[{]/u.test(message)) return undefined;
@@ -79,7 +91,7 @@ export function apiErrorAdvice(error: unknown): string {
     return "You don't have permission to do this. Ask an admin for access.";
   }
   if (status === undefined) {
-    if (error instanceof TypeError || !(error instanceof Error)) {
+    if (isNetworkFailure(error) || !(error instanceof Error)) {
       return "Check your connection and try again.";
     }
     return "Try again. If it keeps happening, reload the page.";
@@ -87,7 +99,11 @@ export function apiErrorAdvice(error: unknown): string {
   if (status === 401) return "Your session ended. Sign in again, then try again.";
   if (status === 404) return "It may have been removed. Reload the page and try again.";
   if (status === 409 || status === 412) {
-    return "It changed since this page loaded. Reload the page and try again.";
+    // A 409 is often a real conflict ("name is already in use"): say which.
+    return (
+      readableServerSentence(serverMessage) ??
+      "It changed since this page loaded. Reload the page and try again."
+    );
   }
   if (status === 400 || status === 422) {
     return readableServerSentence(serverMessage) ?? "Check what you entered and try again.";
@@ -99,11 +115,25 @@ export function apiErrorAdvice(error: unknown): string {
 
 /**
  * The text to show for a failed action where only one line fits (a toast
- * description, a form error). API errors become advice; an error the app
- * wrote itself keeps its own message.
+ * description, a form error). API errors become advice, followed by the
+ * request reference for support; an error the app wrote itself keeps its own
+ * message. Next to Technical details (which already show the reference), use
+ * `userErrorTextWithoutReference`.
  */
 export function userErrorText(error: unknown, fallback?: string): string {
-  if (isApiError(error) || error instanceof TypeError) return apiErrorAdvice(error);
+  const text = userErrorTextWithoutReference(error, fallback);
+  if (!isApiError(error)) return text;
+  const { reference } = apiErrorFacts(error);
+  return reference ? `${text} Reference: ${reference}.` : text;
+}
+
+/**
+ * `userErrorText` without the request reference, for places that show the
+ * reference behind Technical details already (`apiErrorDetails`,
+ * `apiErrorTechnicalFacts`).
+ */
+export function userErrorTextWithoutReference(error: unknown, fallback?: string): string {
+  if (isApiError(error) || isNetworkFailure(error)) return apiErrorAdvice(error);
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
   return fallback ?? "Something went wrong. Try again.";

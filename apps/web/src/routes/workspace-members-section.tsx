@@ -25,7 +25,12 @@ import {
 import { Section, SectionStack } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import { apiErrorTechnicalFacts, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorTechnicalFacts,
+  isPermissionDenied,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { permissionLabel } from "@/lib/api-key-presets";
 import { orgLabel } from "@/lib/org";
 import {
@@ -1071,7 +1076,7 @@ function FailureText({ error }: { error: unknown }) {
   const facts = apiErrorTechnicalFacts(error);
   return (
     <>
-      {userErrorText(error)}
+      {userErrorTextWithoutReference(error)}
       {facts.length > 0 ? (
         <div className="mt-1">
           <TechnicalDetails facts={facts} />

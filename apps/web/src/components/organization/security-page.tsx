@@ -17,7 +17,12 @@ import { SelectMenu } from "@/components/ui/select-menu";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
-import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,
@@ -154,7 +159,7 @@ function RowLoadFailure({
       action={<RowButton onClick={onRetry}>Try again</RowButton>}
       {...apiErrorDetails(error)}
     >
-      {userErrorText(error)}
+      {userErrorTextWithoutReference(error)}
     </ErrorMessage>
   );
 }

@@ -9,7 +9,11 @@ import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
-import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { OrganizationKnowledgePrompt } from "@/routes/organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "@/routes/workspace-state-loader";
 import type { CompanyProfileAgentPolicy, CompanyProfileAgentPolicyMode } from "@/types";
@@ -107,7 +111,7 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
             action={<RowButton onClick={() => void load()}>Try again</RowButton>}
             {...apiErrorDetails(error)}
           >
-            {userErrorText(error)}
+            {userErrorTextWithoutReference(error)}
           </ErrorMessage>
         ) : loading || !policy ? (
           <div role="status" aria-label="Loading agent changes…">
@@ -144,7 +148,7 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
                 announce
                 {...apiErrorDetails(error)}
               >
-                {userErrorText(error)}
+                {userErrorTextWithoutReference(error)}
               </ErrorMessage>
             ) : null}
             <p role="status" className="text-xs leading-[18px] text-fg-muted empty:hidden">
@@ -197,7 +201,7 @@ function CurrentIdentitySection({
         action={<RowButton onClick={() => void inventory.reload()}>Try again</RowButton>}
         {...apiErrorDetails(inventory.error)}
       >
-        {userErrorText(inventory.error)}
+        {userErrorTextWithoutReference(inventory.error)}
       </ErrorMessage>
     );
   } else if (!profile) {
@@ -254,7 +258,7 @@ function CurrentIdentitySection({
             announce
             {...apiErrorDetails(inventory.error)}
           >
-            {userErrorText(inventory.error)}
+            {userErrorTextWithoutReference(inventory.error)}
           </ErrorMessage>
         ) : null}
       </div>

@@ -20,7 +20,7 @@ import { Notice } from "@/components/ui/notice";
 import { SectionFrameReset } from "@/components/ui/section-variant";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { AnalyticsAction } from "@/lib/analytics-actions";
-import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -125,10 +125,10 @@ export interface FormFrameProps {
 /** What went wrong and what to do; an API error's status and reference go behind Technical details. */
 function errorMessage(error: unknown): ReactNode {
   const facts = apiErrorTechnicalFacts(error);
-  if (facts.length === 0) return userErrorText(error);
+  if (facts.length === 0) return userErrorTextWithoutReference(error);
   return (
     <>
-      {userErrorText(error)}
+      {userErrorTextWithoutReference(error)}
       <div className="mt-1">
         <TechnicalDetails facts={facts} />
       </div>

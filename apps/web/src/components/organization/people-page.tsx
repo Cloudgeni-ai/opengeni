@@ -48,7 +48,7 @@ import {
   canRevokeOrganizationInvitation,
   organizationMemberCapabilities,
 } from "@/lib/organization-admin";
-import { apiErrorDetails, userErrorText } from "@/lib/api-error";
+import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import type {
   OrganizationInvitation,
@@ -457,7 +457,7 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
         action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
         {...apiErrorDetails(directory.members.error)}
       >
-        {userErrorText(directory.members.error)}
+        {userErrorTextWithoutReference(directory.members.error)}
       </ErrorMessage>
     );
   }
@@ -747,7 +747,7 @@ function PersonPage({
             action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
             {...apiErrorDetails(directory.members.error)}
           >
-            {userErrorText(directory.members.error)}
+            {userErrorTextWithoutReference(directory.members.error)}
           </ErrorMessage>
         ) : (
           <EmptyState

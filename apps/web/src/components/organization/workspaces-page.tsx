@@ -39,7 +39,7 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SelectMenu } from "@/components/ui/select-menu";
-import { apiErrorDetails, userErrorText } from "@/lib/api-error";
+import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import type {
   OrganizationMember,
   OrganizationWorkspaceAccess,
@@ -240,7 +240,7 @@ function WorkspacesList({
         action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
         {...apiErrorDetails(overview.error)}
       >
-        {userErrorText(overview.error)}
+        {userErrorTextWithoutReference(overview.error)}
       </ErrorMessage>
     );
   }
@@ -436,7 +436,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
             action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
             {...apiErrorDetails(directory.overview.error)}
           >
-            {userErrorText(directory.overview.error)}
+            {userErrorTextWithoutReference(directory.overview.error)}
           </ErrorMessage>
         ) : (
           <DetailSkeleton />

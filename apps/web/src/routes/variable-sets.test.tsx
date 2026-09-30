@@ -180,7 +180,9 @@ describe("Variable sets", () => {
         { status: 403 },
       ),
     );
-    expect(error.message).toBe("You don't have permission to do this. Ask an admin for access.");
+    expect(error.message).toBe(
+      "You don't have permission to do this. Ask an admin for access. Reference: req_403.",
+    );
   });
 
   test("shows variables write-only, with no version, dots or reveal", async () => {

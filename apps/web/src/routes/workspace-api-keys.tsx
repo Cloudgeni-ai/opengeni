@@ -68,7 +68,7 @@ import {
   type ApiKeyPresetId,
   type ApiKeyStatus,
 } from "@/lib/api-key-presets";
-import { apiErrorDetails, userErrorText } from "@/lib/api-error";
+import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import { NEW_API_KEY } from "@/lib/api-keys-route";
 import { delegableApiKeyPermissions, hasWorkspacePermission } from "@/lib/permissions";
 import type { ApiKey } from "@/types";
@@ -374,7 +374,7 @@ function KeyList({
           </Button>
         }
       >
-        {userErrorText(data.error)} Your keys keep working.
+        {userErrorTextWithoutReference(data.error)} Your keys keep working.
       </ErrorMessage>
     );
   } else if (empty) {

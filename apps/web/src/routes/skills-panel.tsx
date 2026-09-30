@@ -25,7 +25,12 @@ import { ErrorMessage } from "@/components/ui/error-message";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { MoreMenu } from "@/components/ui/page-actions";
 import { useAppContext, type AppContextValue } from "@/context";
-import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
 /** What failed, and the error behind it: the UI shows advice, never the raw API string. */
@@ -664,7 +669,7 @@ export function SkillsPanelContent({
                 </Button>
               }
             >
-              {userErrorText(error.cause)}
+              {userErrorTextWithoutReference(error.cause)}
             </ErrorMessage>
           )
         ) : null}

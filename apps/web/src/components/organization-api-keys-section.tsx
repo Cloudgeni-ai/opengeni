@@ -19,7 +19,12 @@ import { RelativeTime } from "@/components/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { apiKeyStatus } from "@/lib/api-key-status";
 import type { ApiKey } from "@/types";
 
@@ -180,7 +185,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         action={<RowButton onClick={() => void refreshApiKeys()}>Try again</RowButton>}
         {...apiErrorDetails(apiKeysError)}
       >
-        {userErrorText(apiKeysError)}
+        {userErrorTextWithoutReference(apiKeysError)}
       </ErrorMessage>
     );
   } else if (!apiKeysLoaded) {
@@ -216,7 +221,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
             action={<RowButton onClick={() => void refreshApiKeys()}>Try again</RowButton>}
             {...apiErrorDetails(apiKeysError)}
           >
-            {userErrorText(apiKeysError)}
+            {userErrorTextWithoutReference(apiKeysError)}
           </ErrorMessage>
         ) : null}
         <RowList label="Organization API keys" columns={COLUMNS} nameLabel="Key" flush>

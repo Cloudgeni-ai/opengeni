@@ -165,7 +165,7 @@ test("failed inventory blocks sending and retry recovers without forgetting excl
   fail = true;
   await act(async () => state.refresh());
   expect(state.error).toBe(
-    "Couldn't check connected accounts. Opengeni couldn't finish the request. Try again in a moment.",
+    "Couldn't check connected accounts. Opengeni couldn't finish the request. Try again in a moment. Reference: req-accounts.",
   );
   expect(state.selections).toEqual([]);
   fail = false;

@@ -14,7 +14,12 @@ import {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
-import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 
 import type { GoogleDriveKnowledgeSourceDialogProps } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -444,7 +449,7 @@ export function IntegrationFacetsPanel({
                     </Button>
                   }
                 >
-                  {userErrorText(error.cause)}
+                  {userErrorTextWithoutReference(error.cause)}
                 </ErrorMessage>
               )
             ) : data ? (

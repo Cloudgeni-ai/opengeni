@@ -7,6 +7,7 @@ import {
   apiErrorFacts,
   isPermissionDenied,
   userErrorText,
+  userErrorTextWithoutReference,
 } from "./api-error";
 
 const REFERENCE = "bc734e3e-0cde-4331-9b15-03e64bf77695";
@@ -82,8 +83,58 @@ describe("api errors in product words", () => {
       "Check your connection and try again.",
     );
     expect(userErrorText(apiError(500, "boom"))).toBe(
-      "Opengeni couldn't finish the request. Try again in a moment.",
+      `Opengeni couldn't finish the request. Try again in a moment. Reference: ${REFERENCE}.`,
     );
     expect(userErrorText(undefined, "Couldn't save.")).toBe("Couldn't save.");
+  });
+
+  test("a 409 with a readable server sentence says what conflicted", () => {
+    expect(apiErrorAdvice(apiError(409, "variable set name is already in use: Prod"))).toBe(
+      "Variable set name is already in use: Prod.",
+    );
+    expect(apiErrorAdvice(apiError(409, "personal GitHub connection must be reconnected"))).toBe(
+      "Personal GitHub connection must be reconnected.",
+    );
+    // No readable sentence: the change-since-load advice.
+    expect(apiErrorAdvice(apiError(409, "revision_mismatch"))).toBe(
+      "It changed since this page loaded. Reload the page and try again.",
+    );
+    expect(apiErrorAdvice(apiError(412, '{"etag":"W/1"}'))).toBe(
+      "It changed since this page loaded. Reload the page and try again.",
+    );
+  });
+
+  test("only a fetch transport failure is a connection problem", () => {
+    for (const message of [
+      "Failed to fetch",
+      "NetworkError when attempting to fetch resource.",
+      "Load failed",
+      "Network request failed",
+    ]) {
+      expect(userErrorText(new TypeError(message))).toBe("Check your connection and try again.");
+    }
+    // The SDK's input checks and plain bugs are TypeErrors too.
+    expect(userErrorText(new TypeError("customModelId must be a UUID"))).toBe(
+      "customModelId must be a UUID",
+    );
+    expect(
+      apiErrorAdvice(new TypeError("Cannot read properties of undefined (reading 'id')")),
+    ).toBe("Try again. If it keeps happening, reload the page.");
+  });
+
+  test("the one-line text keeps the support reference unless Technical details show it", () => {
+    const error = apiError(409, "variable set name is already in use: Prod");
+    expect(userErrorText(error)).toBe(
+      `Variable set name is already in use: Prod. Reference: ${REFERENCE}.`,
+    );
+    expect(userErrorTextWithoutReference(error)).toBe("Variable set name is already in use: Prod.");
+    expect(userErrorText(new Error(`OpenGeni API 404: not found Reference: ${REFERENCE}.`))).toBe(
+      `Try again. If it keeps happening, reload the page. Reference: ${REFERENCE}.`,
+    );
+    // No reference, nothing appended; an app error keeps its own message.
+    expect(userErrorText(Object.assign(new Error("gone"), { status: 404 }))).toBe(
+      "It may have been removed. Reload the page and try again.",
+    );
+    expect(userErrorText(new Error("Pick a workspace first."))).toBe("Pick a workspace first.");
   });
 });

@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ErrorMessage, type ErrorDetail } from "@/components/ui/error-message";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
 
 /* ============================================================================
    Failed loads
@@ -56,7 +56,7 @@ export function failedLoadParts(failure: Pick<FailedLoad, "detail" | "cause">): 
       : undefined);
   if (cause === undefined) return { detail: failure.detail, details: [] };
   return {
-    detail: failure.detail && !raw ? failure.detail : userErrorText(cause),
+    detail: failure.detail && !raw ? failure.detail : userErrorTextWithoutReference(cause),
     details: apiErrorTechnicalFacts(cause),
   };
 }

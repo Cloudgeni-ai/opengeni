@@ -27,7 +27,7 @@ import {
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
 } from "@/lib/organization-admin";
-import { apiErrorDetails, userErrorText } from "@/lib/api-error";
+import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import type { OrganizationRecoveryOverview } from "@/types";
 
 type RecoveryState = {
@@ -304,7 +304,7 @@ export function OrganizationRecoverySection(props: {
         action={<RowButton onClick={() => void load()}>Try again</RowButton>}
         {...apiErrorDetails(visible.error)}
       >
-        {userErrorText(visible.error)}
+        {userErrorTextWithoutReference(visible.error)}
       </ErrorMessage>
     );
   }

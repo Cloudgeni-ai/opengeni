@@ -53,7 +53,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
-import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorTechnicalFacts,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** Copy to the clipboard and toast the outcome. The shared helper falls back to
@@ -428,7 +432,7 @@ function FailureText({ error }: { error: unknown }) {
   const facts = apiErrorTechnicalFacts(error);
   return (
     <>
-      {userErrorText(error)}
+      {userErrorTextWithoutReference(error)}
       {facts.length > 0 ? (
         <div className="mt-1">
           <TechnicalDetails facts={facts} />

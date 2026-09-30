@@ -26,7 +26,11 @@ import { Button } from "@/components/ui/button";
 import { TechnicalDetails } from "@/components/ui/error-message";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { apiErrorTechnicalFacts, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorTechnicalFacts,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import {
   loadModelAccessOnboarding,
@@ -294,7 +298,7 @@ export function OrganizationOnboardingPanel({
           <h1 className="text-base font-semibold">We couldn't load your account setup</h1>
           <p className="mt-2 text-sm leading-5 text-fg-subtle">
             Your account is signed in, but checking its organization setup failed. This is usually
-            temporary. {userErrorText(statusError.error)}
+            temporary. {userErrorTextWithoutReference(statusError.error)}
           </p>
           {apiErrorTechnicalFacts(statusError.error).length > 0 ? (
             <div className="mt-2">

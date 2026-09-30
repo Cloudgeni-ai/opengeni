@@ -128,6 +128,7 @@ import {
 } from "@/lib/capabilities";
 import {
   mcpOAuthCallbackFailureMessage,
+  oauthCallbackFailureMessage,
   oauthCallbackReasonMessage,
 } from "@/lib/oauth-callback-messages";
 import {
@@ -1131,7 +1132,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     const reason = params.get("reason");
     const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
-    const message = oauthCallbackReasonMessage(reason) ?? "Couldn't connect. Please try again.";
+    const message = oauthCallbackFailureMessage(reason);
     if (item) {
       setSheetError(message);
       setSelected(

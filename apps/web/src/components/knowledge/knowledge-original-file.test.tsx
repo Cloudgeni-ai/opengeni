@@ -130,6 +130,8 @@ test("an API failure says what happened and what to do, never the raw API string
   expect(alert).toContain("Couldn't open the original file.");
   expect(alert).toContain("Try again in a moment.");
   expect(container.textContent).not.toContain("OpenGeni API");
-  expect(container.textContent).not.toContain("Reference");
+  expect(container.textContent).not.toContain("storage backend");
+  // The request reference stays for support.
+  expect(alert).toContain("Reference: 7d8e9f00-1111-2222-3333-444455556666.");
   await act(async () => root.unmount());
 });

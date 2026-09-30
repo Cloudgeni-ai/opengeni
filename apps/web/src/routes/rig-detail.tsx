@@ -58,7 +58,7 @@ import { resourceScopeLabel } from "@/components/resource-scope-picker";
 import { userFacingError } from "@/components/variable-sets/variable-set-model";
 import { LoadFailure } from "@/components/variable-sets/variable-set-pages";
 import { useAppContext } from "@/context";
-import { apiErrorDetails, userErrorText } from "@/lib/api-error";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
@@ -377,7 +377,7 @@ export function RigDetailRoute({
             }
             {...apiErrorDetails(rig.mutationError)}
           >
-            {userErrorText(rig.mutationError)}
+            {userErrorTextWithoutReference(rig.mutationError)}
           </ErrorMessage>
         ) : null}
         <DetailPageBody aside={aside}>

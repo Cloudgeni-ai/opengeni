@@ -4,7 +4,11 @@ import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
-import { apiErrorTechnicalFacts, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import {
+  apiErrorTechnicalFacts,
+  isPermissionDenied,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 
 const RECONNECT_PILL_REVEAL_DELAY_MS = 1_500;
@@ -253,7 +257,7 @@ export function LoadErrorState({
           <div className="mt-0.5 break-words text-xs leading-4.5 text-fg-muted">
             {denied
               ? "You don't have access to this. Ask an admin for access."
-              : userErrorText(error)}
+              : userErrorTextWithoutReference(error)}
           </div>
         ) : null}
         {!denied && facts.length > 0 ? (

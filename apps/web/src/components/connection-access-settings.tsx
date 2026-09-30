@@ -16,7 +16,7 @@ import {
   apiErrorDetails,
   apiErrorTechnicalFacts,
   isPermissionDenied,
-  userErrorText,
+  userErrorTextWithoutReference,
 } from "@/lib/api-error";
 
 /* ----------------------------------------------------------------------------
@@ -114,7 +114,7 @@ function accessRefusedText(organization: boolean): string {
 /** A failed save: what to do, then an API error's facts behind Technical details. */
 function saveFailure(caught: unknown): ReactNode {
   const facts = apiErrorTechnicalFacts(caught);
-  const advice = userErrorText(caught, "Couldn't save. Nothing was changed.");
+  const advice = userErrorTextWithoutReference(caught, "Couldn't save. Nothing was changed.");
   if (facts.length === 0) return advice;
   return (
     <>
