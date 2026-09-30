@@ -768,6 +768,16 @@ function CreateKeyPage({
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // A preset must still describe its full selection after live access changes.
+    if (access !== "custom" && !fullyDelegable(presetById(access).permissions, data.delegable)) {
+      setCustom(
+        presetById(access).permissions.filter((permission) => data.delegable.has(permission)),
+      );
+      setAccess("custom");
+    }
+  }, [access, data.delegable]);
+
+  useEffect(() => {
     // On the one-time step focus moves to Copy, so a second Enter can't leave it unseen.
     if (created) {
       rootRef.current?.querySelector<HTMLElement>("[data-slot=form-body] button")?.focus();
@@ -790,10 +800,9 @@ function CreateKeyPage({
     );
   }
 
-  const permissions =
-    access === "custom"
-      ? custom
-      : presetById(access).permissions.filter((permission) => data.delegable.has(permission));
+  const permissions = (access === "custom" ? custom : presetById(access).permissions).filter(
+    (permission) => data.delegable.has(permission) && isWorkspaceKeyPermission(permission),
+  );
   const expiresOn = expiryDate(expiry);
 
   const presetOptions: SelectOption<ApiKeyPresetId>[] = apiKeyPresets().map((preset) => {
@@ -919,6 +928,7 @@ function CreateKeyPage({
               options={presetOptions}
               value={access}
               onChange={(next) => {
+                if (next === "custom" && access !== "custom") setCustom([...permissions]);
                 setAccess(next);
                 setErrors((current) => ({ ...current, permissions: undefined }));
               }}

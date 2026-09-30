@@ -5,11 +5,61 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_OPENROUTER_MODEL_ID,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  configuredModels,
+  withClaudeConnectionCatalog,
+  withClaudeConnectionCredential,
 } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { z } from "zod";
-import { buildWorkspaceModelCatalog, projectWorkspaceModelCatalog } from "../src/model-catalog";
+import {
+  buildWorkspaceModelCatalog,
+  projectClientModel,
+  projectWorkspaceModelCatalog,
+} from "../src/model-catalog";
+import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-order";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
+
+test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
+  let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
+    anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+    claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  });
+  settings = withClaudeConnectionCatalog(
+    settings,
+    {
+      anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+      claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+    },
+    "workspace",
+  );
+  settings = withClaudeConnectionCredential(settings, "anthropic", "fixture-secret");
+  settings = withClaudeConnectionCredential(
+    settings,
+    "claude_subscription",
+    JSON.stringify({
+      version: 1,
+      token: "sk-ant-oat01-test-secret",
+      identity: { accountUuid: "10000000-0000-4000-8000-000000000001", deviceId: "a".repeat(64) },
+    }),
+  );
+  for (const [providerId, label, billingClass] of [
+    ["workspace-anthropic", "Anthropic API", "byok"],
+    ["workspace-claude-subscription", "Claude subscription", "claude_subscription"],
+    ["organization-anthropic", "Anthropic API", "organization_byok"],
+    ["organization-claude-subscription", "Claude subscription", "claude_subscription"],
+  ]) {
+    const model = configuredModels(settings).find(
+      (candidate) => candidate.providerId === providerId,
+    )!;
+    const client = projectClientModel(model);
+    expect(client.provider).toBe(providerId);
+    expect(client.providerLabel).toBe(label);
+    expect(client.source).toBeUndefined();
+    expect(modelPickerBillingClassFor(client)).toBe(billingClass);
+    expect(JSON.stringify(client)).not.toContain("secret");
+    expect(JSON.stringify(client)).not.toContain("10000000-0000-4000-8000-000000000001");
+  }
+});
 
 const previousClientModelSchema = z
   .object({

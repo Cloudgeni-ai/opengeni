@@ -74,15 +74,28 @@ transitions. Returning `null` hides the visual.
 ## Readable turns (`turnSummary.rolling`)
 
 `turnSummary={{ rolling: true }}` selects `groupTimeline(items, { readableTurns:
-true })`. The September 28, 2026 design revision supersedes the exchange-fold and
-answer-anchor presentation. Runtime phase semantics, replay deduplication, and
+true })`. The September 30, 2026 revision keeps the per-turn boundaries introduced
+on September 28 and adds live-tail activity placement and settled progress
+disclosure. It does not restore cross-turn exchange folding or forced answer
+anchoring. Runtime phase semantics, replay deduplication, and
 classic `groupTimeline(items)` grouping are unchanged. The deprecated
 `foldExchanges` option aliases readable turns; there is no legacy folding mode.
 
-- **Assistant prose stays readable.** Every commentary and answer message is a
-  distinct, fully formatted message with its normal actions. Short and long
-  phase-less streams render identically: there is no character-count heuristic,
-  replaceable note preview, or automatic demotion when more work follows.
+- **Startup stays visible.** The existing preparation orb appears on its own,
+  not inside the Working disclosure. When preparation ends, the live Working
+  row takes over without a competing orb or resetting elapsed time: the clock
+  still includes startup. Interrupted preparation keeps failure and recovery
+  information accessible instead of leaving a spinning orb.
+- **Live prose stays readable.** Every progress message is distinct and fully
+  formatted with its normal actions. One live Working or Waiting row follows
+  the current turn's progress, instead of updating above newer messages. Short
+  and long phase-less streams render identically: there is no character-count
+  heuristic or replaceable note preview.
+- **Finished turns stay concise.** Earlier assistant messages and tool history
+  collapse together under Worked for, while the final response remains visible.
+  Opening the disclosure reveals chronological prose and activity. A new turn
+  does not fold away a previous turn's final response. This is a presentation
+  change, not removal or rewriting of durable messages.
 - **One summary per turn.** Work uses a stable turn identity, never a cross-turn
   exchange fold. Routine machine deliveries coalesce into one compact reason per
   resumed turn, with payloads behind its disclosure. Prior turn-ending messages
@@ -94,12 +107,15 @@ classic `groupTimeline(items)` grouping are unchanged. The deprecated
   Completed summaries carry fuller facets. Completed compaction has a compact
   indicator and inspectable details. The disclosure chevron remains clear on
   phones without redundant show/hide-steps copy.
-- **Stable settlement.** The Worked separator sits before the response. Its
-  duration ends at the response's first delta, not its completion receipt. A
-  declared final phase establishes that boundary while streaming; for phase-less
-  messages, settlement identifies the last response without hiding any text.
-  Same-row expansion state survives updates and settlement. New turns get their
-  own rows rather than inheriting an earlier turn's disclosure.
+- **Stable settlement.** The Worked separator sits before the final response only
+  after the turn actually settles. Its duration uses the same start-to-end span
+  as the live timer, including final-answer streaming and any trailing work, so
+  the counter does not jump backwards on completion. A declared final phase
+  identifies the response but does not settle the turn; for phase-less messages,
+  settlement identifies the last response without guessing from text length.
+  Same-row expansion state survives updates and settlement. An expanded
+  or actively read view is not abruptly collapsed or scrolled away. New turns
+  get their own rows rather than inheriting an earlier turn's disclosure.
 
 The recorded wait itself reads "Waited for 1 agent · 3m 5s" once later input, a
 pause, or the session failing or being cancelled ended it, or "Waiting · since

@@ -131,6 +131,108 @@ function topLevelMessages(container: HTMLElement): string[] {
 }
 
 describe("readable per-turn rows", () => {
+  test("a text-only live work row keeps its disclosure when the first tool arrives", async () => {
+    sequence = 0;
+    const progress = event("agent.message.completed", {
+      text: "Checking the ledger.",
+      messageId: "start",
+      phase: "commentary",
+    });
+    const r = await renderComponent(
+      <MessageTimeline events={[progress]} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      const trigger = statusTrigger(r.container);
+      await act(async () => trigger.click());
+      await r.rerender(
+        <MessageTimeline
+          events={[progress, ...tool("read", "exec_command")]}
+          turnSummary={{ rolling: true }}
+        />,
+      );
+      expect(statusTrigger(r.container)).toBe(trigger);
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("late primary media reveals untouched work without replacing reader-owned controls", async () => {
+    for (const choice of [undefined, true, false]) {
+      sequence = 0;
+      const events = [...tool("read", "exec_command")];
+      const r = await renderComponent(
+        <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
+      );
+      try {
+        const trigger = statusTrigger(r.container);
+        if (choice !== undefined) {
+          await act(async () => trigger.click());
+          if (!choice) await act(async () => trigger.click());
+        }
+        const toolNode = r.container.querySelector("[data-og-item]");
+        await r.rerender(
+          <MessageTimeline
+            events={[...events, ...tool("image", "generate_image")]}
+            turnSummary={{ rolling: true }}
+          />,
+        );
+        await flush();
+        expect(statusTrigger(r.container)).toBe(trigger);
+        expect(trigger.getAttribute("aria-expanded")).toBe(choice === false ? "false" : "true");
+        if (choice === true) expect(r.container.querySelector("[data-og-item]")).toBe(toolNode);
+      } finally {
+        await r.unmount();
+      }
+    }
+  });
+
+  test("settled details interleave full Markdown progress and tools while the final stays primary", async () => {
+    sequence = 0;
+    const events = [
+      event("agent.message.delta", { messageId: "first", text: "First **progress**" }),
+      ...tool("read", "exec_command"),
+      event("agent.message.delta", {
+        messageId: "second",
+        text: "Second [progress](https://example.com)",
+      }),
+      ...tool("verify", "exec_command"),
+      event("agent.message.delta", {
+        messageId: "final",
+        phase: "final_answer",
+        text: "Final response",
+      }),
+      event("turn.completed", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      expect(topLevelMessages(r.container)).toEqual(["Final response"]);
+      const trigger = statusTrigger(r.container);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(trigger.textContent).toContain("2 steps");
+      await act(async () => trigger.click());
+      const details = r.container.querySelector("[data-og-fold-content]")!;
+      expect(details.querySelector("strong")?.textContent).toBe("progress");
+      expect(details.querySelector("a")?.textContent).toBe("progress");
+      expect(
+        Array.from(details.querySelectorAll("[data-og-item], [data-og-wide-table-message]")).map(
+          (item) => item.textContent,
+        ),
+      ).toEqual([
+        expect.stringContaining("First progress"),
+        expect.stringContaining("read"),
+        expect.stringContaining("Second progress"),
+        expect.stringContaining("verify"),
+      ]);
+      expect(topLevelMessages(r.container)).toEqual(["Final response"]);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("progress keeps Markdown and distinct message rows while completed tools do not spin", async () => {
     const { first } = exchange();
     const r = await renderComponent(
@@ -175,10 +277,13 @@ describe("readable per-turn rows", () => {
         r.container.querySelector('[data-og-recorded-outcome="wait"] summary')?.textContent,
       ).toMatch(/^Waited for 1 agent · \d+s/);
       expect(topLevelMessages(r.container)).toEqual([
-        "Starting a worker for the count.",
         "The worker is still running.",
         "312 users signed up.",
       ]);
+      await act(async () => statusTrigger(r.container).click());
+      expect(r.container.querySelector("[data-og-fold-content]")?.textContent).toContain(
+        "Starting a worker for the count.",
+      );
     } finally {
       await r.unmount();
     }
@@ -303,7 +408,7 @@ describe("readable per-turn rows", () => {
     }
   });
 
-  test("declared answer duration remains fixed at its first delta after completion", async () => {
+  test("Working continues through final streaming and trailing work, then settles to the full duration", async () => {
     sequence = 0;
     const working = [
       event("turn.started", {}),
@@ -316,12 +421,15 @@ describe("readable per-turn rows", () => {
     );
     try {
       await flush();
-      const span = r.container.querySelector("[data-og-exchange-status]")?.textContent;
-      expect(span).toBe("Worked for 20s");
+      expect(statusTrigger(r.container).textContent).toStartWith("Working");
+      const trailing = [...working, ...tool("verify-after-answer", "exec_command")];
+      await r.rerender(<MessageTimeline events={trailing} turnSummary={{ rolling: true }} />);
+      await flush();
+      expect(statusTrigger(r.container).textContent).toStartWith("Working");
       await r.rerender(
         <MessageTimeline
           events={[
-            ...working,
+            ...trailing,
             event("agent.message.completed", { text: "Answer", phase: "final_answer" }),
             event("turn.completed", {}),
           ]}
@@ -329,7 +437,9 @@ describe("readable per-turn rows", () => {
         />,
       );
       await flush();
-      expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toBe(span);
+      expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toBe(
+        "Worked for 40s",
+      );
     } finally {
       await r.unmount();
     }

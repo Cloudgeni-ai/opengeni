@@ -20,6 +20,29 @@ export type FrozenTurnInitiator = {
   initiatingHumanSubjectId?: string | null;
 };
 
+/** A legacy task has no asserted service identity. Its occurrence is still
+ * initiated by the scheduler, not by the missing-attribution sentinel. */
+export function frozenScheduledOccurrenceInitiator(
+  task: { createdBy: TurnInitiator; createdByContext: TurnInitiatorContext },
+  scheduler: FrozenTurnInitiator,
+): FrozenTurnInitiator {
+  if (
+    task.createdBy.kind !== "service" ||
+    task.createdBy.subjectId === UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID
+  ) {
+    return scheduler;
+  }
+  const { label: _label, ...serviceContext } = task.createdByContext;
+  return {
+    initiator:
+      task.createdBy.subjectId === "scheduler" && !task.createdBy.label
+        ? { ...task.createdBy, label: "OpenGeni scheduler" }
+        : task.createdBy,
+    context: { ...serviceContext, ...scheduler.context },
+    initiatingHumanSubjectId: null,
+  };
+}
+
 const MAX_AGENT_PROVENANCE_HOPS = 32;
 
 /**

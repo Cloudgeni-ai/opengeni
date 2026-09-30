@@ -132,6 +132,7 @@ const client = {
   listConnections: mock(async () => []),
   listWorkspaceGatewayCustomModels: mock(async () => ({ models: [] })),
   listWorkspaceOpenRouterCustomModels: mock(async () => ({ models: [] })),
+  listWorkspaceClaudeCustomModels: mock(async () => ({ models: [] })),
   getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
   getWorkspaceModelAccessPolicy: mock(async () => ({
     allowedProviders: null,

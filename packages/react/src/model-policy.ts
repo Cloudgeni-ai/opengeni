@@ -28,6 +28,7 @@ const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
+  claude_subscription: "Claude subscription",
   byok: "Workspace providers",
   organization_byok: "Organization providers",
 };
@@ -196,6 +197,10 @@ export function advancedSourceSummary(model: ClientModel): string | null {
 }
 
 function workspaceProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "workspace-anthropic")
+    return "Billed to the workspace Anthropic API account";
+  if (model.provider === "workspace-claude-subscription")
+    return "Uses the workspace Claude subscription · no OpenGeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
   }
@@ -206,6 +211,10 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
 }
 
 function organizationProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "organization-anthropic")
+    return "Billed to the organization Anthropic API account";
+  if (model.provider === "organization-claude-subscription")
+    return "Uses the connected Claude subscription · no OpenGeni credits";
   if (model.provider === "organization-openrouter") {
     return "Billed to the organization OpenRouter account";
   }

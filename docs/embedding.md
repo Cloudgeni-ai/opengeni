@@ -1097,6 +1097,8 @@ maintenance disposition, while installations with no suspect population can appl
 the bounded rolling path. Child lifecycle remains child lifecycle—the root id is attribution
 context, not permission to settle a root run.
 Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
+The usage trigger locks the workspace before the session, turn, and attempt, matching lifecycle
+writers. Rolling migration 0541 repairs this ordering without changing validation or retained facts.
 Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
 new fact fails its source transaction instead of committing a poison export row, while standalone
 mode retains its prior input behavior.

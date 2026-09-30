@@ -1,3 +1,8 @@
+import {
+  getWorkspaceProviderApiKeyConnectionMetadata,
+  listWorkspaceProviderCustomModels,
+} from "@opengeni/db";
+import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
@@ -548,7 +553,38 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       getWorkspace(deps.db, workspaceId),
     ]);
+    const claudeConnections: ClaudeConnectionCatalog = {};
+    const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+    await Promise.all(
+      CLAUDE_CONNECTION_KINDS.map(async (kind) => {
+        if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled) return;
+        const [active, models] = await Promise.all([
+          organizationModelProviderConnectionActiveForWorkspace(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+        ]);
+        claudeConnections[kind] = { active, models };
+        const [metadata, workspaceModels] = await Promise.all([
+          getWorkspaceProviderApiKeyConnectionMetadata(deps.db, workspaceId, kind),
+          listWorkspaceProviderCustomModels(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+        ]);
+        workspaceClaudeConnections[kind] = { active: metadata !== null, models: workspaceModels };
+      }),
+    );
     const selections = resolveWorkspaceModelSelection({
+      claudeConnections,
+      workspaceClaudeConnections,
       connectionModelRestrictions,
       settings: resolvedCatalog.settings,
       policy,

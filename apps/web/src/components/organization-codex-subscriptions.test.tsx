@@ -66,6 +66,7 @@ const access = {
   personalWorkspacesSupported: true,
 };
 const context = {
+  clientConfig: { claudeSubscriptionEnabled: false },
   client: {
     requestJson,
     getModelConnectionAccess: mock(async () => access),

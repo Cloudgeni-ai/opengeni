@@ -174,6 +174,7 @@ export function buildTimeline(
   // receipts have no row. Carry resume evidence on the attention landmarks so
   // grouping cannot mistake historical approval for a live wait.
   const presentationWaits = new Map<string | null, Array<NoticeItem | SessionStatusItem>>();
+  const presentationFailures = new Map<string | null, SessionStatusItem[]>();
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
     item: NoticeItem | SessionStatusItem,
@@ -1000,7 +1001,15 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         if (status === "requires_action") rememberPresentationWait(item, turnId);
-        else items.push(item);
+        else {
+          items.push(item);
+          if (status === "failed") {
+            const key = turnId ?? presentationTurnId;
+            const failures = presentationFailures.get(key) ?? [];
+            failures.push(item);
+            presentationFailures.set(key, failures);
+          }
+        }
         break;
       }
 
@@ -1097,6 +1106,23 @@ export function buildTimeline(
             turnId,
             (startupRecoveryRevisionByTurn.get(turnId) ?? 0) + 1,
           );
+          if (
+            !event.duplicateOfEventId &&
+            (!event.turnAssociation || event.turnAssociation === "current")
+          ) {
+            // Human Retry reopens the existing logical turn, unlike a new
+            // prompt. Keep failure evidence, but do not let its old settlement
+            // close the recovered turn's work surface.
+            for (const item of items) {
+              if (item.kind === "turn-end" && item.turnId === turnId && item.outcome === "failed") {
+                item.resumedAt ??= event.occurredAt;
+              }
+            }
+            for (const item of presentationFailures.get(turnId) ?? []) {
+              item.resolvedAt = event.occurredAt;
+            }
+            presentationFailures.delete(turnId);
+          }
         }
         break;
       }
@@ -1305,11 +1331,12 @@ export function buildTimeline(
         break;
       }
 
+      case "turn.superseded":
       case "turn.cancelled": {
         // A retraction of a never-started queued turn is not a turn ending —
         // the message was withdrawn before any work happened; show nothing.
         // A null turnId proves nothing, so it keeps the legacy finalize path.
-        if (turnId && !prescan.startedTurnIds.has(turnId)) {
+        if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
         takeAgentResponse(turnId);
@@ -1768,51 +1795,118 @@ export function groupTimeline(
   return groups;
 }
 
-/** Prose and attention surfaces never enter a work fold. */
+/** Live prose stays primary; settled progress joins its own turn's work history. */
 function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
+  // Turn identity and settlement exist even when a final-only turn has no
+  // disclosure. A late receipt must not become a new turn or revive its clock.
+  const seenTurns = new Set<string>();
+  const settlements = new Map<
+    string,
+    { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
+  >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
   const messages = new Map<string, AgentMessageItem[]>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
+  const itemOrder = new Map(items.map((item, index) => [item.id, index]));
   let legacyTurn = "start";
   let currentTurn = legacyTurn;
   for (const item of items) {
     if (item.kind === "user-message") legacyTurn = item.id;
     const key = ("turnId" in item && item.turnId) || legacyTurn;
-    // Legacy activity still establishes a work boundary using its prompt key.
+    // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
     if (
-      (("turnId" in item && item.turnId) || isActivityItem(item)) &&
-      key !== currentTurn &&
-      !turns.has(key)
+      ("turnId" in item && item.turnId) ||
+      isActivityItem(item) ||
+      (item.kind === "agent-message" && item.text.trim())
     ) {
-      const previous = turns.get(currentTurn);
-      if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
-      currentTurn = key;
+      if (key !== currentTurn && !seenTurns.has(key)) {
+        const previous = turns.get(currentTurn);
+        if (!settlements.has(currentTurn)) {
+          settlements.set(currentTurn, { endedAt: item.occurredAt });
+        }
+        if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
+        currentTurn = key;
+      }
+      seenTurns.add(key);
     }
     const workForTurn = () => {
       let group = turns.get(key);
+      const firstMessage = messages.get(key)?.[0];
+      const messageStart = firstMessage?.startedAt ?? firstMessage?.occurredAt;
+      const startedAt =
+        messageStart && Date.parse(messageStart) < Date.parse(item.occurredAt)
+          ? messageStart
+          : item.occurredAt;
       if (!group) {
+        const settlement = settlements.get(key);
         group = {
           kind: "activity",
           id: `work-${key}`,
           items: [],
-          work: { startedAt: item.occurredAt, details: [] },
+          work: { startedAt, details: [] },
         };
+        if (settlement) {
+          group.work!.endedAt = settlement.endedAt;
+          if (settlement.outcome) group.outcome = settlement.outcome;
+          if (settlement.failureText) group.failureText = settlement.failureText;
+        }
         turns.set(key, group);
-        groups.push(group);
+        const firstMessageIndex =
+          settlement && firstMessage
+            ? groups.findIndex((entry) => entry.kind === "item" && entry.item === firstMessage)
+            : -1;
+        if (firstMessageIndex >= 0) groups.splice(firstMessageIndex, 0, group);
+        else groups.push(group);
+      } else if (Date.parse(startedAt) < Date.parse(group.work!.startedAt)) {
+        // Completion-only startup receipts can reveal an earlier phase start
+        // after another activity has already established the work row.
+        group.work!.startedAt = startedAt;
       }
       return group;
     };
     if (isActivityItem(item)) {
       const group = workForTurn();
       group.items.push(item);
+      const previous = group.work!.details.at(-1);
+      const preparing = (entry: ActivityItem) =>
+        entry.kind === "startup-phase" || (entry.kind === "reasoning" && !entry.text.trim());
+      if (
+        preparing(item) &&
+        previous?.kind === "activity" &&
+        previous.items.every(preparing) &&
+        previous.items.at(-1) === items[(itemOrder.get(item.id) ?? 0) - 1]
+      )
+        previous.items.push(item);
+      else
+        group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
     } else if (item.kind === "turn-end") {
+      if (!item.resumedAt) {
+        settlements.set(key, {
+          endedAt: item.occurredAt,
+          outcome: item.outcome,
+          ...(item.failureText ? { failureText: item.failureText } : {}),
+        });
+      }
       const group = turns.get(key);
       if (group?.work) {
+        if (item.resumedAt) {
+          group.work.details.push({
+            kind: "item",
+            item: {
+              kind: "notice",
+              id: item.id,
+              tone: "failed",
+              text: item.failureText ?? "The turn failed before retrying.",
+              occurredAt: item.occurredAt,
+            },
+          });
+          continue;
+        }
         group.outcome = item.outcome;
         if (item.failureText) group.failureText = item.failureText;
         group.work.endedAt = item.occurredAt;
@@ -1866,7 +1960,8 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           current.waiting = { label: "Waiting for you", since: item.occurredAt };
         } else if (
           item.kind === "session-status" &&
-          ["paused", "cancelled", "failed"].includes(item.status)
+          ["paused", "cancelled", "failed"].includes(item.status) &&
+          !item.resolvedAt
         ) {
           current.endedAt = item.occurredAt;
           delete current.waiting;
@@ -1876,6 +1971,13 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         const prose = messages.get(key) ?? [];
         prose.push(item);
         messages.set(key, prose);
+        // A text-only turn still has one overall activity surface. An explicit
+        // final-only response does not manufacture an empty work disclosure.
+        if (
+          (item.phase !== "final_answer" || prose.length > 1) &&
+          (turns.has(key) || !settlements.has(key))
+        )
+          workForTurn();
       }
     }
   }
@@ -1889,8 +1991,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   });
   // A declared answer starts the response clock immediately. Without a phase,
   // only settlement identifies the last response; text length never does.
-  const responseRows = new Map<AgentMessageItem, Work>();
+  const beforeRows = new Map<TimelineGroup, Work>();
+  const afterRows = new Map<TimelineGroup, Work>();
   const movedRows = new Set<Work>();
+  const foldedProse = new Set<AgentMessageItem>();
   const positions = new Map<TimelineGroup | TimelineItem, number>();
   const nextBoundary = new Map<Work, number>();
   let boundary = groups.length;
@@ -1916,10 +2020,31 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         )
       : prose;
     const response =
-      responseCandidates.find((message) => message.phase === "final_answer") ??
+      responseCandidates.filter((message) => message.phase === "final_answer").at(-1) ??
       (settledAt
-        ? (responseCandidates.at(-1) ?? prose.find((message) => message.phase === "final_answer"))
+        ? (responseCandidates.at(-1) ??
+          prose.filter((message) => message.phase === "final_answer").at(-1))
         : undefined);
+    if (settledAt) {
+      for (const message of responseCandidates) {
+        // Markdown image syntax also carries retained video/audio previews.
+        // Keep potential primary media visible rather than guessing whether a
+        // partial/reference-style embed can safely disappear into history.
+        if (message === response || message.text.includes("![")) continue;
+        foldedProse.add(message);
+        group.work!.details.push({ kind: "item", item: message });
+      }
+    }
+    // Preserve event chronology, not completion timestamps or activity kinds.
+    group.work!.details.sort((a, b) => {
+      const first = (entry: TimelineGroup) =>
+        entry.kind === "item"
+          ? entry.item.id
+          : entry.kind === "activity"
+            ? entry.items[0]?.id
+            : undefined;
+      return (itemOrder.get(first(a) ?? "") ?? 0) - (itemOrder.get(first(b) ?? "") ?? 0);
+    });
     if (response) {
       const responseAt = response.startedAt ?? response.occurredAt;
       // A delayed completion-only receipt cannot extend a settled work clock.
@@ -1927,19 +2052,48 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      if ((positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)) {
-        responseRows.set(response, group);
+      if (
+        settledAt &&
+        (positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)
+      ) {
+        beforeRows.set(groups[positions.get(response)!]!, group);
+        movedRows.add(group);
+      }
+    }
+    if (!settledAt) {
+      // Keep the same row at the tail of this turn, after every live progress
+      // message and attention surface, without crossing a newer input/turn.
+      // A visible steer is not a turn boundary when later prose still belongs
+      // to this turn. New input without that evidence remains a hard boundary.
+      const lastProseIndex = Math.max(...prose.map((message) => positions.get(message) ?? -1));
+      let tailIndex = groups.length - 1;
+      for (let index = (positions.get(group) ?? 0) + 1; index <= tailIndex; index += 1) {
+        const entry = groups[index]!;
+        if (
+          (entry.kind === "activity" && entry.work) ||
+          (entry.kind === "item" &&
+            (("turnId" in entry.item && entry.item.turnId && entry.item.turnId !== key) ||
+              (index > lastProseIndex &&
+                (entry.item.kind === "user-message" || entry.item.kind === "machine-input-batch"))))
+        ) {
+          tailIndex = index - 1;
+          break;
+        }
+      }
+      const tail = groups[tailIndex];
+      if (tail && tail !== group) {
+        afterRows.set(tail, group);
         movedRows.add(group);
       }
     }
   }
   return groups.flatMap((group) => {
     if (group.kind === "activity" && movedRows.has(group)) return [];
-    const row =
-      group.kind === "item" && group.item.kind === "agent-message"
-        ? responseRows.get(group.item)
-        : undefined;
-    return row ? [row, group] : [group];
+    const hidden =
+      group.kind === "item" && group.item.kind === "agent-message" && foldedProse.has(group.item);
+    const before = beforeRows.get(group);
+    const after = afterRows.get(group);
+    return [...(before ? [before] : []), ...(hidden ? [] : [group]), ...(after ? [after] : [])];
   });
 }
 
@@ -2187,6 +2341,7 @@ export function isTurnExecutionEvidence(type: string): boolean {
     isAgentActivityEvent(type) ||
     type === "turn.completed" ||
     type === "turn.failed" ||
+    type === "turn.superseded" ||
     type === "turn.recovery.requested" ||
     type === "turn.capacity_waiting" ||
     type === "session.requiresAction" ||

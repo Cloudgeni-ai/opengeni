@@ -710,9 +710,12 @@ the worker clear its in-memory copy. Failed requests and late/zombie completion
 events cannot reset the streak. Successful inference between transient outages
 therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
-An explicit provider retry hint is a lower bound. Rate limits use the provider's
-`Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing.
+An explicit provider retry hint is a lower bound. Rate limits wait for the
+longer of the provider's `Retry-After` (60 s when absent) and an escalating floor
+of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
+the floor, a one-second hint on a per-minute token limit spends every automatic
+recovery before the window resets. Other retryable classes keep their existing
+pacing.
 An exhausted API-key provider quota is not a rate limit and is never retried:
 a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
 tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
@@ -2159,7 +2162,7 @@ runs for it and the box would stay up until the provider deadline kills it
 uncaptured. One rule contains such commands, independent of command health:
 running, still draining output, stopping, unobservable, or repeatedly failing
 observation all qualify. The reaper reads a new inventory,
-`list_command_containment_candidates(limit, idle window)` from migration 0541,
+`list_command_containment_candidates(limit, idle window)` from migration 0546,
 which lists enrolled drains, rotating leases, and warm or draining Modal leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
@@ -2185,7 +2188,7 @@ workspace control fence and the process -> admission -> lease row locks:
   capture budget before an explicit `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS`). The
   newest attempt close, turn finish, lease holder-set change, and admission or
   settlement on the lease epoch must all be older than the window. Migration
-  0541 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
+  0546 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
   writer changes the holder counters. Process age is never a fact.
 
 A holder or writer that committed first is seen and refuses enrollment; a later
@@ -2207,7 +2210,7 @@ during the drain keeps its exit code. Failed checkpoints retain the provider and
 command holders for retry. Filesystem snapshots preserve neither running
 processes nor application transaction state.
 `opengeni_sandbox_command_containment_total{outcome}` counts inspections and
-enrolled cold commits. Pre-0541 workers keep calling the untouched legacy
+enrolled cold commits. Pre-0546 workers keep calling the untouched legacy
 `list_unobservable_command_drain_candidates(integer)` with their narrower
 predicates during a rolling deploy; a later contract migration can drop it.
 
@@ -2457,6 +2460,12 @@ a recovered successor attempt cannot claim or reissue the predecessor's
 operation UUID. Notes remain an explicit retrieval surface and are never
 composed into recovery history or ordinary prompts. See
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
+
+Task-tree authority locks root and addressed sessions in UUID order with
+`FOR NO KEY UPDATE`: sibling mutations still serialize, but foreign-key
+`KEY SHARE` checks can proceed while child activity finalization holds the
+workspace activity counter. Exact turn/attempt and visibility fences remain
+unchanged (`0542_task_note_root_lock_mode.sql`).
 
 Resource-based turn workers use that exact graceful path only as emergency
 memory protection. Temporal's cgroup-aware slot tuner closes new admission at

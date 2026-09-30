@@ -17,7 +17,13 @@ import { SettingNavRow, SettingRow } from "@/components/ui/setting-row";
    form page to change it.
    -------------------------------------------------------------------------- */
 
-export type ConnectionAccessKind = "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+export type ConnectionAccessKind =
+  | "codex"
+  | "supergrok"
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 export interface ConnectionAccessTarget {
   client: OpenGeniBrowserClient;

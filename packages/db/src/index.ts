@@ -484,6 +484,7 @@ import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   creatorColumns,
   frozenInitiatorForCommandActor,
+  frozenScheduledOccurrenceInitiator,
   initiatorColumns,
   initiatorFromStorage,
   UNATTRIBUTED_LEGACY_INITIATOR,
@@ -10303,13 +10304,49 @@ async function withConnectionSubjectRls<T>(
     : await withWorkspaceRls(db, workspaceId, fn);
 }
 
+const connectionAccessPolicyColumns = {
+  allowedModelIds: schema.connections.allowedModelIds,
+  allowedWorkspaceIds: schema.connections.allowedWorkspaceIds,
+  allowPersonalWorkspaces: schema.connections.allowPersonalWorkspaces,
+  accessPolicyVersion: schema.connections.accessPolicyVersion,
+  accessPolicyUpdatedBy: schema.connections.accessPolicyUpdatedBy,
+  accessPolicyUpdatedAt: schema.connections.accessPolicyUpdatedAt,
+};
+
+// Internal-only: credential replacement preserves the locked connection's access policy.
+// Public connection creation must not accept these administration-owned fields.
+type ConnectionAccessPolicySnapshot = Pick<
+  typeof schema.connections.$inferSelect,
+  | "allowedModelIds"
+  | "allowedWorkspaceIds"
+  | "allowPersonalWorkspaces"
+  | "accessPolicyVersion"
+  | "accessPolicyUpdatedBy"
+  | "accessPolicyUpdatedAt"
+>;
+
+function connectionAccessPolicySnapshot(
+  row: ConnectionAccessPolicySnapshot,
+): ConnectionAccessPolicySnapshot {
+  return {
+    allowedModelIds: row.allowedModelIds,
+    allowedWorkspaceIds: row.allowedWorkspaceIds,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+    accessPolicyVersion: row.accessPolicyVersion,
+    accessPolicyUpdatedBy: row.accessPolicyUpdatedBy,
+    accessPolicyUpdatedAt: row.accessPolicyUpdatedAt,
+  };
+}
+
 async function createConnectionInScope(
   db: Database,
   input: CreateConnectionInput,
+  accessPolicy?: ConnectionAccessPolicySnapshot,
 ): Promise<ConnectionMetadataWithVerification> {
   const [row] = await db
     .insert(schema.connections)
     .values({
+      ...accessPolicy,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.subjectId ?? null,
@@ -10446,7 +10483,11 @@ export async function createConnection(
   );
 }
 
-type WorkspaceProviderApiKeyConnectionKind = "vercel_gateway" | "openrouter";
+export type WorkspaceProviderApiKeyConnectionKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 type WorkspaceProviderApiKeyConnectionSpec = {
   providerDomain: string;
@@ -10456,9 +10497,18 @@ type WorkspaceProviderApiKeyConnectionSpec = {
   label: string;
 };
 
-function workspaceProviderApiKeyConnectionSpec(
+export function workspaceProviderApiKeyConnectionSpec(
   providerKind: WorkspaceProviderApiKeyConnectionKind,
 ): WorkspaceProviderApiKeyConnectionSpec {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription") {
+    return {
+      providerDomain: "api.anthropic.com",
+      credentialRole: providerKind,
+      operationIdMetadataKey: `${providerKind}CredentialOperationId`,
+      operationDigestMetadataKey: `${providerKind}CredentialOperationDigest`,
+      label: providerKind === "anthropic" ? "Anthropic API" : "Claude subscription",
+    };
+  }
   return providerKind === "vercel_gateway"
     ? {
         providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -10484,11 +10534,11 @@ async function lockWorkspaceProviderApiKeyConnection(
   const lockKey =
     providerKind === "vercel_gateway"
       ? `workspace-vercel-ai-gateway:${workspaceId}`
-      : `workspace-openrouter:${workspaceId}`;
+      : `workspace-${providerKind}:${workspaceId}`;
   await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
 }
 
-async function upsertWorkspaceProviderApiKeyConnection(
+export async function upsertWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: UpsertWorkspaceProviderApiKeyConnectionInput,
@@ -10502,7 +10552,7 @@ async function upsertWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10536,25 +10586,30 @@ async function upsertWorkspaceProviderApiKeyConnection(
             : null;
         }
         if (rows.some((row) => row.status !== "revoked")) return null;
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          // Reconnecting cannot reset an administrator's restrictions. Rows are newest first.
+          rows[0] ? connectionAccessPolicySnapshot(rows[0]) : undefined,
+        );
       }),
   );
 }
 
-async function rotateWorkspaceProviderApiKeyConnection(
+export async function rotateWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RotateWorkspaceProviderApiKeyConnectionInput,
@@ -10568,7 +10623,7 @@ async function rotateWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10617,25 +10672,29 @@ async function rotateWorkspaceProviderApiKeyConnection(
             throw new Error(`${spec.label} connection changed during rotation`);
           }
         }
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          connectionAccessPolicySnapshot(targetRow),
+        );
       }),
   );
 }
 
-async function revokeWorkspaceProviderApiKeyConnections(
+export async function revokeWorkspaceProviderApiKeyConnections(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RevokeWorkspaceProviderApiKeyConnectionsInput,
@@ -14912,7 +14971,7 @@ export async function loadConnectionCredentialForBroker(
   );
 }
 
-async function getWorkspaceProviderApiKeyConnectionMetadata(
+export async function getWorkspaceProviderApiKeyConnectionMetadata(
   db: Database,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
@@ -14958,13 +15017,14 @@ export async function workspaceOpenRouterConnectionActive(
   return (await getWorkspaceOpenRouterConnectionMetadata(db, workspaceId)) !== null;
 }
 
-async function loadWorkspaceProviderApiKey(
+export async function loadWorkspaceProviderApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   turnModelId?: string | null,
 ): Promise<string | null> {
+  if (providerKind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return null;
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
     (connection) =>
@@ -71547,6 +71607,21 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            // A task's accepted service provenance is immutable, just like
+            // its execution policy. Never consult a mutable task or borrow
+            // the session creator's human for this occurrence.
+            if (delivered.updates.every((update) => update.kind === "scheduled_occurrence")) {
+              internalInitiator = frozenScheduledOccurrenceInitiator(
+                accepted.task,
+                internalInitiator,
+              );
+              if (delivered.event) {
+                delivered.event.payload = {
+                  ...(delivered.event.payload as Record<string, unknown>),
+                  initiator: internalInitiator.initiator,
+                };
+              }
+            }
             frozenTurnExecutionPolicy = accepted.turnExecutionPolicy
               ? TurnExecutionPolicyV1.parse(accepted.turnExecutionPolicy)
               : null;
@@ -84225,6 +84300,10 @@ function mapConnectionMetadata(row: {
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    anthropicCredentialOperationId: _anthropicOperationId,
+    anthropicCredentialOperationDigest: _anthropicOperationDigest,
+    claude_subscriptionCredentialOperationId: _claudeOperationId,
+    claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
     ...publicMetadata
   } = row.metadata;
   return {

@@ -1,3 +1,4 @@
+import { measureMcpPhase, withMcpCallIdentity } from "@opengeni/observability";
 import {
   getSessionEvent,
   getHumanInputResumeForEvent,
@@ -1350,7 +1351,14 @@ export async function runTurnStreamAttempt(
             );
           }
           streamTiming.onEvent(event.type);
-          await eventing.batcher.push(event);
+          if (event.type === "agent.toolCall.output") {
+            const batcher = eventing.batcher;
+            await withMcpCallIdentity((event.payload as { id: string }).id, () =>
+              measureMcpPhase("event_persistence", () => batcher.push(event)),
+            );
+          } else {
+            await eventing.batcher.push(event);
+          }
           if (event.type === "agent.message.completed") {
             // Completed messages are structural: push returns once durable.
             latestStreamedAssistantText = (event.payload as { text: string }).text;
