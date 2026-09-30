@@ -41,6 +41,7 @@ import {
 } from "./pack";
 import {
   bestHitLines,
+  cleanPrefix,
   excludeArgs,
   idfOf,
   recall,
@@ -49,6 +50,7 @@ import {
   type RecallResult,
 } from "./recall";
 import { mapLimit, READ_CONCURRENCY, WorkspaceSession } from "./session";
+import { nameIndex } from "./nameindex";
 import { locateUsages, specificName, symbolCandidates } from "./symbols";
 import { keywordNotes } from "./vocab";
 import {
@@ -321,13 +323,28 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
 
   // ---- 1. recall
   let ts = performance.now();
-  const rec: RecallResult = await recall({
-    session,
-    question: ctx.question + " " + subQuestions.join(" "),
-    keywords: o.keywords,
-    pathPrefixes: o.paths ?? [],
-    config: cfg,
-  });
+  const scopePaths = (o.paths ?? []).map(cleanPrefix).filter((p): p is string => p !== null && p !== ".");
+  const [rec, ni] = await Promise.all([
+    recall({
+      session,
+      question: ctx.question + " " + subQuestions.join(" "),
+      keywords: o.keywords,
+      pathPrefixes: o.paths ?? [],
+      config: cfg,
+    }),
+    cfg.recall.nameIndex
+      ? nameIndex({
+          session,
+          question: ctx.question + " " + subQuestions.join(" "),
+          files: [],
+          paths: scopePaths,
+          cfg,
+          excludeArgs: exArgs,
+          allowTests,
+          maxFiles: cfg.recall.nameIndexFiles * 3,
+        }).catch(() => null)
+      : Promise.resolve(null),
+  ]);
   mark("recall", ts);
   const kws = [...rec.keywords];
   const userKeywords = rec.keywords.length;
@@ -371,6 +388,40 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   ts = performance.now();
   const cands: FileCandidate[] = [...rec.candidates];
   const byPath = new Map(cands.map((c, i) => [c.path, i]));
+  // files whose declared names carry the question's own words join triage (no Jev spent to find them)
+  const nameIndexAdded: string[] = [];
+  if (ni && ni.files.length) {
+    const qk = kws.length;
+    kws.push({
+      index: qk,
+      raw: "(question words)",
+      variants: [],
+      mode: "phrase",
+      pattern: ni.stems.map(escapeRegex).join("|") || "(?!)",
+      rgPattern: "",
+      df: ni.files.length,
+      pathDf: 0,
+      hitLines: 0,
+      idf: 1,
+      fragments: [],
+      symbol: true,
+    });
+    for (const f of ni.files) {
+      if (nameIndexAdded.length >= cfg.recall.nameIndexFiles) break;
+      if (byPath.has(f.path) || (!allowTests && isTestPath(f.path))) continue;
+      byPath.set(f.path, cands.length);
+      cands.push({
+        path: f.path,
+        lexScore: f.score / 10,
+        kwHits: { [qk]: f.hits.length },
+        pathKws: [],
+        hitLines: new Map(f.hits.map((h) => [h.line, { line: h.line, text: h.text, kws: [qk] }])),
+        isTest: isTestPath(f.path),
+        isDoc: isDocPath(f.path),
+      });
+      nameIndexAdded.push(f.path);
+    }
+  }
   const fileIds = cands.map((_, i) => `f${String(i).padStart(3, "0")}`);
   const maxLex = cands[0]?.lexScore || 1;
   const fileItem = (i: number): FileItem => {
@@ -446,11 +497,165 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   );
   const nFiles = Math.max(rec.totalFiles, 1);
 
-  // ---- 2b. symbol discovery: identifiers of the selected files, judged, then their definitions and usages
-  ts = performance.now();
   const symbolRounds: Array<Record<string, unknown>> = [];
   const symbolAdded: Array<{ path: string; p: number; via: string[] }> = [];
   const followedSymbols: string[] = [];
+  /**
+   * Follow named identifiers: their definitions and usages across the workspace become candidate files, the
+   * files they lead to are triaged, and the passing ones join the selection. Returns the files added.
+   */
+  const followNames = async (
+    round_: number | string,
+    chosen: Array<{ it: { name: string }; p: number }>,
+    roundTrace: Record<string, unknown>,
+  ): Promise<number[]> => {
+    const usage = await locateUsages(
+      session,
+      chosen.map((x) => x.it.name),
+      cfg,
+      exArgs,
+      allowTests,
+    );
+    if (usage.cappedFiles)
+      cuts.push(
+        `symbols round ${round_}: usage search kept at most 30 matching lines per file (${usage.cappedFiles} file${usage.cappedFiles === 1 ? "" : "s"} had more).`,
+      );
+    const fileGain = new Map<number, { score: number; via: Set<string> }>();
+    const generic: string[] = [];
+    for (const x of chosen) {
+      const name = x.it.name;
+      followedSymbols.push(name);
+      const files = usage.files.get(name) ?? new Set<string>();
+      const isGeneric = files.size > cfg.symbols.maxRefFiles;
+      if (isGeneric) generic.push(`${name} (${files.size} files)`);
+      const hits = usage.hits.filter((h) => h.name === name && (!isGeneric || h.kind === "def"));
+      if (!hits.length) continue;
+      const kwIndex = kws.length;
+      const esc = escapeRegex(name);
+      kws.push({
+        index: kwIndex,
+        raw: name,
+        variants: [name],
+        mode: "phrase",
+        pattern: `\\b${esc}\\b`,
+        rgPattern: `(?-u:\\b)${esc}(?-u:\\b)`,
+        df: files.size,
+        pathDf: 0,
+        hitLines: hits.length,
+        idf: idfOf(files.size, nFiles),
+        fragments: [],
+        symbol: true,
+      });
+      for (const h of hits) {
+        let ci = byPath.get(h.path);
+        if (ci === undefined) {
+          ci = cands.length;
+          cands.push({
+            path: h.path,
+            lexScore: 0,
+            kwHits: {},
+            pathKws: [],
+            hitLines: new Map(),
+            isTest: isTestPath(h.path),
+            isDoc: isDocPath(h.path),
+          });
+          byPath.set(h.path, ci);
+          fileIds.push(`s${round_}${String(ci).padStart(4, "0")}`);
+        }
+        const c = cands[ci]!;
+        c.kwHits[kwIndex] = (c.kwHits[kwIndex] ?? 0) + 1;
+        let hl = c.hitLines.get(h.line);
+        if (!hl) c.hitLines.set(h.line, (hl = { line: h.line, text: h.text, kws: [] }));
+        if (!hl.kws.includes(kwIndex)) hl.kws.push(kwIndex);
+        if (!selected.includes(ci)) {
+          const g = fileGain.get(ci) ?? { score: 0, via: new Set<string>() };
+          if (!g.via.has(name)) g.score += x.p * (h.kind === "def" ? 1.5 : 1);
+          g.via.add(name);
+          fileGain.set(ci, g);
+        }
+      }
+    }
+    if (generic.length)
+      cuts.push(
+        `symbols round ${round_}: used in too many files to follow every usage (definitions only): ${generic.join(", ")}`,
+      );
+    // triage the files the identifiers lead to (new files, and candidates that gained symbol hits)
+    const gains = [...fileGain.entries()]
+      .filter(([ci]) => !cands[ci]!.isTest || allowTests)
+      .sort((a, b) => b[1].score - a[1].score || (cands[a[0]]!.path < cands[b[0]]!.path ? -1 : 1));
+    const toTriage = gains.slice(0, cfg.symbols.maxNewFilesTriaged);
+    if (gains.length > toTriage.length) {
+      cuts.push(
+        `symbols round ${round_}: triaged ${toTriage.length} of ${gains.length} files that use the followed identifiers; not triaged: ${gains
+          .slice(toTriage.length, toTriage.length + 12)
+          .map(([ci]) => cands[ci]!.path)
+          .join(", ")}${gains.length - toTriage.length > 12 ? ", ..." : ""}`,
+      );
+    }
+    for (const [ci, g] of toTriage) cands[ci]!.lexScore += g.score;
+    const newScores = await judge.scoreFiles(
+      toTriage.map(([ci]) => fileItem(ci)),
+      ctx,
+    );
+    for (const [id, p] of newScores) fileScores.set(id, p);
+    const passed = toTriage
+      .map(([ci, g]) => ({ ci, g, p: pOf(ci) }))
+      .filter((x) => x.p >= thr.T1)
+      .sort((a, b) => b.p - a.p || b.g.score - a.g.score);
+    const take = passed.slice(0, cfg.symbols.maxNewFilesSelected);
+    if (passed.length > take.length) {
+      cuts.push(
+        `symbols round ${round_}: selected ${take.length} of ${passed.length} relevant files the identifiers lead to; not selected: ${passed
+          .slice(take.length)
+          .map((x) => `${cands[x.ci]!.path} (${r2(x.p)})`)
+          .join(", ")}`,
+      );
+    }
+    for (const x of take) {
+      selected.push(x.ci);
+      symbolAdded.push({ path: cands[x.ci]!.path, p: round(x.p), via: [...x.g.via] });
+    }
+    roundTrace.triaged = toTriage.map(([ci, g]) => ({
+      path: cands[ci]!.path,
+      p: round(pOf(ci)),
+      via: [...g.via],
+    }));
+    roundTrace.added = take.map((x) => cands[x.ci]!.path);
+    await loadLines(take.map((x) => cands[x.ci]!.path));
+    return take.map((x) => x.ci);
+  };
+
+  // ---- 2a. second recall round: most keywords matched nothing relevant, so recall again with real names
+  // that carry the question's own words
+  let recall2: { bad: string[]; names: string[]; added: string[] } | null = null;
+  if (ni && ni.names.length && cfg.recall.secondRoundNames > 0) {
+    const bad = rec.keywords.filter((k) => {
+      if (k.df === 0 && k.pathDf === 0) return true;
+      const hit = cands.filter((c) => c.kwHits[k.index] || c.pathKws.includes(k.index));
+      return !hit.some((c) => pOf(byPath.get(c.path)!) >= thr.T1);
+    });
+    if (rec.keywords.length && bad.length >= Math.max(1, Math.ceil(cfg.recall.secondRoundBadShare * rec.keywords.length))) {
+      const names = ni.names
+        .map((n) => n.name)
+        .filter((n) => specificName(n) && !searched.has(n.toLowerCase()))
+        .slice(0, cfg.recall.secondRoundNames);
+      if (names.length) {
+        const t2 = performance.now();
+        const trace2: Record<string, unknown> = { round: "recall 2", bad: bad.map((k) => k.raw), chosen: names };
+        const added = await followNames(
+          "recall 2",
+          names.map((name) => ({ it: { name }, p: 1 })),
+          trace2,
+        );
+        symbolRounds.push(trace2);
+        recall2 = { bad: bad.map((k) => k.raw), names, added: added.map((i) => cands[i]!.path) };
+        mark("recall2", t2);
+      }
+    }
+  }
+
+  // ---- 2b. symbol discovery: identifiers of the selected files, judged, then their definitions and usages
+  ts = performance.now();
   if (cfg.symbols.enabled) {
     const judged = new Set<string>();
     // identifiers come from relevant code files (not docs, release notes or unrelated tests)
@@ -510,120 +715,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       };
       symbolRounds.push(roundTrace);
       if (!chosen.length) break;
-      const usage = await locateUsages(
-        session,
-        chosen.map((x) => x.it.name),
-        cfg,
-        exArgs,
-        allowTests,
-      );
-      if (usage.cappedFiles)
-        cuts.push(
-          `symbols round ${round_}: usage search kept at most 30 matching lines per file (${usage.cappedFiles} file${usage.cappedFiles === 1 ? "" : "s"} had more).`,
-        );
-      const fileGain = new Map<number, { score: number; via: Set<string> }>();
-      const generic: string[] = [];
-      for (const x of chosen) {
-        const name = x.it.name;
-        followedSymbols.push(name);
-        const files = usage.files.get(name) ?? new Set<string>();
-        const isGeneric = files.size > cfg.symbols.maxRefFiles;
-        if (isGeneric) generic.push(`${name} (${files.size} files)`);
-        const hits = usage.hits.filter((h) => h.name === name && (!isGeneric || h.kind === "def"));
-        if (!hits.length) continue;
-        const kwIndex = kws.length;
-        const esc = escapeRegex(name);
-        kws.push({
-          index: kwIndex,
-          raw: name,
-          variants: [name],
-          mode: "phrase",
-          pattern: `\\b${esc}\\b`,
-          rgPattern: `(?-u:\\b)${esc}(?-u:\\b)`,
-          df: files.size,
-          pathDf: 0,
-          hitLines: hits.length,
-          idf: idfOf(files.size, nFiles),
-          fragments: [],
-          symbol: true,
-        });
-        for (const h of hits) {
-          let ci = byPath.get(h.path);
-          if (ci === undefined) {
-            ci = cands.length;
-            cands.push({
-              path: h.path,
-              lexScore: 0,
-              kwHits: {},
-              pathKws: [],
-              hitLines: new Map(),
-              isTest: isTestPath(h.path),
-              isDoc: isDocPath(h.path),
-            });
-            byPath.set(h.path, ci);
-            fileIds.push(`s${round_}${String(ci).padStart(4, "0")}`);
-          }
-          const c = cands[ci]!;
-          c.kwHits[kwIndex] = (c.kwHits[kwIndex] ?? 0) + 1;
-          let hl = c.hitLines.get(h.line);
-          if (!hl) c.hitLines.set(h.line, (hl = { line: h.line, text: h.text, kws: [] }));
-          if (!hl.kws.includes(kwIndex)) hl.kws.push(kwIndex);
-          if (!selected.includes(ci)) {
-            const g = fileGain.get(ci) ?? { score: 0, via: new Set<string>() };
-            if (!g.via.has(name)) g.score += x.p * (h.kind === "def" ? 1.5 : 1);
-            g.via.add(name);
-            fileGain.set(ci, g);
-          }
-        }
-      }
-      if (generic.length)
-        cuts.push(
-          `symbols round ${round_}: used in too many files to follow every usage (definitions only): ${generic.join(", ")}`,
-        );
-      // triage the files the identifiers lead to (new files, and candidates that gained symbol hits)
-      const gains = [...fileGain.entries()]
-        .filter(([ci]) => !cands[ci]!.isTest || allowTests)
-        .sort((a, b) => b[1].score - a[1].score || (cands[a[0]]!.path < cands[b[0]]!.path ? -1 : 1));
-      const toTriage = gains.slice(0, cfg.symbols.maxNewFilesTriaged);
-      if (gains.length > toTriage.length) {
-        cuts.push(
-          `symbols round ${round_}: triaged ${toTriage.length} of ${gains.length} files that use the followed identifiers; not triaged: ${gains
-            .slice(toTriage.length, toTriage.length + 12)
-            .map(([ci]) => cands[ci]!.path)
-            .join(", ")}${gains.length - toTriage.length > 12 ? ", ..." : ""}`,
-        );
-      }
-      for (const [ci, g] of toTriage) cands[ci]!.lexScore += g.score;
-      const newScores = await judge.scoreFiles(
-        toTriage.map(([ci]) => fileItem(ci)),
-        ctx,
-      );
-      for (const [id, p] of newScores) fileScores.set(id, p);
-      const passed = toTriage
-        .map(([ci, g]) => ({ ci, g, p: pOf(ci) }))
-        .filter((x) => x.p >= thr.T1)
-        .sort((a, b) => b.p - a.p || b.g.score - a.g.score);
-      const take = passed.slice(0, cfg.symbols.maxNewFilesSelected);
-      if (passed.length > take.length) {
-        cuts.push(
-          `symbols round ${round_}: selected ${take.length} of ${passed.length} relevant files the identifiers lead to; not selected: ${passed
-            .slice(take.length)
-            .map((x) => `${cands[x.ci]!.path} (${r2(x.p)})`)
-            .join(", ")}`,
-        );
-      }
-      for (const x of take) {
-        selected.push(x.ci);
-        symbolAdded.push({ path: cands[x.ci]!.path, p: round(x.p), via: [...x.g.via] });
-      }
-      roundTrace.triaged = toTriage.map(([ci, g]) => ({
-        path: cands[ci]!.path,
-        p: round(pOf(ci)),
-        via: [...g.via],
-      }));
-      roundTrace.added = take.map((x) => cands[x.ci]!.path);
-      await loadLines(take.map((x) => cands[x.ci]!.path));
-      sources = take.map((x) => x.ci).filter(codeFile);
+      sources = (await followNames(round_, chosen, roundTrace)).filter(codeFile);
+
     }
     // ranked (for "more candidates") includes the newly triaged files by score
     for (let i = 0; i < cands.length; i++) if (!ranked.includes(i) && fileScores.has(fileIds[i]!)) ranked.push(i);
@@ -631,6 +724,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   }
   mark("symbols", ts);
   emit("symbols", {
+    nameIndex: ni ? { stems: ni.stems, ms: ni.ms, declarations: ni.declarations, added: nameIndexAdded, names: ni.names.slice(0, 20).map((n) => n.name) } : null,
+    recall2,
     rounds: symbolRounds,
     added: symbolAdded,
     selected: selected.map((i) => cands[i]!.path),
@@ -1132,7 +1227,10 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     excludeArgs: exArgs,
   });
   mark("vocab", ts);
-  const widenedNote = prefixNote(rec);
+  const recall2Note = recall2
+    ? `Second recall round: ${recall2.bad.length} keywords matched nothing relevant (${recall2.bad.join(", ")}), so the search also looked up real names that carry the question's words: ${recall2.names.join(", ")}${recall2.added.length ? `; files added: ${recall2.added.join(", ")}` : "; no file passed triage"}.`
+    : undefined;
+  const widenedNote = [prefixNote(rec), recall2Note].filter(Boolean).join(" ") || undefined;
   const footer = renderFooter({
     coverage,
     cuts,

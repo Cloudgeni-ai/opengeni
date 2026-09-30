@@ -162,7 +162,7 @@ describe("config", () => {
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.symbols).toEqual({
       enabled: true,
-      maxRounds: 2,
+      maxRounds: 1,
       maxJudged: 160,
       maxFollowed: 10,
       threshold: 0.5,
