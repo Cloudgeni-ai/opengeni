@@ -104,6 +104,8 @@ export interface KeywordInfo {
   idf: number;
   /** Fragments used because the full keyword had zero hits. */
   fragments: string[];
+  /** An identifier added by symbol discovery (not one of the caller's keywords). */
+  symbol?: boolean | undefined;
 }
 
 export interface HitLine {
@@ -136,6 +138,8 @@ export interface RecallResult {
   validPrefixes: string[];
   /** Path-only candidates dropped because their content is binary (NUL in the first 8 KB). */
   binaryDropped: number;
+  /** The best files below the maxCandidates cut (at most 10), for the pack's cap report. */
+  cutTop: Array<{ path: string; lexScore: number }>;
   ms: number;
 }
 
@@ -653,6 +657,11 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
     totalFiles: files.length,
     candidates,
     scoredFiles: scored.length,
+    cutTop: scored
+      .slice(next)
+      .filter((c) => c.hitLines.size > 0)
+      .slice(0, 10)
+      .map((c) => ({ path: c.path, lexScore: c.lexScore })),
     searchPaths,
     widened,
     missingPrefixes: prefixes.missing,
