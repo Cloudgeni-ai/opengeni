@@ -192,4 +192,34 @@ describe("QuickConnectDialog", () => {
       await rendered.unmount();
     }
   });
+
+  test("an API failure shows advice, not the raw API string", async () => {
+    const request: QuickConnectRequest = {
+      authKind: "api_key",
+      itemName: "Acme API",
+      providerDomain: "acme.example",
+      fieldLabel: "API key",
+      onConnect: async () => {
+        throw Object.assign(
+          new Error("OpenGeni API 403: missing permission: secret:write Reference: req-quick."),
+          { status: 403 },
+        );
+      },
+    };
+    const rendered = await render(<QuickConnectDialog request={request} onOpenChange={() => {}} />);
+    try {
+      const input = rendered.container.querySelector<HTMLInputElement>("#quick-connect-value")!;
+      await act(async () => typeInto(input, "token"));
+      const submit = [...rendered.container.querySelectorAll("button")].find(
+        (node) => node.textContent?.trim() === "Connect",
+      )!;
+      await act(async () => submit.click());
+      expect(rendered.container.textContent).toContain(
+        "You don't have permission to do this. Ask an admin for access.",
+      );
+      expect(rendered.container.textContent).not.toContain("OpenGeni API");
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });

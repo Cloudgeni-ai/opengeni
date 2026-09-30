@@ -46,7 +46,7 @@ export function freeModelDailyLimitReason({
   const headline = "The free model has reached its daily limit.";
   if (modelChanged) return headline;
   const remedies = [
-    canBuyCredits ? "buy OpenGeni credits" : null,
+    canBuyCredits ? "buy Opengeni credits" : null,
     canConnectModel ? freeModelConnectRemedy(subscriptions).phrase : null,
     canChooseModel ? "pick another model" : null,
   ].filter((remedy): remedy is string => remedy !== null);

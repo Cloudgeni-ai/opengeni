@@ -46,7 +46,7 @@ export function bundleKindLabel(kind: BundleKind): string {
 export function bundleProvenanceLabel(provenance: BundleProvenance): string {
   switch (provenance) {
     case "built_in":
-      return "Curated by OpenGeni";
+      return "Curated by Opengeni";
     case "installed_from_source":
       return "Imported from source";
   }
@@ -55,7 +55,7 @@ export function bundleProvenanceLabel(provenance: BundleProvenance): string {
 function bundleProvenanceSpokenLabel(provenance: BundleProvenance): string {
   switch (provenance) {
     case "built_in":
-      return "curated by OpenGeni";
+      return "curated by Opengeni";
     case "installed_from_source":
       return "imported from source";
   }

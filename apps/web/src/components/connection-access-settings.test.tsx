@@ -1,6 +1,6 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -324,3 +324,75 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
     }
   });
 }
+
+test("a refused or failed read says what to do, never the raw API error", async () => {
+  let failure: Error = new OpenGeniApiError(
+    403,
+    JSON.stringify({ error: { message: "Subscription owner browser session required" } }),
+    { correlationId: "corr-refused" },
+  );
+  const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+    requestJson: async () => {
+      throw failure;
+    },
+  });
+  function Page({ editing }: { editing: boolean }) {
+    const access = useConnectionAccess({
+      client,
+      workspaceId: "workspace",
+      kind: "supergrok",
+      connectionId: "account",
+    });
+    return editing ? (
+      <ConnectionAccessFormPage
+        access={access}
+        organization={false}
+        canManage
+        name="Private plan"
+        onClose={() => undefined}
+      />
+    ) : (
+      <ConnectionAccessRows
+        access={access}
+        organization={false}
+        canManage
+        onEdit={() => undefined}
+      />
+    );
+  }
+  const container = document.createElement("div");
+  document.body.append(container);
+  let root = createRoot(container);
+  const flush = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  const buttons = () =>
+    [...container.querySelectorAll<HTMLButtonElement>("button")].map((b) => b.textContent);
+  try {
+    // A refusal is calm: who can see it, no Try again, no API text.
+    await act(async () => root.render(<Page editing={false} />));
+    await flush();
+    expect(container.textContent).toContain(
+      "Only the person who connected this account can see this.",
+    );
+    expect(buttons()).not.toContain("Try again");
+    await act(async () => root.render(<Page editing />));
+    expect(container.textContent).toContain("You can't see what this account can serve.");
+    expect(buttons()).not.toContain("Try again");
+    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("corr-refused");
+
+    // A failure says what happened and what to do; the reference sits in Technical details.
+    await act(async () => root.unmount());
+    failure = new OpenGeniApiError(503, "", { correlationId: "corr-failed" });
+    root = createRoot(container);
+    await act(async () => root.render(<Page editing />));
+    await flush();
+    expect(container.textContent).toContain("Couldn't load what this account can serve.");
+    expect(container.textContent).toContain("Try again in a moment.");
+    expect(buttons()).toContain("Try again");
+    expect(container.textContent).toContain("Technical details");
+    expect(container.textContent).not.toContain("OpenGeni API");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

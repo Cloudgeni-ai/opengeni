@@ -1169,17 +1169,17 @@ function showApiUpdateNotice(willReload: boolean): void {
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
   notice.textContent = willReload
-    ? "OpenGeni updated — reloading…"
-    : "OpenGeni updated. Reload this tab to continue.";
+    ? "Opengeni updated — reloading…"
+    : "Opengeni updated. Reload this tab to continue.";
   Object.assign(notice.style, {
     position: "fixed",
     inset: "16px 16px auto auto",
     zIndex: "2147483647",
-    border: "1px solid rgba(255,255,255,.14)",
+    border: "1px solid var(--og-color-border)",
     borderRadius: "10px",
-    background: "#17191d",
-    color: "#f5f7fa",
-    boxShadow: "0 12px 32px rgba(0,0,0,.35)",
+    background: "var(--og-color-surface-1)",
+    color: "var(--og-color-fg)",
+    boxShadow: "var(--og-shadow-lg)",
     font: "500 14px/1.4 Inter, system-ui, sans-serif",
     padding: "10px 14px",
   });

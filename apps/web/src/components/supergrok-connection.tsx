@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 
 import { ApiError } from "@/api";
+import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
 
 // SuperGrok (xAI) subscriptions for Settings > Models at workspace and
@@ -77,7 +78,8 @@ export function useSuperGrokSubscriptions({
         setUnavailable(true);
         setLoadError(null);
       } else {
-        setLoadError(error instanceof Error ? error.message : "Could not load subscriptions");
+        // Shown under "Couldn't load ..." as what to do; never the raw API message.
+        setLoadError(apiErrorAdvice(error));
       }
     } finally {
       setLoading(false);
@@ -155,9 +157,9 @@ export function useSuperGrokSubscriptions({
             recordOutcome("outcome_unknown");
             if (!controller.signal.aborted && !cancelled.current) {
               setPending(null);
-              toast.error(
-                error instanceof Error ? error.message : "Couldn't confirm the xAI sign-in",
-              );
+              toast.error("Couldn't confirm the xAI sign-in", {
+                description: userErrorText(error),
+              });
             }
           })
           .finally(() => {
@@ -166,7 +168,7 @@ export function useSuperGrokSubscriptions({
       } catch (error) {
         recordOutcome("outcome_unknown");
         setPending(null);
-        toast.error(error instanceof Error ? error.message : "Couldn't start the xAI sign-in");
+        toast.error("Couldn't start the xAI sign-in", { description: userErrorText(error) });
       } finally {
         setBusy(false);
       }
@@ -183,7 +185,7 @@ export function useSuperGrokSubscriptions({
         await refresh();
         toast.success(success);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Couldn't update SuperGrok");
+        toast.error("Couldn't update SuperGrok", { description: userErrorText(error) });
       } finally {
         setBusy(false);
         setWorking(null);
@@ -232,7 +234,7 @@ export function useSuperGrokSubscriptions({
         : `${superGrokAccountName(account)} won't be used for new work`,
     );
 
-  /** Throws with a user-facing message so the prompt can show it. */
+  /** Throws so the rename prompt can say what to do (API facts go in Technical details). */
   const rename = async (account: SuperGrokAccount, label: string): Promise<void> => {
     setBusy(true);
     setWorking(`rename:${account.id}`);
@@ -247,17 +249,16 @@ export function useSuperGrokSubscriptions({
       await refresh();
       toast.success("Name saved");
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message ? error.message : "Couldn't save the name.",
-        { cause: error },
-      );
+      throw error instanceof Error && error.message
+        ? error
+        : new Error("Couldn't save the name.", { cause: error });
     } finally {
       setBusy(false);
       setWorking(null);
     }
   };
 
-  /** Throws with a user-facing message so the confirm dialog can show it. */
+  /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
   const disconnect = async (account: SuperGrokAccount): Promise<void> => {
     setBusy(true);
     setWorking(`disconnect:${account.id}`);
@@ -268,12 +269,11 @@ export function useSuperGrokSubscriptions({
       await refresh();
       toast.success(`Disconnected ${superGrokAccountName(account)}`);
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? error.message
-          : `Couldn't disconnect ${superGrokAccountName(account)}. Try again.`,
-        { cause: error },
-      );
+      throw error instanceof Error && error.message
+        ? error
+        : new Error(`Couldn't disconnect ${superGrokAccountName(account)}. Try again.`, {
+            cause: error,
+          });
     } finally {
       setBusy(false);
       setWorking(null);

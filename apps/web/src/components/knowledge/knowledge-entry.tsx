@@ -47,7 +47,6 @@ import {
   LineTabsTrigger,
 } from "@/components/ui/line-tabs";
 import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
@@ -65,9 +64,7 @@ import {
   KNOWLEDGE_KIND_HELP,
   KNOWLEDGE_KIND_LABEL,
   KNOWLEDGE_PICKABLE_KINDS,
-  KNOWLEDGE_SCOPE_LABEL,
   KNOWLEDGE_SOURCE_LABEL,
-  knowledgeKindIcon,
 } from "./knowledge-labels";
 import {
   EntryList,
@@ -280,7 +277,7 @@ function authorOf(
   revision: { createdBySessionId: string | null },
   scope: KnowledgeEntryScope,
 ): string {
-  if (revision.createdBySessionId) return "OpenGeni";
+  if (revision.createdBySessionId) return "Opengeni";
   return scope === "personal" ? "You" : "A teammate";
 }
 
@@ -610,14 +607,10 @@ function EntryPageContent({
         className="min-w-0"
       >
         <DetailPageHeader
-          leading={knowledgeKindIcon(entry.kind) ? <KindTile kind={entry.kind} /> : null}
+          leading={<KindTile kind={entry.kind} />}
           title={entry.title}
-          chips={
-            <>
-              <MetaChip variant="soft">{KNOWLEDGE_SCOPE_LABEL[record.scope]}</MetaChip>
-              {status}
-            </>
-          }
+          // Where it lives is in the aside ("Where"); the header says it once there.
+          chips={status}
           meta={[
             KNOWLEDGE_KIND_LABEL[entry.kind],
             firstCollection ? (
@@ -673,7 +666,7 @@ function EntryPageContent({
                   tone="waiting"
                   title="Waiting for review"
                   action={
-                    <Button type="button" size="sm" variant="outline" onClick={onOpenReview}>
+                    <Button type="button" size="sm" onClick={onOpenReview}>
                       Open Review
                     </Button>
                   }
@@ -693,7 +686,6 @@ function EntryPageContent({
                       <Button
                         type="button"
                         size="sm"
-                        variant="outline"
                         disabled={busy}
                         onClick={() =>
                           void restore(
@@ -899,7 +891,7 @@ function CollectionMembers({
       title="In this collection"
       action={
         canAdd ? (
-          <Button type="button" variant="outline" size="sm" onClick={onAdd}>
+          <Button type="button" size="sm" onClick={onAdd}>
             <PlusIcon aria-hidden="true" />
             Add knowledge
           </Button>
@@ -971,7 +963,7 @@ function CollectionMembers({
 }
 
 function MembersLabel({ children }: { children: string }) {
-  return <h3 className="m-0 text-xs leading-4.5 font-medium text-fg-subtle">{children}</h3>;
+  return <h3 className="m-0 text-xs leading-4.5 font-medium text-fg">{children}</h3>;
 }
 
 function EntryHistory({

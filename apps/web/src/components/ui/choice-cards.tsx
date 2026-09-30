@@ -3,6 +3,7 @@ import { RadioGroup } from "radix-ui";
 import { createContext, useContext, useId, useMemo, type ReactNode } from "react";
 
 import { useField } from "@/components/ui/field";
+import { useSectionListFrame } from "@/components/ui/section-variant";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -57,11 +58,14 @@ export type ChoiceCardsVariant = "ring" | "radio" | "list";
 interface ChoiceCardsContextValue {
   variant: ChoiceCardsVariant;
   invalid: boolean;
+  /** Flat rows split by hairlines: the options sit inside a section card. */
+  rows: boolean;
 }
 
 const ChoiceCardsContext = createContext<ChoiceCardsContextValue>({
   variant: "ring",
   invalid: false,
+  rows: false,
 });
 
 export interface ChoiceCardsProps {
@@ -125,13 +129,20 @@ export function ChoiceCards({
       .filter(Boolean)
       .join(" ") || undefined;
 
-  const context = useMemo(() => ({ variant, invalid }), [variant, invalid]);
+  // Inside a settings section card nothing may draw its own box: the options
+  // become flat radio rows split by the card's hairlines.
+  const inCard = useSectionListFrame() === "inside";
+  const effectiveVariant: ChoiceCardsVariant = inCard ? "list" : variant;
+  const context = useMemo(
+    () => ({ variant: effectiveVariant, invalid, rows: inCard }),
+    [effectiveVariant, invalid, inCard],
+  );
 
   return (
     <ChoiceCardsContext.Provider value={context}>
       <div data-slot="choice-cards" className={cn("@container min-w-0", className)}>
         {label || description ? (
-          <div className={cn("min-w-0", variant === "list" ? "mb-0.5" : "mb-2")}>
+          <div className={cn("min-w-0", effectiveVariant === "list" ? "mb-0.5" : "mb-2")}>
             {label ? (
               <p id={labelId} className="text-sm font-medium text-fg">
                 {label}
@@ -155,11 +166,16 @@ export function ChoiceCards({
           aria-labelledby={labelledBy}
           aria-describedby={describedBy}
           aria-invalid={invalid || undefined}
-          data-variant={variant}
+          data-variant={effectiveVariant}
+          data-rows={inCard || undefined}
           className={cn(
             "grid min-w-0",
-            variant === "list" ? "-mx-2 gap-0.5" : "gap-2",
-            layout === "grid" && "@min-[560px]:grid-cols-2",
+            inCard
+              ? "divide-y divide-border"
+              : effectiveVariant === "list"
+                ? "-mx-2 gap-0.5"
+                : "gap-2",
+            layout === "grid" && !inCard && "@min-[560px]:grid-cols-2",
           )}
         >
           {children}
@@ -204,7 +220,7 @@ export function ChoiceCard({
   disabledReason,
   className,
 }: ChoiceCardProps) {
-  const { variant, invalid } = useContext(ChoiceCardsContext);
+  const { variant, invalid, rows } = useContext(ChoiceCardsContext);
   const titleId = useId();
   const descriptionId = useId();
   const reasonId = useId();
@@ -223,9 +239,13 @@ export function ChoiceCard({
       data-slot="choice-card"
       className={cn(
         "group/choice relative flex w-full min-w-0 items-start gap-3 text-left transition-colors duration-[120ms] disabled:cursor-not-allowed",
-        variant === "list"
-          ? "rounded-[10px] px-2 py-2.5 hover:bg-surface-2 disabled:hover:bg-transparent"
-          : "rounded-[14px] border px-4 py-3",
+        rows
+          ? // A row of the card, on the card's own 20px text column: no box and
+            // no fill of its own; the filled radio marks the choice.
+            "py-3"
+          : variant === "list"
+            ? "rounded-[10px] px-2 py-2.5 hover:bg-surface-2 disabled:hover:bg-transparent"
+            : "rounded-[14px] border px-4 py-3",
         variant === "ring" &&
           "border-border bg-surface hover:bg-surface-2 data-[state=checked]:border-brand data-[state=checked]:bg-brand/5 data-[state=checked]:hover:bg-brand/8",
         variant === "radio" && "border-border bg-surface hover:bg-surface-2",

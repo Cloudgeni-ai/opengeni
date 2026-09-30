@@ -51,8 +51,23 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    document.documentElement.dataset.ogTheme = resolvedTheme;
-    document.documentElement.classList.toggle("dark", resolvedTheme === "dark");
+    const root = document.documentElement;
+    const changed = root.dataset.ogTheme !== undefined && root.dataset.ogTheme !== resolvedTheme;
+    // Flip the whole palette at once: suspend color transitions for the frame
+    // that swaps the tokens, so controls never pass through low-contrast mixes.
+    if (changed) root.dataset.ogThemeSwitching = "";
+    root.dataset.ogTheme = resolvedTheme;
+    root.classList.toggle("dark", resolvedTheme === "dark");
+    if (!changed) return;
+    let second = 0;
+    const first = window.requestAnimationFrame(() => {
+      second = window.requestAnimationFrame(() => delete root.dataset.ogThemeSwitching);
+    });
+    return () => {
+      window.cancelAnimationFrame(first);
+      window.cancelAnimationFrame(second);
+      delete root.dataset.ogThemeSwitching;
+    };
   }, [resolvedTheme]);
 
   const setAppearance = useCallback((value: Appearance) => {

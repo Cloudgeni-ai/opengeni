@@ -10,6 +10,8 @@ export type KnowledgeSubpage =
   | "add"
   | "edit"
   | "learning"
+  | "instructions"
+  | "identity"
   | "edit-instructions"
   | "instructions-history";
 
@@ -25,6 +27,8 @@ export interface KnowledgeSearch {
   collection?: string;
   /** Knowledge that came from this file. */
   file?: string;
+  /** One change waiting in Review ("knowledge:<id>", "instruction:<id>", "skill:<id>"). */
+  proposal?: string;
   /** Old rail links: the Review tab. */
   review?: boolean;
 }
@@ -33,11 +37,14 @@ const SUBPAGES: readonly KnowledgeSubpage[] = [
   "add",
   "edit",
   "learning",
+  "instructions",
+  "identity",
   "edit-instructions",
   "instructions-history",
 ];
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/u;
+const PROPOSAL = /^(?:knowledge|instruction|skill):[A-Za-z0-9_-]{1,128}$/u;
 
 function id(value: unknown): string | undefined {
   return typeof value === "string" && ID.test(value) ? value : undefined;
@@ -57,6 +64,10 @@ export function parseKnowledgeSearch(search: Record<string, unknown>): Knowledge
   const revision = entry ? id(search.revision) : undefined;
   const collection = id(search.collection);
   const file = typeof search.file === "string" && search.file ? search.file : undefined;
+  const proposal =
+    typeof search.proposal === "string" && PROPOSAL.test(search.proposal)
+      ? search.proposal
+      : undefined;
   return {
     ...(view ? { view } : {}),
     ...(entry ? { entry } : {}),
@@ -64,6 +75,7 @@ export function parseKnowledgeSearch(search: Record<string, unknown>): Knowledge
     ...(page ? { page } : {}),
     ...(collection ? { collection } : {}),
     ...(file ? { file } : {}),
+    ...(proposal ? { proposal } : {}),
     ...(search.review === true ? { review: true } : {}),
   };
 }

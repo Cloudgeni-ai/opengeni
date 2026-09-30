@@ -483,7 +483,7 @@ export function OrganizationInvitationsDialog(props: {
                     </div>
                     <Button
                       type="button"
-                      variant="secondary"
+                      variant="outline"
                       size="sm"
                       className="w-full sm:w-auto"
                       aria-label={`Accept invitation to ${organizationName}`}

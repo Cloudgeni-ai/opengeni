@@ -9,6 +9,7 @@ import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { Section } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
 
 import { useOrganizationDirectory } from "./organization-directory";
 
@@ -29,14 +30,15 @@ export function OrganizationGeneralPage() {
         variant="inline"
         title="Couldn't load the organization."
         action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(overview.error)}
       >
-        {overview.error.message}
+        {userErrorTextWithoutReference(overview.error)}
       </ErrorMessage>
     );
   }
 
   return (
-    <Section aria-label="Organization">
+    <Section title="Details">
       <SettingRowGroup>
         {!organization ? (
           <SettingRowSkeleton />

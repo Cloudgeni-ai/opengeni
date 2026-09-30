@@ -136,7 +136,7 @@ describe("SwitcherBlock production workspace menu wiring", () => {
       expect(trigger.getAttribute("aria-label")).toContain("Personal workspace");
       await openMenu(trigger);
 
-      const createOrganization = menuItem("New organization…");
+      const createOrganization = menuItem("New organization");
       expect(createOrganization).not.toBeNull();
 
       await act(async () => {
@@ -156,7 +156,7 @@ describe("SwitcherBlock production workspace menu wiring", () => {
     const rendered = await render(<SwitcherBlock />);
     try {
       await openMenu(workspaceMenuTrigger(rendered.container));
-      expect(menuItem("New organization…")).toBeNull();
+      expect(menuItem("New organization")).toBeNull();
       expect(
         rendered.container.querySelector('[data-testid="create-organization-dialog"]'),
       ).toBeNull();

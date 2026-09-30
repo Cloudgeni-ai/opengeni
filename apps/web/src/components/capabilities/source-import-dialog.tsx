@@ -162,9 +162,7 @@ export function SourceImportDialog({
           <form className="grid gap-5" onSubmit={submitSource}>
             {state.intent === "create" ? (
               <fieldset className="grid gap-2">
-                <legend className="text-xs font-medium text-fg-muted">
-                  What are you importing?
-                </legend>
+                <legend className="text-xs font-medium text-fg">What are you importing?</legend>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <KindChoice
                     selected={state.kind === "skill"}

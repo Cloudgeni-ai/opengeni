@@ -19,7 +19,7 @@ function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
     return "Free in this deployment";
   }
   if (model.cost === "credits") {
-    return "OpenGeni credits";
+    return "Opengeni credits";
   }
   if (model.cost === "workspace") {
     return "Workspace AI Gateway";
@@ -37,7 +37,7 @@ function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
     return "Workspace AI Gateway";
   }
   if (model.source === "opengeni" || model.billing?.metering === "opengeni_credits") {
-    return "OpenGeni credits";
+    return "Opengeni credits";
   }
   if (model.billing?.upstreamPayer === "connected_subscription") {
     return model.credentialSource?.kind === "connected_subscription" &&

@@ -217,10 +217,10 @@ function SubagentRow({
 /** The quiet section label both homes wear above the tree. */
 export function SubagentsLabel({ count }: { count: number }) {
   return (
-    <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
+    <div className="flex items-center gap-1.5 px-1.5 pt-1 text-xs leading-4.5 font-medium text-fg-muted">
       <BotIcon className="size-3.5" />
       Agents
-      {count > 0 ? <span className="text-fg-subtle/70">· {count}</span> : null}
+      {count > 0 ? <span className="tabular-nums">· {count}</span> : null}
     </div>
   );
 }

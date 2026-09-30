@@ -286,7 +286,12 @@ test("a skill opens as a page with a back link that restores focus to its catalo
 test("save errors stay accessible inside the page without dropping the folder", async () => {
   const { context } = fixture({
     async saveWorkspaceSkill() {
-      throw new Error("Save denied by workspace policy");
+      throw Object.assign(
+        new Error(
+          "OpenGeni API 403: missing permission: workspace:admin Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
+        ),
+        { status: 403 },
+      );
     },
   });
   const view = await mount(context);
@@ -296,8 +301,9 @@ test("save errors stay accessible inside the page without dropping the folder", 
     await view.click("Save skill");
     const page = view.container.querySelector("[data-capability-page]")!;
     expect(page.querySelector('[role="alert"]')?.textContent).toBe(
-      "Save denied by workspace policy",
+      "Couldn't save this skill. You don't have permission to do this. Ask an admin for access. Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
     );
+    expect(page.textContent).not.toContain("OpenGeni API");
     expect(view.container.querySelector("section > [role='alert']")).toBeNull();
     expect(page.querySelector("textarea")?.value).toBe("changed");
   } finally {
@@ -449,10 +455,65 @@ test("scope changes keep the existing authority/version guard and report failure
       },
     ]);
     expect(view.container.querySelector('[data-capability-page] [role="alert"]')?.textContent).toBe(
-      "Scope change denied",
+      "Couldn't change who can use this skill. Scope change denied",
     );
     expect(scope.value).toBe("workspace");
     expect(view.container.querySelector("textarea")?.value).toBe(record.files[0]!.content);
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("a failed skills list says what to do, keeps the reference behind Technical details and retries", async () => {
+  let fail = true;
+  const { context } = fixture({
+    async listWorkspaceSkills() {
+      if (fail) {
+        throw Object.assign(
+          new Error("OpenGeni API 500: database unavailable Reference: req-skills-list."),
+          { status: 500, correlationId: "req-skills-list" },
+        );
+      }
+      return { skills: [record] };
+    },
+  });
+  const view = await mount(context);
+  try {
+    const alert = view.container.querySelector("section [role='alert']")!;
+    expect(alert.textContent).toContain("Couldn't load skills.");
+    expect(alert.textContent).toContain(
+      "Opengeni couldn't finish the request. Try again in a moment.",
+    );
+    expect(alert.textContent).toContain("Technical details");
+    expect(view.container.textContent).not.toContain("OpenGeni API 500");
+    expect(view.container.textContent).not.toContain("No skills yet");
+    fail = false;
+    await view.click("Try again");
+    expect(view.container.querySelector("section [role='alert']")).toBeNull();
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("a refused skills list is a calm line without Try again", async () => {
+  const { context } = fixture({
+    async listWorkspaceSkills() {
+      throw Object.assign(new Error("OpenGeni API 403: missing permission: workspace:read"), {
+        status: 403,
+      });
+    },
+  });
+  const view = await mount(context);
+  try {
+    expect(view.container.querySelector("section [role='alert']")).toBeNull();
+    expect(view.container.textContent).toContain(
+      "You can't see skills here. Ask a workspace admin for access.",
+    );
+    expect(
+      [...view.container.querySelectorAll("button")].some(
+        (node) => node.textContent === "Try again",
+      ),
+    ).toBe(false);
   } finally {
     await view.dispose();
   }

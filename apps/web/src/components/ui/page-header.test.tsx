@@ -49,9 +49,13 @@ describe("PageHeader", () => {
     expect(html).not.toContain("data-icon");
   });
 
-  test("the hairline sits under the header unless tabs replace it", () => {
+  test("draws no hairline by default; an explicit divider or tabs bring their own rule", () => {
     const plain = renderToStaticMarkup(<PageHeader title="Schedules" />);
-    expect(plain).toContain("border-b");
+    expect(plain).not.toContain("border-b");
+    expect(plain).toContain("pb-4");
+
+    const ruled = renderToStaticMarkup(<PageHeader title="Schedules" divider />);
+    expect(ruled).toContain("border-b");
 
     const tabbed = renderToStaticMarkup(
       <PageHeader title="Knowledge" tabs={<div data-tabs="knowledge" />} />,

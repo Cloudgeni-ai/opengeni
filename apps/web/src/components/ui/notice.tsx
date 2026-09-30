@@ -91,6 +91,8 @@ export function Notice({
   const Glyph = meta.glyph();
   return (
     <div
+      data-slot="notice"
+      data-tone={tone}
       role={live === "assertive" ? "alert" : live === "polite" ? "status" : undefined}
       className={cn(
         "flex items-start gap-2.5 rounded-lg border p-3 text-sm",
@@ -106,7 +108,9 @@ export function Notice({
         </span>
       )}
       <div className={cn("min-w-0 flex-1", layout === "banner" && "py-1.5")}>
-        {title ? <div className="font-medium">{title}</div> : null}
+        {/* A title is always full-strength text, whatever the tone; the body
+            under it is the muted description. */}
+        {title ? <div className="font-medium text-fg">{title}</div> : null}
         {children ? (
           <div className={cn("break-words text-sm leading-5", title ? "mt-0.5 text-fg-muted" : "")}>
             {children}

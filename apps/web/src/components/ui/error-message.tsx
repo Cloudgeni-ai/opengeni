@@ -1,6 +1,7 @@
 import { CheckIcon, ChevronRightIcon, CircleAlertIcon, CopyIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 
+import { SectionCardContext } from "@/components/ui/section-variant";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -148,6 +149,8 @@ export function TechnicalDetails({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const panelId = useId();
+  // Inside a settings card the facts sit on the card: never a box in a box.
+  const inCard = useContext(SectionCardContext);
   return (
     <div className={cn("min-w-0", align === "center" && "flex flex-col items-center")}>
       <button
@@ -170,7 +173,8 @@ export function TechnicalDetails({
         id={panelId}
         hidden={!open}
         className={cn(
-          "mt-1 grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-md border border-border bg-surface-2 px-3 py-2.5 text-left text-xs leading-4.5",
+          "mt-1 grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-left text-xs leading-4.5",
+          inCard ? "py-1 pl-5" : "rounded-md border border-border bg-surface-2 px-3 py-2.5",
         )}
       >
         {facts.map((fact) => (

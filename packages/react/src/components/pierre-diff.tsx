@@ -167,6 +167,9 @@ export function PierreDiff({
     "--diffs-light-bg": "var(--og-color-bg)",
     "--diffs-bg-buffer-override": "var(--og-color-surface-1)",
     "--diffs-bg-separator-override": "var(--og-color-surface-1)",
+    // Pierre's default (fg mixed 65% into bg) falls under 4.5:1 on the lifted
+    // graphite separator; quiet meta text keeps AA on every diff surface.
+    "--diffs-fg-number-override": "var(--og-color-fg-subtle)",
     "--diffs-addition-color-override": "var(--og-color-status-idle)",
     "--diffs-deletion-color-override": "var(--og-color-status-failed)",
     "--diffs-fg-number-addition-override": "var(--og-color-status-idle)",

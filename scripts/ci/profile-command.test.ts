@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { parseGnuTime } from "./profile-command";
 
 async function expectProcessGone(pid: number): Promise<void> {
+  expect(Number.isSafeInteger(pid)).toBe(true);
+  expect(pid).toBeGreaterThan(0);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
       process.kill(pid, 0);
@@ -180,7 +182,7 @@ describe("secret-safe command profile parsing", () => {
         "--",
         "sh",
         "-c",
-        `sleep 30 & echo $! > ${pidFile}; wait`,
+        `sleep 30 & echo $! > ${pidFile}.tmp; mv ${pidFile}.tmp ${pidFile}; wait`,
       ],
       { stdout: "ignore", stderr: "ignore" },
     );
@@ -210,11 +212,13 @@ describe("secret-safe command profile parsing", () => {
       `#!/usr/bin/env bash
 set -eu
 trap 'exit 0' TERM
-(
-  trap '' TERM
+bash -eu -c '
+  trap "" TERM
+  # Publish readiness only after TERM is ignored and the PID is fully written.
+  echo "$$" > "$1.tmp"
+  mv "$1.tmp" "$1"
   while :; do sleep 1; done
-) &
-echo "$!" > "$1"
+' bash "$1" &
 wait
 `,
     );

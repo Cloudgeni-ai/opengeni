@@ -18,7 +18,7 @@ type OrganizationKnowledgeModelSelection = {
 
 function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
   if (model.cost === "free") return "Free in this deployment";
-  if (model.cost === "credits") return "OpenGeni credits";
+  if (model.cost === "credits") return "Opengeni credits";
   if (model.cost === "workspace") return "Workspace AI Gateway";
   if (model.cost === "subscription") {
     return model.source === "supergrok" ? "SuperGrok subscription" : "Codex subscription";
@@ -27,7 +27,7 @@ function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
   if (model.source === "supergrok") return "SuperGrok subscription";
   if (model.source === "workspace_gateway") return "Workspace AI Gateway";
   if (model.source === "opengeni" || model.billing?.metering === "opengeni_credits") {
-    return "OpenGeni credits";
+    return "Opengeni credits";
   }
   if (model.billing?.upstreamPayer === "connected_subscription") {
     return model.credentialSource?.kind === "connected_subscription" &&
@@ -208,7 +208,7 @@ export function OrganizationKnowledgePrompt({ workspaceId }: { workspaceId: stri
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
         <Button type="submit" disabled={!canSubmit} className="pointer-coarse:h-11">
           <SparklesIcon aria-hidden="true" />
-          {starting ? "Starting…" : "Create with OpenGeni"}
+          {starting ? "Starting…" : "Create with Opengeni"}
         </Button>
         {modelSelection ? (
           <p className="text-xs leading-[18px] text-fg-muted" role="status">

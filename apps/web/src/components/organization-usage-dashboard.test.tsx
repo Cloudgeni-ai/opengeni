@@ -4,7 +4,9 @@ import {
   formatExactUsage,
   formatUsageAmount,
   organizationUsageChart,
+  organizationUsageRows,
 } from "./organization-usage-dashboard";
+import type { AccessContext } from "@/types";
 import { usageMetricLabel, usageUnitLabel } from "@/lib/usage-metric";
 
 describe("organization usage presentation", () => {
@@ -45,6 +47,8 @@ describe("organization usage presentation", () => {
       totals: [selected],
       workspaces: [],
       nextWorkspaceCursor: null,
+      personalWorkspaces: [],
+      personalWorkspaceCount: 0,
       buckets: [
         {
           bucket: "2026-09-14T01:00",
@@ -59,5 +63,66 @@ describe("organization usage presentation", () => {
       labels: ["2026-09-14T00:00", "2026-09-14T01:00", "2026-09-14T02:00", "2026-09-14T03:00"],
       values: [0, 3, 0, 0],
     });
+  });
+
+  test("lists Personal workspaces by owner, amounts only, and links only what you administer", () => {
+    const cost = (quantity: string) => [
+      { eventType: "model.cost", unit: "usd_micros", quantity, eventCount: "1" },
+    ];
+    const adminOf = "11111111-1111-4111-8111-111111111111";
+    const memberOf = "22222222-2222-4222-8222-222222222222";
+    const ownPersonal = "33333333-3333-4333-8333-333333333333";
+    const maria = "44444444-4444-4444-8444-444444444444";
+    const you = "55555555-5555-4555-8555-555555555555";
+    const unknown = "66666666-6666-4666-8666-666666666666";
+    const grant = (workspaceId: string, permissions: string[]) => ({
+      accountId: "account",
+      workspaceId,
+      subjectId: "user:you",
+      permissions,
+    });
+    const accessContext = {
+      mode: "managed",
+      subjectId: "user:you",
+      accountGrants: [],
+      workspaceGrants: [
+        grant(adminOf, ["workspace:admin"]),
+        grant(memberOf, ["workspace:read", "sessions:read"]),
+        // Owning a Personal workspace grants no workspace:admin, so no Insights.
+        grant(ownPersonal, ["workspace:read"]),
+      ],
+    } as unknown as AccessContext;
+    const rows = organizationUsageRows({
+      shared: [
+        { workspaceId: adminOf, name: "Platform", totals: cost("2000000") },
+        { workspaceId: memberOf, name: "Finance", totals: [] },
+      ],
+      personal: [
+        { membershipId: maria, totals: cost("5000000") },
+        { membershipId: you, totals: cost("1000000") },
+        { membershipId: unknown, totals: cost("3000000") },
+      ],
+      selected: { eventType: "model.cost", unit: "usd_micros" },
+      members: [
+        { id: maria, name: "Maria Chen", email: "maria@acme.dev" },
+        { id: you, name: null, email: "you@acme.dev" },
+      ],
+      youMembershipId: you,
+      accessContext,
+    });
+    expect(rows.map((row) => [row.title, row.kind, row.quantity, row.you])).toEqual([
+      ["Maria Chen", "personal", "5000000", false],
+      ["Organization member", "personal", "3000000", false],
+      ["Platform", "shared", "2000000", false],
+      ["you@acme.dev", "personal", "1000000", true],
+      ["Finance", "shared", "0", false],
+    ]);
+    expect(rows.find((row) => row.title === "Platform")?.insightsWorkspaceId).toBe(adminOf);
+    expect(rows.find((row) => row.title === "Finance")?.insightsWorkspaceId).toBeNull();
+    expect(
+      rows.filter((row) => row.kind === "personal").map((row) => row.insightsWorkspaceId),
+    ).toEqual([null, null, null]);
+    // Personal rows are keyed by membership; no Personal workspace id reaches the page.
+    expect(JSON.stringify(rows)).not.toContain(ownPersonal);
   });
 });

@@ -3,6 +3,7 @@ import {
   noteSuccessfulLogin,
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 // Root providers: client config bootstrap, auth (deployment key / configured
@@ -100,6 +101,8 @@ import {
   isAuthorizedWorkspaceId,
   workspaceNavigationPreferenceStorageId,
   writeLastWorkspaceId,
+  writeLastWorkspaceIdForOrganization,
+  organizationWorkspacePreferenceStorageId,
 } from "@/lib/workspace-navigation-preference";
 import {
   buildResources,
@@ -571,6 +574,11 @@ export function useLatestCallback<Args extends unknown[], Result>(
     callbackRef.current = callback;
   }, [callback]);
   return useCallback((...args: Args) => callbackRef.current(...args), []);
+}
+
+/** The app context where one exists; null in hosts that render a piece of the app alone. */
+export function useOptionalAppContext(): AppContextValue | null {
+  return useContext(AppContext);
 }
 
 export function useAppContext(): AppContextValue {
@@ -1122,6 +1130,15 @@ export function RootRouteComponent() {
       workspaceNavigationPreferenceStorageId(accessContext.subjectId),
       workspaceId,
     );
+    // Switching back to this organization returns to this workspace.
+    const accountId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+    if (accountId) {
+      writeLastWorkspaceIdForOrganization(
+        organizationWorkspacePreferenceStorageId(accessContext.subjectId),
+        accountId,
+        workspaceId,
+      );
+    }
   }, [accessContext, pathname, workspaces]);
 
   // New-chat policy follows the active workspace. Explicit composer choices
@@ -1240,7 +1257,7 @@ export function RootRouteComponent() {
       created = creation.value;
     } catch (error) {
       toast.error("Failed to create workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1281,7 +1298,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to rename workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1357,7 +1374,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to update workspace settings", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1382,7 +1399,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to update the workspace default sandbox environment", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1421,7 +1438,7 @@ export function RootRouteComponent() {
       return updated;
     } catch (error) {
       toast.error("Failed to rename session", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1509,7 +1526,7 @@ export function RootRouteComponent() {
           ? "Session pin changed elsewhere"
           : `Couldn't ${pinned ? "pin" : "unpin"} session`,
         {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         },
       );
       return null;
@@ -1534,7 +1551,7 @@ export function RootRouteComponent() {
       if (deletion.status === "stale") return false;
     } catch (error) {
       toast.error("Failed to delete workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     }
@@ -1609,7 +1626,7 @@ export function RootRouteComponent() {
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
         toast.error("GitHub status unavailable", {
-          description: String(error),
+          description: userErrorText(error),
         });
       } finally {
         if (githubRefreshId.current === refreshId && ownsRefresh()) {
@@ -1703,7 +1720,7 @@ export function RootRouteComponent() {
         if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
         setPersonalGitHubCatalogReady(true);
         toast.error("Your GitHub account is unavailable", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       } finally {
         if (ownsRefresh()) setPersonalGitHubBusy(false);
@@ -1727,7 +1744,7 @@ export function RootRouteComponent() {
       window.location.assign(attempt.nextAction.url);
     } catch (error) {
       toast.error("Couldn't open GitHub sign-in", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     }
   }
@@ -1746,7 +1763,7 @@ export function RootRouteComponent() {
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect your GitHub account", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -1774,7 +1791,7 @@ export function RootRouteComponent() {
       return true;
     } catch (error) {
       toast.error("Couldn't update GitHub repository access", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -2102,7 +2119,7 @@ export function RootRouteComponent() {
         )
       ) {
         toast.error("GitHub App setup failed", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       }
     } finally {
@@ -2211,7 +2228,7 @@ export function RootRouteComponent() {
         setSelectedRepoIds(previousSelectedIds);
         setSelectedRepoRefs(previousSelectedRefs);
         toast.error("Failed to unlink GitHub installation", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       }
       return false;
@@ -2776,7 +2793,7 @@ export function RootRouteComponent() {
       action={
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           onClick={() => {
             setConfigError(null);
             setConfigRequestVersion((version) => version + 1);
@@ -2859,7 +2876,7 @@ export function RootRouteComponent() {
       action={
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           onClick={() => setAccessKeyVersion((version) => version + 1)}
         >
           Retry
@@ -2898,7 +2915,7 @@ export function RootRouteComponent() {
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
             void handleManagedSignOut().catch((error) =>
-              toast.error("Sign out failed", { description: String(error) }),
+              toast.error("Sign out failed", { description: userErrorText(error) }),
             );
           }}
           onSignOut={handleManagedSignOut}
@@ -3059,9 +3076,9 @@ function AccessKeyPanel(props: {
   onSubmit: () => void;
 }) {
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
       <form
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         onSubmit={(event) => {
           event.preventDefault();
           props.onSubmit();
@@ -3076,7 +3093,7 @@ function AccessKeyPanel(props: {
             <p className="text-sm text-fg-subtle">
               Enter the{" "}
               {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"}{" "}
-              for this OpenGeni instance.
+              for this Opengeni instance.
             </p>
           </div>
         </div>

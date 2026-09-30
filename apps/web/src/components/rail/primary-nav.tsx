@@ -108,9 +108,9 @@ export function PrimaryNav() {
       <NewSessionLink
         aria-label={`New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}`}
         className={cn(
-          "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted outline-none transition-colors pointer-coarse:h-10",
-          "hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
-          newSessionActive && "bg-surface-2 text-fg",
+          "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10",
+          "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
+          newSessionActive && "bg-selection text-fg hover:bg-selection",
           rail.collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",
         )}
       >
@@ -145,7 +145,7 @@ export function PrimaryNav() {
                   size="sm"
                   aria-expanded="true"
                   onClick={() => setShortcutsExpanded(false)}
-                  className="h-6 w-full justify-start gap-1.5 px-2.5 text-2xs font-normal text-fg-subtle hover:text-fg-muted"
+                  className="h-6 w-full justify-start gap-1.5 px-2.5 text-2xs font-normal text-fg-muted hover:text-fg"
                 >
                   <ChevronDownIcon aria-hidden="true" className="size-3 rotate-180" />
                   Less
@@ -203,8 +203,8 @@ export function PrimaryNav() {
                 data-active={activeWorkspaceSection ? "true" : undefined}
                 onClick={() => setShortcutsExpanded(true)}
                 className={cn(
-                  "group relative w-full justify-start gap-2.5 px-2.5 text-fg-muted pointer-coarse:h-10",
-                  activeWorkspaceSection && "bg-surface-2 text-fg",
+                  "group relative w-full justify-start gap-2.5 px-2.5 font-normal text-fg-label pointer-coarse:h-10",
+                  activeWorkspaceSection && "bg-selection text-fg hover:bg-selection",
                 )}
               >
                 <span

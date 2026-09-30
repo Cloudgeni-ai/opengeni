@@ -131,7 +131,7 @@ export function CausalSheet(props: {
                           ? `${formatUsd(driver.equivalentCreditUsd)} equivalent credits`
                           : "equivalent price unknown"}
                         {" · "}
-                        {formatUsd(driver.creditUsd)} OpenGeni credits
+                        {formatUsd(driver.creditUsd)} Opengeni credits
                       </p>
                     </div>
                   ) : (
@@ -207,12 +207,7 @@ export function CausalSheet(props: {
               <ArrowRightIcon className="size-3.5" />
             </Button>
           ) : (
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              onClick={() => props.onOpenChange(false)}
-            >
+            <Button type="button" size="sm" onClick={() => props.onOpenChange(false)}>
               Done
             </Button>
           )}

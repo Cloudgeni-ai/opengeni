@@ -247,7 +247,7 @@ describe("SessionTenancyControl", () => {
     expect(memberActions).not.toBeNull();
     await act(async () => memberActions!.click());
     expect(container.textContent).not.toContain("Limit this session to me…");
-    expect(container.textContent).toContain("Fork session…");
+    expect(container.textContent).toContain("Fork session");
 
     await act(async () => root.unmount());
     container.remove();
@@ -377,7 +377,7 @@ describe("SessionTenancyControl", () => {
       );
     });
 
-    await chooseAccessAction(container, "Fork session…");
+    await chooseAccessAction(container, "Fork session");
     await act(async () => dialogButton(container, "Workspace").click());
     expect(container.textContent).toContain(
       "This private session's complete conversation will be copied",
@@ -516,7 +516,7 @@ describe("SessionTenancyControl", () => {
       );
     });
 
-    await chooseAccessAction(container, "Fork session…");
+    await chooseAccessAction(container, "Fork session");
     const dialog = container.querySelector('[role="dialog"]');
     if (!(dialog instanceof HTMLElement)) throw new Error("Missing confirmation dialog");
     expect(
@@ -588,7 +588,7 @@ describe("SessionTenancyControl", () => {
       );
     });
 
-    await chooseAccessAction(container, "Fork session…");
+    await chooseAccessAction(container, "Fork session");
     await act(async () => dialogButton(container, "Fork for workspace").click());
     await flush();
     expect(container.textContent).toContain("Retry fork");

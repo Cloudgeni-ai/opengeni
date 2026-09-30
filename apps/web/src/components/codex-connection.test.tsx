@@ -354,7 +354,7 @@ describe("ResetCreditInventory", () => {
       });
 
       expect(container.textContent).toContain(
-        "OpenGeni couldn't confirm who is signed in to this browser",
+        "Opengeni couldn't confirm who is signed in to this browser",
       );
       expect(container.textContent).toContain("ownership can't be claimed or changed");
       expect(container.querySelectorAll("button")).toHaveLength(0);

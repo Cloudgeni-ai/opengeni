@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   AgentLearningContext,
   AgentLearningOverrides,
@@ -37,6 +38,7 @@ const context = {
 mock.module("@/context", () => ({ useAppContext: () => context }));
 const { AgentLearningSettingsEditor, AgentLearningDraftEditor } =
   await import("./agent-learning-settings");
+const { apiErrorAdvice } = await import("@/lib/api-error");
 let container: HTMLDivElement;
 let root: Root;
 beforeAll(() => {
@@ -176,4 +178,57 @@ test("new-chat compact draft does not write settings and removes only the reset 
   await change(field("Knowledge"), "inherit");
   expect(current).toEqual({ skills: "automatic" });
   expect(saveSettings).not.toHaveBeenCalled();
+});
+
+/** Opens the editor again on a fresh root, so it starts from the cached rows. */
+async function reopen() {
+  await render();
+  await act(async () => root.unmount());
+  root = createRoot(container);
+}
+test("a failed refresh over cached rows says it couldn't refresh, with Try again", async () => {
+  await reopen();
+  const failure = new OpenGeniApiError(503, "");
+  getSettings.mockImplementationOnce(async () => {
+    throw failure;
+  });
+  await render();
+  // The cached rows stay.
+  expect(field("Knowledge").value).toBe("inherit");
+  expect(container.textContent).toContain("Couldn't refresh Agent learning.");
+  expect(container.textContent).toContain(apiErrorAdvice(failure));
+  expect(container.textContent).not.toContain("Couldn't save that.");
+  const retry = [...container.querySelectorAll("button")].find(
+    (each) => each.textContent === "Try again",
+  );
+  const reads = getSettings.mock.calls.length;
+  await act(async () => retry!.click());
+  expect(getSettings.mock.calls.length).toBeGreaterThan(reads);
+  expect(container.textContent).not.toContain("Couldn't refresh Agent learning.");
+});
+test("cached rows can't be saved until the refresh has read the current version", async () => {
+  await reopen();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow = async (_workspace: string, scope: string, source?: AgentLearningContext) => {
+    await gate;
+    return {
+      ownerKey: scope,
+      contextKey: source ? `${source.kind}:${source.id}` : "default",
+      version: 5,
+      settings: source ? {} : defaults,
+    };
+  };
+  getSettings.mockImplementationOnce(slow).mockImplementationOnce(slow);
+  await render();
+  expect(container.querySelector("fieldset")?.disabled).toBe(true);
+  await change(field("Knowledge"), "off");
+  expect(saveSettings).not.toHaveBeenCalled();
+
+  await act(async () => release());
+  expect(container.querySelector("fieldset")?.disabled).toBe(false);
+  await change(field("Knowledge"), "off");
+  expect(saveSettings.mock.calls[0]?.[1]).toMatchObject({ expectedVersion: 5 });
 });
