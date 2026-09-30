@@ -277,7 +277,7 @@ export function useSettingsRail(input: {
 
   // The same picker as the main rail: switching workspace or organization keeps
   // the same kind of settings page. A workspace managed without access has none.
-  const createOrganization = useCreateOrganizationFlow(openWorkspace);
+  const createOrganizationFlow = useCreateOrganizationFlow(openWorkspace);
   const picker =
     workspace && !managedWorkspace ? (
       <>
@@ -286,11 +286,13 @@ export function useSettingsRail(input: {
           collapsed={false}
           align="start"
           onSelect={openWorkspace}
-          onCreateOrganization={createOrganization.canCreate ? createOrganization.start : undefined}
+          onCreateOrganization={
+            createOrganizationFlow.canCreate ? createOrganizationFlow.start : undefined
+          }
           createReturnLabel={hereLabel}
           className="w-full"
         />
-        {createOrganization.dialog}
+        {createOrganizationFlow.dialog}
       </>
     ) : null;
 

@@ -213,8 +213,10 @@ export function useCreateOrganizationFlow(onCreated: (workspaceId: string) => vo
 
 export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
   const rail = useRail();
-  const createOrganization = useCreateOrganizationFlow(rail.openWorkspace);
-  const onCreateOrganization = createOrganization.canCreate ? createOrganization.start : undefined;
+  const createOrganizationFlow = useCreateOrganizationFlow(rail.openWorkspace);
+  const onCreateOrganization = createOrganizationFlow.canCreate
+    ? createOrganizationFlow.start
+    : undefined;
 
   if (rail.collapsed) {
     return (
@@ -226,14 +228,14 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
           onSelect={rail.openWorkspace}
           onCreateOrganization={onCreateOrganization}
         />
-        {createOrganization.dialog}
+        {createOrganizationFlow.dialog}
       </>
     );
   }
 
   return (
     <div className={inline ? "ml-auto grid min-w-0 flex-1" : WORKSPACE_SWITCHER_GRID_CLASS}>
-      {createOrganization.dialog}
+      {createOrganizationFlow.dialog}
       <WorkspaceSwitcherMenu
         workspaceId={rail.workspaceId}
         collapsed={false}
