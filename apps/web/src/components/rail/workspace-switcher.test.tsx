@@ -54,11 +54,20 @@ mock.module("@tanstack/react-router", () => ({
     );
   },
 }));
+// A configured deployment (key or token) has no organization administrator session.
+let authMode = "managedSession";
+const createRequests: unknown[] = [];
 mock.module("@/context", () => ({
   useAppContext: () => ({
     workspaces,
     managedSelfContext: null,
-    clientConfig: { productAccessMode: "managed", auth: { mode: "managedSession" } },
+    clientConfig: { productAccessMode: "managed", auth: { mode: authMode } },
+    captureWorkspaceInvocation: () => ({ token: 1 }),
+    ownsWorkspaceInvocation: () => true,
+    createWorkspace: async (request: { name: string; accountId: string }) => {
+      createRequests.push(request);
+      return workspace("ws-created", request.accountId, request.name);
+    },
     accessContext: {
       mode: "managed",
       subjectId: "user:alex",
@@ -83,6 +92,8 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 beforeEach(() => {
+  authMode = "managedSession";
+  createRequests.length = 0;
   localStorage.clear();
   document.body.replaceChildren();
 });
@@ -263,6 +274,35 @@ describe("workspace picker", () => {
       expect(document.body.querySelector('[role="dialog"]')).toBeNull();
       // Creating in an organization they administer starts by switching to it.
       expect(item("Acme Robotics")).toBeDefined();
+    } finally {
+      await picker.unmount();
+    }
+  });
+
+  test("a configured deployment key that may create workspaces names one here, in this organization", async () => {
+    authMode = "deploymentKey";
+    const picker = await renderPicker("ws-design");
+    try {
+      const create = item("New workspace in Acme Robotics")!;
+      expect(create.hasAttribute("data-disabled")).toBe(false);
+      expect(create.getAttribute("href")).toBeNull();
+      await act(async () => create.click());
+      const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(dialog.textContent).toContain("New workspace");
+      const input = dialog.querySelector<HTMLInputElement>("#workspace-name")!;
+      await act(async () => {
+        input.value = "Staging";
+        // happy-dom does not route input events through React's value tracker.
+        const key = Object.keys(input).find((name) => name.startsWith("__reactProps$"))!;
+        (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[key]!.onChange(
+          { target: input, currentTarget: input },
+        );
+      });
+      await act(async () => {
+        dialog.querySelector<HTMLFormElement>("form")!.requestSubmit();
+      });
+      expect(createRequests).toEqual([{ name: "Staging", accountId: acme }]);
+      expect(picker.selected).toEqual(["ws-created"]);
     } finally {
       await picker.unmount();
     }

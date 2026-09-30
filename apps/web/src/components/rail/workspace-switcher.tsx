@@ -1,7 +1,9 @@
 import { Link } from "@tanstack/react-router";
 import { Building2Icon, LockIcon, PauseIcon, PlusIcon, SettingsIcon } from "lucide-react";
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { toast } from "sonner";
 
+import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
 import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
 import {
   DropdownMenu,
@@ -23,6 +25,7 @@ import {
   type OrgOption,
 } from "@/lib/org";
 import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
+import { hasAccountPermission } from "@/lib/permissions";
 import { currentPageReturnTo, returnToSearch, type ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
 import { administersOrganization } from "@/lib/workspaces";
@@ -117,7 +120,25 @@ export function CreateWorkspaceMenuItem(props: {
   workspaceId: string;
   /** Where the page's back link returns: the page the menu was opened on. */
   returnTo?: ReturnTo | undefined;
+  /**
+   * A session that may create workspaces but not administer the organization
+   * (a configured deployment key or token): create by name, here.
+   */
+  onCreateHere?: (() => void) | undefined;
 }) {
+  if (!props.canCreate && props.onCreateHere) {
+    return (
+      <DropdownMenuItem onSelect={props.onCreateHere}>
+        <PlusIcon />
+        <span
+          className="min-w-0 flex-1 truncate"
+          title={`New workspace in ${props.organizationLabel}`}
+        >
+          New workspace in {props.organizationLabel}
+        </span>
+      </DropdownMenuItem>
+    );
+  }
   if (!props.canCreate) {
     return (
       // Readable, not faded: the reason is the point of showing it.
@@ -211,6 +232,38 @@ export function WorkspaceSwitcherMenu(props: {
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const canCreate = useCanCreateWorkspaceIn(activeAccountId);
   const rememberedWorkspaceIds = useRememberedWorkspaceIds();
+  // Owners and admins create on the organization's New workspace page. A
+  // session that holds workspace:create without administering the
+  // organization (a configured deployment key or token) can't reach that page,
+  // so it creates by name here, in the current organization only.
+  const createHereAccountId =
+    !canCreate &&
+    activeAccountId &&
+    hasAccountPermission(context.accessContext, activeAccountId, "workspace:create")
+      ? activeAccountId
+      : null;
+  const [createOpen, setCreateOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submitCreate() {
+    const name = nameDraft.trim();
+    if (!name || busy || !createHereAccountId) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(props.workspaceId);
+    if (!acceptedTransition) return;
+    setBusy(true);
+    try {
+      const created = await context.createWorkspace({ name, accountId: createHereAccountId });
+      if (!created) return;
+      if (!context.ownsWorkspaceInvocation(props.workspaceId, acceptedTransition)) return;
+      toast.success(`Workspace ${created.name} created`);
+      setCreateOpen(false);
+      setNameDraft("");
+      props.onSelect(created.id);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <>
@@ -221,6 +274,7 @@ export function WorkspaceSwitcherMenu(props: {
         activeWorkspaceId={props.workspaceId}
         activeAccountId={activeAccountId}
         canCreate={canCreate}
+        onCreateHere={createHereAccountId ? () => setCreateOpen(true) : undefined}
         createReturnTo={currentPageReturnTo(
           props.createReturnLabel ?? activeWorkspace?.name ?? "Back",
         )}
@@ -239,6 +293,19 @@ export function WorkspaceSwitcherMenu(props: {
           className={props.className}
         />
       </WorkspaceMenu>
+      {createHereAccountId ? (
+        <WorkspaceNameDialog
+          mode={createOpen ? "create" : null}
+          name={nameDraft}
+          busy={busy}
+          onNameChange={setNameDraft}
+          onOpenChange={(open) => {
+            setCreateOpen(open);
+            if (!open) setNameDraft("");
+          }}
+          onSubmit={() => void submitCreate()}
+        />
+      ) : null}
     </>
   );
 }
@@ -307,6 +374,8 @@ export function WorkspaceMenu(props: {
   activeWorkspaceId: string;
   activeAccountId: string | null;
   canCreate: boolean;
+  /** Create by name in the current organization; see CreateWorkspaceMenuItem. */
+  onCreateHere?: (() => void) | undefined;
   /** Where New workspace's back link returns. */
   createReturnTo?: ReturnTo | undefined;
   /** The last workspace used in each organization. */
@@ -381,6 +450,7 @@ export function WorkspaceMenu(props: {
             <CreateWorkspaceMenuItem
               organizationLabel={currentOrg.label}
               canCreate={props.canCreate}
+              onCreateHere={props.onCreateHere}
               workspaceId={props.activeWorkspaceId}
               returnTo={props.createReturnTo}
             />
