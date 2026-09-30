@@ -1907,7 +1907,7 @@ after the transaction.
 Every agent reconstruction appends the newest decision's warning to session
 instructions, after the stable workspace prompt prefix. Maintenance migration
 0526 requires warning protocol v2 at attempt claim for every session with an
-automatic checkpoint receipt; rolling migration 0547 additionally requires v3
+automatic checkpoint receipt; rolling migration 0548 additionally requires v3
 for a session with an empty-workspace receipt, including after lease churn.
 Older workers fail closed only for affected sessions. Human-consented recovery
 keeps its independent v1 gate.
