@@ -957,7 +957,9 @@ definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
 
 `turnSummary={{ rolling: true }}` selects the readable per-turn presentation:
-while work is live, assistant progress messages stay fully formatted and visible,
+startup shows the preparation orb outside any disclosure, then hands over to
+Working without resetting the startup-inclusive elapsed clock. While work is
+live, assistant progress messages stay fully formatted and visible,
 followed by one Working or Waiting disclosure with the rolling latest step.
 When the turn finishes, earlier assistant messages and tools share the Worked
 disclosure; the final response remains visible. Expanding reveals that turn's

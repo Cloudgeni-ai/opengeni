@@ -81,6 +81,11 @@ anchoring. Runtime phase semantics, replay deduplication, and
 classic `groupTimeline(items)` grouping are unchanged. The deprecated
 `foldExchanges` option aliases readable turns; there is no legacy folding mode.
 
+- **Startup stays visible.** The existing preparation orb appears on its own,
+  not inside the Working disclosure. When preparation ends, the live Working
+  row takes over without a competing orb or resetting elapsed time: the clock
+  still includes startup. Interrupted preparation keeps failure and recovery
+  information accessible instead of leaving a spinning orb.
 - **Live prose stays readable.** Every progress message is distinct and fully
   formatted with its normal actions. One live Working or Waiting row follows
   the current turn's progress, instead of updating above newer messages. Short
