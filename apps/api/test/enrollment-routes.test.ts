@@ -196,8 +196,9 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     expect((await getEnrollment(db, workspaceId, enrollment.id))!.credentialGeneration).toBe(
       enrollment.credentialGeneration,
     );
-    expect((await request(expired, now - 121)).status).toBe(401);
-    expect((await request(expired, now + 121)).status).toBe(401);
+    // Stay outside the 120-second window even when HTTP requests cross a second boundary.
+    expect((await request(expired, now - 300)).status).toBe(401);
+    expect((await request(expired, now + 300)).status).toBe(401);
     expect((await request(expired, now, generateKeyPairSync("ed25519").privateKey)).status).toBe(
       401,
     );
