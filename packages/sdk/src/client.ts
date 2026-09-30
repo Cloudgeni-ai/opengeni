@@ -1256,7 +1256,7 @@ export class OpenGeniClient {
     await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/credential-provider`);
   }
 
-  /** Organization default; requires account:admin, not an asUser or agent-attempt client. */
+  /** Requires account:admin or a full organization key; not asUser or agent attempts. */
   async getOrganizationCredentialProvider(
     organizationId: string,
   ): Promise<GetOrganizationCredentialProviderResponse> {
@@ -1297,7 +1297,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** All matching workspaces, one signing secret; requires account:admin. */
+  /** All matching workspaces, one signing secret; account admin or full organization key. */
   async createOrganizationWebhook(
     organizationId: string,
     request: CreateOrganizationWebhookRequest,

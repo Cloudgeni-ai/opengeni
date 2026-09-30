@@ -17,6 +17,7 @@ import {
   deleteOrganizationWebhook,
   enqueueSessionTurn,
   migrate,
+  nestedPostgresSqlState,
   provisionRoles,
   assertRuntimeDatabasePosture,
   getOrganizationCredentialProvider,
@@ -36,6 +37,16 @@ import {
 import { ensureExternalIdentity } from "../src/external-identities";
 
 setDefaultTimeout(60_000);
+
+async function expectSqlState(action: () => Promise<unknown>, state: string): Promise<void> {
+  let failure: unknown;
+  try {
+    await action();
+  } catch (error) {
+    failure = error;
+  }
+  expect(nestedPostgresSqlState(failure)).toBe(state);
+}
 
 let shared: SharedTestDatabase | null;
 let client: DbClient;
@@ -294,12 +305,17 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
       }),
     ).toEqual([]);
     // Wrong account/workspace parameters cannot widen the private identity seam.
-    await expect(
-      withRlsContext(client.db, other.scope, async (tx) =>
-        tx.execute(sql`select opengeni_private.resolve_integration_initiating_human_v1(
+    await expectSqlState(
+      async () =>
+        await withRlsContext(
+          client.db,
+          other.scope,
+          async (tx) =>
+            await tx.execute(sql`select opengeni_private.resolve_integration_initiating_human_v1(
         ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${identity.subjectId})`),
-      ),
-    ).rejects.toThrow("scope invalid");
+        ),
+      "42501",
+    );
   });
 
   test("claim leases, disabled queue, exact settlement, redelivery and deletion", async () => {
@@ -380,8 +396,9 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
   });
 
   test("runtime cannot directly read external identities and unscoped tables are invisible", async () => {
-    await expect(client.db.execute(sql`select * from external_identities`)).rejects.toThrow(
-      "permission denied",
+    await expectSqlState(
+      async () => await client.db.execute(sql`select * from external_identities`),
+      "42501",
     );
     const rows = await client.db.execute(sql`select * from organization_webhooks`);
     expect(rows).toHaveLength(0);
@@ -401,18 +418,28 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
       ).toHaveLength(0);
     });
     const other = await fixture("rls-other");
-    await expect(
-      withRlsContext(client.db, other.scope, async (tx) =>
-        tx.execute(sql`select * from opengeni_private.resolve_organization_credential_provider_v1(
+    await expectSqlState(
+      async () =>
+        await withRlsContext(
+          client.db,
+          other.scope,
+          async (tx) =>
+            await tx.execute(sql`select * from opengeni_private.resolve_organization_credential_provider_v1(
         ${scope.accountId}::uuid, ${scope.workspaceId}::uuid
       )`),
-      ),
-    ).rejects.toThrow("scope invalid");
-    await expect(
-      withAccountRls(client.db, scope.accountId, async (tx) =>
-        tx.execute(sql`insert into organization_credential_providers(account_id, url, secret_encrypted, workspace_filter)
+        ),
+      "42501",
+    );
+    await expectSqlState(
+      async () =>
+        await withAccountRls(
+          client.db,
+          scope.accountId,
+          async (tx) =>
+            await tx.execute(sql`insert into organization_credential_providers(account_id, url, secret_encrypted, workspace_filter)
         values (${scope.accountId}::uuid, 'https://example.test', 'sealed', '{"externalSource":null}'::jsonb)`),
-      ),
-    ).rejects.toThrow("organization_credential_providers_filter_chk");
+        ),
+      "23514",
+    );
   });
 });

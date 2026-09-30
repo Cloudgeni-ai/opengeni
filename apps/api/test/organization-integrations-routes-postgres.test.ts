@@ -18,6 +18,7 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 import { registerOrganizationIntegrationRoutes } from "../src/routes/organization-integrations";
+import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 
 setDefaultTimeout(60_000);
 
@@ -55,7 +56,7 @@ beforeAll(async () => {
     prefix: token.slice(0, 14),
     keyHash: new Bun.CryptoHasher("sha256").update(token).digest("hex"),
     credentialKind: "organization",
-    permissions: ["account:admin", "workspace:admin"],
+    permissions: organizationApiKeyPermissionsForAccess("full"),
   });
   app = new Hono();
   registerOrganizationIntegrationRoutes(app, { db: client.db, settings } as ApiRouteDeps);
@@ -75,6 +76,31 @@ async function call(method: string, path: string, body?: unknown, bearer = token
   });
 }
 describe("organization integration routes (PostgreSQL)", () => {
+  test("read-only organization keys cannot read or modify integration registrations", async () => {
+    const readToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId,
+      workspaceId: null,
+      name: "Read-only integration",
+      prefix: readToken.slice(0, 14),
+      keyHash: new Bun.CryptoHasher("sha256").update(readToken).digest("hex"),
+      credentialKind: "organization",
+      permissions: organizationApiKeyPermissionsForAccess("read"),
+    });
+    expect((await call("GET", "/webhooks", undefined, readToken)).status).toBe(403);
+    expect(
+      (
+        await call(
+          "PUT",
+          "/credential-provider",
+          {
+            url: "https://product.example/credentials",
+          },
+          readToken,
+        )
+      ).status,
+    ).toBe(403);
+  });
   test("concurrent first PUT returns exactly one stored signing secret", async () => {
     await call("DELETE", "/credential-provider");
     const responses = await Promise.all(
@@ -165,5 +191,28 @@ describe("organization integration routes (PostgreSQL)", () => {
       exp: Math.floor(Date.now() / 1000) + 300,
     });
     expect((await call("GET", "/webhooks", undefined, bearer)).status).toBe(403);
+  });
+  test("human account administrators can configure organization integrations", async () => {
+    const bearer = await signDelegatedAccessToken(delegationSecret, {
+      accountId,
+      workspaceId,
+      subjectId,
+      principalKind: "human_session",
+      permissions: ["account:admin"],
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+    expect(
+      (
+        await call(
+          "PUT",
+          "/credential-provider",
+          {
+            url: "https://product.example/human-credentials",
+          },
+          bearer,
+        )
+      ).status,
+    ).toBe(201);
+    expect((await call("DELETE", "/credential-provider", undefined, bearer)).status).toBe(204);
   });
 });

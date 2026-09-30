@@ -1,6 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { AccessContext } from "@opengeni/contracts";
+import { requireAccessContext } from "@opengeni/core";
+import * as db from "@opengeni/db";
+import { testSettings } from "@opengeni/testing";
+import { Hono } from "hono";
 import { requireOrganizationIntegrationAdmin } from "../src/routes/organization-integrations";
+import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 import {
   integrationProviderFields,
   integrationWebhookFields,
@@ -20,7 +25,44 @@ function context(): AccessContext {
     defaultWorkspaceId: null,
   };
 }
+afterEach(() => mock.restore());
+
 describe("organization integration authority", () => {
+  test("canonical full organization keys qualify without account:admin; read-only, workspace and foreign keys do not", async () => {
+    const key = {
+      id: crypto.randomUUID(),
+      accountId: organizationId,
+      workspaceId: null,
+      name: "Integration key",
+      credentialKind: "organization",
+      permissions: organizationApiKeyPermissionsForAccess("full"),
+    };
+    expect(key.permissions).not.toContain("account:admin");
+    const lookup = spyOn(db, "findActiveApiKeyByHash");
+    const app = new Hono();
+    app.get("/", async (c) => {
+      const access = await requireAccessContext(c, {
+        db: {} as never,
+        settings: testSettings({ productAccessMode: "managed" }),
+      });
+      return c.json({ subjectId: requireOrganizationIntegrationAdmin(access, organizationId) });
+    });
+    const call = () =>
+      app.request("/", {
+        headers: { authorization: "Bearer ogk_unit_test" },
+      });
+    lookup.mockResolvedValue(key as never);
+    expect((await call()).status).toBe(200);
+    lookup.mockResolvedValue({
+      ...key,
+      permissions: organizationApiKeyPermissionsForAccess("read"),
+    } as never);
+    expect((await call()).status).toBe(403);
+    lookup.mockResolvedValue({ ...key, workspaceId, credentialKind: "workspace" } as never);
+    expect((await call()).status).toBe(403);
+    lookup.mockResolvedValue({ ...key, accountId: crypto.randomUUID() } as never);
+    expect((await call()).status).toBe(403);
+  });
   test("shared projections expose no account credentials or signing secret", () => {
     const provider = {
       id: organizationId,
@@ -54,6 +96,11 @@ describe("organization integration authority", () => {
     expect(() => requireOrganizationIntegrationAdmin(access, organizationId)).toThrow(
       "account:admin",
     );
+    access.accountGrants[0]!.subjectId = access.subjectId;
+    access.accountGrants[0]!.permissions = organizationApiKeyPermissionsForAccess("full");
+    expect(() => requireOrganizationIntegrationAdmin(access, organizationId)).toThrow(
+      "account:admin",
+    );
     expect(() => requireOrganizationIntegrationAdmin(context(), workspaceId)).toThrow(
       "account:admin",
     );
@@ -79,6 +126,10 @@ describe("organization integration authority", () => {
           ...marker,
         },
       ];
+      expect(() => requireOrganizationIntegrationAdmin(access, organizationId)).toThrow(
+        "Agent attempts",
+      );
+      access.accountGrants[0]!.permissions = organizationApiKeyPermissionsForAccess("full");
       expect(() => requireOrganizationIntegrationAdmin(access, organizationId)).toThrow(
         "Agent attempts",
       );

@@ -36,6 +36,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { organizationApiKeyAccess, requireOrganizationApiKeyControlPermission } from "./api-keys";
 import {
   integrationBody as body,
   integrationDeliveryProjection as deliveryProjection,
@@ -46,7 +47,7 @@ import {
   newIntegrationSecret,
 } from "./workspace-integrations";
 
-/** Literal account authority only: workspace admin never implies org admin. */
+/** Account administrators or verified full-access organization keys; never workspace keys. */
 export function requireOrganizationIntegrationAdmin(
   context: AccessContext,
   organizationId: string,
@@ -60,14 +61,21 @@ export function requireOrganizationIntegrationAdmin(
     (candidate) =>
       candidate.accountId === organizationId && candidate.subjectId === context.subjectId,
   );
-  if (!grant?.permissions.includes("account:admin")) {
+  if (!grant) {
     throw new HTTPException(403, { message: "missing permission: account:admin" });
   }
   if (context.subjectId.startsWith("api_key:")) {
+    requireOrganizationApiKeyControlPermission(context, organizationId);
     const authority = accountScopedApiKeyWorkspaceAuthority(context);
-    if (!authority || authority.accountId !== organizationId) {
+    if (
+      !authority ||
+      authority.accountId !== organizationId ||
+      organizationApiKeyAccess(authority.permissions) !== "full"
+    ) {
       throw new HTTPException(403, { message: "organization API key authority required" });
     }
+  } else if (!grant.permissions.includes("account:admin")) {
+    throw new HTTPException(403, { message: "missing permission: account:admin" });
   }
   return grant.subjectId;
 }
