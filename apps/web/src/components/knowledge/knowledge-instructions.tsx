@@ -5,8 +5,10 @@ import {
   type WorkspaceInstructionPolicyListResponse,
 } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
+import { resolveWorkspaceDefaultAgentIdentity } from "@opengeni/contracts";
 import {
   ArrowUpRightIcon,
+  BotIcon,
   Building2Icon,
   HistoryIcon,
   PencilIcon,
@@ -31,6 +33,7 @@ import { RevisionHistory, type Revision } from "@/components/ui/revision-history
 import { Section, SectionStack } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { canManageWorkspaceSettings } from "@/lib/permissions";
 import { createWorkspaceInstructionSave } from "@/lib/workspace-instruction-save";
 import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
 import { promptCopy, useAgentBrainPromptCatalog } from "@/routes/agent-brain-prompt";
@@ -267,7 +270,8 @@ export function InstructionsTab({
   onOpenHistory,
   onGoToLibrary,
 }: InstructionsTabProps) {
-  const { client } = useAppContext();
+  const { client, clientConfig } = useAppContext();
+  const agentSettings = clientConfig.agentConfig?.enabled === true;
   const identity = useCompanyProfileInventory(client, workspaceId);
   const profile = identity.response?.activeRevision?.profile ?? null;
   const [askOpen, setAskOpen] = useState(false);
@@ -282,6 +286,7 @@ export function InstructionsTab({
           description={`Added to every chat and schedule in ${workspaceName}, before anything agents look up.`}
           contentClassName="divide-y divide-border"
         >
+          {agentSettings ? <AgentIdentityBlock workspaceId={workspaceId} /> : null}
           <div className="flex min-w-0 flex-col gap-3 py-4">
             <BlockHeader
               icon={<Building2Icon />}
@@ -446,6 +451,13 @@ export function InstructionsTab({
           </div>
         </Section>
       </SectionStack>
+      {agentSettings ? (
+        <InlineHelp icon>
+          Every prompt starts with who the agent is, then your organization, then these
+          instructions, then anything set for one chat. Instructions take priority over OpenGeni's
+          default way of working, but never over its safety rules or how it runs tools.
+        </InlineHelp>
+      ) : null}
       <InlineHelp icon>
         Facts go in the <HelpLink onClick={onGoToLibrary}>Library</HelpLink>. Step-by-step
         procedures go in Skills, in{" "}
@@ -462,6 +474,76 @@ export function InstructionsTab({
           personal={personal}
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * "Who the agent is": the workspace's default agent identity for new chats.
+ * It is edited with the rest of the agent defaults, in workspace settings, so
+ * this block shows it and links there.
+ */
+function AgentIdentityBlock({ workspaceId }: { workspaceId: string }) {
+  const context = useAppContext();
+  const navigate = useNavigate();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const canManage = canManageWorkspaceSettings(
+    context.accessContext,
+    workspace,
+    context.managedSelfContext,
+  );
+  const resolved = resolveWorkspaceDefaultAgentIdentity(
+    workspace?.settings,
+    workspace?.agentInstructions,
+  );
+  return (
+    <div className="flex min-w-0 flex-col gap-3 py-4" data-testid="agent-identity-block">
+      <BlockHeader
+        icon={<BotIcon />}
+        title="Who the agent is"
+        meta={
+          resolved.source === "legacy_agent_instructions"
+            ? "From this workspace's earlier custom persona"
+            : resolved.source === "explicit"
+              ? "Set for new chats in this workspace"
+              : "OpenGeni's default"
+        }
+        actions={
+          canManage ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="pointer-coarse:h-11"
+              onClick={() =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/settings",
+                  params: { workspaceId },
+                  search: { section: "general", view: "agent-defaults" },
+                })
+              }
+            >
+              <PencilIcon aria-hidden="true" />
+              Edit
+            </Button>
+          ) : undefined
+        }
+      />
+      <div className="flex min-w-0 flex-col gap-1 pl-11 text-sm leading-6 max-sm:pl-0">
+        {resolved.identity ? (
+          <p className="break-words whitespace-pre-wrap text-fg">{resolved.identity}</p>
+        ) : (
+          <p className="text-fg-muted">
+            OpenGeni's general assistant for questions, writing, research, analysis and technical
+            work. Replace it to give agents your product's name, role and tone.
+          </p>
+        )}
+        {!canManage ? (
+          <p className="text-xs leading-4.5 text-fg-muted">
+            Only workspace admins can change this.
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }

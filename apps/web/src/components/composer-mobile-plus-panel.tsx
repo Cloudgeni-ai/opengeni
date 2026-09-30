@@ -8,6 +8,7 @@ import {
   PaperclipIcon,
   PlugIcon,
   SettingsIcon,
+  SlidersHorizontalIcon,
 } from "lucide-react";
 import {
   lazy,
@@ -40,8 +41,20 @@ import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
+import {
+  ComposerCapabilitiesMenuBody,
+  type ComposerAgentCapabilities,
+} from "@/components/composer-capabilities-menu-body";
+import { capabilitySummary } from "@/lib/agent-capabilities";
 
-export type Panel = "root" | "tools" | "repos" | "voice" | "variables" | "settings";
+export type Panel =
+  | "root"
+  | "capabilities"
+  | "tools"
+  | "repos"
+  | "voice"
+  | "variables"
+  | "settings";
 
 /**
  * Shared composer actions at every width; model and voice stay in the bar.
@@ -68,6 +81,11 @@ export type ComposerPlusProps = {
     scope: "workspace" | "personal";
     canEdit: boolean;
   };
+  /**
+   * Agent settings are on for this server: "+" shows Capabilities (with the
+   * connectors nested under Workspace connectors) instead of Connectors.
+   */
+  agentCapabilities?: ComposerAgentCapabilities;
   disabled?: boolean;
   fileUploadsEnabled: boolean;
   servers: McpServerOption[];
@@ -129,6 +147,21 @@ export function ComposerMobilePlusPanel(
     </button>
   );
 
+  const backToCapabilities = (
+    <button
+      type="button"
+      aria-label="Back to capabilities"
+      className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-11"
+      onClick={(event) => {
+        event.preventDefault();
+        setPanel("capabilities");
+      }}
+    >
+      <ChevronLeftIcon className="size-4" />
+    </button>
+  );
+  const agentCapabilities = props.agentCapabilities;
+
   return (
     <ComposerPanelContent
       dialog={dialogOpen}
@@ -154,7 +187,29 @@ export function ComposerMobilePlusPanel(
               Add photos & files
             </DropdownMenuItem>
           ) : null}
-          {
+          {agentCapabilities ? (
+            <DropdownMenuItem
+              className={COMPOSER_MENU_ACTION_CLASS}
+              disabled={props.disabled || agentCapabilities.disabled}
+              onSelect={(event) => {
+                event.preventDefault();
+                setPanel("capabilities");
+                props.onOpenConnectors?.();
+              }}
+            >
+              <SlidersHorizontalIcon className="size-4" />
+              Capabilities
+              <span className="ml-auto max-w-[9rem] truncate text-xs text-fg-muted">
+                {agentCapabilities.customized
+                  ? capabilitySummary(
+                      agentCapabilities.draft.values,
+                      agentCapabilities.availability,
+                    ).replace(" capabilities", "")
+                  : "Default"}
+              </span>
+              <ChevronRightIcon className="size-4 text-fg-subtle" />
+            </DropdownMenuItem>
+          ) : (
             <DropdownMenuItem
               className={COMPOSER_MENU_ACTION_CLASS}
               disabled={props.disabled || props.toolsDisabled}
@@ -171,7 +226,7 @@ export function ComposerMobilePlusPanel(
               </span>
               <ChevronRightIcon className="size-4 text-fg-subtle" />
             </DropdownMenuItem>
-          }
+          )}
           {repositories ? (
             <DropdownMenuItem
               className={COMPOSER_MENU_ACTION_CLASS}
@@ -234,6 +289,15 @@ export function ComposerMobilePlusPanel(
             </DropdownMenuItem>
           ) : null}
         </>
+      ) : panel === "capabilities" && agentCapabilities ? (
+        <ComposerCapabilitiesMenuBody
+          capabilities={agentCapabilities}
+          presentation={dialogOpen ? "dialog" : "menu"}
+          leading={backButton}
+          connectorsSelected={toolsSelected}
+          connectorsTotal={connectors.length}
+          onOpenConnectors={() => setPanel("tools")}
+        />
       ) : panel === "tools" ? (
         <SessionToolsMenuBody
           {...props.connectorActions}
@@ -244,7 +308,7 @@ export function ComposerMobilePlusPanel(
           customizing={props.connectorCustomizing}
           onCustomizingChange={props.onConnectorCustomizingChange}
           onChange={props.onToolSelectionChange}
-          leading={backButton}
+          leading={agentCapabilities ? backToCapabilities : backButton}
         />
       ) : panel === "repos" && repositories ? (
         withLeading(repositories.panel, backButton)
@@ -325,11 +389,13 @@ function ComposerPanelContent(props: {
         <DialogTitle className="sr-only">
           {props.panel === "repos"
             ? "Repositories"
-            : props.panel === "tools"
-              ? "Connectors"
-              : props.panel === "variables"
-                ? "Variable sets"
-                : "Voice model"}
+            : props.panel === "capabilities"
+              ? "Capabilities"
+              : props.panel === "tools"
+                ? "Connectors"
+                : props.panel === "variables"
+                  ? "Variable sets"
+                  : "Voice model"}
         </DialogTitle>
         {props.children}
       </DialogContent>

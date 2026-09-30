@@ -58,6 +58,7 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
     open &&
     panel !== "root" &&
     panel !== "tools" &&
+    panel !== "capabilities" &&
     panel !== "settings" &&
     props.expandedPanelPresentation === "dialog";
 

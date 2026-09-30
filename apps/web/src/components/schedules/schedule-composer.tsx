@@ -253,6 +253,9 @@ export function ComposerField({
   ];
 
   /* ----- tools */
+  // With agent settings, built-in tools follow "What the agent can do"; the
+  // menu then only picks connected apps.
+  const agentSettings = context.clientConfig.agentConfig?.enabled === true;
   const servers = context.toolMcpServers.filter((server) => server.id !== "opengeni");
   const selectedTools = draft.mcpServerIds ?? [];
   const toggleTool = (id: string, on: boolean) =>
@@ -278,7 +281,7 @@ export function ComposerField({
       repositoryOptions.length > 0 ||
       showSetChip ||
       showRigChip ||
-      draft.includeOpenGeniTool ||
+      (draft.includeOpenGeniTool && !agentSettings) ||
       selectedTools.length > 0);
   return (
     <div
@@ -339,7 +342,7 @@ export function ComposerField({
               loading={rigs.loading && liveRigs.length === 0}
             />
           ) : null}
-          {draft.includeOpenGeniTool ? (
+          {draft.includeOpenGeniTool && !agentSettings ? (
             <RemovableChip
               icon={<PlugIcon />}
               label="Workspace tools"
@@ -401,25 +404,34 @@ export function ComposerField({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-72 rounded-[16px] p-1.5">
               <DropdownMenuLabel className="px-2 pt-1 pb-1.5 text-xs font-medium text-fg-subtle">
-                Tools this schedule can use
+                {agentSettings
+                  ? "Connected apps this schedule can use"
+                  : "Tools this schedule can use"}
               </DropdownMenuLabel>
-              <DropdownMenuCheckboxItem
-                checked={draft.includeOpenGeniTool}
-                disabled={!canAttachOpenGeniTool}
-                onCheckedChange={(checked) => update({ includeOpenGeniTool: checked === true })}
-                onSelect={(event) => event.preventDefault()}
-                className="min-h-9 rounded-[8px] pointer-coarse:min-h-11"
-              >
-                <PlugIcon className="size-4 text-fg-subtle" />
-                <span className="min-w-0">
-                  <span className="block truncate">Workspace tools</span>
-                  <span className="block text-xs leading-4.5 text-fg-muted">
-                    {canAttachOpenGeniTool
-                      ? "Chats, schedules and other work in this workspace."
-                      : "Not available on this OpenGeni server."}
+              {agentSettings && servers.length === 0 ? (
+                <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
+                  No apps are connected to this workspace yet.
+                </p>
+              ) : null}
+              {agentSettings ? null : (
+                <DropdownMenuCheckboxItem
+                  checked={draft.includeOpenGeniTool}
+                  disabled={!canAttachOpenGeniTool}
+                  onCheckedChange={(checked) => update({ includeOpenGeniTool: checked === true })}
+                  onSelect={(event) => event.preventDefault()}
+                  className="min-h-9 rounded-[8px] pointer-coarse:min-h-11"
+                >
+                  <PlugIcon className="size-4 text-fg-subtle" />
+                  <span className="min-w-0">
+                    <span className="block truncate">Workspace tools</span>
+                    <span className="block text-xs leading-4.5 text-fg-muted">
+                      {canAttachOpenGeniTool
+                        ? "Chats, schedules and other work in this workspace."
+                        : "Not available on this OpenGeni server."}
+                    </span>
                   </span>
-                </span>
-              </DropdownMenuCheckboxItem>
+                </DropdownMenuCheckboxItem>
+              )}
               {servers.map((server) => (
                 <DropdownMenuCheckboxItem
                   key={server.id}

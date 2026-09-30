@@ -47,6 +47,15 @@ export function buildProviderRequestSnapshot(input: {
   body: string | null;
   unavailableReason?: string;
   requestIndex: number;
+  /**
+   * The agent's persistent instruction layers. When the wire `instructions`
+   * start with them, the snapshot names those sections (identity, the
+   * operational contract with its prompt modules, governance, ...) so an
+   * inspector can show them with titles. The wire body stays the source of
+   * truth; an unrecognized prompt yields no sections.
+   */
+  persistentLayers?: readonly PersistentAgentInstructionLayerDraft[];
+  genesisTitleDirective?: string;
 }): ModelContextSnapshot {
   let body = input.body;
   let unavailableReason = input.unavailableReason;
@@ -69,15 +78,29 @@ export function buildProviderRequestSnapshot(input: {
   }));
   const instructionsTokens =
     parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0;
+  const wireInstructions = typeof payload.instructions === "string" ? payload.instructions : null;
+  const sectionLayers =
+    wireInstructions && input.persistentLayers?.length
+      ? splitCapturedInstructions({
+          persistentLayers: input.persistentLayers,
+          capturedInstructions: wireInstructions,
+          genesisTitleDirective: input.genesisTitleDirective ?? "",
+        })
+      : [];
+  // Only a recognized structure is worth repeating; a raw blob adds nothing.
+  const layers = sectionLayers.some((layer) => layer.id !== "sent_system_instructions")
+    ? sectionLayers
+    : [];
   const toolsTokens = parts.find((part) => part.key === "tools")?.estimatedTokens ?? 0;
   return {
     version: MODEL_CONTEXT_SNAPSHOT_VERSION,
     source: "model_request",
     capturedAt: new Date().toISOString(),
     requestIndex: input.requestIndex,
-    // Wire body owns the contents. Legacy prefix fields are not reconstructed.
+    // Wire body owns the contents. Legacy prefix fields are not reconstructed;
+    // `layers` only names sections of the wire instructions.
     instructions: "",
-    layers: [],
+    layers,
     tools: [],
     skills: [],
     tokens: {

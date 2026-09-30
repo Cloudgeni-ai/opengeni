@@ -8163,6 +8163,8 @@ function bindModelVisibleContextCapture(
         body,
         ...(unavailableReason ? { unavailableReason } : {}),
         requestIndex: index ?? nextModelContextCaptureIndex(agent),
+        persistentLayers: persistentAgentInstructionInspectionFor(agent).layers,
+        genesisTitleDirective: GENESIS_TITLE_DIRECTIVE,
       }),
     );
   };

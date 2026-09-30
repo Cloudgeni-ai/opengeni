@@ -495,7 +495,7 @@ const workspaceSettingsRoute = createRoute({
   ): {
     section?: WorkspaceSettingsSection | "plugins";
     account?: string;
-    view?: ModelsView | AccessUrlView;
+    view?: ModelsView | AccessUrlView | "agent-defaults";
     key?: string;
     member?: string;
   } & ReturnToSearch => {
@@ -506,7 +506,12 @@ const workspaceSettingsRoute = createRoute({
         ? ("plugins" as const)
         : (workspaceSettingsSectionFromSearch(search.section) ?? undefined);
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
-    const view = section === "models" ? parseModelsView(search.view) : undefined;
+    const view =
+      section === "models"
+        ? parseModelsView(search.view)
+        : (section ?? "general") === "general" && search.view === "agent-defaults"
+          ? ("agent-defaults" as const)
+          : undefined;
     const key = section === "api-keys" ? parseApiKeyParam(search.key) : undefined;
     const access = section === "access" ? parseAccessSearch(search) : {};
     return {
@@ -893,6 +898,9 @@ function WorkspaceSettings() {
       section={section ?? "general"}
       modelsAccount={account}
       modelsView={section === "models" ? (view as ModelsView | undefined) : undefined}
+      generalView={
+        (section ?? "general") === "general" && view === "agent-defaults" ? view : undefined
+      }
       apiKey={key}
       access={
         section === "access"

@@ -144,8 +144,17 @@ import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
 } from "@/lib/use-workspace-model-catalog";
+import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
+import {
+  capabilityAvailability,
+  draftFromRequest,
+  requestFromDraft,
+  workspaceAgentDefaultsDraft,
+  type AgentCapabilityDraft,
+} from "@/lib/agent-capabilities";
 import {
   emptySessionDraft,
+  fitToolPolicyToAgentCapabilities,
   isSessionDraftComputeReady,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
@@ -284,6 +293,46 @@ function SessionsIndexRouteContent({
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
+  const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
+  const agentAvailability = useMemo(
+    () => capabilityAvailability(context.clientConfig.agentConfig),
+    [context.clientConfig.agentConfig],
+  );
+  const workspaceAgentDraft = useMemo(
+    () =>
+      workspaceAgentDefaultsDraft({
+        capabilities: resolveWorkspaceAgentDefaults(workspace?.settings)?.capabilities,
+        legacyHumanInputOff: workspace?.settings.agentHumanInputEnabled === false,
+      }),
+    [workspace?.settings],
+  );
+  const composerAgentCapabilities = agentConfigEnabled
+    ? {
+        customized: draft.agentCapabilities !== undefined,
+        draft:
+          draft.agentCapabilities !== undefined
+            ? draftFromRequest(draft.agentCapabilities)
+            : workspaceAgentDraft,
+        availability: agentAvailability,
+        onCustomizedChange: (customized: boolean) =>
+          setDraft((current) => {
+            if (!customized) {
+              const { agentCapabilities: _dropped, ...rest } = current;
+              return rest;
+            }
+            return {
+              ...current,
+              agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+            };
+          }),
+        onChange: (next: AgentCapabilityDraft) =>
+          setDraft((current) => ({
+            ...current,
+            agentCapabilities: requestFromDraft(next, agentAvailability),
+          })),
+      }
+    : undefined;
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -753,14 +802,17 @@ function SessionsIndexRouteContent({
     (draft.compute.kind !== "machine" || (!fleet.loading && selectedMachine !== null));
   const persistedToolPolicy = useMemo(
     () =>
-      newSessionDraftToolPolicy({
-        selectedMcpServerIds: context.selectedCapabilityToolIds,
-        workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
-        catalogReady: context.workspaceMcpCatalogReady,
-        customizing: connectorCustomizing,
-        explicit: toolSelectionExplicit,
-        ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
-      }),
+      fitToolPolicyToAgentCapabilities(
+        newSessionDraftToolPolicy({
+          selectedMcpServerIds: context.selectedCapabilityToolIds,
+          workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
+          catalogReady: context.workspaceMcpCatalogReady,
+          customizing: connectorCustomizing,
+          explicit: toolSelectionExplicit,
+          ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
+        }),
+        draft.agentCapabilities,
+      ),
     [
       context.selectedCapabilityToolIds,
       context.workspaceMcpCatalogReady,
@@ -768,6 +820,7 @@ function SessionsIndexRouteContent({
       toolSelectionExplicit,
       connectorCustomizing,
       connectorExclusions,
+      draft.agentCapabilities,
     ],
   );
   const persistedValue = useMemo(
@@ -1576,6 +1629,14 @@ function SessionsIndexRouteContent({
                   },
                 }}
                 menuSide="bottom"
+                {...(composerAgentCapabilities
+                  ? {
+                      agentCapabilities: {
+                        ...composerAgentCapabilities,
+                        disabled: busy || newSessionDraft.loading,
+                      },
+                    }
+                  : {})}
                 draftChatSettings={{
                   workspaceId,
                   scope:

@@ -129,6 +129,7 @@ function isSubPage(section: WorkspaceSettingsSection, search: Record<string, unk
   if (section === "models") return Boolean(search.account || search.view);
   if (section === "api-keys") return Boolean(search.key);
   if (section === "access") return Boolean(search.view);
+  if (section === "general") return search.view === "agent-defaults";
   return false;
 }
 

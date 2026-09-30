@@ -28,7 +28,13 @@ import { VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DisabledReasonTooltip, SettingRow, SettingRowSkeleton } from "@/components/ui/setting-row";
+import {
+  DisabledReasonTooltip,
+  SettingNavRow,
+  SettingRow,
+  SettingRowSkeleton,
+} from "@/components/ui/setting-row";
+import { workspaceAgentDefaultsSummary } from "@/lib/agent-defaults-summary";
 import { Field, FieldStack, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { Notice } from "@/components/ui/notice";
@@ -53,11 +59,14 @@ export function WorkspaceSettingsRoute({
   section,
   modelsAccount,
   modelsView,
+  generalView,
   apiKey,
   access,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
+  /** Settings > General: the Agent defaults page, when open. */
+  generalView?: "agent-defaults" | undefined;
   /** Settings > Models: the account page that is open. */
   modelsAccount?: string | undefined;
   /** Settings > Models: the form page that is open. */
@@ -83,6 +92,7 @@ export function WorkspaceSettingsRoute({
     <OperationalWorkspaceSettingsRoute
       workspaceId={workspaceId}
       section={section}
+      generalView={generalView}
       modelsAccount={modelsAccount}
       modelsView={modelsView}
       apiKey={apiKey}
@@ -108,6 +118,7 @@ function useAccessNavigation(workspaceId: string, access: AccessSearch | undefin
 function OperationalWorkspaceSettingsRoute({
   workspaceId,
   section,
+  generalView,
   modelsAccount,
   modelsView,
   apiKey,
@@ -115,12 +126,14 @@ function OperationalWorkspaceSettingsRoute({
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
+  generalView?: "agent-defaults" | undefined;
   modelsAccount?: string | undefined;
   modelsView?: ModelsView | undefined;
   apiKey?: string | undefined;
   access?: AccessSearch | undefined;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const accessNavigation = useAccessNavigation(workspaceId, access);
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -165,7 +178,22 @@ function OperationalWorkspaceSettingsRoute({
 
   return (
     <WorkspaceSettingsContent>
-      {section === "general" ? (
+      {section === "general" && generalView === "agent-defaults" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading agent defaults" />}>
+          <LazySessionDefaultsPage
+            key={workspaceId}
+            workspaceId={workspaceId}
+            canManage={canManageSettings}
+            onClose={() =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "general" },
+              })
+            }
+          />
+        </Suspense>
+      ) : section === "general" ? (
         <WorkspaceGeneralSettings
           workspaceId={workspaceId}
           organizationLabel={organizationLabel}
@@ -384,6 +412,23 @@ function WorkspaceGeneralSettings({
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
+        {context.clientConfig.agentConfig?.enabled ? (
+          <SettingNavRow
+            label="Agent"
+            description="What agents can do and who they are."
+            value={workspaceAgentDefaultsSummary(
+              activeWorkspace.settings,
+              context.clientConfig.agentConfig,
+            )}
+            onOpen={() =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "general", view: "agent-defaults" },
+              })
+            }
+          />
+        ) : null}
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
           workspaceId={workspaceId}
@@ -825,6 +870,11 @@ function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: str
     </Notice>
   );
 }
+
+const LazySessionDefaultsPage = lazy(async () => {
+  const module = await import("@/components/settings/session-defaults-page");
+  return { default: module.SessionDefaultsPage };
+});
 
 const LazyMembersSection = lazy(async () => {
   const module = await import("./workspace-members-section");

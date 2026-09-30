@@ -62,6 +62,7 @@ import {
 } from "@opengeni/react/session";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BotIcon,
   BugIcon,
   CheckIcon,
   Loader2Icon,
@@ -250,6 +251,11 @@ const LazyFailedSessionBanner = lazy(() =>
   })),
 );
 
+const LazyAgentConfigurationPanel = lazy(() =>
+  import("@/components/session/agent-configuration-panel").then(({ AgentConfigurationPanel }) => ({
+    default: AgentConfigurationPanel,
+  })),
+);
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
@@ -1364,6 +1370,22 @@ function SessionDock(props: {
       ),
     },
   ];
+  if (props.session && context.clientConfig.agentConfig?.enabled) {
+    trailingTabs.push({
+      id: "agent",
+      label: "Agent",
+      icon: <BotIcon />,
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening agent settings" />}>
+          <LazyAgentConfigurationPanel
+            key={props.session.id}
+            session={props.session}
+            onReloadSession={props.onReloadSession}
+          />
+        </Suspense>
+      ),
+    });
+  }
   if (props.session) {
     trailingTabs.push({
       id: "debug",

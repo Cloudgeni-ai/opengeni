@@ -334,6 +334,7 @@ export function OrgSettingsRoute({
               key={`${identityKey}:organization-api-keys`}
               organizationId={accountId}
               canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+              agentSettings={context.clientConfig.agentConfig?.enabled === true}
               view={organizationView === "new-key" ? "new-key" : undefined}
               onViewChange={(view) =>
                 void navigate({

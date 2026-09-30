@@ -277,7 +277,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
   );
 }
 
-function ConnectorAction(props: {
+export function ConnectorAction(props: {
   presentation?: "menu" | "dialog";
   checked?: boolean;
   label?: string;
