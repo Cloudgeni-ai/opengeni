@@ -8,6 +8,7 @@ test("non-model attribution freezes jobs/documents and admits no creator-based l
   );
   expect(source).toContain('NOT NULL DEFAULT \'{"kind":"unknown"}\'::jsonb');
   expect(source).toContain("attribution:=causal_turn.attribution");
+  expect(source).toContain("IF billing_workspace IS NOT NULL THEN");
   expect(source).toContain("FROM opengeni_private.usage_allowance_attribution_receipts");
   expect(source).not.toMatch(/FROM\s+(?:session_turns|scheduled_task_runs)\b/iu);
   expect(source).toContain("attribution:=coalesce(accepted");

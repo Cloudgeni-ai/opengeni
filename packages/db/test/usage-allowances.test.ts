@@ -78,6 +78,10 @@ describe("usage allowance projections and validation", () => {
     expect(usageBranch).not.toContain("PERFORM capture_usage_allowance_period");
     expect(usageBranch).not.toContain("PERFORM emit_usage_allowance_notifications");
     expect(source).toContain("CREATE FUNCTION maintain_usage_allowances");
+    expect(source).toContain(
+      "ALTER FUNCTION opengeni_private.enqueue_workspace_webhook_deliveries_v1()",
+    );
+    expect(source).toContain("SET search_path=pg_catalog,%I,pg_temp");
     expect(source).toContain("om.personal_workspace_id=p_workspace");
   });
 });

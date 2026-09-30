@@ -39,7 +39,7 @@ DECLARE
   accepted jsonb;
   document_attribution jsonb;
   billing_workspace uuid := nullif(current_setting('opengeni.workspace_id',true),'')::uuid;
-  opened integer;
+  opened integer := 0;
   previous text := current_setting('opengeni.knowledge_index_dispatcher',true);
 BEGIN
   IF NEW.change_kind='archive' THEN RETURN NEW; END IF;
@@ -47,10 +47,15 @@ BEGIN
   -- needs only the same tenant's immutable initiating facts through FORCE-RLS,
   -- including private turns, without reading their content. Reuse 0547's exact
   -- owner-only SELECT capability over content-free accounting receipts.
-  INSERT INTO opengeni_private.usage_allowance_capabilities
-    VALUES(pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,billing_workspace)
-    ON CONFLICT DO NOTHING;
-  GET DIAGNOSTICS opened = ROW_COUNT;
+  -- Organization publication/indexing has no workspace billing scope. It
+  -- needs no workspace receipt authority and must not mint a NULL/synthetic
+  -- workspace stamp. Exact turn/schedule attribution still requires one.
+  IF billing_workspace IS NOT NULL THEN
+    INSERT INTO opengeni_private.usage_allowance_capabilities
+      VALUES(pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,billing_workspace)
+      ON CONFLICT DO NOTHING;
+    GET DIAGNOSTICS opened = ROW_COUNT;
+  END IF;
   -- knowledge_entry_apply already resolved the trusted actor and held the exact
   -- attempt/publication locks. Do not read a session's latest turn or creator.
   IF NEW.actor->>'kind'='agent' THEN

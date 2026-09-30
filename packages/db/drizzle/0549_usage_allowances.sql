@@ -147,6 +147,14 @@ BEGIN
   END;
   RETURN NULL;
 END $enqueue$;
+-- The replacement above resets 0546's function SET clauses. Preserve its
+-- invoker posture and pin after the final replacement; caller temp tables
+-- must not intercept durable webhook fanout.
+DO $workspace_webhook_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION opengeni_private.enqueue_workspace_webhook_deliveries_v1()
+    SET search_path=pg_catalog,%I,pg_temp',current_schema());
+END $workspace_webhook_path$;
 CREATE TABLE opengeni_private.usage_allowance_capabilities (
   backend_pid integer NOT NULL,
   transaction_id xid8 NOT NULL,

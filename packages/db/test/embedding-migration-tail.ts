@@ -1,3 +1,5 @@
+import { allowanceMigrationTail } from "./allowance-migration-tail";
+
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
@@ -63,7 +65,5 @@ export const embeddingMigrationTail = [
   "0539_scheduled_admission_refusals.sql",
   // Allowance receipts compile against the withheld Knowledge/embedding and
   // scheduled-refusal lifecycle. Replay them after those prerequisites.
-  "0549_usage_allowances.sql",
-  "0550_non_model_debit_attribution.sql",
-  "0551_video_allowance_refunds.sql",
+  ...allowanceMigrationTail,
 ];

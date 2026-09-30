@@ -12,6 +12,7 @@ import {
   applyCreditDebitAfterUse,
   applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
+  appendSessionEvents,
   bootstrapWorkspace,
   checkWorkspaceAllowance,
   clearWorkspaceAllowance,
@@ -37,6 +38,7 @@ import {
   setWorkspaceAllowance,
   UsageAllowanceVersionConflictError,
   withRlsContext,
+  withSessionActivityRlsContext,
 } from "../src/index";
 
 setDefaultTimeout(60_000);
@@ -169,9 +171,9 @@ describe("usage allowance DB lifecycle", () => {
 
   test("old complete readiness and old role provisioning stay compatible with private allowance storage", async () => {
     const repoRoot = new URL("../../..", import.meta.url).pathname;
-    // Exact pre-allowance origin/main ancestor of PR3038. A moving merge-base
+    // Exact integration-aware pre-allowance origin/main ancestor of PR3038. A moving merge-base
     // would stop exercising the old binary as soon as the PR itself merges.
-    const oldRevision = "3a354ce4637d71e632f92be6f9aa6ff97f470fba";
+    const oldRevision = "30414a09b";
     const directory = `${repoRoot}/.allowance-old-runtime-${crypto.randomUUID()}`;
     // Build immutable old source with the current dependency resolver, without
     // copying/modifying source or substituting today's evaluator constants.
@@ -937,6 +939,105 @@ test("0547 portable owner capabilities cover every SELECT/INSERT/UPDATE and reje
     url.password = owner.appPassword;
     ownerApp = createDb(url.toString());
     const scope = await fixture(ownerApp.db, owner.admin);
+    const webhookSession = await createSession(ownerApp.db, {
+      ...scope,
+      initialMessage: "Pinned webhook outbox",
+      resources: [],
+      metadata: {},
+      model: "test",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+    });
+    const [webhook] = await owner.admin`insert into workspace_webhooks
+      (account_id,workspace_id,url,secret_encrypted,event_types)
+      values(${scope.accountId},${scope.workspaceId},'https://example.test/pinned','sealed',array['turn.completed'])
+      returning id`;
+    await withSessionActivityRlsContext(ownerApp.db, scope, async (tx) => {
+      await tx.execute(sql`create temp table workspace_webhooks as
+        select * from public.workspace_webhooks where id=${webhook!.id}::uuid`);
+      await tx.execute(sql`create temp table workspace_webhook_deliveries
+        (like public.workspace_webhook_deliveries including all)`);
+      await tx.execute(sql`create temp table webhook_shadow_receipts(executed_as text)`);
+      await tx.execute(sql`create function pg_temp.webhook_shadow_probe() returns trigger language plpgsql as $$
+        begin insert into pg_temp.webhook_shadow_receipts values(current_user); return new; end $$`);
+      await tx.execute(sql`create trigger webhook_shadow_probe after insert on pg_temp.workspace_webhook_deliveries
+        for each row execute function pg_temp.webhook_shadow_probe()`);
+      await appendSessionEvents(tx, scope.workspaceId, webhookSession.id, [
+        { type: "turn.completed", payload: { output: "durable" } },
+      ]);
+      const shadow = await tx.execute(
+        sql`select count(*)::integer as count from pg_temp.webhook_shadow_receipts`,
+      );
+      expect((shadow as unknown as { count: number }[])[0]!.count).toBe(0);
+    });
+    const [realDelivery] =
+      await owner.admin`select count(*)::integer as count from workspace_webhook_deliveries
+      where webhook_id=${webhook!.id} and event_type='turn.completed'`;
+    expect(realDelivery!.count).toBe(1);
+    const [webhookPath] = await owner.admin`select proconfig,prosecdef from pg_proc
+      where oid='opengeni_private.enqueue_workspace_webhook_deliveries_v1()'::regprocedure`;
+    expect(webhookPath!.proconfig).toContain("search_path=pg_catalog, public, pg_temp");
+    expect(webhookPath!.prosecdef).toBe(false);
+
+    const organizationEntry = await saveKnowledgeEntry(
+      ownerApp.db,
+      {
+        ...scope,
+        actor: {
+          kind: "human",
+          principalKind: "human_session",
+          subjectId: scope.subjectId,
+          writeScopes: ["organization"],
+          settingsScopes: [],
+          review: true,
+        },
+      },
+      {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        scope: "organization",
+        entry: {
+          kind: "fact",
+          title: "Organization indexing",
+          content: "No workspace stamp required",
+          groupIds: [],
+          evidence: [],
+          relationships: [],
+        },
+      },
+    );
+    const orgRevision = crypto.randomUUID();
+    await ownerSql.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id',${scope.accountId},true),
+        set_config('opengeni.workspace_id','',true),set_config('opengeni.subject_id',${scope.subjectId},true),
+        set_config('opengeni.knowledge_actor_kind','human',true)`;
+      await tx`insert into knowledge_entry_revisions(id,account_id,entry_id,number,body,actor,previous_revision_id)
+        select ${orgRevision}::uuid,account_id,entry_id,number+1,body,actor,id
+        from knowledge_entry_revisions where id=${organizationEntry.revisionId}::uuid`;
+      const [queued] =
+        await tx`select billing_attribution from knowledge_index_jobs where revision_id=${orgRevision}::uuid`;
+      expect(queued!.billing_attribution).toEqual({
+        kind: "human",
+        initiatingHumanSubjectId: scope.subjectId,
+      });
+      const [stamp] =
+        await tx`select count(*)::integer as count from opengeni_private.usage_allowance_capabilities`;
+      expect(stamp!.count).toBe(0);
+      const [authority] =
+        await tx`select usage_allowance_capability_active(${scope.accountId}::uuid,NULL::uuid) as active`;
+      expect(authority!.active).toBe(false);
+    });
+    await expect(
+      withRlsContext(ownerApp.db, scope, (tx) =>
+        tx.execute(
+          sql`insert into opengeni_private.usage_allowance_capabilities values
+        (pg_backend_pid(),pg_current_xact_id(),'public',${scope.accountId}::uuid,${scope.workspaceId}::uuid)`,
+        ),
+      ).catch(nestedPostgresSqlState),
+    ).resolves.toBe("42501");
     const knowledge = await saveKnowledgeEntry(
       ownerApp.db,
       {
