@@ -41,15 +41,18 @@ switched on per deployment or workspace to measure it.
 1. **Recall.** One wide ripgrep pass over the workspace finds candidate files
    by keyword, weighted by how rare each keyword is.
 2. **File triage.** Jev decides which candidate files are about the question.
-3. **Symbols.** The identifiers that the relevant files declare, import, call or
-   render are judged by Jev. For the ones that matter, one ripgrep pass finds
-   their definitions and usages across the workspace. The files they lead to are
-   triaged too, so the file behind an import, or a sibling call site, is found
-   even when no keyword matched it. The engine runs at most two rounds.
-4. **Passage check.** Jev scores passages for relevance and for each
-   sub-question. The most relevant small files are cut into declaration-sized
-   tiles, so every function and handler in them is judged. Other files get
-   windows around their keyword and symbol hits.
+3. **Symbols.** Jev judges a shortlist of the identifiers that the relevant files declare, import, call
+   or render: at most 160, ranked cheaply first. For the ones that matter, one ripgrep pass finds their
+   definitions and usages across the workspace, so the file behind an import, or a sibling call site, is
+   found even when no keyword matched it. This runs alongside step 4, and the windows it adds are verified
+   in the same Jev round as the leads, so it adds no round of its own.
+4. **Passage check.** Jev scores passages for relevance and for each sub-question. The most relevant
+   small files are cut into declaration-sized tiles, so every function and handler in them is judged.
+   Other files get windows around their keyword and symbol hits. In the same round, Jev answers a
+   "must change together" question for up to 60 functions of the three most relevant files, each shown by
+   its signature and the calls it makes. A chosen function is packed right after each sub-question's best
+   passage: it catches sibling code that a literal relevance check scores low, such as another handler
+   that mutates the same state.
 5. **Leads.** The tool follows up to six definitions named in the best passages,
    one level deep, and checks up to three call sites of each.
 6. **Pack.** Passages that pass are packed within a token budget:
@@ -59,8 +62,9 @@ switched on per deployment or workspace to measure it.
      sub-question is weak.
 
    A final Jev check gives the packed passages an evidence rating:
-   - below 0.4, the tool follows the next leads once;
-   - below 0.7, it refills the budget with the next-best passages.
+   - below 0.4, the tool follows the next leads once and checks again;
+   - below 0.7, it refills the budget with the next-best passages; the rating then covers the passages
+     above the bar.
 
    The rating cannot see evidence the search missed, so the header, the tool
    description and the directive all steer follow-up searches outside the pack:
@@ -74,6 +78,15 @@ switched on per deployment or workspace to measure it.
    leads, symbols, call sites and the token budget), with the cut files and line
    ranges. Keywords that matched nothing, or only files judged irrelevant, are
    listed with similar identifiers that exist in the workspace.
+
+On 138 real staging searches replayed at their own commits, compared with scout-0.3.1:
+- the share of the regions agents later edited or cited that the pack contains rose from 13% to 18%;
+- the share it contains or points to by line range rose from 29% to 57%;
+- packs grew from 8.8k to 10.6k tokens;
+- Jev cost rose from $0.005 to $0.009 per call.
+
+Most of the added lines are relevant: lines outside any region the agent later used rose 4%, while lines
+inside them rose 49%.
 
 The engine lives in `@opengeni/jev` and runs in the worker. The workspace sees
 only read-only commands through `SandboxChannelAService`:
