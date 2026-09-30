@@ -122,6 +122,14 @@ config:
   # Keep false for the image rollout, then flip true only after API, worker, and
   # web replicas all understand the host authority discriminator.
   OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
+  # Agent configuration (sessions.agent_config, migration 0542). Readers first:
+  # roll every worker onto the 0542-aware image with both switches off, then
+  # set ADMISSION to "true" so the API accepts `agent` inputs (and PUT
+  # .../agent, workspace defaults, scheduled/automation `agent`). DEFAULT makes
+  # new top-level sessions that omit `agent` resolve { capabilities: "all" }.
+  # See docs/deployment.md.
+  OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED: "false"
+  OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS: "false"
   OPENGENI_BILLING_MODE: disabled
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"

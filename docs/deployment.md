@@ -1274,6 +1274,24 @@ remove, drain, or disable those durable refs. Upgraded readers, child
 inheritance, and workers consume them regardless of their local switch value;
 the switch gates only new external admission and static configuration.
 
+Agent configuration (`sessions.agent_config`, rolling migration
+`0542_session_agent_config.sql`) has two switches, both `false` in config and
+Helm. Deploy the 0542-aware API, control worker, and turn worker everywhere
+with both off: every session keeps a NULL configuration and byte-identical
+legacy behavior, and an old worker reading a new row ignores the column. Then
+set `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true` to admit `agent` on session
+create, `PUT .../sessions/:id/agent`, MCP `session_create`, scheduled-task
+`agentConfig.agent`, automation templates, and workspace
+`settings.sessionAgentDefaults`; with it off each of those is a 422 whose
+`details.code` is `agent_config_not_enabled`, and stored workspace defaults are
+ignored. `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS=true` additionally
+resolves omitted-`agent` top-level sessions to `{ capabilities: "all" }`; an old
+worker ignoring an `"all"` configuration still runs today's full tool set.
+Turning either switch off later changes only new admissions: stored
+configurations stay authoritative for their sessions, and a scheduled task
+whose stored `agent` is no longer admissible is refused (skipped) rather than
+run without it. See `packages/contracts/src/agent-config.ts`.
+
 Migration 0303 is intentionally rolling and applies while the switch remains
 `false`; applying the ordinary migration chain does not activate an
 organization. The switch is enforced by the separately invoked session-tenancy

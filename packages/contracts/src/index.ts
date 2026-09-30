@@ -8,7 +8,14 @@ import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
 export * from "./agent-config";
-import { WorkspaceAgentDefaults } from "./agent-config";
+import {
+  AGENT_INSTRUCTIONS_MAX_CHARACTERS,
+  AgentConfigRequest,
+  AgentEffectiveTools,
+  ClientAgentConfig,
+  ResolvedAgentConfig,
+  WorkspaceAgentDefaults,
+} from "./agent-config";
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
 export * from "./skill-use";
@@ -2565,6 +2572,9 @@ export const UpdateWorkspaceSettingsRequest = z
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+    // Agent defaults for new sessions; null clears them. Requires the agent
+    // configuration admission switch.
+    sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -7821,6 +7831,7 @@ export const NewSessionDraftOptions = withVariableSetIdAlias({
   goal: GoalSpec.optional(),
   firstPartyMcpPermissions: z.array(Permission).optional(),
   firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+  agent: AgentConfigRequest.optional(),
 });
 export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
 
@@ -9771,6 +9782,9 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       .min(SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS)
       .max(SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS)
       .optional(),
+    // Agent configuration for every generated session; resolved at dispatch
+    // (the whole-row execution digest covers it). Omitted keeps legacy.
+    agent: AgentConfigRequest.optional(),
   };
 }
 
@@ -9988,6 +10002,10 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
     resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
     resolvedFirstPartyMcpPermissions: z.array(Permission),
+    /** Agent configuration resolved for generated sessions; absent = legacy. */
+    resolvedAgentConfig: ResolvedAgentConfig.optional(),
+    /** Effective instructions from the `agent.instructions` alias, when set. */
+    resolvedAgentInstructions: z.string().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
     resolvedVariableSet: z
       .object({
         id: z.string().uuid(),
@@ -10648,6 +10666,8 @@ export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSche
       sandboxBackend: SandboxBackend.nullable().default(null),
       policyRole: z.string().trim().min(1).max(128).nullable().default(null),
       metadata: AutomationBoundedJson.default({}),
+      // Agent configuration for generated sessions. Omitted keeps legacy.
+      agent: AgentConfigRequest.optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -12977,6 +12997,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Exact model-visible OpenGeni selection. The default omits connector-wide
     // tools; [] intentionally selects none.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+    // Frozen agent configuration (migration 0542). null = a legacy session
+    // with byte-identical historical behavior.
+    agent: ResolvedAgentConfig.nullable().default(null),
+    // Capability-level projection of what a configured session can use.
+    // Omitted by internal readers; null for legacy sessions.
+    effectiveTools: AgentEffectiveTools.nullable().optional(),
     // Per-session third-party MCP servers, metadata only. Credential values are
     // write-only and never appear here.
     mcpServers: z.array(SessionMcpServerMetadata).default([]),
@@ -13327,6 +13353,7 @@ export const SessionEventType = z.enum([
   "session.title_set",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
+  "session.agent.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
@@ -13561,6 +13588,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.queue.prompt.cancelled",
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
+    "session.agent.updated",
   ],
   terminal: [
     "turn.completed",
@@ -15766,6 +15794,10 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // exposes none.
       // This does not grant authority: every registered tool is permission-gated.
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+      // One agent configuration: capabilities, identity, instructions alias and
+      // renderer. Omission keeps today's behavior (or inherits a configured
+      // parent). Children may only narrow. Behind the admission switch.
+      agent: AgentConfigRequest.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
       // policies, connection refs, and encrypted credentials. Explicit arrays,
@@ -17786,6 +17818,13 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxDurationSeconds: VOICE_INPUT_MAX_DURATION_SECONDS,
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
+    }),
+    // Agent configuration rollout: whether `agent` is admitted, whether new
+    // sessions default to a configuration, and per-capability availability.
+    agentConfig: ClientAgentConfig.default({
+      enabled: false,
+      defaultForNewSessions: false,
+      capabilities: [],
     }),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.

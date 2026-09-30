@@ -77,6 +77,7 @@ import {
   SessionMessageSearchRequest,
   type SessionMessageSearchResponse,
 } from "@opengeni/contracts";
+import { ResolvedAgentConfig } from "@opengeni/contracts";
 import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
@@ -33274,6 +33275,11 @@ export type SessionCreateInput = {
   parentSessionId?: string | null;
   /** Freezes a new root session's code_search decision; omitted uses the boot-installed policy. */
   codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
+  /**
+   * Frozen agent configuration (migration 0542). Omitted or null writes a
+   * legacy session. When provided it also participates in keyed-create replay.
+   */
+  agentConfig?: ResolvedAgentConfig | null;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
@@ -33594,6 +33600,8 @@ type SessionCreateReplayIdentity = {
   agentAccess?: SessionAgentAccess;
   scopeSubjectId?: SessionScopeSubjectId | null;
   memoryScope?: SessionMemoryScope;
+  /** Resolved agent configuration of the retrying request; omitted skips the check. */
+  agentConfig?: ResolvedAgentConfig | null;
 };
 
 // Session metadata is immutable after creation and already participates in
@@ -33685,6 +33693,33 @@ function assertSessionCreateReplayIdentity(
   ) {
     throw new SessionCreateIdempotencyConflictError();
   }
+  // A keyed retry that resolves a different agent configuration (capabilities,
+  // identity, renderer) is a different request.
+  if (
+    input.agentConfig !== undefined &&
+    stableJson(agentConfigReplayIdentity(existing.agentConfig)) !==
+      stableJson(agentConfigReplayIdentity(input.agentConfig))
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+}
+
+/** Replay compares what the session does, not the bookkeeping `source` label. */
+function agentConfigReplayIdentity(config: unknown): unknown {
+  const parsed = parseStoredSessionAgentConfig(config);
+  if (!parsed) return null;
+  const { source: _source, ...identity } = parsed;
+  return identity;
+}
+
+/**
+ * Read a stored agent configuration. A value this release cannot parse (for
+ * example written by a newer release after a rollback) projects as null.
+ */
+export function parseStoredSessionAgentConfig(value: unknown): ResolvedAgentConfig | null {
+  if (value === null || value === undefined) return null;
+  const parsed = ResolvedAgentConfig.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 async function lockSessionCreateIdempotencyKey(
@@ -33845,6 +33880,7 @@ async function createSessionInTransaction(
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
         ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
         ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+        ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
       });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
@@ -34074,6 +34110,7 @@ async function createSessionInTransaction(
                 ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
                 : "portable"),
             codeSearchEnabled,
+            agentConfig: input.agentConfig ?? null,
             status: "queued",
           },
           "initialMessage",
@@ -34116,6 +34153,7 @@ async function createSessionInTransaction(
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
           ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
           ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+          ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
@@ -34327,6 +34365,8 @@ export async function getInitializedSessionCreateReplay(
 
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
+    /** Resolved agent configuration of the retry; omitted skips the comparison. */
+    agentConfig?: ResolvedAgentConfig | null;
   },
 ): Promise<InitializedSessionCreateReplay | null> {
   return await withWorkspaceSubjectSessionActivityRls(
@@ -81455,6 +81495,8 @@ function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
+  agentConfig?: ResolvedAgentConfig | null;
+  instructions?: string | null;
   toolPolicy?: SessionToolPolicy;
   toolPolicyVersion?: number;
   expectedToolPolicyVersion?: number;
@@ -82923,6 +82965,10 @@ type LockedSessionUpdateResult = {
     resources?: ResourceRef[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
+    /** Agent configuration (migration 0542); written with the tool-policy CAS. */
+    agentConfig?: ResolvedAgentConfig | null;
+    /** Session instructions (the `agent.instructions` alias). */
+    instructions?: string | null;
     toolPolicy?: SessionToolPolicy;
     toolPolicyVersion?: number;
     expectedToolPolicyVersion?: number;
@@ -83090,6 +83136,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(update.firstPartyMcpTools !== undefined
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
               : {}),
+            ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
+            ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }
@@ -83385,6 +83433,7 @@ function mapSession(
         ? row.codexCompactionMode
         : "portable",
     codeSearchEnabled: row.codeSearchEnabled === true,
+    agent: parseStoredSessionAgentConfig(row.agentConfig),
     ...pin,
     ...attention,
     ...archive,
