@@ -256,7 +256,7 @@ export async function completeClaudeSubscriptionOAuth(
   });
   if (tokens.account) bundle.identity.accountUuid = tokens.account.uuid;
   const serialized = JSON.stringify(bundle);
-  const version = await withRlsContext(deps.db, scope, async (tx) => {
+  const credentialVersion = await withRlsContext(deps.db, scope, async (tx) => {
     let version: number;
     if (scope.workspaceId) {
       const connectionInput = {
@@ -343,6 +343,6 @@ export async function completeClaudeSubscriptionOAuth(
   ).catch(() => undefined);
   return ClaudeSubscriptionOAuthCompleteResponse.parse({
     connected: true,
-    credentialVersion: version,
+    credentialVersion,
   });
 }

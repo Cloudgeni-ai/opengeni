@@ -593,14 +593,14 @@ test("catalog loading remains offline with expired OAuth in both scopes and pres
     settings,
     "gpt-5.6-sol",
   );
-  const provider = parseModelProvidersJson(catalogs.modelProvidersJson).find(
-    (provider) => provider.id === "organization-claude-subscription",
+  const catalogProvider = parseModelProvidersJson(catalogs.modelProvidersJson).find(
+    (candidate) => candidate.id === "organization-claude-subscription",
   )!;
-  expect(provider.anthropic!.credentialBinding).toEqual({
+  expect(catalogProvider.anthropic!.credentialBinding).toEqual({
     connectionId: before!.connectionId,
     credentialVersion: before!.credentialVersion,
   });
-  expect(JSON.stringify(provider.anthropic)).not.toContain("refreshToken");
+  expect(JSON.stringify(catalogProvider.anthropic)).not.toContain("refreshToken");
   expect(
     (await loadClaudeSubscriptionUsageCredential(client.db, settings, usageScope(scope)))!
       .credentialEncrypted,

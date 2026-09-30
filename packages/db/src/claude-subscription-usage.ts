@@ -100,13 +100,13 @@ function plaintext(
 ) {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) throw new Error("Claude credential encryption is unavailable");
-  let plaintext = decryptEnvironmentValue(key, row.credentialEncrypted);
+  let serializedCredential = decryptEnvironmentValue(key, row.credentialEncrypted);
   if (scope.scope === "workspace") {
-    const credential = JSON.parse(plaintext) as { apiKey?: unknown };
+    const credential = JSON.parse(serializedCredential) as { apiKey?: unknown };
     if (typeof credential.apiKey !== "string") throw new Error("Claude credential is invalid");
-    plaintext = credential.apiKey;
+    serializedCredential = credential.apiKey;
   }
-  return plaintext;
+  return serializedCredential;
 }
 function token(
   settings: Settings,
