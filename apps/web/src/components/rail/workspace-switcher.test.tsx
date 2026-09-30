@@ -185,10 +185,15 @@ describe("workspace picker", () => {
       const workspaceRows = Array.from(group!.querySelectorAll('[role="menuitem"]')).map(
         (row) => row.textContent ?? "",
       );
-      expect(workspaceRows).toHaveLength(3);
+      expect(workspaceRows).toHaveLength(4);
       expect(workspaceRows[0]).toContain("Design preview");
       expect(workspaceRows[1]).toContain("Personal workspace");
       expect(workspaceRows[2]).toContain("Production");
+      // An owner gets one quiet quick path to the organization's create page.
+      expect(workspaceRows[3]).toBe("New workspace");
+      const create = item("New workspace");
+      expect(create?.getAttribute("href")).toContain("/organization");
+      expect(create?.getAttribute("href")).toContain("view=new-workspace");
       expect(menuText()).not.toContain("Launch room");
 
       const switchGroup = document.body.querySelector(
@@ -201,10 +206,9 @@ describe("workspace picker", () => {
       ).toEqual(["Beta Partners", "Northwind Labs"]);
       // An organization with nothing open to this person can't be switched to.
       expect(menuText()).not.toContain("Empty Org");
-      // Creating and administering live elsewhere: the picker is only places to go.
+      // Administering lives elsewhere.
       expect(item("Organization settings")).toBeUndefined();
       expect(item("New organization")).toBeUndefined();
-      expect(item("New workspace")).toBeUndefined();
     } finally {
       await picker.unmount();
     }

@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { Building2Icon, LockIcon, PauseIcon, PlusIcon } from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -25,6 +26,7 @@ import {
 } from "@/lib/org";
 import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
 import { hasAccountPermission } from "@/lib/permissions";
+import { currentPageReturnTo, returnToSearch, type ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
 import { administersOrganization } from "@/lib/workspaces";
 import {
@@ -125,6 +127,33 @@ function CreateWorkspaceHereMenuItem(props: { organizationLabel: string; onCreat
   );
 }
 
+/**
+ * "New workspace": the quick path to the one create flow, the organization's
+ * New workspace page. Shown only to people who can create there; its back link
+ * returns to the page the picker was opened on.
+ */
+function CreateWorkspaceLinkMenuItem(props: {
+  workspaceId: string;
+  returnTo?: ReturnTo | undefined;
+}) {
+  return (
+    <DropdownMenuItem asChild>
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId: props.workspaceId }}
+        search={{
+          section: "workspaces",
+          view: "new-workspace",
+          ...returnToSearch(props.returnTo),
+        }}
+      >
+        <PlusIcon />
+        <span className="min-w-0 flex-1 truncate">New workspace</span>
+      </Link>
+    </DropdownMenuItem>
+  );
+}
+
 /** The workspaces of one organization, the current one checked. */
 export function WorkspaceMenuItems(props: {
   workspaces: Workspace[];
@@ -157,9 +186,10 @@ export function WorkspaceMenuItems(props: {
  * The workspace picker at the top of the main rail. It shows the workspace and
  * its organization, lists that organization's workspaces, and, when the person
  * belongs to more than one organization, the others to switch to. Switching
- * organization opens a workspace there. Creating workspaces and organizations
- * and organization settings live elsewhere (Organization settings, the account
- * menu, the settings rail). Callers own where a workspace selection lands.
+ * organization opens a workspace there. People who can create workspaces get a
+ * quiet "New workspace" row that opens the organization's create page; new
+ * organizations and organization settings live in the account menu and the
+ * settings rail. Callers own where a workspace selection lands.
  */
 export function WorkspaceSwitcherMenu(props: {
   workspaceId: string;
@@ -221,6 +251,8 @@ export function WorkspaceSwitcherMenu(props: {
         activeWorkspaceId={props.workspaceId}
         activeAccountId={activeAccountId}
         onCreateHere={createHereAccountId ? () => setCreateOpen(true) : undefined}
+        canCreate={administers}
+        createReturnTo={currentPageReturnTo(activeWorkspace?.name ?? "Back")}
         rememberedWorkspaceIds={rememberedWorkspaceIds}
         onSelect={props.onSelect}
         managedSelfContext={context.managedSelfContext}
@@ -317,6 +349,10 @@ export function WorkspaceMenu(props: {
   activeAccountId: string | null;
   /** Create by name in the current organization; see CreateWorkspaceHereMenuItem. */
   onCreateHere?: (() => void) | undefined;
+  /** Show the "New workspace" link to the organization's create page. */
+  canCreate?: boolean;
+  /** Where that page's back link returns. */
+  createReturnTo?: ReturnTo | undefined;
   /** The last workspace used in each organization. */
   rememberedWorkspaceIds?: Record<string, string>;
   onSelect: (workspaceId: string) => void;
@@ -385,7 +421,12 @@ export function WorkspaceMenu(props: {
               managedSelfContext={props.managedSelfContext}
               onSelect={props.onSelect}
             />
-            {props.onCreateHere ? (
+            {props.canCreate ? (
+              <CreateWorkspaceLinkMenuItem
+                workspaceId={props.activeWorkspaceId}
+                returnTo={props.createReturnTo}
+              />
+            ) : props.onCreateHere ? (
               <CreateWorkspaceHereMenuItem
                 organizationLabel={currentOrg.label}
                 onCreate={props.onCreateHere}
