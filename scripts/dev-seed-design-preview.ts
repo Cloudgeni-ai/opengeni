@@ -59,6 +59,7 @@ import {
   type ScheduleSeed,
 } from "./dev-seed-design-preview/surfaces";
 import { LIVE_CONTENT, applyLiveBatch } from "./dev-seed-design-preview/live-edit";
+import { seedMachines } from "./dev-seed-design-preview/machines";
 import { ConversationBuilder, type SeedEventRow } from "./dev-seed-design-preview/timeline";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1863,6 +1864,7 @@ await seedCapabilities();
 await refreshScheduleAccess();
 await seedIntegrations();
 await seedRigs();
+await seedConnectedMachines();
 
 log("\nDone. Workspaces:");
 for (const line of workspaceUrls) log(`  ${line}`);
@@ -2710,6 +2712,36 @@ async function seedIntegrations() {
   if (deliveries) log(`Wrote ${deliveries} webhook deliveries`);
 }
 
+/** Connected Machines with an hour of metrics, when the stack enables them. */
+async function seedConnectedMachines() {
+  if (!migrationsUrl) return;
+  const probe = workspaceIdByName["Platform engineering"];
+  if (!probe) return;
+  const response = await owner.request("GET", `/v1/workspaces/${probe}/machines`, undefined, {
+    allow: [404],
+  });
+  if (response.status === 404) {
+    log("Connected Machines are off (OPENGENI_SANDBOX_SELFHOSTED_ENABLED); skipped machines");
+    return;
+  }
+  const machines = await seedMachines({
+    databaseUrl: migrationsUrl,
+    workspaces: conversationPlan.map((plan) => ({
+      name: plan.name,
+      workspaceId: plan.workspaceId,
+      accountId: plan.accountId,
+    })),
+    statePath: resolve(dirname(credentialsPath), "machines.json"),
+    log,
+  });
+  if (machines.length) {
+    log(
+      `Seeded ${machines.length} connected machines; keep them online with ` +
+        "`bun scripts/dev-seed-design-preview/machines.ts --heartbeat`",
+    );
+  }
+}
+
 /** Sandbox environments with a second version for one of them. */
 async function seedRigs() {
   let created = 0;
@@ -2779,7 +2811,10 @@ async function seedRigHealth() {
         if (done) continue;
         const finishedAt = new Date(Date.now() - 2 * 60_000);
         const startedAt = new Date(finishedAt.getTime() - 94_000);
-        const checks = (rig.activeVersion.checks ?? seed.checks) as { name: string; command: string }[];
+        const checks = (rig.activeVersion.checks ?? seed.checks) as {
+          name: string;
+          command: string;
+        }[];
         const checkResults = checks.map((check) => {
           const failed = !seed.health.passed && check.name === seed.health.failing;
           return {
