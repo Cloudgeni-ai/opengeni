@@ -54,9 +54,13 @@ import {
   type EditableArtifactLiveSnapshot,
   type EditableArtifactLiveTicket,
   type EditableArtifactLiveTicketRecord,
+  type EditableArtifactLiveSourceSessionAuthority,
 } from "./types";
 
 const textEncoder = new TextEncoder();
+// Source-bound sockets must renew through the product proxy's live host check.
+// Unbound native console sockets retain their existing artifact-only lifecycle.
+const SOURCE_SESSION_LIVE_LEASE_MS = 15_000;
 const strictDecoder = new TextDecoder("utf-8", { fatal: true });
 
 // Shared OGATX is bounded at 5 MiB and whole OGACO at 8 MiB. Transport
@@ -112,6 +116,11 @@ export type OpenEditableArtifactLiveInput = Readonly<{
   resume: EditableArtifactLiveResume;
   sink: EditableArtifactLiveSinkPort;
   signal?: AbortSignal;
+  /** API-owned canonical source session authorization, including live revocation. */
+  authorizeSourceSession?: (
+    ticket: EditableArtifactLiveTicketRecord,
+    permission: "read" | "edit",
+  ) => Promise<boolean>;
 }>;
 
 export interface EditableArtifactLiveSession {
@@ -160,6 +169,7 @@ export class EditableArtifactLiveServer {
       modality: EditableArtifactModality;
       actor: EditableArtifactActor;
       allowEdit: boolean;
+      sourceSessionAuthority?: EditableArtifactLiveSourceSessionAuthority;
     }>,
   ): Promise<EditableArtifactLiveTicket> {
     return this.ticketAuthority.mint(input);
@@ -183,6 +193,9 @@ export class EditableArtifactLiveServer {
       resume: input.resume,
       sink: input.sink,
       ...(input.signal === undefined ? {} : { parentSignal: input.signal }),
+      ...(input.authorizeSourceSession
+        ? { authorizeSourceSession: input.authorizeSourceSession }
+        : {}),
     });
     await session.start();
     return session;
@@ -197,6 +210,7 @@ type SessionConstructor = Readonly<{
   resume: EditableArtifactLiveResume;
   sink: EditableArtifactLiveSinkPort;
   parentSignal?: AbortSignal;
+  authorizeSourceSession?: OpenEditableArtifactLiveInput["authorizeSourceSession"];
 }>;
 
 type InFlight = Readonly<{
@@ -214,6 +228,8 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
   private readonly dependencies: EditableArtifactLiveServerDependencies;
   private readonly options: NormalizedOptions;
   private readonly ticket: EditableArtifactLiveTicketRecord;
+  private readonly authorizeSourceSession: OpenEditableArtifactLiveInput["authorizeSourceSession"];
+  private readonly sourceSessionLeaseExpiresAt: number | null;
   private readonly resume: EditableArtifactLiveResume;
   private readonly sink: EditableArtifactLiveSinkPort;
   private readonly abort = new AbortController();
@@ -247,6 +263,10 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
     this.dependencies = input.dependencies;
     this.options = input.options;
     this.ticket = input.ticket;
+    this.authorizeSourceSession = input.authorizeSourceSession;
+    this.sourceSessionLeaseExpiresAt = input.ticket.sourceSessionAuthority
+      ? Date.parse(input.ticket.issuedAt) + SOURCE_SESSION_LIVE_LEASE_MS
+      : null;
     this.artifactId = input.ticket.artifactId;
     this.modality = input.ticket.modality;
     this.streamEpoch = input.streamEpoch;
@@ -527,6 +547,7 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
   }
 
   private assertOpen(): void {
+    this.assertSourceSessionLease();
     if (this.closedValue) {
       throw new EditableArtifactLiveError("closed", "Live session is closed");
     }
@@ -1035,16 +1056,38 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
   private async checkPermission(
     permission: "read" | "edit",
   ): Promise<Awaited<ReturnType<EditableArtifactAuthorizationPort["authorize"]>>> {
+    this.assertSourceSessionLease();
+    if (this.ticket.sourceSessionAuthority) {
+      if (
+        !this.authorizeSourceSession ||
+        !(await this.authorizeSourceSession(this.ticket, permission))
+      ) {
+        return Object.freeze({ allowed: false, revision: this.authorizationRevision });
+      }
+    }
     const decision = await this.dependencies.authorization.authorize({
       scope: this.ticket.scope,
       artifactId: this.artifactId,
       actor: this.ticket.actor,
       permission,
     });
+    this.assertSourceSessionLease();
     if (permission === "edit" && !this.ticket.allowEdit) {
       return Object.freeze({ ...decision, allowed: false });
     }
     return decision;
+  }
+
+  private assertSourceSessionLease(): void {
+    if (
+      this.sourceSessionLeaseExpiresAt !== null &&
+      this.dependencies.clock.now().getTime() >= this.sourceSessionLeaseExpiresAt
+    ) {
+      void this.close("ticket_expired");
+      throw new EditableArtifactLiveError("ticket_expired", "Source session lease expired", {
+        retryable: true,
+      });
+    }
   }
 
   private async sendBarrier(): Promise<void> {
@@ -1062,6 +1105,7 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
 
   private async send(frame: EditableArtifactLiveServerFrame): Promise<void> {
     if (this.closedValue) return;
+    this.assertSourceSessionLease();
     const bytes = estimateFrameBytes(frame);
     if (bytes > this.options.maxOutboundFrameBytes) {
       throw new EditableArtifactLiveError(
@@ -1131,9 +1175,21 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
       ),
     );
     while (!this.abort.signal.aborted) {
-      await this.dependencies.scheduler.sleep(tick, this.abort.signal);
+      const leaseRemaining =
+        this.sourceSessionLeaseExpiresAt === null
+          ? tick
+          : this.sourceSessionLeaseExpiresAt - this.dependencies.clock.now().getTime();
+      if (leaseRemaining <= 0) {
+        await this.close("ticket_expired");
+        return;
+      }
+      await this.dependencies.scheduler.sleep(Math.min(tick, leaseRemaining), this.abort.signal);
       if (this.abort.signal.aborted || this.closedValue) return;
       const now = this.dependencies.clock.now().getTime();
+      if (this.sourceSessionLeaseExpiresAt !== null && now >= this.sourceSessionLeaseExpiresAt) {
+        await this.close("ticket_expired");
+        return;
+      }
       if (this.oldestInFlightAt !== 0 && now - this.oldestInFlightAt >= this.options.ackTimeoutMs) {
         await this.enqueue(() => this.requireResync("slow_client", this.targetHead));
         return;

@@ -612,6 +612,31 @@ export async function touchEditableArtifactSessionLink(
   });
 }
 
+/** Exact association lookup; never depends on the bounded recent-artifact list. */
+export async function hasEditableArtifactSessionLink(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  sessionIdInput: string,
+  artifactIdInput: string,
+): Promise<boolean> {
+  const scope = validateScope(scopeInput);
+  const sessionId = validateUuid(sessionIdInput, "session id");
+  const artifactId = validateStableId(artifactIdInput, "artifact id");
+  return await withRlsContext(db, scope, async (tx) => {
+    const rows = await rawRows<{ linked: boolean }>(
+      tx,
+      sql`select exists (
+        select 1 from editable_artifact_session_links
+        where account_id = ${scope.accountId}::uuid
+          and workspace_id = ${scope.workspaceId}::uuid
+          and session_id = ${sessionId}::uuid
+          and artifact_id = ${artifactId}
+      ) as linked`,
+    );
+    return rows[0]?.linked === true;
+  });
+}
+
 /** List the exact artifacts most recently used by one session. */
 export async function listEditableArtifactIdsForSession(
   db: Database,

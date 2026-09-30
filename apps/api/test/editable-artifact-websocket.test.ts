@@ -97,6 +97,33 @@ describe("editable artifact WebSocket transport", () => {
     expect(upgradeCalls).toBe(0);
   });
 
+  test("passes API-owned source-session authorization into live runtime admission", async () => {
+    const harness = fixture();
+    const authorizeSourceSession = async () => true;
+    const connection = new EditableArtifactWebSocketConnection(
+      harness.application,
+      authorizeSourceSession,
+    );
+    connection.attach(new TestSocket(connection));
+    connection.receive(
+      encodeEditableArtifactLiveOpenWireFrame({
+        type: "open",
+        protocolVersion: 2,
+        artifactId,
+        token: "t".repeat(43),
+        resume: {
+          modality: "spreadsheet",
+          localCursor: 0,
+          localStateHash: zeroHash,
+          localCausalFrontier: [],
+          requireSnapshot: false,
+        },
+      }),
+    );
+    await settle();
+    expect(harness.openCalls[0]?.authorizeSourceSession).toBe(authorizeSourceSession);
+  });
+
   test("opens once, forwards exact OGATX bytes, emits transaction then acceptance, and applies ACK", async () => {
     const harness = fixture();
     const connection = new EditableArtifactWebSocketConnection(harness.application);
