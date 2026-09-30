@@ -171,6 +171,7 @@ describe("config", () => {
       maxNewFilesSelected: 6,
       triage: false,
       tileNewMaxLines: 300,
+      windowsPerFile: 3,
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.wave3).toEqual({
       enabled: true,

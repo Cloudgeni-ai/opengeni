@@ -103,6 +103,18 @@ export interface FakeJevOptions {
    * other symbol gets 0.1. Unset: every symbol gets 0.1, so symbol discovery follows nothing.
    */
   symbolGood?: string[];
+  /**
+   * Declarations the "must change together" judge answers 0.9 for (an entry of `state.declarations` naming
+   * one); every other declaration gets 0.1. Unset: every declaration gets 0.1, so nothing is chosen.
+   */
+  changeGood?: string[];
+  /**
+   * Answer of every status question (overall and per sub-question); an array gives the answer of successive
+   * status requests (the last entry repeats). Unset: 0.85.
+   */
+  statusScore?: number | number[];
+  /** 1-based numbers of the status requests that fail with 503 (the others answer normally). */
+  failStatusCalls?: number[];
   /** Every request returns this retryable status (503 by default when true). */
   fail?: boolean;
   rejectStatus?: number;
@@ -114,11 +126,12 @@ export interface FakeJevOptions {
 /**
  * Deterministic fake Jev: P(yes) = 0.9 when the judged item (file entry, passage text or lead) mentions one of
  * `good`, else 0.1. The second sub-question is only covered by passages mentioning compactNow. Status
- * questions answer 0.85. Symbols (symbol discovery) are judged by `symbolGood` instead. Usage is the request
- * size / 3.2.
+ * questions answer 0.85 (or `statusScore`). Symbols (symbol discovery) are judged by `symbolGood` and
+ * declarations ("must change together") by `changeGood` instead. Usage is the request size / 3.2.
  */
 export function fakeJevFetch(opts: FakeJevOptions = {}) {
   const good = opts.good ?? ["compactionThresholdTokens", "compactNow", "clampRatio", "MIN_RATIO"];
+  let statusCalls = 0;
   return async (url: string, init: RequestInit): Promise<Response> => {
     if (init.method === "GET") return new Response("{}", { status: 200 });
     const body = JSON.parse(String(init.body));
@@ -129,6 +142,15 @@ export function fakeJevFetch(opts: FakeJevOptions = {}) {
     const st = body.state;
     if (opts.failStatus && st.evidence !== undefined)
       return Response.json({ detail: "down" }, { status: 503 });
+    let statusP = 0.85;
+    if (st.evidence !== undefined) {
+      statusCalls++;
+      if (opts.failStatusCalls?.includes(statusCalls))
+        return Response.json({ detail: "down" }, { status: 503 });
+      const sc = opts.statusScore;
+      if (typeof sc === "number") statusP = sc;
+      else if (sc?.length) statusP = sc[Math.min(statusCalls, sc.length) - 1]!;
+    }
     const answers: Record<string, unknown> = {};
     for (const id of Object.keys(body.questions)) {
       let text = "";
@@ -145,7 +167,15 @@ export function fakeJevFetch(opts: FakeJevOptions = {}) {
         };
         continue;
       }
-      let p = text === "status" ? 0.85 : good.some((g) => text.includes(g)) ? 0.9 : 0.1;
+      if (st.declarations?.[id] !== undefined) {
+        const decl: string = st.declarations[id];
+        answers[id] = {
+          type: "noul",
+          noul: (opts.changeGood ?? []).some((g) => decl.startsWith(`${g}  (`)) ? 0.9 : 0.1,
+        };
+        continue;
+      }
+      let p = text === "status" ? statusP : good.some((g) => text.includes(g)) ? 0.9 : 0.1;
       if (id.startsWith("cov::") && id.endsWith("::1") && !text.includes("compactNow")) p = 0.1;
       answers[id] = { type: "noul", noul: p };
     }

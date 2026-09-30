@@ -1357,9 +1357,10 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       }
     } else refilled = true;
   } else if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.fillBelowRating) {
-    const before = body.included.length;
+    // compare what is packed, not how many blocks: a refilled passage can be joined onto a shown neighbour
+    const before = body.included.map((x) => `${x.id}@${x.start}-${x.end}`).join(",");
     body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
-    if (body.included.length !== before) {
+    if (body.included.map((x) => `${x.id}@${x.start}-${x.end}`).join(",") !== before) {
       // the rating stays that of the passages above the bar (no second check: one Jev round less)
       adaptive.push(
         `rating ${r2(firstRating)}: filled the budget with passages rel >= ${cfg.pack.fillMinRelevance}`,

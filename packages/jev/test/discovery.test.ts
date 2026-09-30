@@ -28,6 +28,7 @@ import {
   extractSymbols,
   importNames,
   locateUsages,
+  MAX_SYMBOL_LINE,
   specificName,
   symbolCandidates,
   usagePatterns,
@@ -168,6 +169,33 @@ describe("extractSymbols / importNames", () => {
     const s = extractSymbols(["let n: ArtifactRecord = MAX_ITEMS;"]);
     expect(s.find((o) => o.name === "MAX_ITEMS")?.kind).toBe("constant");
     expect(s.find((o) => o.name === "ArtifactRecord")?.kind).toBe("type");
+  });
+});
+
+describe("extractSymbols on long lines", () => {
+  test("lines longer than MAX_SYMBOL_LINE are skipped", () => {
+    const pad = " ".repeat(MAX_SYMBOL_LINE);
+    expect(extractSymbols([`const longValue = loadRows(1);${pad}`])).toEqual([]);
+    // a line of exactly MAX_SYMBOL_LINE chars is still read
+    const exact = "const keptValue = loadRows(1);".padEnd(MAX_SYMBOL_LINE, " ");
+    expect(exact.length).toBe(MAX_SYMBOL_LINE);
+    expect(extractSymbols([exact]).map((o) => o.name)).toContain("loadRows");
+    // the other lines of the file are unaffected
+    const s = extractSymbols([`x(${"a".repeat(MAX_SYMBOL_LINE)})`, "const rows = loadRows(1);"]);
+    expect(s.map((o) => [o.name, o.line])).toContainEqual(["loadRows", 2]);
+  });
+  test("a 200k-char minified line returns quickly", () => {
+    const minified = "define(a):b".repeat(200_000 / 11);
+    expect(minified.length).toBeGreaterThan(199_000);
+    const t0 = performance.now();
+    expect(extractSymbols([minified, "const rows = loadRows(1);"]).map((o) => o.name)).toContain(
+      "loadRows",
+    );
+    expect(performance.now() - t0).toBeLessThan(200);
+    // a long continuation line inside a multi-line import block is bounded too
+    const t1 = performance.now();
+    extractSymbols(["import {", `  ${"define(a):b,".repeat(200_000 / 12)}`, '} from "m";']);
+    expect(performance.now() - t1).toBeLessThan(200);
   });
 });
 
