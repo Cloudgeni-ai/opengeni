@@ -427,6 +427,10 @@ export function TurnSummary({
         if (
           statusKind &&
           (facet.id === "duration" ||
+            (facet === BUILT_IN_TURN_SUMMARY_FACETS[0] &&
+              context.items.every(
+                (item) => item.kind === "startup-phase" || item.kind === "agent-message",
+              )) ||
             (statusKind !== "worked" &&
               facet.id !== "steps" &&
               BUILT_IN_TURN_SUMMARY_FACET_IDS.includes(facet.id as BuiltInTurnSummaryFacetId)))

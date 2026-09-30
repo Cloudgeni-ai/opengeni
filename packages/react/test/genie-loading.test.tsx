@@ -182,6 +182,9 @@ test("readable startup stays primary through phase gaps and first byte, then han
     expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toMatch(
       /^Working · 1[2-4]s$/,
     );
+    expect(r.container.querySelector("[data-og-work-header]")?.textContent).not.toContain(
+      "Preparation",
+    );
     const trigger = r.container.querySelector<HTMLButtonElement>("[data-og-work-header]")!;
     await act(async () => trigger.click());
     expect(r.container.querySelector("[data-og-fold-content] .og-genie-loading")).toBeNull();

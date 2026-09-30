@@ -640,6 +640,7 @@ describe("readable timeline browser regression", () => {
           const header = page.locator('[data-og-work-header="outer"]');
           expect(await header.count()).toBe(1);
           expect(await header.textContent()).toMatch(/Working · [5-9]s/);
+          expect(await header.textContent()).not.toContain("Preparation");
           if (output)
             await page.screenshot({ path: `${output}/startup-${width}-${theme}-working.png` });
           await header.click();

@@ -3143,7 +3143,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           return (
             <ActivityRail
               items={group.items}
-              startupActive={startupDismissed ? false : undefined}
+              {...(startupDismissed ? { startupActive: false } : {})}
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
