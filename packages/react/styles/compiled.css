@@ -1603,6 +1603,9 @@
 :where(.og-root).bottom-3,:where(.og-root) .bottom-3 {
     bottom: calc(var(--spacing) * 3);
   }
+:where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
+    bottom: calc(var(--spacing) * 4);
+  }
 :where(.og-root).bottom-14,:where(.og-root) .bottom-14 {
     bottom: calc(var(--spacing) * 14);
   }

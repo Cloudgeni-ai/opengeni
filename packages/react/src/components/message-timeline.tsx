@@ -2293,9 +2293,7 @@ export function MessageTimeline({
                       className={cn(
                         // tabIndex=-1 is programmatic only — never paint a focus ring on
                         // the whole scroller (click + Shift used to flash a blue outline).
-                        "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-16 sm:px-6 outline-hidden",
-                        // The jump band below reserves the bottom breathing room.
-                        autoFollow ? "pb-1" : "pb-6",
+                        "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-16 pb-6 sm:px-6 outline-hidden",
                         autoFollow && pinned && !hasNewer
                           ? "[overflow-anchor:none]"
                           : "[overflow-anchor:auto]",
@@ -2569,88 +2567,81 @@ export function MessageTimeline({
                         </motion.div>
                       ) : null}
                     </AnimatePresence>
-                    {autoFollow ? (
-                      // In flow below the scroller, not floating over it, so the action
-                      // never covers a row or its controls. The band keeps its height
-                      // whether or not the action shows: toggling it would resize the
-                      // scroller, move the reader, and feed back into the pinned state.
-                      <div
-                        data-og-jump-band=""
-                        className="flex h-9 shrink-0 items-start justify-center"
-                      >
-                        {!pinned || hasNewer || canSkipTipCatchup ? (
-                          <motion.button
-                            type="button"
-                            data-og-jump-to-latest=""
-                            initial={{ opacity: 0, y: 4 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.15, ease: "easeOut" }}
-                            onClick={() => {
-                              // Returning to the tip explicitly releases reader-owned
-                              // prose. Clear only this timeline's selection before the
-                              // synchronous ownership check on the next commit.
-                              const viewport = scrollRef.current;
-                              const selection = viewport?.ownerDocument.getSelection();
-                              if (
-                                selection &&
-                                !selection.isCollapsed &&
-                                (viewport?.contains(selection.anchorNode) ||
-                                  viewport?.contains(selection.focusNode))
-                              )
-                                selection.removeAllRanges();
-                              disclosureKeepsUnpinnedRef.current = false;
-                              if (hasNewer) {
-                                // Do not pin against the current history page — its bottom
-                                // is not the tip. The pin + snap run when the tip window
-                                // actually lands (`hasNewer` flips false).
-                                wantPinRef.current = true;
-                                const node = scrollRef.current;
-                                if (onJumpToLatest) {
-                                  void Promise.resolve(onJumpToLatest()).then(
-                                    () => {
-                                      // Covers a host that flipped hasNewer before
-                                      // resolving; otherwise the tip-window commit
-                                      // consumes the flag.
-                                      const current = scrollRef.current;
-                                      if (current && wantPinRef.current && !hasNewerRef.current) {
-                                        wantPinRef.current = false;
-                                        applyPinned(true);
-                                        snapToBottom(current);
-                                      }
-                                    },
-                                    () => {
-                                      // The tip reload failed (ordinary network error):
-                                      // an armed latch would fire a surprise snap when
-                                      // the reader later pages to the tip themselves.
-                                      wantPinRef.current = false;
-                                    },
-                                  );
-                                } else if (node) {
-                                  // No tip reload available: jump within the in-memory
-                                  // window so the newer sentinel can page forward; the
-                                  // latch pins if the tip window eventually lands.
-                                  snapToBottom(node);
-                                }
-                                return;
-                              }
+                    <AnimatePresence>
+                      {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
+                        <motion.button
+                          type="button"
+                          data-og-jump-to-latest=""
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 8 }}
+                          transition={{ duration: 0.15, ease: "easeOut" }}
+                          onClick={() => {
+                            // Returning to the tip explicitly releases reader-owned
+                            // prose. Clear only this timeline's selection before the
+                            // synchronous ownership check on the next commit.
+                            const viewport = scrollRef.current;
+                            const selection = viewport?.ownerDocument.getSelection();
+                            if (
+                              selection &&
+                              !selection.isCollapsed &&
+                              (viewport?.contains(selection.anchorNode) ||
+                                viewport?.contains(selection.focusNode))
+                            )
+                              selection.removeAllRanges();
+                            disclosureKeepsUnpinnedRef.current = false;
+                            if (hasNewer) {
+                              // Do not pin against the current history page — its bottom
+                              // is not the tip. The pin + snap run when the tip window
+                              // actually lands (`hasNewer` flips false).
+                              wantPinRef.current = true;
                               const node = scrollRef.current;
-                              if (node) {
-                                applyPinned(true);
+                              if (onJumpToLatest) {
+                                void Promise.resolve(onJumpToLatest()).then(
+                                  () => {
+                                    // Covers a host that flipped hasNewer before
+                                    // resolving; otherwise the tip-window commit
+                                    // consumes the flag.
+                                    const current = scrollRef.current;
+                                    if (current && wantPinRef.current && !hasNewerRef.current) {
+                                      wantPinRef.current = false;
+                                      applyPinned(true);
+                                      snapToBottom(current);
+                                    }
+                                  },
+                                  () => {
+                                    // The tip reload failed (ordinary network error):
+                                    // an armed latch would fire a surprise snap when
+                                    // the reader later pages to the tip themselves.
+                                    wantPinRef.current = false;
+                                  },
+                                );
+                              } else if (node) {
+                                // No tip reload available: jump within the in-memory
+                                // window so the newer sentinel can page forward; the
+                                // latch pins if the tip window eventually lands.
                                 snapToBottom(node);
                               }
-                            }}
-                            className={cn(
-                              "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                              "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
-                              "hover:border-og-border-strong",
-                            )}
-                          >
-                            <ArrowDownIcon className="size-3.5" />
-                            Jump to latest
-                          </motion.button>
-                        ) : null}
-                      </div>
-                    ) : null}
+                              return;
+                            }
+                            const node = scrollRef.current;
+                            if (node) {
+                              applyPinned(true);
+                              snapToBottom(node);
+                            }
+                          }}
+                          className={cn(
+                            "absolute inset-x-0 bottom-4 mx-auto w-fit",
+                            "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                            "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
+                            "hover:border-og-border-strong",
+                          )}
+                        >
+                          <ArrowDownIcon className="size-3.5" />
+                          Jump to latest
+                        </motion.button>
+                      ) : null}
+                    </AnimatePresence>
                   </div>
                 </TimelineAnnotationSourceRootContext.Provider>
               </TooltipProvider>
