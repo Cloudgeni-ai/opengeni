@@ -36,10 +36,10 @@ describe("managed self-context surfaces", () => {
       "aria-label={personal ? `${workspace.name}, Personal workspace`",
     );
     expect(switcherSource).toContain('<span className="sr-only"> Paused</span>');
-    // A Personal workspace reads as a person tile and "Personal · <organization>", not a chip.
+    // A Personal workspace reads as a lock tile and "Private · <organization>", not a chip.
     expect(switcherSource).not.toContain("<PersonalWorkspaceBadge");
     expect(switcherSource.match(/<WorkspaceGlyph/g)?.length).toBeGreaterThanOrEqual(2);
-    expect(switcherSource).toContain("`Personal · ${organizationLabel}`");
+    expect(switcherSource).toContain("`Private · ${organizationLabel}`");
     // The picker is startup code: importing the organization-settings access module
     // pulls the settings chunks into the direct-session graph (bundle budget).
     expect(switcherSource).not.toContain("@/lib/organization-settings-access");

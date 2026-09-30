@@ -47,6 +47,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { matchesShortcut, NEW_SESSION_SHORTCUT } from "@/lib/keyboard-shortcuts";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useAppContext } from "@/context";
+import { PrivateSessionIndicator } from "@/components/session/private-session-indicator";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
 import type { Session } from "@/types";
@@ -528,6 +530,13 @@ function SessionRouteHeader({
           <Suspense fallback={null}>
             <LazySessionTenancyRouteControl session={session} events={events} />
           </Suspense>
+        ) : isPersonalWorkspace(
+            context.workspaces.find((candidate) => candidate.id === session.workspaceId) ?? null,
+            context.managedSelfContext,
+          ) ? (
+          // Without a tenancy record there is no access control to show, but a
+          // Personal workspace chat is still private: say so, read-only.
+          <PrivateSessionIndicator />
         ) : null
       }
       sandboxSlot={

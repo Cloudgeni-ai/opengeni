@@ -141,16 +141,18 @@ describe("workspace picker", () => {
     }
   });
 
-  test('a Personal workspace reads as a person tile and "Personal · <organization>", not a chip', async () => {
+  test('a Personal workspace reads as a lock tile and "Private · <organization>", not a chip', async () => {
     const picker = await renderPicker("ws-acme-personal");
     try {
-      expect(picker.trigger.textContent).toBe("Personal workspacePersonal · Acme Robotics");
-      expect(picker.trigger.getAttribute("aria-label")).toContain("Personal workspace:");
-      expect(picker.trigger.querySelector("svg.lucide-user")).not.toBeNull();
+      expect(picker.trigger.textContent).toBe("Personal workspacePrivate · Acme Robotics");
+      expect(picker.trigger.getAttribute("aria-label")).toContain(
+        "Personal workspace, private to you:",
+      );
+      expect(picker.trigger.querySelector("svg.lucide-lock")).not.toBeNull();
       const row = item("Personal workspace")!;
-      expect(row.querySelector("svg.lucide-user")).not.toBeNull();
+      expect(row.querySelector("svg.lucide-lock")).not.toBeNull();
       // No chip: the name keeps the width; screen readers still hear it.
-      expect(row.textContent).toBe("Personal workspace, your Personal workspace");
+      expect(row.textContent).toBe("Personal workspace, your Personal workspace, private to you");
     } finally {
       await picker.unmount();
     }

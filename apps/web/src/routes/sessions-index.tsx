@@ -67,6 +67,7 @@ import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
+import { PrivateWorkspaceNote } from "@/components/session/private-session-indicator";
 import {
   RunsOnMenuBody,
   VisibilityMenuBody,
@@ -1756,6 +1757,7 @@ function SessionsIndexRouteContent({
             }
           />
 
+          {personalWorkspace ? <PrivateWorkspaceNote /> : null}
           {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
 
           {/* Accounts load quietly with the composer: only a problem shows here,

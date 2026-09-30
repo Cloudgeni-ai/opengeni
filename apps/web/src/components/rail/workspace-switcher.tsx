@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Building2Icon, PauseIcon, PlusIcon, SettingsIcon, UserIcon } from "lucide-react";
+import { Building2Icon, LockIcon, PauseIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
@@ -40,8 +40,9 @@ function workspaceInitial(workspace: Workspace | null): string {
 }
 
 /**
- * A workspace's tile: its initial, or a person for a Personal workspace. The
- * tile says "personal" quietly, so names keep the width a chip would take.
+ * A workspace's tile: its initial, or a lock for a Personal workspace, whose
+ * chats only its owner can see. The tile says it quietly, so names keep the
+ * width a chip would take.
  */
 function WorkspaceGlyph({
   workspace,
@@ -51,7 +52,7 @@ function WorkspaceGlyph({
   personal: boolean;
 }) {
   return personal ? (
-    <UserIcon aria-hidden="true" className="size-3.5" />
+    <LockIcon aria-hidden="true" className="size-3.5" />
   ) : (
     <>{workspaceInitial(workspace)}</>
   );
@@ -266,7 +267,7 @@ export const WorkspaceSwitcherTrigger = forwardRef<
   ref,
 ) {
   const workspaceLabel = activeWorkspace?.name ?? (collapsed ? "switch workspace" : "none");
-  const accessibleLabel = `${personal ? "Personal workspace" : "Workspace"}: ${workspaceLabel}, in ${organizationLabel}. Switch workspace or organization`;
+  const accessibleLabel = `${personal ? "Personal workspace, private to you" : "Workspace"}: ${workspaceLabel}, in ${organizationLabel}. Switch workspace or organization`;
 
   if (collapsed) {
     return (
@@ -293,7 +294,7 @@ export const WorkspaceSwitcherTrigger = forwardRef<
       className={className}
       compact={compact}
       label={activeWorkspace?.name ?? "Select workspace"}
-      meta={personal ? `Personal · ${organizationLabel}` : organizationLabel}
+      meta={personal ? `Private · ${organizationLabel}` : organizationLabel}
       icon={<WorkspaceGlyph workspace={activeWorkspace} personal={personal} />}
     />
   );
@@ -455,7 +456,9 @@ export function WorkspaceMenuItemContent(props: {
       </span>
       <span className="min-w-0 flex-1 truncate">
         {props.workspace.name}
-        {personal ? <span className="sr-only">, your Personal workspace</span> : null}
+        {personal ? (
+          <span className="sr-only">, your Personal workspace, private to you</span>
+        ) : null}
       </span>
       {paused ? (
         <>
