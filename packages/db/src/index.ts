@@ -10303,13 +10303,49 @@ async function withConnectionSubjectRls<T>(
     : await withWorkspaceRls(db, workspaceId, fn);
 }
 
+const connectionAccessPolicyColumns = {
+  allowedModelIds: schema.connections.allowedModelIds,
+  allowedWorkspaceIds: schema.connections.allowedWorkspaceIds,
+  allowPersonalWorkspaces: schema.connections.allowPersonalWorkspaces,
+  accessPolicyVersion: schema.connections.accessPolicyVersion,
+  accessPolicyUpdatedBy: schema.connections.accessPolicyUpdatedBy,
+  accessPolicyUpdatedAt: schema.connections.accessPolicyUpdatedAt,
+};
+
+// Internal-only: credential replacement preserves the locked connection's access policy.
+// Public connection creation must not accept these administration-owned fields.
+type ConnectionAccessPolicySnapshot = Pick<
+  typeof schema.connections.$inferSelect,
+  | "allowedModelIds"
+  | "allowedWorkspaceIds"
+  | "allowPersonalWorkspaces"
+  | "accessPolicyVersion"
+  | "accessPolicyUpdatedBy"
+  | "accessPolicyUpdatedAt"
+>;
+
+function connectionAccessPolicySnapshot(
+  row: ConnectionAccessPolicySnapshot,
+): ConnectionAccessPolicySnapshot {
+  return {
+    allowedModelIds: row.allowedModelIds,
+    allowedWorkspaceIds: row.allowedWorkspaceIds,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+    accessPolicyVersion: row.accessPolicyVersion,
+    accessPolicyUpdatedBy: row.accessPolicyUpdatedBy,
+    accessPolicyUpdatedAt: row.accessPolicyUpdatedAt,
+  };
+}
+
 async function createConnectionInScope(
   db: Database,
   input: CreateConnectionInput,
+  accessPolicy?: ConnectionAccessPolicySnapshot,
 ): Promise<ConnectionMetadataWithVerification> {
   const [row] = await db
     .insert(schema.connections)
     .values({
+      ...accessPolicy,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.subjectId ?? null,
@@ -10515,7 +10551,7 @@ export async function upsertWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10549,20 +10585,25 @@ export async function upsertWorkspaceProviderApiKeyConnection(
             : null;
         }
         if (rows.some((row) => row.status !== "revoked")) return null;
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          // Reconnecting cannot reset an administrator's restrictions. Rows are newest first.
+          rows[0] ? connectionAccessPolicySnapshot(rows[0]) : undefined,
+        );
       }),
   );
 }
@@ -10581,7 +10622,7 @@ export async function rotateWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10630,20 +10671,24 @@ export async function rotateWorkspaceProviderApiKeyConnection(
             throw new Error(`${spec.label} connection changed during rotation`);
           }
         }
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          connectionAccessPolicySnapshot(targetRow),
+        );
       }),
   );
 }

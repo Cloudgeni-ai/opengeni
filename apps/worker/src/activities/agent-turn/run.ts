@@ -35,11 +35,11 @@ import { buildCodexTokenResolver } from "../codex-auth";
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
-  CODEX_FALLBACK_MODEL_SLUGS,
   codexRequestStorage,
   withCodexRequestOverrides,
   type CodexRequestContext,
 } from "@opengeni/codex";
+import { codexUpstreamModelSlugs } from "@opengeni/config";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -615,10 +615,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sessionId: input.sessionId,
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
-                    resolveModel: buildModelResolver(
-                      CODEX_FALLBACK_MODEL_SLUGS,
-                      CODEX_FALLBACK_MODEL_SLUGS[0],
-                    ),
+                    resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally

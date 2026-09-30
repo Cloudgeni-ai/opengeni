@@ -64,10 +64,12 @@ import {
   type OlderHistoryLoader,
 } from "../older-history";
 import { Markdown } from "./markdown";
+import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
   timelineAnchorCorrection,
+  timelineHasReader,
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
@@ -209,6 +211,16 @@ export type MessageTimelineProps = {
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
    */
   toolRegistry?: ToolRegistry | undefined;
+  /**
+   * Open OpenGeni object links the agent writes in replies and progress notes:
+   * `artifact:<file>`, `sandbox:<path>`, editable artifacts, and Sites. Return
+   * a host URL (`{ href }`) or action (`{ open }`); unhandled targets render as
+   * unavailable text instead of a console link that 404s inside the host.
+   * Applies to the default message renderer and to any `Markdown` a custom
+   * `renderMessageText` renders. `SessionConversation` supplies file and
+   * sandbox downloads by default.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Resolve permanent workspace image/file receipts through the authenticated host SDK. */
@@ -469,6 +481,7 @@ function cssEscapeAttribute(value: string): string {
  * with a "jump to latest" affordance when the reader scrolls back.
  */
 export function MessageTimeline({
+  resolveLink,
   userMessageDisclosureLabels,
   searchTarget,
   events,
@@ -625,6 +638,11 @@ export function MessageTimeline({
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
   const settlementRef = useRef<TimelineSettlement | null>(null);
+  const settlementAnimationRef = useRef<Animation | null>(null);
+  const stopSettlement = useCallback(() => {
+    settlementAnimationRef.current?.cancel();
+    settlementAnimationRef.current = null;
+  }, []);
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
@@ -632,6 +650,9 @@ export function MessageTimeline({
     () => groupTimeline(resolvedItems, { readableTurns }),
     [resolvedItems, readableTurns],
   );
+  // A new timeline revision (including session/turn replacement) owns layout.
+  // Never leave an old decorative transform running on its retained rows.
+  useLayoutEffect(() => stopSettlement, [projectedGroups, stopSettlement]);
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
     for (const item of resolvedItems) {
@@ -654,6 +675,7 @@ export function MessageTimeline({
   const { groups: allGroups, release: releaseProgress } = useReadingProgress(
     projectedGroups,
     autoFollow && pinned && !hasNewer,
+    scrollRef.current,
   );
   const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
   const canSkipTipCatchupRef = useRef(false);
@@ -912,13 +934,14 @@ export function MessageTimeline({
         node.contains(selection.anchorNode) &&
         node.contains(selection.focusNode)
       ) {
+        stopSettlement();
         releasePinFromReader();
         disclosureKeepsUnpinnedRef.current = true;
       }
     };
     node.ownerDocument.addEventListener("selectionchange", onSelection);
     return () => node.ownerDocument.removeEventListener("selectionchange", onSelection);
-  }, [readableTurns, releasePinFromReader]);
+  }, [readableTurns, releasePinFromReader, stopSettlement]);
 
   /**
    * Settled away from the tip while the camera is idle — Vimium / unfocused
@@ -989,6 +1012,7 @@ export function MessageTimeline({
     if (wheelConsumedByNestedScrollable(event)) {
       return;
     }
+    stopSettlement();
     disclosureKeepsUnpinnedRef.current = false;
     programmaticScrollRef.current = 0;
     if (event.deltaY >= 0) {
@@ -1008,6 +1032,7 @@ export function MessageTimeline({
     if (event.button && event.pointerType === "mouse") {
       return;
     }
+    stopSettlement();
     // Clicks on chips/buttons/links must not arm — their settle collapse
     // also drops scrollTop and would false-unpin. Drag on prose/scroller may.
     if (
@@ -1034,6 +1059,7 @@ export function MessageTimeline({
       event.key === "Home" ||
       event.key === "End"
     ) {
+      stopSettlement();
       disclosureKeepsUnpinnedRef.current = false;
     }
     if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
@@ -1667,7 +1693,7 @@ export function MessageTimeline({
           : null;
     }
 
-    if (settlement) animateTimelineSettlement(settlement);
+    if (settlement) settlementAnimationRef.current = animateTimelineSettlement(settlement);
 
     // Promise settlement is not itself permission to retry. A receipt-marked
     // accepted page retires its exact owner on this commit even when projection
@@ -2160,7 +2186,7 @@ export function MessageTimeline({
     releasePinAfterScrollSettled(node);
   };
 
-  return (
+  const timeline = (
     <LightboxProvider>
       <FoldMemoryProvider value={foldMemoryRef.current}>
         <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
@@ -2171,11 +2197,12 @@ export function MessageTimeline({
                   <div
                     className={cn("og-root relative flex min-h-0 flex-col", className)}
                     // Sticky insets start at the scroller's padded content edge
-                    // (pt-16). Subtract that padding, then reserve 3.5rem for the
-                    // floating question action, including its touch hit target.
-                    style={
-                      { "--og-work-header-top": questionNav ? "-0.5rem" : "-4rem" } as CSSProperties
-                    }
+                    // (pt-16). Subtract exactly that padding so an expanded work
+                    // header pins flush to the scrollport. Pinning it lower left a
+                    // band of scrolling rows visible above the header, which then
+                    // looked like it floated over the middle of the timeline. The
+                    // floating question action sits below this strip instead.
+                    style={{ "--og-work-header-top": "-4rem" } as CSSProperties}
                   >
                     {onAnnotate ? (
                       <Suspense fallback={null}>
@@ -2197,6 +2224,7 @@ export function MessageTimeline({
                       onScrollEnd={onScrollEnd}
                       onWheel={onWheel}
                       onTouchStart={(event) => {
+                        stopSettlement();
                         const touch = event.touches.length === 1 ? event.touches[0] : undefined;
                         touchPositionRef.current = touch
                           ? { x: touch.clientX, y: touch.clientY }
@@ -2245,6 +2273,7 @@ export function MessageTimeline({
                       }}
                       onFocusCapture={(event) => {
                         if (readableTurns && event.target !== event.currentTarget) {
+                          stopSettlement();
                           releasePinFromReader();
                           disclosureKeepsUnpinnedRef.current = true;
                         }
@@ -2263,6 +2292,9 @@ export function MessageTimeline({
                     >
                       <TimelineBeforeLayout
                         capture={() => {
+                          if (readableTurns && timelineHasReader(scrollRef.current)) {
+                            releasePinFromReader();
+                          }
                           readingAnchorRef.current =
                             !pinnedRef.current && scrollRef.current
                               ? captureTimelineAnchor(scrollRef.current)
@@ -2483,7 +2515,9 @@ export function MessageTimeline({
                           exit={{ opacity: 0, y: -6 }}
                           transition={{ duration: 0.15, ease: "easeOut" }}
                           data-og-question-nav=""
-                          className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-end px-4 sm:px-6"
+                          // Below the pinned work-header strip (py-1.5 row, 44px on coarse
+                          // pointers), never over it: the header stays a full-width target.
+                          className="pointer-events-none absolute inset-x-0 top-11 z-10 flex justify-end px-4 sm:px-6 pointer-coarse:top-14"
                         >
                           <div className="pointer-events-auto inline-flex max-w-[calc(50%-0.5rem)] items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
                             <button
@@ -2534,6 +2568,18 @@ export function MessageTimeline({
                           exit={{ opacity: 0, y: 8 }}
                           transition={{ duration: 0.15, ease: "easeOut" }}
                           onClick={() => {
+                            // Returning to the tip explicitly releases reader-owned
+                            // prose. Clear only this timeline's selection before the
+                            // synchronous ownership check on the next commit.
+                            const viewport = scrollRef.current;
+                            const selection = viewport?.ownerDocument.getSelection();
+                            if (
+                              selection &&
+                              !selection.isCollapsed &&
+                              (viewport?.contains(selection.anchorNode) ||
+                                viewport?.contains(selection.focusNode))
+                            )
+                              selection.removeAllRanges();
                             disclosureKeepsUnpinnedRef.current = false;
                             if (hasNewer) {
                               // Do not pin against the current history page — its bottom
@@ -2596,6 +2642,8 @@ export function MessageTimeline({
       </FoldMemoryProvider>
     </LightboxProvider>
   );
+  // Agent-authored object links resolve through the host, never the console.
+  return <OpenGeniLinkProvider resolveLink={resolveLink}>{timeline}</OpenGeniLinkProvider>;
 }
 
 type KeyedTimelineGroup = {

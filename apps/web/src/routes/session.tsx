@@ -172,6 +172,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "@/lib/session-dock-preferences";
+import { consoleLinkResolver } from "@/lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -2673,6 +2674,7 @@ function SessionChatPane(props: {
               }
             >
               <MessageTimeline
+                resolveLink={consoleLinkResolver}
                 trailingState={
                   <>
                     {/* Recovery follows the failed request, only in the latest history window.
