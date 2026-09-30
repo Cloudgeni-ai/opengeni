@@ -940,6 +940,8 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
 
 export class OpenGeniClient {
   protected externalActorHeader?: string;
+  protected serviceInitiatorHeader?: string | undefined;
+  protected serviceContextHeader?: string | undefined;
   private readonly baseUrl: string;
   protected readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
@@ -8330,11 +8332,30 @@ export class OpenGeniClient {
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
+    const headerNames = Object.keys(headers).map((key) => key.toLowerCase());
+    const hasUser =
+      this.externalActorHeader !== undefined || headerNames.includes("x-opengeni-external-actor");
+    const hasService =
+      this.serviceInitiatorHeader !== undefined ||
+      headerNames.includes("x-opengeni-service-initiator") ||
+      headerNames.includes("x-opengeni-service-context");
+    if (hasUser && hasService)
+      throw new Error("asUser and asService attribution headers are mutually exclusive");
     if (this.externalActorHeader) {
       for (const key of Object.keys(headers)) {
         if (key.toLowerCase() === "x-opengeni-external-actor") delete headers[key];
       }
       headers["x-opengeni-external-actor"] = this.externalActorHeader;
+    }
+    if (this.serviceInitiatorHeader !== undefined) {
+      for (const key of Object.keys(headers)) {
+        const name = key.toLowerCase();
+        if (name === "x-opengeni-service-initiator" || name === "x-opengeni-service-context")
+          delete headers[key];
+      }
+      headers["x-opengeni-service-initiator"] = this.serviceInitiatorHeader;
+      if (this.serviceContextHeader !== undefined)
+        headers["x-opengeni-service-context"] = this.serviceContextHeader;
     }
     return headers;
   }
@@ -8757,13 +8778,14 @@ export class OpenGeniClient {
       if (abort.signal?.aborted) {
         throw abort.signal.reason ?? new DOMException("Request aborted", "AbortError");
       }
+      const headers = this.headers(correlationId);
       let response: FetchResponse;
       try {
         response = await awaitWithAbort(
           this.fetchImpl(this.url(path, query), {
             method,
             headers: {
-              ...this.headers(correlationId),
+              ...headers,
               Accept: "application/json",
               ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
             },
@@ -8810,12 +8832,13 @@ export class OpenGeniClient {
     options: OpenGeniRequestOptions & { accept?: string } = {},
   ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path, query), {
         method,
         headers: {
-          ...this.headers(correlationId),
+          ...headers,
           Accept: options.accept ?? "application/octet-stream",
         },
         ...(options.signal ? { signal: options.signal } : {}),
@@ -8834,12 +8857,13 @@ export class OpenGeniClient {
   /** Contract-checked transport shared by opt-in typed SDK clients for 204 responses. */
   async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path), {
         method,
         headers: {
-          ...this.headers(correlationId),
+          ...headers,
           Accept: "application/json",
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },

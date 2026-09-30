@@ -34,6 +34,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
+import { serviceInitiatorFromHeaders } from "./service-initiator";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
@@ -140,6 +141,10 @@ export function hasVerifiedOwningUserAuthorization(
 const accountScopedApiKeyContexts = new WeakMap<
   AccessContext,
   Readonly<{ accountId: string; permissions: readonly Permission[] }>
+>();
+const apiKeyServiceContexts = new WeakMap<
+  AccessContext,
+  Pick<AccessGrant, "serviceInitiator" | "serviceInitiatorContext">
 >();
 const verifiedOrganizationServiceAuthorizations = new WeakMap<
   AccessGrantAuthorization,
@@ -567,6 +572,7 @@ async function accessGrantAuthorization(
         ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
         permissions: authority.permissions,
         principalKind: "api_key",
+        ...apiKeyServiceContexts.get(context),
       };
     } else {
       throw new HTTPException(403, { message: "workspace access denied" });
@@ -690,6 +696,21 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
+  const service = serviceInitiatorFromHeaders(c.req.raw.headers);
+  if (service) {
+    if (deps.settings.productAccessMode === "local") {
+      throw new HTTPException(422, {
+        message: "service initiator headers require an organization or workspace API key",
+      });
+    }
+    const context = await apiKeyAccessContext(c, deps, deps.settings.productAccessMode);
+    if (!context) {
+      throw new HTTPException(422, {
+        message: "service initiator headers require an organization or workspace API key",
+      });
+    }
+    return context;
+  }
   if (c.req.header("x-opengeni-external-actor") !== undefined) {
     if (deps.settings.productAccessMode === "local") {
       throw new HTTPException(401, {
@@ -794,6 +815,16 @@ async function apiKeyAccessContext(
     return null;
   }
   const externalHeader = c.req.header("x-opengeni-external-actor");
+  const service = serviceInitiatorFromHeaders(c.req.raw.headers);
+  if (
+    service &&
+    apiKey.credentialKind !== "organization" &&
+    apiKey.credentialKind !== "workspace"
+  ) {
+    throw new HTTPException(422, {
+      message: "service initiator headers require an organization or workspace API key",
+    });
+  }
   if (externalHeader !== undefined) {
     if (apiKey.workspaceId !== null || apiKey.credentialKind !== "organization") {
       throw new HTTPException(403, { message: "external actors require an organization key" });
@@ -875,12 +906,14 @@ async function apiKeyAccessContext(
             subjectLabel: apiKey.name,
             permissions: apiKey.permissions,
             principalKind: "api_key",
+            ...service,
           },
         ]
       : [],
     defaultAccountId: apiKey.accountId,
     defaultWorkspaceId: apiKey.workspaceId,
   } satisfies AccessContext;
+  if (service) apiKeyServiceContexts.set(context, service);
   if (apiKey.workspaceId === null && apiKey.credentialKind === "organization") {
     accountScopedApiKeyContexts.set(
       context,

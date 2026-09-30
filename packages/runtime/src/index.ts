@@ -10113,6 +10113,9 @@ export function repositoryUsesSandboxClone(
     return false;
   }
   return (
+    // Unbound repositories must wait until run credentials have been delivered.
+    // Manifest Git entries materialize before that helper is available.
+    !repositoryHasExplicitGitConnection(resource) ||
     // A best-effort repository must go through the clone hook: the SDK's
     // manifest materialization has no per-entry failure tolerance.
     resource.optional === true ||
@@ -10120,6 +10123,18 @@ export function repositoryUsesSandboxClone(
     Boolean(resource.expectedCommitSha) ||
     Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
     Boolean(resource.provider)
+  );
+}
+
+/** An explicit platform selection never falls back to product Git credentials. */
+export function repositoryHasExplicitGitConnection(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): boolean {
+  return (
+    resource.connectionId !== undefined ||
+    resource.credentialBindingId !== undefined ||
+    resource.connectionType !== undefined ||
+    resource.githubInstallationId !== undefined
   );
 }
 
@@ -10464,6 +10479,11 @@ function gitCredentialHelperBindingCaseLines(
   bindings: GitCredentialBindingSeed[],
 ): string[] {
   const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  const providerStoreRemotes = new Set(
+    resources
+      .filter((resource) => !repositoryHasExplicitGitConnection(resource))
+      .map((resource) => resource.uri),
+  );
   return runtimeGitBindingDescriptors(resources)
     .filter(
       (descriptor) =>
@@ -10475,7 +10495,7 @@ function gitCredentialHelperBindingCaseLines(
       const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
-          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) ${providerStoreRemotes.has(descriptor.uri) ? '[ -z "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ] || exit 0; ' : ""}username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
       );
     });
 }
@@ -10693,6 +10713,14 @@ function gitCredentialHelperCommandLines(
         `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
     );
   });
+  const providerStoreOriginHosts = runtimeGitBindingDescriptors(
+    resources.filter((resource) => !repositoryHasExplicitGitConnection(resource)),
+  ).flatMap((item) =>
+    gitRemoteUriAliases(item.uri, item.remotePathProvider).map(
+      (uri) =>
+        `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.host)}; return 0 ;;`,
+    ),
+  );
   const soleWrapperHashes = [...bindingProviders.entries()].flatMap(([provider, ids]) => {
     if (ids.size !== 1) return [];
     const descriptor = wrapperDescriptors.find((item) => item.provider === provider);
@@ -10879,6 +10907,12 @@ function gitCredentialHelperCommandLines(
     "    *) return 1 ;;",
     "  esac",
     "}",
+    "provider_store_host_for_origin() {",
+    '  case "$provider|$1" in',
+    ...providerStoreOriginHosts,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
     `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
     `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
     'if [ -n "$provider" ]; then',
@@ -10907,8 +10941,19 @@ function gitCredentialHelperCommandLines(
     '      *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
     "    esac",
     "  fi",
-    '  if [ -f "$token_file" ]; then',
+    "  token=",
+    '  provider_store_host="$(provider_store_host_for_origin "${origin:-}" 2>/dev/null || true)"',
+    '  if [ -z "${OPENGENI_GIT_BINDING:-}" ] && [ -n "$provider_store_host" ] && [ -r "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+    '    provider_credential="$(printf \'protocol=https\\nhost=%s\\n\\n\' "$provider_store_host" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get)"',
+    '    while IFS="=" read -r key value; do',
+    '      if [ "$key" = password ]; then token="$value"; fi',
+    "    done <<PROVIDER_CREDENTIAL_EOF",
+    "$provider_credential",
+    "PROVIDER_CREDENTIAL_EOF",
+    "    unset provider_credential",
+    '  elif [ -f "$token_file" ]; then',
     '    token="$(cat "$token_file" 2>/dev/null || true)"',
+    "  fi",
     '    if [ -n "$token" ]; then',
     '      case "$token_env" in',
     '        GH_TOKEN) export GH_TOKEN="$token" ;;',
@@ -10921,7 +10966,6 @@ function gitCredentialHelperCommandLines(
     '        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;',
     "      esac",
     "    fi",
-    "  fi",
     "fi",
     'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
     'old_ifs="$IFS"',
@@ -11059,6 +11103,22 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  ref="$3"',
   '  subpath="$4"',
   '  expected_commit="${5:-}"',
+  // Command-only helper selection: neither the credential nor its helper is
+  // persisted in .git/config. The run-credential wrapper supplies the current
+  // provider store path before this command starts; Git performs exact-host
+  // matching in that store. No matching entry means an anonymous fetch.
+  '  repository_credential_source="${6:-connection}"',
+  "  repository_git() {",
+  '    if [ "$repository_credential_source" = provider ]; then',
+  '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
+  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+  // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
+  // leaving its platform binding, broker route and askpass behavior intact.
+  '      command git -c credential.helper= -c credential.helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper" "$@"',
+  "    else",
+  '      command git "$@"',
+  "    fi",
+  "  }",
   '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
   // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
   // proof of a completed materialization: an interrupted clone (worker crash /
@@ -11067,8 +11127,8 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
   // the mount path before the repo exists). Subpath extracts are not git repos —
   // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
   '        echo "Repository resource already present at $target"',
   "        return 0",
   "      fi",
@@ -11082,7 +11142,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  rm -rf "$tmp"',
   // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
   // (set -eu would exit before any cleanup).
-  '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+  '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
@@ -11093,15 +11153,15 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // remote set-head` only accepts a branch that the fetch materialized under
   // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
   // must not turn a successful fetch into a failed clone.
-  '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-  '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+  '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+  '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
   "  fi",
-  '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   "    exit 1",
   "  fi",
-  '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+  '  if [ -n "$expected_commit" ] && [ "$(repository_git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
   '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
   '    rm -rf "$tmp"',
   "    exit 1",
@@ -11128,7 +11188,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // accept it; a non-empty non-repo survivor here is a mount point the manifest
   // re-filled — install into it by content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
   '        rm -rf "$tmp"',
   '        echo "Repository resource already present at $target"',
   "        return 0",
@@ -11138,7 +11198,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   "    else",
   '      mv "$tmp" "$target"',
   "    fi",
-  '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+  '    repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
   "  fi",
   '  if [ ! -e "$target" ]; then',
   '    echo "Repository resource was not materialized at $target" >&2',
@@ -11241,7 +11301,7 @@ export function repositoryCloneCommand(
     "start_optional_repository_clone() {",
     "  (",
     "    set +e",
-    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5"',
+    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5" "$7"',
     "    clone_status=$?",
     '    if [ "$clone_status" -eq 124 ] || [ "$clone_status" -eq 137 ]; then',
     `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone did not finish in time); the session continues without it" >&2`,
@@ -11276,6 +11336,7 @@ export function repositoryCloneCommand(
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
         shellQuote(resource.expectedCommitSha ?? ""),
         ...(optional ? [shellQuote(mountPath)] : []),
+        shellQuote(repositoryHasExplicitGitConnection(resource) ? "connection" : "provider"),
       ].join(" "),
     );
     if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
