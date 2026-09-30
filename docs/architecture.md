@@ -638,7 +638,7 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
    execution and authority snapshots, then invokes `@opengeni/runtime`.
 7. Runtime builds the model/tool environment and lazily establishes the
    selected provisioned sandbox or Connected Machine when an operation needs
-   compute (unbound repositories clone with provider Git credentials).
+   compute.
 8. Worker events are appended durably before best-effort live publication.
    The API's SSE stream replays and gap-fills from Postgres.
 
