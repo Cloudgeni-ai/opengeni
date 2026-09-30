@@ -118,6 +118,10 @@
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"
     },
+    "./tenant-workspaces": {
+      "types": "./src/tenant-workspaces.ts",
+      "default": "./src/tenant-workspaces.ts"
+    },
     "./next": {
       "types": "./src/adapters/next.ts",
       "default": "./src/adapters/next.ts"

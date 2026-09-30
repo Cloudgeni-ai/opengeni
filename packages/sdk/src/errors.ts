@@ -49,6 +49,25 @@ export class OpenGeniApiError extends Error {
   }
 }
 
+/** Deployment or organization setup must be completed before private chats can be created. */
+export class OpenGeniSetupError extends OpenGeniApiError {
+  constructor(error: OpenGeniApiError) {
+    super(error.status, error.body, {
+      code: "OPENGENI_SETUP_REQUIRED",
+      retryable: false,
+      correlationId: error.correlationId,
+      displayMessage:
+        "Private chats require organization_private_session_settings.enabled (migration 0323). " +
+        "An organization owner or admin can enable Only me chats in the web app under Organization settings > Security & data, " +
+        "or use updateOrganizationPrivateSessionSettings from @opengeni/sdk/organization-private-session-settings " +
+        "with enabled: true, the current expectedVersion and a stable operationId " +
+        "(PATCH /v1/organizations/:organizationId/private-session-settings; an organization key needs workspace:admin). " +
+        "If platform readiness is unavailable, ask the deployment operator to activate session tenancy first.",
+    });
+    this.name = "OpenGeniSetupError";
+  }
+}
+
 export type OpenGeniSecureContextRequiredReason = "insecure_context" | "web_crypto_unavailable";
 
 /**

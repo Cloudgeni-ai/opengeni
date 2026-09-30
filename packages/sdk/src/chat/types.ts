@@ -1,6 +1,8 @@
 import type { FetchLike } from "../client";
+import type { Chats } from "../chats";
 import type {
   CreateSessionRequest,
+  AgentConfigRequest,
   HumanInputAnswer,
   LatencyMode,
   ReasoningEffort,
@@ -16,7 +18,7 @@ export type ChatAgentAccess = "session" | "user" | "workspace";
 /**
  * Compatibility option for personal or workspace Knowledge. `false` initializes
  * Knowledge authoring to Off; authorized retrieval remains available. Omitted
- * follows user/workspace agent reach; session-only reach defaults to false.
+ * follows `chats`, which defaults to private chats with personal Knowledge.
  * Task notes cover temporary session-tree data.
  */
 export type ChatMemory = "user" | "workspace" | false;
@@ -50,7 +52,14 @@ export type ChatOptions = ChatTarget & {
   /** Prefer the actual OpenGeni session ID for shared or existing conversations.
    * The acting user is independent of the conversation's identity. */
   sessionId?: string | undefined;
-  /** Defaults to `"session"`: the agent sees only this conversation. */
+  /**
+   * Private (default) uses personal Knowledge and session-only reach; shared uses
+   * workspace Knowledge and reach. Isolated also provisions a workspace per tenant/user.
+   */
+  chats?: Chats | undefined;
+  /** Agent identity, capabilities and instructions; renderer defaults to markdown. */
+  agent?: AgentConfigRequest | undefined;
+  /** Explicit agent reach overrides the `chats` default. */
   agentAccess?: ChatAgentAccess | undefined;
   memory?: ChatMemory | undefined;
   model?: string | undefined;
@@ -153,6 +162,8 @@ export type ChatSendOptions = {
 
 export type ChatSessionListOptions = ChatTarget & {
   user?: string | undefined;
+  /** Match the chat's mode; isolated lists that user's separate workspace. */
+  chats?: Chats | undefined;
   limit?: number | undefined;
 };
 

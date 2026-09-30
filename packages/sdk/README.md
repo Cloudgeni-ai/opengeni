@@ -71,6 +71,29 @@ const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 </OpenGeniProvider>;
 ```
 
+The proxy and `@opengeni/sdk/chat` facade accept `chats` (default `"private"`).
+Private chats use private visibility, session-only agent reach and personal
+Knowledge; `"shared"` uses workspace visibility, agent reach and Knowledge.
+The API wire values are `visibility: "private" | "workspace"`; stored visibility
+is `user_private | workspace_shared`. Explicit hook/create fields override defaults.
+
+For `"isolated"`, pass the facade and return `{ tenant, user }` from `resolve`.
+`og.workspaceIdFor({ tenant, user }, { isolation: "user" })` provisions a separate
+workspace and that user's external membership. It uses stable onboarding keys,
+so retries do not restore revoked access. Other modes need explicit onboarding.
+The standalone resolver is on the server-only `@opengeni/sdk/tenant-workspaces`
+subpath. Keep tenant and user values host-authenticated.
+
+The facade also accepts `agent` (identity, capabilities, instructions, renderer)
+and defaults its renderer to `"markdown"`. Its private default now turns personal
+Knowledge on; pass `memory: false` to keep authoring off. Service-owned facade
+chats should explicitly select `"shared"` because private chats require `asUser`.
+The facade's renderer requires the deployment operator to enable
+`OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true`; the SDK never bypasses that rollout gate.
+Missing organization private-session enablement raises `OpenGeniSetupError`,
+with owner/admin API, SDK and web-app instructions; the proxy preserves that
+actionable error for browser clients.
+
 Framework adapters are thin wrappers over the same web-standard handler (they
 also accept `createChatHandler` or any `(Request) => Promise<Response>`):
 

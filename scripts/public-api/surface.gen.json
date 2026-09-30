@@ -23166,6 +23166,7 @@
       "CapabilityUnavailableReason": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
+      "Chats": "type",
       "ClientAgentConfig": "type",
       "ClientAuthConfig": "type",
       "ClientConfig": "type",
@@ -23769,6 +23770,7 @@
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
+      "OpenGeniSetupError": "value",
       "OpenGeniSignatureError": "value",
       "OpenGeniSiteBridgeCancelMessage": "type",
       "OpenGeniSiteBridgeConnectMessage": "type",
@@ -24505,6 +24507,7 @@
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
+      "OpenGeniSetupError": "value",
       "OpenGeniStreamError": "value",
       "OpenGeniToolCallError": "value",
       "OpenGeniToolCallOptions": "type",
@@ -24554,6 +24557,7 @@
       "ChatResolution": "type",
       "ChatResolve": "type",
       "ChatRespondInput": "type",
+      "Chats": "type",
       "ChatSendOptions": "type",
       "chatSessionId": "value",
       "ChatSessionListOptions": "type",
@@ -24581,6 +24585,7 @@
       "OpenGeni": "value",
       "OpenGeniChatError": "value",
       "OpenGeniOptions": "type",
+      "OpenGeniSetupError": "value",
       "parseChatChunkStream": "value",
       "respondInputFromBody": "value",
       "responsesBlocks": "value",
@@ -24631,6 +24636,7 @@
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
+      "OpenGeniSetupError": "value",
       "OpenGeniStreamError": "value",
       "OpenGeniToolCallError": "value",
       "OpenGeniToolCallOptions": "type",
@@ -25256,6 +25262,12 @@
       "resolveSiteClientScript": "value",
       "SITE_BROWSER_RUNTIME": "value",
       "SITE_CLIENT_SCRIPT_PATH": "value"
+    },
+    "@opengeni/sdk/tenant-workspaces": {
+      "createWorkspaceIdResolver": "value",
+      "WorkspaceIdOptions": "type",
+      "WorkspaceIdResolverOptions": "type",
+      "WorkspaceIdTarget": "type"
     },
     "@opengeni/react": {
       "ActivityDisclosure": "value",
@@ -26791,7 +26803,8 @@
       "organizationId",
       "sessions",
       "source",
-      "workspaceId"
+      "workspaceId",
+      "workspaceIdFor"
     ],
     "OpenGeniApiContractMismatchError": [
       "actual",

@@ -1,5 +1,11 @@
 import { OpenGeniEmbeddingClient as OpenGeniClient } from "../embedding-client";
 import { OpenGeniApiError } from "../errors";
+import { chatDefaults } from "../chats";
+import {
+  createWorkspaceIdResolver,
+  type WorkspaceIdOptions,
+  type WorkspaceIdTarget,
+} from "../tenant-workspaces";
 import type { SendMessageInput } from "../client";
 import type { CreateSessionRequest, Session, SessionEvent } from "../types";
 import { ChatPendingFold, ChatTurnFold, asRecord, stringValue } from "./fold";
@@ -54,8 +60,7 @@ export class OpenGeni {
     /** Sessions visible to the selected canonical user, or explicit service caller. */
     list: (options: ChatSessionListOptions) => Promise<Session[]>;
   };
-  private readonly workspaceName: ((tenant: string) => string) | undefined;
-  private readonly workspaces = new Map<string, Promise<string>>();
+  private readonly resolveWorkspaceId: ReturnType<typeof createWorkspaceIdResolver>;
 
   constructor(options: OpenGeniOptions) {
     if (!options.apiKey) throw new TypeError("OpenGeni requires an apiKey.");
@@ -67,7 +72,11 @@ export class OpenGeni {
     });
     this.organizationId = options.organizationId;
     this.source = options.source ?? DEFAULT_CHAT_SOURCE;
-    this.workspaceName = options.workspaceName;
+    this.resolveWorkspaceId = createWorkspaceIdResolver(this.client, {
+      organizationId: this.organizationId,
+      source: this.source,
+      workspaceName: options.workspaceName,
+    });
     this.sessions = { list: (listOptions) => this.listSessions(listOptions) };
   }
 
@@ -78,22 +87,12 @@ export class OpenGeni {
     if (target.workspaceId) return target.workspaceId;
     const tenant = target.tenant;
     if (!tenant) throw new TypeError("Pass either tenant or workspaceId.");
-    let pending = this.workspaces.get(tenant);
-    if (!pending) {
-      pending = this.client
-        .ensureWorkspace({
-          accountId: this.organizationId,
-          externalSource: this.source,
-          externalId: tenant,
-          name: this.workspaceName?.(tenant) ?? tenant,
-        })
-        .then((response) => response.workspace.id);
-      pending.catch(() => {
-        this.workspaces.delete(tenant);
-      });
-      this.workspaces.set(tenant, pending);
-    }
-    return await pending;
+    return await this.workspaceIdFor({ tenant }, { isolation: "tenant" });
+  }
+
+  /** Resolve a tenant workspace, or provision its separate user workspace and external member. */
+  async workspaceIdFor(target: WorkspaceIdTarget, options: WorkspaceIdOptions): Promise<string> {
+    return await this.resolveWorkspaceId(target, options);
   }
 
   /**
@@ -104,16 +103,10 @@ export class OpenGeni {
    */
   async chat(options: ChatOptions): Promise<Chat> {
     if (!options.conversation) throw new TypeError("chat() requires a conversation id.");
-    const agentAccess = options.agentAccess ?? "session";
-    const memoryScope =
-      options.memory === false
-        ? "off"
-        : options.memory === undefined
-          ? agentAccess === "session"
-            ? "off"
-            : agentAccess
-          : options.memory;
-    if (memoryScope === "user" && !options.user) {
+    const defaults = chatDefaults(options.chats ?? "private");
+    const agentAccess = options.agentAccess ?? defaults.agentAccess;
+    const memoryScope = options.memory === false ? "off" : (options.memory ?? defaults.memoryScope);
+    if (options.memory === "user" && !options.user) {
       throw new OpenGeniChatError(
         "memory_scope_requires_user",
         'memory: "user" requires an authenticated product user.',
@@ -122,7 +115,13 @@ export class OpenGeni {
     const client = options.user
       ? this.client.asUser(options.user, { source: this.source })
       : this.client;
-    const workspaceId = await this.workspaceId(options);
+    const workspaceId =
+      options.chats === "isolated"
+        ? await this.workspaceIdFor(
+            { tenant: options.tenant ?? "", user: options.user },
+            { isolation: "user" },
+          )
+        : await this.workspaceId(options);
     const sessionId = options.sessionId ?? (await chatSessionId(workspaceId, options.conversation));
     const session = await this.findSession(client, workspaceId, sessionId);
     const buildCreate: BuildCreate = (text, send) => {
@@ -139,13 +138,21 @@ export class OpenGeni {
           : undefined);
       const context = [baseContext, messageContext].filter(Boolean).join("\n\n") || undefined;
       return {
-        agentAccess,
-        memoryScope,
         ...(options.model !== undefined ? { model: options.model } : {}),
         ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
         ...(options.skills !== undefined ? { skills: options.skills } : {}),
         ...(options.tools !== undefined ? { tools: options.tools } : {}),
         ...create,
+        visibility: create.visibility ?? defaults.visibility,
+        agentAccess: create.agentAccess ?? agentAccess,
+        memoryScope: create.memoryScope ?? memoryScope,
+        agent: {
+          capabilities: create.agent?.capabilities ?? options.agent?.capabilities,
+          identity:
+            create.agent?.identity !== undefined ? create.agent.identity : options.agent?.identity,
+          instructions: create.agent?.instructions ?? options.agent?.instructions,
+          renderer: create.agent?.renderer ?? options.agent?.renderer ?? "markdown",
+        },
         ...(context !== undefined ? { modelContext: context } : {}),
         ...messagePolicy(send),
         initialMessage: text,
@@ -198,7 +205,13 @@ export class OpenGeni {
   }
 
   private async listSessions(options: ChatSessionListOptions): Promise<Session[]> {
-    const workspaceId = await this.workspaceId(options);
+    const workspaceId =
+      options.chats === "isolated"
+        ? await this.workspaceIdFor(
+            { tenant: options.tenant ?? "", user: options.user },
+            { isolation: "user" },
+          )
+        : await this.workspaceId(options);
     const client = options.user
       ? this.client.asUser(options.user, { source: this.source })
       : this.client;

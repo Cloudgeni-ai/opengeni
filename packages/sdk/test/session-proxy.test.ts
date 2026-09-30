@@ -206,6 +206,9 @@ describe("createSessionProxyHandler", () => {
     expect(inputs).toEqual([{ initialMessage: "hi", idempotencyKey: "k1" }]);
     expect(upstream.requests[0]!.body).toEqual({
       initialMessage: "hi",
+      visibility: "private",
+      agentAccess: "session",
+      memoryScope: "user",
       idempotencyKey: "k1",
       tools: [],
       firstPartyMcpTools: [],
@@ -435,6 +438,9 @@ describe("createSessionProxyHandler", () => {
     await browser.createSession(WORKSPACE_ID, { initialMessage: "start" } as never);
     expect(upstream.requests[3]!.body).toEqual({
       initialMessage: "start",
+      visibility: "private",
+      agentAccess: "session",
+      memoryScope: "user",
       modelContext: "Page: /reports · TZ: Europe/Oslo · 2026-09-29\n\nWorkspace plan",
     });
     expect(inputs).toEqual([
