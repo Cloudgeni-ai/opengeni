@@ -2732,6 +2732,7 @@ async function seedConnectedMachines() {
       accountId: plan.accountId,
     })),
     statePath: resolve(dirname(credentialsPath), "machines.json"),
+    agentVersion: runtime.OPENGENI_AGENT_STABLE_VERSION,
     log,
   });
   if (machines.length) {

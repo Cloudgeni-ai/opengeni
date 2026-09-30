@@ -12,17 +12,24 @@
  *   bun scripts/dev-seed-design-preview/machines.ts --heartbeat
  *
  * which writes a heartbeat and a fresh sample every 10 seconds until stopped.
+ * Each machine holds a runner connection lease and reports the promoted agent
+ * version, like a connected agent's Hello, so the cards show a current agent.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  claimEnrollmentConnection,
   createDb,
   finalizeEnrollmentByToken,
   ingestMachineMetricsSample,
   listEnrollments,
+  releaseEnrollmentConnection,
+  renewEnrollmentConnection,
+  setEnrollmentAgentRuntime,
   touchEnrollmentLastSeen,
+  type Database,
   type MachineMetricsSample,
 } from "@opengeni/db";
 
@@ -99,6 +106,33 @@ export interface SeededMachine {
   enrollmentId: string;
   name: string;
   online: boolean;
+  credentialGeneration: number;
+}
+
+const LEASE_MS = 60_000;
+const instanceIdFor = (name: string) => `design-preview-${name}`;
+
+/** Holds the runner connection lease a live agent would, re-claiming it if it lapsed. */
+async function holdConnection(
+  db: Database,
+  ids: { accountId: string; workspaceId: string; enrollmentId: string },
+  name: string,
+  credentialGeneration?: number,
+): Promise<void> {
+  const connectionInstanceId = instanceIdFor(name);
+  const { renewed } = await renewEnrollmentConnection(db, {
+    ...ids,
+    connectionInstanceId,
+    leaseMs: LEASE_MS,
+  });
+  if (renewed || credentialGeneration === undefined) return;
+  await claimEnrollmentConnection(db, {
+    workspaceId: ids.workspaceId,
+    enrollmentId: ids.enrollmentId,
+    credentialGeneration,
+    connectionInstanceId,
+    leaseMs: LEASE_MS,
+  });
 }
 
 /** A stable fake ed25519 public key per machine name, so re-runs find it again. */
@@ -138,6 +172,8 @@ export async function seedMachines(input: {
   databaseUrl: string;
   workspaces: { name: string; workspaceId: string; accountId: string }[];
   statePath: string;
+  /** The promoted agent version (OPENGENI_AGENT_STABLE_VERSION). */
+  agentVersion?: string;
   log: (message: string) => void;
 }): Promise<SeededMachine[]> {
   const client = createDb(input.databaseUrl, { max: 2 });
@@ -151,7 +187,9 @@ export async function seedMachines(input: {
       });
       for (const machine of machines) {
         const pubkey = pubkeyFor(machine.name);
-        let enrollmentId = existing.find((entry) => entry.pubkey === pubkey)?.id;
+        const found = existing.find((entry) => entry.pubkey === pubkey);
+        let enrollmentId = found?.id;
+        let credentialGeneration = found?.credentialGeneration;
         let created = false;
         if (!enrollmentId) {
           const { enrollment } = await finalizeEnrollmentByToken(client.db, {
@@ -165,6 +203,7 @@ export async function seedMachines(input: {
             sandboxName: machine.name,
           });
           enrollmentId = enrollment.id;
+          credentialGeneration = enrollment.credentialGeneration;
           created = true;
         }
         const ids = {
@@ -185,7 +224,38 @@ export async function seedMachines(input: {
           sample: sampleFor(machine, new Date(now)),
         });
         await touchEnrollmentLastSeen(client.db, ids);
-        seeded.push({ ...ids, name: machine.name, online: machine.online });
+        // The Hello a connected agent sends: its version and what it can do.
+        await holdConnection(client.db, ids, machine.name, credentialGeneration);
+        await setEnrollmentAgentRuntime(client.db, {
+          ...ids,
+          connectionInstanceId: instanceIdFor(machine.name),
+          agentVersion: input.agentVersion ?? null,
+          binarySha256: null,
+          updateChannel: "stable",
+          capabilities: {
+            exec: true,
+            filesystem: true,
+            git: true,
+            pty: true,
+            opStream: true,
+            desktop: machine.hasDisplay,
+            transactionalFsWrite: true,
+          },
+          completedUpdate: null,
+        });
+        if (!machine.online) {
+          await releaseEnrollmentConnection(client.db, {
+            ...ids,
+            connectionInstanceId: instanceIdFor(machine.name),
+            reason: "design-preview machine is offline",
+          });
+        }
+        seeded.push({
+          ...ids,
+          name: machine.name,
+          online: machine.online,
+          credentialGeneration: credentialGeneration ?? 1,
+        });
         if (created) input.log(`  machine ${machine.name} enrolled in ${workspace.name}`);
       }
     }
@@ -226,6 +296,7 @@ async function heartbeat(databaseUrl: string, statePath: string): Promise<never>
           sample: sampleFor(seed, new Date()),
         });
         await touchEnrollmentLastSeen(client.db, ids);
+        await holdConnection(client.db, ids, machine.name, machine.credentialGeneration);
       } catch (error) {
         console.error(`heartbeat ${machine.name}: ${(error as Error).message.slice(0, 200)}`);
       }
