@@ -65,21 +65,18 @@ describe("Workspace switcher trigger in Chromium", () => {
     for (const label of [
       "Default workspace",
       "Product Testing",
-      "New workspace in CloudGeni Product Engineering and Reliability",
-      "Organization settings",
+      // An administrator gets one quiet create row for the current organization.
+      "New workspace",
       // Another organization is one row that opens its workspace.
       "CloudGeni Research",
-      "New organization",
     ]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
-    // Only the current organization's workspaces and settings are listed.
-    expect(
-      await page.getByRole("menuitem", { name: "Research Sandbox", exact: true }).count(),
-    ).toBe(0);
-    expect(
-      await page.getByRole("menuitem", { name: "Organization settings", exact: true }).count(),
-    ).toBe(1);
+    // Only the current organization's workspaces are listed; organization
+    // settings and new organizations live in the account menu and settings.
+    for (const label of ["Research Sandbox", "Organization settings", "New organization"]) {
+      expect(await page.getByRole("menuitem", { name: label, exact: true }).count()).toBe(0);
+    }
     const personalMenuItem = page.getByRole("menuitem", {
       // The sr-only suffix is a separate box, so Chromium adds a space before its comma.
       name: /^Personal workspace\s*, your Personal workspace, private to you$/,
@@ -108,7 +105,7 @@ describe("Workspace switcher trigger in Chromium", () => {
     expect(await page.getByTestId("last-action").textContent()).toBe("Opened Product Testing");
   }, 15_000);
 
-  test("the combined menu exposes organization creation and settings to pointer and keyboard", async () => {
+  test("the New workspace row opens the organization's create page by keyboard", async () => {
     await page.goto(`${baseUrl}/test/workspace-switcher-trigger.html`, {
       waitUntil: "networkidle",
     });
@@ -116,18 +113,16 @@ describe("Workspace switcher trigger in Chromium", () => {
 
     await trigger.focus();
     await trigger.press("Enter");
-    await page.getByRole("menuitem", { name: "New organization", exact: true }).click();
-    expect(await page.getByTestId("last-action").textContent()).toBe("New organization");
-
-    const organizationSettings = page.getByRole("menuitem", {
-      name: "Organization settings",
-      exact: true,
-    });
-    // Radix defers roving focus. Verify each key's destination before sending
-    // the next key, including Home from the pointer-selected create action.
+    const newWorkspace = page.getByRole("menuitem", { name: "New workspace", exact: true });
+    await newWorkspace.waitFor();
     const items = page.getByRole("menuitem");
+    const labels = (await items.allInnerTexts()).map((text) => text.trim());
+    const target = labels.indexOf("New workspace");
+    expect(target).toBeGreaterThan(0);
+    // Radix defers roving focus. Verify each key's destination before sending
+    // the next key.
     await page.keyboard.press("Home");
-    for (let step = 0; step <= 4; step += 1) {
+    for (let step = 0; step <= target; step += 1) {
       if (step > 0) await page.keyboard.press("ArrowDown");
       await page.waitForFunction(
         (element) => document.activeElement === element,
@@ -135,9 +130,7 @@ describe("Workspace switcher trigger in Chromium", () => {
         { timeout: 2_000 },
       );
     }
-    expect(
-      await organizationSettings.evaluate((element) => document.activeElement === element),
-    ).toBe(true);
+    expect(await newWorkspace.evaluate((element) => document.activeElement === element)).toBe(true);
     await page.keyboard.press("Enter");
     expect(await page.getByTestId("route-path").textContent()).toBe(
       "/workspaces/workspace-personal/organization",
