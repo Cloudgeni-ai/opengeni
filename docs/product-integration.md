@@ -121,7 +121,7 @@ workspace read, model catalog, live control stream, and workspace Resume;
 session read and rename, event list and SSE (with `Last-Event-ID` resume),
 send, steer, approval and human-input responses, queue, composer draft,
 pause/resume, (unless `files: false`) attachment upload and download URLs, and
-(unless `sandboxFiles: false`) session sandbox file reads for `sandbox:` links.
+(only with explicit `sandboxFiles: true`) session sandbox file reads for `sandbox:` links.
 Every other route or method is a 404 (cancel and workspace Pause are refused);
 unknown query parameters on served reads pass through for newer browser SDKs. Browser session creation is off unless the server
 supplies `createSession`; the browser may then send only `initialMessage` and
@@ -668,12 +668,24 @@ routes, which resolve against the product's own origin and 404 there.
 | Agent writes | Target | `SessionConversation` default |
 | --- | --- | --- |
 | `[Report](artifact:<file uuid>)` | Retained workspace file (exports, published files) | Downloads through a short-lived URL (proxy `files`) |
-| `[Code](sandbox:src/app.ts:12)` | File in the session's sandbox or Connected Machine | Downloads through `fs/read` (proxy `sandboxFiles`) |
+| `[Code](sandbox:src/app.ts:12)` | File in the session's working directory | Unavailable unless the proxy explicitly enables `sandboxFiles: true` |
 | `[Weekly report](/workspaces/<ws>/artifacts/editable/<id>)` | Live editable document, workbook, or presentation (`artifactReference` from the artifact tools) | Unavailable until the host resolves it |
 | `[Dashboard](/workspaces/<ws>/artifacts/<uuid>)` | Saved Site / published HTML | Unavailable until the host resolves it |
 
-So with `SessionConversation` (or `OpenGeniChat`) behind the proxy, file and
-sandbox links work with no code. Pass `resolveLink` to route the rest to the
+With `SessionConversation` (or `OpenGeniChat`) behind the proxy, retained-file
+downloads work by default. Sandbox-path reads are off by default: enable
+`sandboxFiles: true` deliberately. The proxy forces workspace-only reads,
+including on Connected Machines: relative paths and absolute paths inside the
+selected working directory are accepted; traversal, outside absolute paths,
+and symlink components are refused. Reads are capped at 25 MiB in actual bytes.
+Providers without the required no-symlink descriptor support fail closed.
+This strict mode currently requires a POSIX runtime with Python and
+descriptor-relative opens; Windows Connected Machine sandbox-path downloads
+are unavailable.
+The proxy reports this capability in client config, so disabled sandbox links
+render unavailable rather than offering a download that fails.
+
+Pass `resolveLink` to route the rest to the
 product's own UI; return `{ href }` for a host page or `{ open }` for an action,
 and `null` to keep the default:
 
@@ -708,8 +720,10 @@ file with `fsRead(workspaceId, sessionId, { path, encoding: "base64" })`.
 
 Editable artifacts are live collaborative objects, not files. The artifact
 export tool advertises the formats the deployment serves in its description;
-today that is spreadsheet XLSX only, and every other modality/format pair is
-refused with `unsupported_format` before any version is pinned. Agents are told
+the stock deployment serves spreadsheet XLSX only. Custom exporters supply
+their own supported formats; the exact profile and options are preflighted
+before any snapshot or version pin. Unsupported requests are refused with
+`unsupported_format` and configured-format guidance. Agents are told
 to share the live artifact link instead of promising a PDF or DOCX, so a host
 that needs file delivery of documents should plan on the artifact page rather
 than an export.

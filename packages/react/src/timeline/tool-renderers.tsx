@@ -1,4 +1,5 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
 import {
   parseSandboxFileArtifactReceipt,
@@ -1198,16 +1199,19 @@ const SITE_OPEN_CLASS =
   "inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10";
 
 function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
+  const [pending, setPending] = useState(false);
+  const [failed, setFailed] = useState(false);
   // The console route only exists in the OpenGeni console; a host decides.
   const resolution = useOpenGeniLinkResolver()?.({
     kind: "site",
     artifactId: receipt.artifactId,
     workspaceId: receipt.workspaceId,
   });
-  if (resolution?.href) {
+  const destination = resolution?.href ? defaultUrlTransform(resolution.href) : "";
+  if (destination) {
     return (
       <a
-        href={resolution.href}
+        href={destination}
         aria-label={`Open ${receipt.title}`}
         className={SITE_OPEN_CLASS}
         onClick={(event) => event.stopPropagation()}
@@ -1223,16 +1227,22 @@ function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
       <button
         type="button"
         aria-label={`Open ${receipt.title}`}
+        aria-busy={pending}
+        disabled={pending}
         className={SITE_OPEN_CLASS}
         onClick={(event) => {
           event.stopPropagation();
+          if (pending) return;
+          setPending(true);
+          setFailed(false);
           void Promise.resolve()
             .then(open)
-            .catch(() => undefined);
+            .catch(() => setFailed(true))
+            .finally(() => setPending(false));
         }}
         onKeyDown={(event) => event.stopPropagation()}
       >
-        Open
+        {pending ? "Opening…" : failed ? "Retry open" : "Open"}
       </button>
     );
   }

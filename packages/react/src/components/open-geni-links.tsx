@@ -104,7 +104,7 @@ function base64Bytes(content: string): Uint8Array<ArrayBuffer> {
  * the normal SDK client (for example behind `createSessionProxyHandler`):
  *
  * - `artifact:<file>` downloads the retained file through a short-lived URL.
- * - `sandbox:<path>` downloads the file from the session's sandbox.
+ * - `sandbox:<path>` downloads when enabled by the host proxy capability.
  *
  * Editable artifacts and Sites have no default: they need a host surface
  * (see `@opengeni/react/artifacts/*` and `@opengeni/react/sites`), so they stay
@@ -114,6 +114,7 @@ export function sessionLinkResolver(input: {
   client: SessionLinkClient;
   workspaceId: string;
   sessionId: string;
+  sandboxFiles?: boolean;
 }): OpenGeniLinkResolver {
   const { client, workspaceId, sessionId } = input;
   return (target) => {
@@ -130,6 +131,7 @@ export function sessionLinkResolver(input: {
       };
     }
     if (target.kind === "sandbox-file") {
+      if (input.sandboxFiles === false) return null;
       if (typeof client.fsRead !== "function") return null;
       return {
         open: async () => {

@@ -32,7 +32,14 @@ import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
 import { searchMatchOffset, type TimelineSearchTarget } from "./timeline-search";
-import { parseOpenGeniLink, parseSandboxLink, type OpenGeniLinkTarget } from "@opengeni/sdk";
+import {
+  parseOpenGeniLink,
+  parseSandboxLink,
+  parseRetainedFileReference,
+  isReservedOpenGeniLink,
+  openGeniLinkScheme,
+  type OpenGeniLinkTarget,
+} from "@opengeni/sdk";
 import {
   chainLinkResolvers,
   useOpenGeniLinkResolver,
@@ -284,12 +291,12 @@ const markdownComponents: Components = {
     if (target) {
       // Explicit per-kind props keep their historical precedence.
       if (target.kind === "file" && target.workspaceId === null && artifactHref) {
-        const destination = artifactHref(target.fileId);
+        const destination = defaultUrlTransform(artifactHref(target.fileId));
         if (destination) {
           return (
             <a
               className={MARKDOWN_LINK_CLASS}
-              href={defaultUrlTransform(destination)}
+              href={destination}
               target="_blank"
               rel="noreferrer noopener"
             >
@@ -302,11 +309,12 @@ const markdownComponents: Components = {
         target.kind === "sandbox-file" && onSandboxFile
           ? { open: () => onSandboxFile(target.path, target.line ?? undefined) }
           : chainLinkResolvers(resolveLink, inherited)?.(target);
-      if (resolution?.href) {
+      const destination = resolution?.href ? defaultUrlTransform(resolution.href) : "";
+      if (destination) {
         return (
           <a
             className={MARKDOWN_LINK_CLASS}
-            href={defaultUrlTransform(resolution.href)}
+            href={destination}
             target="_blank"
             rel="noreferrer noopener"
           >
@@ -339,7 +347,7 @@ const markdownComponents: Components = {
         </span>
       );
     }
-    if (isSandboxHref(href) || !href) {
+    if (isReservedOpenGeniLink(href) || !href) {
       return (
         <span
           className="break-words text-og-fg-subtle"
@@ -404,10 +412,8 @@ function ActionMarkdownLink({
   );
 }
 
-const SANDBOX_SCHEME = "sandbox:";
-
 function isSandboxHref(href: string | undefined): boolean {
-  return href?.startsWith(SANDBOX_SCHEME) ?? false;
+  return openGeniLinkScheme(href) === "sandbox";
 }
 
 /**
@@ -426,11 +432,7 @@ export function sandboxFilePathFromHref(href: string | undefined): string | null
 }
 
 export function retainedImageId(src: string): string | null {
-  return (
-    /^artifact:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
-      .exec(src)?.[1]
-      ?.toLowerCase() ?? null
-  );
+  return parseRetainedFileReference(src);
 }
 function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
   const { renderImage, suppressImages } = useContext(InteractiveContext);
@@ -447,7 +449,7 @@ function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
 }
 
 const markdownUrlTransform: UrlTransform = (url, key, node) =>
-  (key === "href" && node.tagName === "a" && (isSandboxHref(url) || retainedImageId(url))) ||
+  (key === "href" && node.tagName === "a" && isReservedOpenGeniLink(url)) ||
   (key === "src" && node.tagName === "img" && retainedImageId(url))
     ? url
     : defaultUrlTransform(url);

@@ -40,6 +40,13 @@ inherited approvals with catalog floors; policies grant neither capabilities nor
 Account isolation/rebinding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
 
+Embedded sandbox-path downloads are explicitly opt-in at the session proxy.
+The proxy forces working-directory confinement, including on Connected Machines,
+and refuses symlink components; unsupported descriptor-read providers fail closed.
+`packages/runtime/src/sandbox/confined-file-read.ts` owns the no-follow descriptor
+helper shared with OpenSandbox's byte-bounded reads. Direct console machine reads
+retain their existing broader authority. See [product integration](product-integration.md).
+
 ---
 
 ## 3. Core invariants

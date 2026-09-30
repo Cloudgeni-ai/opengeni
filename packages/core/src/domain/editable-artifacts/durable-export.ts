@@ -34,11 +34,9 @@ export type EditableArtifactMaterializationFormat =
   | "webp";
 
 /**
- * The export formats the deployed materializer serves, per modality. This is
- * the single source for the production profile resolver, the agent tool
- * schema/description, and the agent-facing refusal, so an agent is never
- * offered (or left to guess) a format that will be refused. Extend it only
- * together with a real codec.
+ * Stock production export formats. Custom deployments advertise their own
+ * capabilities on the profile port; this list never overrides their resolver.
+ * Extend the stock list only together with a real deployed codec.
  */
 export const EDITABLE_ARTIFACT_EXPORT_FORMATS: Readonly<
   Record<EditableArtifactModality, readonly EditableArtifactMaterializationFormat[]>
@@ -50,7 +48,15 @@ export const EDITABLE_ARTIFACT_EXPORT_FORMATS: Readonly<
 
 /** Human/agent-readable summary of {@link EDITABLE_ARTIFACT_EXPORT_FORMATS}. */
 export function describeEditableArtifactExportFormats(): string {
-  const entries = Object.entries(EDITABLE_ARTIFACT_EXPORT_FORMATS) as Array<
+  return describeConfiguredExportFormats(EDITABLE_ARTIFACT_EXPORT_FORMATS);
+}
+
+export function describeConfiguredExportFormats(
+  configuredFormats: Readonly<
+    Record<EditableArtifactModality, readonly EditableArtifactMaterializationFormat[]>
+  >,
+): string {
+  const entries = Object.entries(configuredFormats) as Array<
     [EditableArtifactModality, readonly EditableArtifactMaterializationFormat[]]
   >;
   const supported = entries
@@ -73,13 +79,14 @@ export function describeEditableArtifactExportFormats(): string {
 export function unsupportedEditableArtifactExport(
   modality: EditableArtifactModality,
   format: string,
+  formats = EDITABLE_ARTIFACT_EXPORT_FORMATS,
 ): EditableArtifactDurableExportError {
-  const listed = (EDITABLE_ARTIFACT_EXPORT_FORMATS[modality] as readonly string[]).includes(format);
+  const listed = (formats[modality] as readonly string[]).includes(format);
   return new EditableArtifactDurableExportError(
     "unsupported_format",
     listed
-      ? `unsupported_format: this deployment does not serve a ${format} export of a ${modality} artifact with these options; retry with options omitted.`
-      : `unsupported_format: a ${modality} artifact cannot be exported as ${format}. ${describeEditableArtifactExportFormats()}`,
+      ? `unsupported_format: this deployment does not serve a ${format} export of a ${modality} artifact with these options; retry with options omitted. ${describeConfiguredExportFormats(formats)}`
+      : `unsupported_format: a ${modality} artifact cannot be exported as ${format}. ${describeConfiguredExportFormats(formats)}`,
   );
 }
 
@@ -148,6 +155,11 @@ export type EditableArtifactMaterializationProfile = Readonly<{
 
 /** Server-owned profile lookup. Clients never supply executable identity facts. */
 export interface EditableArtifactMaterializationProfilePort {
+  /** Deployment-owned discovery; resolve remains the authority for exact options.
+   * Optional for existing custom adapters, whose support is resolved dynamically. */
+  supportedFormats?: Readonly<
+    Record<EditableArtifactModality, readonly EditableArtifactMaterializationFormat[]>
+  >;
   resolve(
     input: Readonly<{
       modality: EditableArtifactModality;
@@ -300,6 +312,38 @@ const PROFILE_TEXT = /^[\x21-\x7e]+$/u;
 export class EditableArtifactDurableExportService {
   constructor(private readonly dependencies: EditableArtifactDurableExportServiceDependencies) {}
 
+  describeFormats(): string {
+    const formats = this.dependencies.profiles.supportedFormats;
+    return formats
+      ? describeConfiguredExportFormats(formats)
+      : "Export formats are determined by this deployment's configured exporter; unsupported format/options combinations are refused before pinning.";
+  }
+
+  /** Read-only exact preflight: no snapshot, ID allocation, or store write. */
+  async preflight(input: {
+    modality: EditableArtifactModality;
+    format: EditableArtifactMaterializationFormat;
+    options?: Readonly<Record<string, unknown>>;
+  }): Promise<EditableArtifactMaterializationProfile> {
+    const format = materializationFormat(input.format);
+    const options = exactOptions(input.options ?? Object.freeze({}));
+    const profile = await this.dependencies.profiles.resolve({
+      modality: input.modality,
+      format,
+      options,
+    });
+    if (!profile) {
+      const formats = this.dependencies.profiles.supportedFormats;
+      if (formats) throw unsupportedEditableArtifactExport(input.modality, format, formats);
+      throw new EditableArtifactDurableExportError(
+        "unsupported_format",
+        `unsupported_format: this deployment does not serve ${input.modality} → ${format} with these options. ${this.describeFormats()}`,
+      );
+    }
+    validateProfile(profile, input.modality, format);
+    return profile;
+  }
+
   async pinVersion(
     input: DurableExportContext & {
       idempotencyKey: string;
@@ -360,13 +404,11 @@ export class EditableArtifactDurableExportService {
     const format = materializationFormat(input.format);
     const options = exactOptions(input.options ?? Object.freeze({}));
     const version = await this.getVersion(context, versionId);
-    const profile = await this.dependencies.profiles.resolve({
+    const profile = await this.preflight({
       modality: version.modality,
       format,
       options,
     });
-    if (!profile) throw unsupportedEditableArtifactExport(version.modality, format);
-    validateProfile(profile, version.modality, format);
     const requestHash = hashPublicRequest("materialize", [
       idempotencyKey,
       versionId,

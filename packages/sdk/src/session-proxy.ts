@@ -135,7 +135,9 @@ export type SessionProxyHandlerOptions = {
    * Let the browser read a file from the session's sandbox (`POST .../fs/read`)
    * so `sandbox:` links in agent replies can be downloaded. Only `path`,
    * `encoding`, and `maxBytes` are forwarded; OpenGeni still requires the
-   * user's `files:read` permission on that session. Defaults to true.
+   * user's `files:read` permission on that session. Explicit opt-in, default
+   * false. Reads are confined to its working directory, including on Connected
+   * Machines; symlinked paths are refused.
    */
   sandboxFiles?: boolean | undefined;
   /**
@@ -209,7 +211,7 @@ export function createSessionProxyHandler(
   const defaultSource = isFacade(target) ? target.source : "default";
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const filesEnabled = options.files ?? true;
-  const sandboxFilesEnabled = options.sandboxFiles ?? true;
+  const sandboxFilesEnabled = options.sandboxFiles === true;
   const modelSelection = options.modelSelection ?? true;
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const sessionList = options.sessionList ?? "mine";
@@ -316,6 +318,7 @@ export function createSessionProxyHandler(
           return json({
             ...config,
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+            sandboxFiles: sandboxFilesEnabled,
             ...(modelSelection ? {} : { modelSelection: false }),
           });
         }
@@ -496,9 +499,14 @@ export function createSessionProxyHandler(
         }
         case "GET human-input-requests":
           return await read(`${session}/human-input-requests`);
-        case "POST fs/read": {
+        case "POST fs/read":
+        case "POST fs/read-workspace": {
           if (!sandboxFilesEnabled) return errorJson(404, "route_not_allowed", "Not found.");
-          return json(await client.requestJson("POST", `${session}/fs/read`, sandboxRead(body)));
+          // A distinct route fails closed on older APIs that would strip the
+          // additive workspaceOnly field and otherwise permit machine-wide reads.
+          return json(
+            await client.requestJson("POST", `${session}/fs/read-workspace`, sandboxRead(body)),
+          );
         }
       }
       if (op.length === 2 && op[0] === "human-input-requests" && method === "GET") {
@@ -532,11 +540,18 @@ function sandboxRead(body: Record<string, unknown> | undefined): Record<string, 
   if (encoding !== undefined && encoding !== "utf8" && encoding !== "base64") {
     reject(400, "invalid_body", "encoding must be utf8 or base64.");
   }
-  if (maxBytes !== undefined && (typeof maxBytes !== "number" || !Number.isSafeInteger(maxBytes))) {
-    reject(400, "invalid_body", "maxBytes must be an integer.");
+  if (
+    maxBytes !== undefined &&
+    (typeof maxBytes !== "number" ||
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1 ||
+      maxBytes > 25 * 1024 * 1024)
+  ) {
+    reject(400, "invalid_body", "maxBytes must be an integer from 1 to 26214400.");
   }
   return {
     path,
+    workspaceOnly: true,
     ...(encoding === undefined ? {} : { encoding }),
     ...(maxBytes === undefined ? {} : { maxBytes }),
   };

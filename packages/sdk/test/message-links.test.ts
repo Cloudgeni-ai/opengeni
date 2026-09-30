@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { openGeniConsolePath, parseOpenGeniLink } from "../src/index";
+import { openGeniConsolePath, parseOpenGeniLink, isReservedOpenGeniLink } from "../src/index";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const EDITABLE = "0123456789ABCDEF0123456789abcdef";
@@ -21,6 +21,7 @@ describe("parseOpenGeniLink", () => {
       kind: "site",
       artifactId: UUID,
       workspaceId: WS,
+      fromSession: UUID,
     });
     expect(parseOpenGeniLink(`/workspaces/${WS}/artifacts/files/${UUID}`)).toEqual({
       kind: "file",
@@ -68,5 +69,26 @@ describe("parseOpenGeniLink", () => {
     expect(openGeniConsolePath(parseOpenGeniLink(`artifact:${UUID}`)!, WS)).toBe(
       `/workspaces/${WS}/artifacts/files/${UUID}`,
     );
+  });
+
+  test("case-insensitive schemes share recognition and complete queries are validated", () => {
+    expect(parseOpenGeniLink(`ARTIFACT:${UUID}`)).toEqual(parseOpenGeniLink(`artifact:${UUID}`));
+    expect(parseOpenGeniLink("SANDBOX:src/app.ts:3")).toEqual({
+      kind: "sandbox-file",
+      path: "src/app.ts",
+      line: 3,
+    });
+    const path = `/workspaces/${WS}/artifacts/${UUID}`;
+    expect(parseOpenGeniLink(`${path}?fromSession=${UUID}?version=2`)).toBeNull();
+    expect(openGeniConsolePath(parseOpenGeniLink(`${path}?fromSession=${UUID}`)!, WS)).toBe(
+      `${path}?fromSession=${UUID}`,
+    );
+    for (const suffix of ["#top", "?version=2", "?", "/"]) {
+      expect(parseOpenGeniLink(path + suffix)).toBeNull();
+      expect(isReservedOpenGeniLink(path + suffix)).toBe(true);
+    }
+    expect(isReservedOpenGeniLink(`/workspaces/${WS}/artifacts/%65ditable/not-hex`)).toBe(true);
+    expect(isReservedOpenGeniLink(`https://external.test${path}`)).toBe(false);
+    expect(isReservedOpenGeniLink(`/workspaces/${WS}/settings`)).toBe(false);
   });
 });

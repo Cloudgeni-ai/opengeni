@@ -5354,6 +5354,19 @@
     },
     {
       "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace",
+      "sdk": [
+        "OpenGeniClient.fsRead"
+      ],
+      "request": [
+        "FsReadRequest"
+      ],
+      "response": [
+        "FsReadResponse"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write",
       "sdk": [
         "OpenGeniClient.fsWrite"
@@ -9100,6 +9113,7 @@
         "$.models": "array!",
         "$.models[]": "ref(ClientModel)",
         "$.productAccessMode": "ref(ProductAccessMode)!",
+        "$.sandboxFiles": "boolean?",
         "$.serverVersion": "string?",
         "$.structuredServices": "object!",
         "$.structuredServices.fileSystem": "boolean!",
@@ -11987,7 +12001,8 @@
         "$.encoding": "enum?=[\"\\\"base64\\\"\",\"\\\"utf8\\\"\"]",
         "$.maxBytes": "integer?",
         "$.path": "string!",
-        "$.route": "ref(FileSystemRouteIdentity)?"
+        "$.route": "ref(FileSystemRouteIdentity)?",
+        "$.workspaceOnly": "boolean?"
       }
     },
     "FsReadResponse": {
@@ -23292,6 +23307,7 @@
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isReservedOpenGeniLink": "value",
       "isRetryableStreamError": "value",
       "isSiteCatalogStaleError": "value",
       "KnowledgeEntryBatchReviewRequest": "type",
@@ -23453,6 +23469,7 @@
       "OpenGeniDynamicToolNode": "type",
       "OpenGeniGeneratedTools": "type",
       "OpenGeniInteractionClient": "value",
+      "openGeniLinkScheme": "value",
       "OpenGeniLinkTarget": "type",
       "OpenGeniRequestOptions": "type",
       "OpenGeniSecureContextRequiredError": "value",

@@ -190,6 +190,8 @@ export type {
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
+  isReservedOpenGeniLink,
+  openGeniLinkScheme,
   parseRetainedFileReference,
   parseSandboxLink,
 } from "./message-links";

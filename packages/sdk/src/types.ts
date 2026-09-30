@@ -2489,6 +2489,8 @@ export type FsListBatchRequest = { requests: FsListRequest[] };
 export type FsListBatchResponse = { results: FsListResponse[] };
 export type FsReadRequest = {
   path: string;
+  /** Confine this read to the session's working directory, refusing symlinks. */
+  workspaceOnly?: boolean;
   encoding?: FsEncoding;
   maxBytes?: number;
   route?: FileSystemRouteIdentity;
@@ -4038,6 +4040,8 @@ export type ClientConfig = {
    * model picker. OpenGeni itself omits it.
    */
   modelSelection?: boolean | undefined;
+  /** Session proxy sandbox-path download opt-in; absent on native deployments. */
+  sandboxFiles?: boolean | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**

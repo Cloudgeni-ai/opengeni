@@ -2,7 +2,7 @@ import { setStartupDetails } from "../src/timeline/startup-preference";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { registerDom, renderComponent, flush, actRun } from "./render-hook";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
 import type {
   AuthNeededItem,
@@ -548,6 +548,56 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
 }
 
 describe("SiteArtifactRenderer", () => {
+  test("Site actions expose pending and retry state instead of swallowing failures", async () => {
+    let reject!: (error: Error) => void;
+    let calls = 0;
+    const pending = new Promise<void>((_resolve, rejectPending) => {
+      reject = rejectPending;
+    });
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      status: "complete",
+      output: {
+        artifact: {
+          id: "22222222-2222-4222-8222-222222222222",
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          title: "Board",
+        },
+        version: { revision: 1 },
+      },
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const view = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={() => ({
+          open: () => {
+            calls++;
+            return pending;
+          },
+        })}
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    try {
+      await flush();
+      const button = view.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open Board"]',
+      )!;
+      await actRun(() => button.click());
+      await flush();
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      button.click();
+      expect(calls).toBe(1);
+      await actRun(() => reject(new Error("failed")));
+      await flush();
+      expect(button.disabled).toBe(false);
+      expect(button.textContent).toBe("Retry open");
+    } finally {
+      await view.unmount();
+    }
+  });
   test("renders a direct durable Site link from the structured mutation result", async () => {
     const item = toolItem({
       name: "opengeni__artifacts_create",

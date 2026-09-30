@@ -27,8 +27,10 @@ document, workbook, or presentation), and `/workspaces/<ws>/artifacts/<uuid>`
 console routes and 404 on the product origin. Never pass them to a raw `<a>`.
 
 - `SessionConversation`/`OpenGeniChat` behind `createSessionProxyHandler`
-  already download `artifact:` files and `sandbox:` files (proxy `files` and
-  `sandboxFiles`, both on by default). Keep those permissions (`files:read`).
+  download `artifact:` files by default. `sandbox:` reads require deliberate
+  proxy `sandboxFiles: true` (default off) plus `files:read`; they are confined
+  to the selected working directory, including on Connected Machines, and
+  refuse symlinked paths. Disabled sandbox links render unavailable.
 - Route editable artifacts and Sites to the product's own UI with
   `resolveLink={(target) => ... ({ href } | { open } | null)}` on
   `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a

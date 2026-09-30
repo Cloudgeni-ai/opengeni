@@ -27,8 +27,6 @@ import {
 } from "@opengeni/contracts/editable-artifacts";
 
 import {
-  EDITABLE_ARTIFACT_EXPORT_FORMATS,
-  unsupportedEditableArtifactExport,
   type EditableArtifactDurableExportService,
   type EditableArtifactMaterializationFormat,
   type EditableArtifactMaterializationJob,
@@ -194,6 +192,9 @@ export type EditableArtifactAgentApplicationDependencies = Readonly<{
  * not another artifact engine: every mutation terminates at EditableArtifactService.
  */
 export class EditableArtifactAgentApplication {
+  describeExportFormats(): string {
+    return this.dependencies.exports.describeFormats();
+  }
   constructor(private readonly dependencies: EditableArtifactAgentApplicationDependencies) {}
 
   async list(
@@ -476,9 +477,11 @@ export class EditableArtifactAgentApplication {
       artifactId,
     });
     // Refuse before pinning a version: the agent learns what does exist.
-    if (!EDITABLE_ARTIFACT_EXPORT_FORMATS[artifact.modality].includes(input.format)) {
-      throw unsupportedEditableArtifactExport(artifact.modality, input.format);
-    }
+    await this.dependencies.exports.preflight({
+      modality: artifact.modality,
+      format: input.format,
+      ...(input.options ? { options: input.options } : {}),
+    });
     const version = await this.dependencies.exports.pinVersion({
       scope: context.scope,
       actor: context.actor,

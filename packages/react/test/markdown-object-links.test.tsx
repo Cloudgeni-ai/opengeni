@@ -31,6 +31,60 @@ describe("OpenGeni object links inside an embedding host", () => {
     expect(html).toContain('data-og-link-unavailable="site"');
   });
 
+  test("rejected reserved references never become host-origin navigations", () => {
+    const path = `/workspaces/${WORKSPACE}/artifacts/editable/${EDITABLE}`;
+    for (const href of [
+      path + "#top",
+      path + "?version=2",
+      path + "?",
+      path + "/",
+      path.replace("editable", "%65ditable"),
+      path + `?fromSession=${FILE}?version=2`,
+      "artifact:invalid",
+      "ARTIFACT:invalid",
+      "/workspace/a:0",
+    ]) {
+      const html = renderToStaticMarkup(<Markdown>{`[Report](${href})`}</Markdown>);
+      expect(html).not.toContain("<a ");
+      expect(html).toContain("unavailable");
+    }
+    const uppercase = renderToStaticMarkup(
+      <Markdown artifactHref={(id) => `/download/${id}`}>{`[Report](ARTIFACT:${FILE})`}</Markdown>,
+    );
+    expect(uppercase).toContain(`href="/download/${FILE}"`);
+  });
+
+  test("unsafe resolver and legacy destinations are unavailable, never empty anchors", () => {
+    for (const href of ["javascript:alert(1)", "data:text/html,hello", "file:///etc/passwd"]) {
+      for (const props of [{ resolveLink: () => ({ href }) }, { artifactHref: () => href }]) {
+        const html = renderToStaticMarkup(
+          <Markdown {...props}>{`[Report](artifact:${FILE})`}</Markdown>,
+        );
+        expect(html).not.toContain("<a ");
+        expect(html).toContain("unavailable");
+      }
+    }
+  });
+
+  test("disabled sandbox defaults leave path references unavailable but retain file downloads", () => {
+    const resolve = sessionLinkResolver({
+      client: {
+        fsRead: (() => Promise.reject(new Error("must not read"))) as never,
+        createFileDownloadUrl: (() => Promise.resolve({ url: "https://file.test" })) as never,
+      },
+      workspaceId: WORKSPACE,
+      sessionId: FILE,
+      sandboxFiles: false,
+    });
+    expect(resolve({ kind: "sandbox-file", path: "src/a", line: null })).toBeNull();
+    expect(resolve({ kind: "file", fileId: FILE, workspaceId: null })).not.toBeNull();
+    const html = renderToStaticMarkup(
+      <Markdown resolveLink={resolve}>{"[Code](sandbox:src/a)"}</Markdown>,
+    );
+    expect(html).not.toContain("<button");
+    expect(html).not.toContain("<a ");
+  });
+
   test("a host resolver turns each target into its own URL", () => {
     const seen: OpenGeniLinkTarget[] = [];
     const html = renderToStaticMarkup(

@@ -11,6 +11,7 @@ import {
 } from "../../src/domain/editable-artifacts/agent-application";
 import {
   EditableArtifactDurableExportError,
+  unsupportedEditableArtifactExport,
   describeEditableArtifactExportFormats,
   type EditableArtifactDurableExportService,
   type EditableArtifactMaterializationJob,
@@ -496,6 +497,9 @@ describe("editable artifact agent application", () => {
     > = [];
     const touched: string[] = [];
     const exports = {
+      async preflight() {
+        return {};
+      },
       async pinVersion(input: (typeof pinCalls)[number]) {
         pinCalls.push(input);
         return { version, replayed: false };
@@ -608,6 +612,9 @@ describe("editable artifact agent application", () => {
     const application = new EditableArtifactAgentApplication({
       domain: fixture.service,
       exports: {
+        async preflight() {
+          throw unsupportedEditableArtifactExport("spreadsheet", "pdf");
+        },
         async pinVersion() {
           pinned += 1;
           throw new Error("must not pin");

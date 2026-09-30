@@ -76,7 +76,9 @@ the panel bottom. Do not add a second timeline scroller or fixed/sticky composer
 
 Agent replies link files, sandbox paths, editable artifacts, and Sites with
 `artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
-host origin. `SessionConversation` downloads files and sandbox files itself;
+host origin. `SessionConversation` downloads retained files by default;
+sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
+session working directory without following symlinks.
 route artifacts and Sites with its `resolveLink` prop (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
 `@opengeni/sdk` outside React. See

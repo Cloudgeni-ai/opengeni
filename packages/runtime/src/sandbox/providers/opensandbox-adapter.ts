@@ -9,6 +9,7 @@ import {
   type Endpoint,
   type Sandboxes,
 } from "@alibaba-group/opensandbox";
+import { confinedFileReadCommand, parseConfinedFileRead } from "../confined-file-read";
 import {
   Manifest,
   Permissions,
@@ -941,12 +942,32 @@ export class OpenSandboxSession {
 
   async readFile(args: { path: string; runAs?: string; maxBytes?: number }): Promise<Uint8Array> {
     assertRunAsUnsupported(args.runAs);
-    const provider = await this.ensureStarted();
-    return await provider.files
-      .readBytes(workspacePath(args.path, { allowPrivate: true }), {
-        ...(args.maxBytes !== undefined ? { limit: args.maxBytes } : {}),
-      })
-      .catch((error) => this.rethrowFilesystemReadError(provider, error));
+    const absolute = workspacePath(args.path, { allowPrivate: true });
+    const root = [WORKSPACE_ROOT, ...ALLOWED_PRIVATE_ROOTS].find(
+      (candidate) => absolute === candidate || absolute.startsWith(`${candidate}/`),
+    )!;
+    const maxBytes = args.maxBytes ?? 512 * 1024 * 1024;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 512 * 1024 * 1024) {
+      throw new SandboxConfigurationError("Invalid OpenSandbox read byte limit");
+    }
+    const result = await this.exec({
+      cmd: confinedFileReadCommand(root, absolute.slice(root.length + 1), maxBytes),
+      login: false,
+      yieldTimeMs: 30_000,
+      maxOutputTokens: Math.ceil((maxBytes * 4) / 3) + 1024,
+    });
+    if (result.exitCode === 66) {
+      throw new SandboxWorkspaceReadNotFoundError("OpenSandbox workspace path not found");
+    }
+    if (result.exitCode === 67) {
+      throw new SandboxConfigurationError("path resolves outside workspace or contains a symlink");
+    }
+    const bytes =
+      result.sessionId === undefined && result.exitCode === 0
+        ? parseConfinedFileRead(result.stdout, maxBytes)
+        : null;
+    if (!bytes) throw new SandboxProviderError("OpenSandbox confined file read unavailable");
+    return bytes;
   }
 
   private async rethrowFilesystemReadError(

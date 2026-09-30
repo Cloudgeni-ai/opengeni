@@ -8,7 +8,6 @@ import type {
   EditableArtifactAgentQuery,
 } from "@opengeni/core/editable-artifacts";
 import {
-  describeEditableArtifactExportFormats,
   editableArtifactClientTransactionId,
   editableArtifactId,
 } from "@opengeni/core/editable-artifacts";
@@ -268,7 +267,7 @@ export function registerEditableArtifactAgentTools(
     "editable_artifact_export",
     {
       title: "Export editable artifact",
-      description: `Pin the current artifact head and start an immutable file export. ${describeEditableArtifactExportFormats()} This does not write into the sandbox. Poll opengeni__editable_artifact_export_status for the resulting workspace file ID.`,
+      description: `Pin the current artifact head and start an immutable file export. ${input.deps.editableArtifactAgent?.describeExportFormats?.() ?? "No exporter capability description is available; query this deployment before promising a format."} This does not write into the sandbox. Poll opengeni__editable_artifact_export_status for the resulting workspace file ID.`,
       inputSchema: {
         artifactId: ArtifactId,
         format: Format.describe(

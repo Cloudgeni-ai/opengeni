@@ -360,6 +360,7 @@ function materializationProfiles(
   }
   const codecVersion = capabilities.codecVersions["opengeni.xlsx"];
   return Object.freeze({
+    supportedFormats: EDITABLE_ARTIFACT_EXPORT_FORMATS,
     async resolve(input: Parameters<EditableArtifactMaterializationProfilePort["resolve"]>[0]) {
       // EDITABLE_ARTIFACT_EXPORT_FORMATS is what agents are told exists.
       if (

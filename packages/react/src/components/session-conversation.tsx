@@ -19,6 +19,7 @@ import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
 import {
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkResolver,
   type OpenGeniLinkResolver,
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
@@ -32,7 +33,7 @@ export type SessionConversationProps = ClientOverride & {
   /**
    * Open OpenGeni object links in agent replies (`artifact:`, `sandbox:`,
    * editable artifacts, Sites). Asked first; by default retained files and
-   * sandbox files download through this conversation's client, while
+   * sandbox files download only when the proxy explicitly enables them, while
    * editable artifacts and Sites stay unavailable until the host resolves them.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
@@ -128,18 +129,20 @@ function Conversation({
       : {}),
   });
   const region = useRef<HTMLDivElement>(null);
+  const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
     () =>
       sessionLinkResolver({
         client: context.client,
         workspaceId: context.workspaceId,
         sessionId,
+        sandboxFiles: config.sandboxFiles,
       }),
-    [context.client, context.workspaceId, sessionId],
+    [context.client, context.workspaceId, sessionId, config.sandboxFiles],
   );
   const links = useMemo(
-    () => chainLinkResolvers(resolveLink, defaultLinks) ?? undefined,
-    [resolveLink, defaultLinks],
+    () => chainLinkResolvers(resolveLink, inheritedLinks, defaultLinks) ?? undefined,
+    [resolveLink, inheritedLinks, defaultLinks],
   );
   const error = detail.error ?? feed.error ?? human.error;
   return (
@@ -277,9 +280,10 @@ function useClientConfigFlags(client: {
   getClientConfig: () => Promise<{
     fileUploads?: { enabled?: boolean };
     modelSelection?: boolean | undefined;
+    sandboxFiles?: boolean | undefined;
   }>;
-}): { uploads: boolean; modelSelection: boolean } {
-  const [flags, setFlags] = useState({ uploads: false, modelSelection: true });
+}): { uploads: boolean; modelSelection: boolean; sandboxFiles: boolean } {
+  const [flags, setFlags] = useState({ uploads: false, modelSelection: true, sandboxFiles: false });
   useEffect(() => {
     let live = true;
     client.getClientConfig().then(
@@ -288,6 +292,7 @@ function useClientConfigFlags(client: {
           setFlags({
             uploads: config.fileUploads?.enabled === true,
             modelSelection: config.modelSelection !== false,
+            sandboxFiles: config.sandboxFiles !== false,
           });
         }
       },
