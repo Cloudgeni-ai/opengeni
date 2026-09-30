@@ -567,6 +567,19 @@ Canonical: `packages/contracts/src/work-claims.ts`,
 `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, and
 [`work-discovery.md`](work-discovery.md).
 
+### 3.12 Usage allowances constrain debits, never grant authority or reserve funds
+
+Allowances constrain USD-micro debits, not funding or access. Organization
+authority writes budgets; workspace admins split members; agents write neither.
+Post-call settlement permits concurrent overshoot, never reservations.
+Schedules/children/continuations/recovery retain causal members. Shares may
+oversubscribe included credits plus remaining grants. Mutations use CAS/keyed
+grants; monthly boundaries use UTC clamping.
+Default-off `OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until all
+API/control/turn readers are upgraded, never persisted-policy enforcement.
+
+Canonical: [`usage-allowances.md`](usage-allowances.md), §5.7.
+
 ---
 
 ## 4. System architecture
@@ -977,6 +990,8 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
+Allowances: [policy, counters, reads, notifications](usage-allowances.md).
+
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
 telemetry, comparison pricing, and dashboards do not independently debit or
@@ -1007,26 +1022,13 @@ durations, never primary/secondary position. Headers lacking both durations cann
 update labeled cache; absent reset timing does not clear an exhausted window.
 The account picker refreshes live usage on open rather than trusting stale labels.
 
-Codex turns require durable credential leases. `rotation_enabled` off waits on
-capped accounts; on permits same-turn failover. First allocation freezes source,
-active pointer, rotation, strategy, and pin in `codexCredentialPolicySnapshotV1`
-before no-credential waits. Recovery retains that policy with current health and
-cooldowns. Missing/expired deadlines fail closed; late heartbeats are discarded.
-Expiry SQL reads database time after locking.
-
-Source-advisory locks serialize changes. Accepted pools govern
-allocation, recovery, capacity, tokens, and wakes. Guarded content-free capture
-preserves legacy sources in `codex_turn_source_bindings` without rewriting history.
-New work uses new settings; connecting preserves mode; Automatic prefers local
-accounts. Token loading/refresh requires exact live leases.
-Workspace lists use current pools; session pickers use accepted pools for waits,
-current pools for new work. Membership, ownership, health, token-family CAS,
-and live-lease disconnect fences remain enforced.
-
-Migration 0492 requires maintenance: drain API/control/turn processes, supply
-runtime logins, migrate, provision roles, then start compatible binaries.
-Guards reject live runtime DB sessions; recover accepted turns from checkpoints.
-Never restart pre-0492 binaries.
+Codex requires exact live credential leases and frozen accepted source/rotation
+policy; recovery preserves that policy while current health governs capacity.
+Canonical allocator, expiry, source-change, and picker rules:
+[Codex rotation](codex-subscription-rotation.md).
+Migration 0492 requires drained API/control/turn processes, runtime-login
+inventory, migration, role provisioning, and matching binaries; never restart
+pre-0492 code. Accepted turns recover from checkpoints.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
@@ -1723,6 +1725,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
+| Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations

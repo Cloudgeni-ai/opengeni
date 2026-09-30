@@ -1,5 +1,10 @@
 # Deployment
 
+Workspace/member allowances use rolling migrations and a default-off producer
+gate. Upgrade every API, control worker, and turn worker before enabling
+`OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement
+of persisted policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
+
 ## Scheduled Slack channel posts (0530)
 
 `0530_scheduled_slack_bot_messages.sql` is rolling. It adds the private

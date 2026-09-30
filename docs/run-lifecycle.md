@@ -9,6 +9,16 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 
 ## Turns
 
+Workspace/member [usage allowances](usage-allowances.md) reuse edge admission,
+claimed-turn admission, and the post-response budget valve. Credit debits and
+allowance counters commit together; descendants and service-created continuations
+retain the accepted turn's initiating human. Pure-service work has no member
+ceiling. Externally funded work with no credit debit consumes no allowance.
+An exhausted allowance emits typed scope/reset details, completes the segment
+with the existing `budget_exhausted` marker, keeps the session usable, and pauses
+an active goal with reason `allowance` in the settlement transaction. No
+pre-call reservation or event-scan admission is introduced.
+
 Workspace control revisions never move backwards. Migration 0505 repairs heads
 behind retained control events by advancing only the revision, preserving pause
 state, timers and event history. Fresh browser streams start at that head; old

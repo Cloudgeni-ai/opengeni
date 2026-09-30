@@ -127,6 +127,7 @@ Up to ten endpoints per workspace, each with its own secret and a subset of:
 | `session.status.changed` | The session status changes |
 | `session.requiresAction` | The agent waits for a tool approval |
 | `session.humanInput.requested` | The agent asks the user a structured question |
+| `usage.threshold_reached` / `usage.exhausted` / `usage.period_reset` | Allowance lifecycle signals; see [usage allowances](usage-allowances.md#errors-and-event-handling) |
 
 ```ts
 const { webhook, secret } = await client.createWorkspaceWebhook(workspaceId, {
@@ -156,6 +157,14 @@ Deliveries are enqueued inside the same transaction that records the session
 event, so an event cannot be committed without its deliveries. A pump in every
 API replica claims them with short leases, so replicas share the work and a
 crash only delays a delivery. Settled deliveries are pruned after seven days.
+
+Usage events are workspace-scoped, without a synthetic session/turn identity
+or session sequence. Periodic allowance maintenance in the API dispatch loop
+evaluates thresholds, idle rollover, and grant expiry independently of usage
+GETs. Receipt/outbox enqueue is transactional and failed maintenance retries;
+bounded sweeps do not guarantee delivery at the exact wall-clock boundary. See
+[usage allowances](usage-allowances.md#errors-and-event-handling) before using
+them for a product meter.
 
 ## MCP identity
 

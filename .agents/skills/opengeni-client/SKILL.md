@@ -184,6 +184,11 @@ Read selectively: [Product integration shapes](references/product-integration-sh
 [Data tools and credentials](references/data-tools-and-credentials.md), and
 [External users and embedded connection setup](references/external-users-and-connect.md).
 
+For per-seat included usage, administrator splits, top-ups, team budgets, or
+browser progress meters, read [Usage allowances](references/usage-allowances.md).
+Keep organization-budget writes on the backend; the conversation proxy exposes
+only own usage. These are post-call ceilings, not prepaid reservations.
+
 ## Build Gotchas
 
 - Always pass `baseUrl` (`process.env.OPENGENI_API_BASE_URL`); the chat facade
