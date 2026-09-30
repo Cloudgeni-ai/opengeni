@@ -1,6 +1,6 @@
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { labelReasoningEffort } from "@opengeni/react";
-import type { CodexConnectPoll } from "@opengeni/sdk";
+import type { CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -95,10 +95,17 @@ function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string
  * purchase is an optional upgrade. Connecting a model updates the
  * actor-private new-chat draft so the next chat preselects that model. Leaving
  * remains available; this does not change the 0348 API.
+ *
+ * The person here just created the organization, so a subscription (Codex,
+ * SuperGrok) connects for everyone in it, and reaches their Personal
+ * workspace through the organization. API keys stay in the Personal
+ * workspace: the organization's keys serve shared workspaces only, so an
+ * organization key would not pay for the next chat.
  */
 export function ModelAccessOnboardingPanel({
   client,
   organizationId,
+  organizationName,
   workspaceId,
   billingMode = "disabled",
   codexEnabled = false,
@@ -109,6 +116,8 @@ export function ModelAccessOnboardingPanel({
 }: {
   client?: OpenGeniBrowserClient;
   organizationId: string;
+  /** The new organization's name, for "Shared with everyone in Acme". */
+  organizationName?: string | undefined;
   workspaceId: string;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
@@ -207,13 +216,24 @@ export function ModelAccessOnboardingPanel({
     let verificationUri: string;
     const controller = new AbortController();
     try {
+      // Subscriptions connect for the whole organization (its creator is its
+      // owner); the Personal workspace uses the organization's accounts.
       if (kind === "codex") {
-        const start = await client.codexConnectStart(workspaceId);
+        const start = await client.requestJson<CodexConnectStart>(
+          "POST",
+          `/v1/organizations/${organizationId}/codex/connect/start`,
+          {},
+        );
         verificationUri = start.verificationUri;
         setPending({ kind, userCode: start.userCode, verificationUri });
         begin = () =>
           pollDeviceAuthorization<CodexConnectPoll>({
-            poll: () => client.codexConnectPoll(workspaceId, start.state),
+            poll: () =>
+              client.requestJson<CodexConnectPoll>(
+                "POST",
+                `/v1/organizations/${organizationId}/codex/connect/poll`,
+                { state: start.state },
+              ),
             expired: { status: "expired" },
             initialIntervalSeconds: Math.max(2, start.intervalSeconds),
             expiresAtMs: Date.now() + CODEX_DEVICE_CODE_TTL_MS,
@@ -221,12 +241,12 @@ export function ModelAccessOnboardingPanel({
             retryable: isRetryableDevicePollError,
           });
       } else {
-        const start = await client.supergrokConnectStart(workspaceId, "user");
+        const start = await client.organizationSupergrokConnectStart(organizationId);
         verificationUri = start.verificationUriComplete ?? start.verificationUri;
         setPending({ kind, userCode: start.userCode, verificationUri });
         begin = () =>
           pollSuperGrokDeviceLogin({
-            poll: () => client.supergrokConnectPoll(workspaceId, start.state),
+            poll: () => client.organizationSupergrokConnectPoll(organizationId, start.state),
             initialIntervalSeconds: start.intervalSeconds,
             expiresAtMs: Date.now() + start.expiresInSeconds * 1_000,
             signal: controller.signal,
@@ -251,8 +271,8 @@ export function ModelAccessOnboardingPanel({
       if (result.status === "connected") {
         toast.success(
           kind === "codex"
-            ? `Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`
-            : "SuperGrok connected",
+            ? `Codex connected for ${organizationName || "your organization"}${result.plan ? ` (${result.plan} plan)` : ""}`
+            : `SuperGrok connected for ${organizationName || "your organization"}`,
         );
         // Hold the leave buttons until the connected model is the next-chat selection.
         setBusy(true);
@@ -346,31 +366,32 @@ export function ModelAccessOnboardingPanel({
   }
 
   const validAmount = validTopupAmount(topupAmount);
+  const everyone = `everyone in ${organizationName || "your organization"}`;
   const providers = [
     {
       name: "Codex",
-      description: "Use your ChatGPT plan",
+      description: `Use your ChatGPT plan, for ${everyone}`,
       action: () => void startDeviceLogin("codex"),
       analytics: "connect_codex" as const,
       disabled: !client,
     },
     {
       name: "SuperGrok",
-      description: "Use your xAI subscription",
+      description: `Use your xAI subscription, for ${everyone}`,
       action: () => void startDeviceLogin("supergrok"),
       analytics: "connect_supergrok" as const,
       disabled: !client,
     },
     {
       name: "Vercel AI Gateway",
-      description: "Use your own API key",
+      description: "Use your own API key, in your Personal workspace",
       action: () => toggleKeyProvider("gateway"),
       analytics: "connect_ai_gateway" as const,
       key: "gateway",
     },
     {
       name: "OpenRouter",
-      description: "Use your own API key",
+      description: "Use your own API key, in your Personal workspace",
       action: () => toggleKeyProvider("openrouter"),
       analytics: "connect_openrouter" as const,
       key: "openrouter",
