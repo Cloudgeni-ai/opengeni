@@ -2085,16 +2085,37 @@ describe("capability catalog helpers", () => {
   test("labels MCP probe failures as connection failures", () => {
     expect(
       capabilityErrorToast(
-        new Error(
-          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
+        Object.assign(
+          new Error(
+            'OpenGeni API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again. Reference: req-probe.',
+          ),
+          { status: 422 },
         ),
         "Capability update failed",
       ),
     ).toEqual({
       title: "Connection failed",
       description:
-        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
+        "Opengeni couldn't connect to api.4fetch.com. Check the endpoint address, then try again.",
     });
+  });
+
+  test("never shows the raw API error string", () => {
+    const refused = Object.assign(
+      new Error(
+        "OpenGeni API 403: missing permission: workspace:admin Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
+      ),
+      { status: 403 },
+    );
+    const copy = capabilityErrorToast(refused, "Couldn't remove Skill");
+    expect(copy).toEqual({
+      title: "Couldn't remove Skill",
+      description: "You don't have permission to do this. Ask an admin for access.",
+    });
+    expect(
+      capabilityErrorToast(new Error("This Skill is awaiting review."), "Couldn't enable")
+        .description,
+    ).toBe("This Skill is awaiting review.");
   });
 });
 

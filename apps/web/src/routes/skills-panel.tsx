@@ -20,10 +20,15 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { DetailPage } from "@/components/ui/detail-page";
 import { DetailSkeleton } from "@/components/ui/detail-sheet";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ErrorMessage } from "@/components/ui/error-message";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { MoreMenu } from "@/components/ui/page-actions";
 import { useAppContext, type AppContextValue } from "@/context";
+import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+
+/** What failed, and the error behind it: the UI shows advice, never the raw API string. */
+type SkillsFailure = { title: string; cause: unknown };
 
 /** Both product destinations use this catalog and the same folder write API. */
 export function SkillsPanel({
@@ -109,7 +114,7 @@ export function SkillsPanelContent({
   const [path, setPath] = useState("SKILL.md");
   const [newPath, setNewPath] = useState("");
   const [history, setHistory] = useState<PreferenceRegistryRevisionSummary[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<SkillsFailure | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -154,7 +159,7 @@ export function SkillsPanelContent({
       })
       .catch((reason) => {
         if (inventoryGeneration.current === current)
-          setError(reason instanceof Error ? reason.message : "Could not load Skills");
+          setError({ title: "Couldn't load skills", cause: reason });
       })
       .finally(() => {
         if (inventoryGeneration.current === current) setLoading(false);
@@ -186,7 +191,7 @@ export function SkillsPanelContent({
       })
       .catch((reason) => {
         if (live && current === inventoryGeneration.current)
-          setError(reason instanceof Error ? reason.message : "Could not refresh Skills");
+          setError({ title: "Couldn't refresh skills", cause: reason });
       })
       .finally(() => {
         if (live && current === inventoryGeneration.current) setLoading(false);
@@ -261,7 +266,7 @@ export function SkillsPanelContent({
       setNextCursor(page.nextCursor);
     } catch (reason) {
       if (generation.current === current)
-        setError(reason instanceof Error ? reason.message : "Could not load more Skills");
+        setError({ title: "Couldn't load more skills", cause: reason });
     } finally {
       if (generation.current === current) setBusy(false);
     }
@@ -296,7 +301,7 @@ export function SkillsPanelContent({
       setHistory(detail.revisions);
     } catch (reason) {
       if (generation.current === current)
-        setError(reason instanceof Error ? reason.message : "Could not open Skill");
+        setError({ title: "Couldn't open this skill", cause: reason });
     } finally {
       if (generation.current === current) {
         setBusy(false);
@@ -383,7 +388,7 @@ export function SkillsPanelContent({
       setNotice("Skill scope updated.");
     } catch (reason) {
       if (generation.current === current)
-        setError(reason instanceof Error ? reason.message : "Could not change skill scope");
+        setError({ title: "Couldn't change who can use this skill", cause: reason });
     } finally {
       if (generation.current === current) setBusy(false);
     }
@@ -456,7 +461,15 @@ export function SkillsPanelContent({
       );
     } catch (reason) {
       if (generation.current === current)
-        setError(reason instanceof Error ? reason.message : "Skill change failed");
+        setError({
+          title:
+            operation === "save"
+              ? "Couldn't save this skill"
+              : operation === "approve"
+                ? "Couldn't approve this revision"
+                : "Couldn't restore this revision",
+          cause: reason,
+        });
     } finally {
       if (generation.current === current) setBusy(false);
     }
@@ -479,7 +492,7 @@ export function SkillsPanelContent({
       path={path}
       newPath={newPath}
       history={history}
-      error={error}
+      error={error ? `${error.title}. ${userErrorText(error.cause)}` : null}
       notice={notice}
       busy={busy}
       dirty={dirty}
@@ -519,7 +532,7 @@ export function SkillsPanelContent({
         <EmptyState
           variant="page"
           title="Couldn't open this skill"
-          description={error}
+          description={userErrorText(error.cause)}
           action={
             <Button type="button" variant="outline" size="sm" onClick={back}>
               Back to Capabilities
@@ -572,16 +585,30 @@ export function SkillsPanelContent({
           }
         />
         {error && !record ? (
-          <p role="alert" className="text-sm text-status-error">
-            {error}{" "}
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() => navigate(() => setReload((value) => value + 1))}
+          isPermissionDenied(error.cause) ? (
+            <p className="text-sm text-fg-muted">
+              You can't see skills here. Ask a workspace admin for access.
+            </p>
+          ) : (
+            <ErrorMessage
+              variant="inline"
+              announce
+              title={`${error.title}.`}
+              {...apiErrorDetails(error.cause)}
+              action={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => navigate(() => setReload((value) => value + 1))}
+                >
+                  Try again
+                </Button>
+              }
             >
-              Reload Skills
-            </Button>
-          </p>
+              {userErrorText(error.cause)}
+            </ErrorMessage>
+          )
         ) : null}
         {notice && !record ? (
           <p role="status" className="text-sm">
@@ -589,7 +616,7 @@ export function SkillsPanelContent({
           </p>
         ) : null}
         {loading ? <p role="status">Loading Skills…</p> : null}
-        {!loading && !skills.length ? (
+        {!loading && !error && !skills.length ? (
           <p className="text-sm text-fg-subtle">
             {onFindSkill
               ? "No skills installed yet. Browse the catalog below or add your own."

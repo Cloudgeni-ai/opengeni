@@ -136,6 +136,8 @@ import {
 } from "@/lib/personal-github-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { request } from "@/api";
+import { LoadErrorState } from "@/components/common";
+import { userErrorText } from "@/lib/api-error";
 
 // Custom API creation is a fundamentally different "define a new connector
 // from a spec" flow (paste a URL, preview, pick tools, authenticate, create),
@@ -791,7 +793,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       })
       .catch((error) => {
         toast.error("Couldn't link your Slack identity", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       });
   }, [slackLinkToken, workspaceId, clearReturnParams]);
@@ -862,7 +864,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     } catch (error) {
       dispatchCustomApi({
         type: "preview_error",
-        message: error instanceof Error ? error.message : String(error),
+        message: userErrorText(error),
         authenticationMayBeRequired: false,
       });
       return;
@@ -879,7 +881,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     } catch (error) {
       dispatchCustomApi({
         type: "preview_error",
-        message: error instanceof Error ? error.message : String(error),
+        message: `Couldn't read this API. ${userErrorText(error)}`,
         authenticationMayBeRequired: customApiAuthenticationMayBeRequired(source, error),
       });
     }
@@ -914,7 +916,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       dispatchCustomApi({
         type: "phase",
         phase: "auth",
-        error: error instanceof Error ? error.message : String(error),
+        error: `Couldn't connect your account. ${userErrorText(error)}`,
       });
     }
   }
@@ -951,7 +953,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       dispatchCustomApi({
         type: "phase",
         phase: "review",
-        error: error instanceof Error ? error.message : String(error),
+        error: `Couldn't ${editing ? "update" : "install"} this API. ${userErrorText(error)}`,
       });
     }
   }
@@ -982,7 +984,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setCustomApiRemoveTarget({ instance, removesDefinition: preview.removesDefinition });
     } catch (error) {
       toast.error("Couldn't inspect removal impact", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setCustomApiBusyKey(null);
@@ -1012,7 +1014,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       return true;
     } catch (error) {
       toast.error("Couldn't remove this instance", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -1129,9 +1131,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     const reason = params.get("reason");
     const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
-    const message =
-      oauthCallbackReasonMessage(reason) ??
-      (reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
+    const message = oauthCallbackReasonMessage(reason) ?? "Couldn't connect. Please try again.";
     if (item) {
       setSheetError(message);
       setSelected(
@@ -1409,8 +1409,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     } catch (error) {
       setRegistryResults([]);
       setRegistrySearched(null);
-      toast.error("Registry search failed", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't search the registry", {
+        description: userErrorText(error),
       });
     } finally {
       setRegistryBusy(false);
@@ -1846,12 +1846,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       </div>
                     ) : null}
                     {loadError ? (
-                      <p role="alert">
-                        {loadError.message}
-                        <button type="button" onClick={() => void refresh()}>
-                          Retry
-                        </button>
-                      </p>
+                      <div className="mt-6">
+                        <LoadErrorState
+                          title="Couldn't load connections"
+                          error={loadError}
+                          onRetry={() => void refresh()}
+                        />
+                      </div>
                     ) : null}
                   </div>
                   <div
