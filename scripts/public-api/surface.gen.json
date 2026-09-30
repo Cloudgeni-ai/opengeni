@@ -9424,6 +9424,7 @@
         "$.aliases": "array?",
         "$.aliases[]": "string",
         "$.api": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.availability": "ref(ModelAvailabilityV1)?",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
         "$.contextWindowTokens": "integer?",

@@ -1,0 +1,356 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import postgres from "postgres";
+import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
+import { ClientConfig, signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
+import {
+  allWorkspacePermissions,
+  bootstrapWorkspace,
+  createConnection,
+  createDb,
+  createWorkspaceProviderCustomModel,
+  getModelConnectionAccess,
+  ensureCodexRotationSettings,
+  updateCodexRotationSettings,
+  updateModelConnectionAccess,
+  upsertCodexSubscriptionCredential,
+  upsertWorkspaceModelPolicy,
+  type DbClient,
+} from "@opengeni/db";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { createApp } from "../src/app";
+
+const SECRET = "client-model-admission-parity-test-secret";
+let shared: SharedTestDatabase | null = null;
+let client: DbClient | null = null;
+
+beforeAll(async () => {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (adminUrl || appUrl) {
+    if (!adminUrl || !appUrl) throw new Error("Both test PostgreSQL URLs are required");
+    const admin = postgres(adminUrl, { max: 4 });
+    shared = { admin, adminUrl, appUrl, release: async () => await admin.end() };
+  } else {
+    shared = await acquireSharedTestDatabase("client-model-admission");
+  }
+  if (!shared && process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+    throw new Error("Client model admission parity tests require real PostgreSQL");
+  }
+  if (shared) client = createDb(shared.appUrl);
+}, 180_000);
+
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+}, 60_000);
+
+async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
+  if (!client || !shared) throw new Error("PostgreSQL fixture unavailable");
+  const context = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test:client-model-admission",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Client model admission",
+    workspaceExternalSource: "test:client-model-admission",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Client model admission",
+    subjectId: `user:client-model-${crypto.randomUUID()}`,
+  });
+  const grant = context.workspaceGrants[0]!;
+  const [personal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal') returning id`;
+  await shared.admin`
+    insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${grant.accountId}, ${grant.subjectId}, 'owner', 'active', ${personal!.id})`;
+  const app = createApp({
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SECRET,
+      codexSubscriptionEnabled: true,
+      sandboxBackend: "none",
+      ...overrides,
+    }),
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient: {
+      wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
+    } as never,
+    managedAuth: null,
+  });
+  async function request(
+    path: string,
+    body?: unknown,
+    actor: AccessGrant = grant,
+  ): Promise<Response> {
+    return app.request(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        authorization: `Bearer ${await signDelegatedAccessToken(SECRET, {
+          ...actor,
+          principalKind: "human_session",
+          exp: Math.floor(Date.now() / 1_000) + 3_600,
+        })}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  }
+  async function config(actor: AccessGrant = grant) {
+    const response = await request(
+      `/v1/config/client?workspaceId=${grant.workspaceId}`,
+      undefined,
+      actor,
+    );
+    expect(response.status).toBe(200);
+    const clientConfig = ClientConfig.parse(await response.json());
+    expect(clientConfig.allowedModels).toEqual(clientConfig.models.map((model) => model.id));
+    return clientConfig;
+  }
+  async function parity(rejected: string[] = []) {
+    const current = await config();
+    for (const model of current.allowedModels) {
+      const response = await request(`/v1/workspaces/${grant.workspaceId}/sessions`, {
+        model,
+        initialMessage: "Test model selection",
+        visibility: "workspace",
+        tools: [],
+      });
+      if (response.status !== 202) {
+        throw new Error(`Expected creatable model ${model}: ${await response.text()}`);
+      }
+      expect(response.status).toBe(202);
+      expect((await response.json()).model).toBe(model);
+    }
+    for (const model of rejected) {
+      expect(current.allowedModels).not.toContain(model);
+      const response = await request(`/v1/workspaces/${grant.workspaceId}/sessions`, {
+        model,
+        initialMessage: "Test model selection",
+        visibility: "workspace",
+        tools: [],
+      });
+      expect(response.status).toBe(422);
+    }
+    return current;
+  }
+  return { grant, request, config, parity };
+}
+
+test("PG: disconnected Codex is never advertised or freshly creatable", async () => {
+  if (!client) return;
+  const f = await fixture();
+  const config = await f.parity(["codex/gpt-6-sol", "codex/invented-model"]);
+  expect(config.allowedModels.length).toBeGreaterThan(0);
+  expect(config.allowedModels.some((id) => id.startsWith("codex/"))).toBe(false);
+  const implicit = await f.request("/v1/config/client");
+  expect(ClientConfig.parse(await implicit.json()).allowedModels).toEqual(config.allowedModels);
+  const readOnly = { ...f.grant, permissions: ["workspace:read"] as AccessGrant["permissions"] };
+  expect((await f.config(readOnly)).models).toEqual([]);
+}, 180_000);
+
+test("PG: ready Codex model permissions and workspace policy affect list and create identically", async () => {
+  if (!client || !shared) return;
+  const f = await fixture();
+  const credential = await upsertCodexSubscriptionCredential(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    credentialEncrypted: "metadata-only-fake-secret",
+    chatgptAccountId: crypto.randomUUID(),
+    scopes: null,
+    planType: "pro",
+    isFedramp: false,
+    expiresAt: null,
+    lastRefreshAt: null,
+  });
+  await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
+  await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
+  const codexTarget = { ...f.grant, kind: "codex" as const, connectionId: credential.id };
+  const codexAccess = await getModelConnectionAccess(client.db, codexTarget);
+  expect(codexAccess).not.toBeNull();
+  expect(
+    await updateModelConnectionAccess(client.db, codexTarget, {
+      ...codexAccess!,
+      allowedModels: ["codex/gpt-6-sol"],
+    }),
+  ).not.toBeNull();
+  expect((await f.parity(["codex/gpt-6-astra", "codex/invented-model"])).allowedModels).toContain(
+    "codex/gpt-6-sol",
+  );
+  await upsertWorkspaceModelPolicy(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    allowedProviders: ["openai"],
+    allowedModels: ["gpt-5.6-sol"],
+  });
+  expect((await f.parity(["codex/gpt-6-sol", "gpt-5.6-luna"])).allowedModels).toEqual([
+    "gpt-5.6-sol",
+  ]);
+}, 180_000);
+
+test("PG: workspace Claude custom models use the same readiness and model permissions", async () => {
+  if (!client || !shared) return;
+  const f = await fixture();
+  const connection = await createConnection(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    subjectId: null,
+    providerDomain: "api.anthropic.com",
+    kind: "api_key",
+    credentialEncrypted: "metadata-only-fake-secret",
+    metadata: { credentialRole: "anthropic" },
+    createdBySubjectId: f.grant.subjectId,
+  });
+  const custom = await createWorkspaceProviderCustomModel(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    providerKind: "anthropic",
+    upstreamModelId: "claude-fixture-model",
+    label: "Fixture Claude",
+    operationId: crypto.randomUUID(),
+    requestHash: "a".repeat(64),
+    createdBySubjectId: f.grant.subjectId,
+  });
+  expect(custom).not.toBeNull();
+  expect((await f.parity()).allowedModels).toContain("workspace-anthropic/claude-fixture-model");
+  const claudeTarget = { ...f.grant, kind: "anthropic" as const, connectionId: connection.id };
+  const claudeAccess = await getModelConnectionAccess(client.db, claudeTarget);
+  expect(claudeAccess).not.toBeNull();
+  expect(
+    await updateModelConnectionAccess(client.db, claudeTarget, {
+      ...claudeAccess!,
+      allowedModels: [],
+    }),
+  ).not.toBeNull();
+  await f.parity(["workspace-anthropic/claude-fixture-model"]);
+}, 180_000);
+
+test("PG: no usable model yields empty lists, not a fabricated selectable default", async () => {
+  if (!client) return;
+  const f = await fixture({ openaiApiKey: undefined });
+  expect((await f.parity(["gpt-5.6-sol", "codex/gpt-6-sol"])).allowedModels).toEqual([]);
+  const readOnly = { ...f.grant, permissions: ["workspace:read"] as AccessGrant["permissions"] };
+  expect((await f.config(readOnly)).models).toEqual([]);
+}, 180_000);
+
+test("PG: workspace selector never borrows another caller's authority", async () => {
+  if (!client) return;
+  const f = await fixture();
+  const other = await fixture();
+  const forbidden = await f.request(
+    `/v1/config/client?workspaceId=${other.grant.workspaceId}`,
+    undefined,
+    { ...f.grant, permissions: allWorkspacePermissions },
+  );
+  expect(forbidden.status).toBe(403);
+}, 180_000);
+
+test("PG: database catalog changes and retired Codex definitions apply to both list and create", async () => {
+  if (!client || !shared) return;
+  const capabilities = configuredModels(
+    withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true })),
+  ).find((model) => model.id === "codex/gpt-6-sol")!.capabilities;
+  const baseDocument = {
+    schemaVersion: 1,
+    defaultModel: "gpt-5.6-sol",
+    builtInModels: ["gpt-5.6-sol"],
+    codexModels: [
+      { id: "codex/fixture-hot-model", upstreamModelId: "fixture-hot-model", capabilities },
+    ],
+  };
+  // The integration database is an isolated test fixture, never a deployment.
+  const prior = await shared.admin<{ document: unknown; version: number; updated_at: Date }[]>`
+    select document, version, updated_at from deployment_model_catalog where singleton = true`;
+  try {
+    await shared.admin`
+      insert into deployment_model_catalog (singleton, document)
+      values (true, ${shared.admin.json(baseDocument)})
+      on conflict (singleton) do update set document = excluded.document, version = deployment_model_catalog.version + 1`;
+    const f = await fixture({ modelCatalogSource: "database" });
+    await f.parity(["codex/fixture-hot-model", "codex/gpt-6-sol", "gpt-5.6-luna"]);
+    await upsertCodexSubscriptionCredential(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      credentialEncrypted: "metadata-only-fake-secret",
+      chatgptAccountId: crypto.randomUUID(),
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: null,
+      lastRefreshAt: null,
+    });
+    await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
+    await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
+    expect((await f.parity(["codex/gpt-6-sol"])).allowedModels).toContain(
+      "codex/fixture-hot-model",
+    );
+    const retiredDocument = {
+      ...baseDocument,
+      codexModels: baseDocument.codexModels.map((model) => ({ ...model, retired: true })),
+    };
+    await shared.admin`
+      update deployment_model_catalog set document = ${shared.admin.json(retiredDocument)}, version = version + 1
+      where singleton = true`;
+    expect((await f.parity(["codex/fixture-hot-model"])).allowedModels).toEqual(["gpt-5.6-sol"]);
+  } finally {
+    if (prior[0]) {
+      await shared.admin`
+        update deployment_model_catalog set document = ${shared.admin.json(prior[0].document as never)},
+        version = ${prior[0].version}, updated_at = ${prior[0].updated_at} where singleton = true`;
+    } else {
+      await shared.admin`delete from deployment_model_catalog where singleton = true`;
+    }
+  }
+}, 180_000);
+
+test.each([
+  { name: "Azure AD", azureOpenaiAdToken: "fixture-bearer-never-executed" },
+  { name: "managed identity", azureOpenaiAdToken: undefined },
+])(
+  "PG: $name with no resolver observation remains listed and creatable",
+  async (scenario) => {
+    if (!client) return;
+    const f = await fixture({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://fixture.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: undefined,
+      azureOpenaiAdToken: scenario.azureOpenaiAdToken,
+    });
+    const result = await f.parity(["codex/gpt-6-sol"]);
+    expect(result.allowedModels.length).toBeGreaterThan(0);
+    for (const model of result.models) {
+      expect(model.availability).toMatchObject({
+        status: "unavailable",
+        selectable: false,
+        reason: "credential_not_ready",
+      });
+    }
+  },
+  180_000,
+);
+
+test("PG: provider_unhealthy xAI model remains listed and creatable with unavailable status", async () => {
+  if (!client) return;
+  const f = await fixture({
+    modelProvidersJson: JSON.stringify([
+      {
+        id: "xai",
+        apiKey: "fixture-key-never-executed",
+        baseUrl: "https://api.x.ai/v1",
+        models: [{ id: "xai/grok-4.5" }],
+      },
+    ]),
+  });
+  const result = await f.parity();
+  expect(result.allowedModels).toContain("xai/grok-4.5");
+  expect(result.models.find((model) => model.id === "xai/grok-4.5")?.availability).toEqual({
+    status: "unavailable",
+    selectable: false,
+    reason: "provider_unhealthy",
+    checkedAt: null,
+  });
+}, 180_000);

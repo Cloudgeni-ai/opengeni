@@ -611,6 +611,15 @@ describe("OpenGeniClient access + workspaces", () => {
     ]);
   });
 
+  test("getClientConfig forwards an explicit workspace without losing request options", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ apiContractRevision: OPENGENI_API_CONTRACT_REVISION }),
+    );
+    const controller = new AbortController();
+    await client.getClientConfig({ workspaceId: "workspace/a b", signal: controller.signal });
+    expect(new URL(requests[0]!.url).searchParams.get("workspaceId")).toBe("workspace/a b");
+  });
+
   test("getWorkspaceModelCatalog fetches authenticated selectability", async () => {
     const catalog = {
       models: [

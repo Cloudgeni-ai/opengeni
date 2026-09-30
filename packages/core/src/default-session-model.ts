@@ -1,5 +1,7 @@
 import {
   canonicalizeConfiguredModelId,
+  CLAUDE_CONNECTION_KINDS,
+  type ClaudeConnectionCatalog,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -17,6 +19,8 @@ import {
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
+  getWorkspaceProviderApiKeyConnectionMetadata,
+  listWorkspaceProviderCustomModels,
   listOrganizationModelProviderCustomModelsForWorkspace,
   listWorkspaceGatewayCustomModels,
   listWorkspaceOpenRouterCustomModels,
@@ -32,6 +36,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  isWorkspaceModelAdmissible,
   resolveWorkspaceModelSelection,
   type WorkspaceModelSelection,
   type WorkspaceModelSelectionInput,
@@ -362,7 +367,32 @@ export async function loadWorkspaceModelSelectionInput(
       providerKind: "openrouter",
     }),
   ]);
+  const claudeConnections: ClaudeConnectionCatalog = {};
+  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+  await Promise.all(
+    CLAUDE_CONNECTION_KINDS.map(async (kind) => {
+      if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return;
+      const [active, models, metadata, workspaceModels] = await Promise.all([
+        organizationModelProviderConnectionActiveForWorkspace(db, {
+          accountId,
+          workspaceId,
+          providerKind: kind,
+        }),
+        listOrganizationModelProviderCustomModelsForWorkspace(db, {
+          accountId,
+          workspaceId,
+          providerKind: kind,
+        }),
+        getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, kind),
+        listWorkspaceProviderCustomModels(db, { accountId, workspaceId, providerKind: kind }),
+      ]);
+      claudeConnections[kind] = { active, models };
+      workspaceClaudeConnections[kind] = { active: metadata !== null, models: workspaceModels };
+    }),
+  );
   return {
+    claudeConnections,
+    workspaceClaudeConnections,
     connectionModelRestrictions,
     settings,
     policy,
@@ -377,6 +407,35 @@ export async function loadWorkspaceModelSelectionInput(
     organizationGatewayCustomModels,
     organizationOpenRouterCustomModels,
   };
+}
+
+/** Caller-scoped fresh selection; never use this to re-admit already accepted work. */
+export async function resolveCallerWorkspaceModelSelections(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceModelSelectionContext,
+): Promise<WorkspaceModelSelection[]> {
+  return resolveWorkspaceModelSelection(
+    await loadWorkspaceModelSelectionInput(db, settings, context),
+  );
+}
+
+/** Transient selectability for existing consumers; not fresh-create admission. */
+export function selectableWorkspaceModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): WorkspaceModelSelection | undefined {
+  const selection = findSelection(selections, modelId);
+  return selection?.availability.selectable ? selection : undefined;
+}
+
+/** Same stable decision used by client config and direct fresh session creation. */
+export function admissibleWorkspaceModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): WorkspaceModelSelection | undefined {
+  const selection = findSelection(selections, modelId);
+  return selection && isWorkspaceModelAdmissible(selection) ? selection : undefined;
 }
 
 /**

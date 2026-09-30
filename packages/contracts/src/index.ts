@@ -17512,6 +17512,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     cost: ModelCostClassV1.optional(),
     capabilities: ModelCapabilitiesV1.optional(),
     pricing: ModelPricingScheduleV1.optional(),
+    /** Transient health/readiness hint; allowedModels determines create admission. */
+    availability: z.lazy(() => ModelAvailabilityV1).optional(),
     definitionVersion: z
       .string()
       .regex(/^sha256:[a-f0-9]{64}$/u)
@@ -17669,7 +17671,8 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
     defaultModel: z.string(),
-    allowedModels: z.array(z.string()).min(1),
+    // No usable selection is a valid state (e.g. a disconnected subscription).
+    allowedModels: z.array(z.string()),
     // Richer model list (provider-grouped) for the picker. Defaults to [] for
     // back-compat: callers that only read allowedModels are unaffected.
     models: z.array(ClientModel).default([]),

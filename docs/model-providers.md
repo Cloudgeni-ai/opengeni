@@ -853,10 +853,33 @@ the intent is an explicit fixed allow-list instead.
 
 ## Static catalog and workspace availability
 
-`GET /v1/config/client` is public deployment bootstrap configuration. Its
-`models` array exposes client-safe static definitions and the legacy
-`allowedModels` list. It never contains workspace credential readiness,
-workspace policy, concrete connected-account identity, or provider secrets.
+`GET /v1/config/client` remains public bootstrap configuration. Signed-out
+responses expose stably admissible deployment models, never disconnected
+subscription models. Authenticated responses resolve the caller's default
+workspace; `?workspaceId=<id>` selects an exact authorized workspace (required
+for organization keys without a default). The SDK accepts this selector through
+`getClientConfig({ workspaceId })`, and the embedded session proxy pins its host
+workspace.
+
+`models` and the legacy `allowedModels` contain the same canonical IDs that
+direct fresh session creation accepts through the shared stable admission
+predicate. It rejects only absent/retired definitions, unsupported text/SSE,
+workspace policy or connection model permissions, inactive/reauth-required
+connections, and missing deployment API keys. Unknown, stale or unavailable
+provider health (including xAI freshness) and deployment credential-resolver
+observations never reject creation. Azure AD/managed identity credentials are
+resolved at execution, not assumed absent when no observation exists.
+
+Each config model carries an optional `availability` observation for degraded
+UI display. Its status/reason/checkedAt and transient `selectable` flag do not
+override membership in `allowedModels`: a model may remain creatable while
+reported unavailable. A caller lacking `sessions:create` receives no models.
+Both lists may be empty; the required `defaultModel` string then remains a
+bootstrap hint, not an admitted choice.
+Billing/usage admission and a provider's live response are separate from model
+selection. Changes between listing and creating are re-evaluated at creation.
+Responses contain no connected-account identity, provider secrets, or execution
+topology. Child inheritance and keyed repair keep their accepted-work rules.
 
 Authenticated callers use:
 

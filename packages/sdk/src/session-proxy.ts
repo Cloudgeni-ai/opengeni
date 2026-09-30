@@ -312,7 +312,7 @@ export function createSessionProxyHandler(
             "GET",
             "/v1/config/client",
             undefined,
-            query,
+            { ...query, workspaceId },
             call,
           );
           return json({

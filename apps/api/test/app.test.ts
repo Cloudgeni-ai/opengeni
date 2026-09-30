@@ -503,7 +503,7 @@ describe("API helpers", () => {
 
   test("allows public bearer CORS without exposing credentialed browser sessions", async () => {
     const app = createApp({
-      settings: testSettings(),
+      settings: testSettings({ productAccessMode: "managed" }),
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -1819,7 +1819,7 @@ describe("GET /v1/config/client", () => {
   // null so createApp does not try to stand up Better Auth.
   function appFor(settings: Settings) {
     const deps = {
-      settings,
+      settings: { ...settings, productAccessMode: "managed" as const },
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -2025,7 +2025,7 @@ describe("GET /v1/config/client", () => {
     ).toBeNull();
   });
 
-  test("supports a Codex subscription model as the client default", async () => {
+  test("does not advertise a disconnected Codex subscription, even as deployment default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
       openaiModel: "codex/gpt-6-sol",
@@ -2034,16 +2034,29 @@ describe("GET /v1/config/client", () => {
     const config = await fetchClientConfig(settings);
 
     expect(config.defaultModel).toBe("codex/gpt-6-sol");
-    expect(config.allowedModels).toContain("codex/gpt-6-sol");
-    const defaultModel = config.models.find((model) => model.id === config.defaultModel);
-    expect(defaultModel).toMatchObject({
-      provider: "codex",
-      providerLabel: "Codex",
-      source: "codex",
-      billing: { upstreamPayer: "connected_subscription", metering: "external" },
-    });
-    expect(defaultModel).not.toHaveProperty("deployment");
-    expect(defaultModel).not.toHaveProperty("credentialSource");
+    expect(config.allowedModels).toEqual([]);
+    expect(config.models).toEqual([]);
+  });
+
+  test("public bootstrap hides enabled subscriptions and missing deployment credentials", async () => {
+    const config = await fetchClientConfig(
+      testSettings({
+        codexSubscriptionEnabled: true,
+        supergrokSubscriptionEnabled: true,
+        openaiApiKey: undefined,
+      }),
+    );
+    expect(config.allowedModels).toEqual([]);
+    expect(config.models).toEqual([]);
+  });
+
+  test("stale browser cookies preserve public bootstrap but explicit workspace requests require auth", async () => {
+    const app = appFor(testSettings());
+    expect(
+      (await app.request("/v1/config/client", { headers: { cookie: "unrelated=expired" } })).status,
+    ).toBe(200);
+    expect((await app.request("/v1/config/client?workspaceId=workspace")).status).toBe(401);
+    expect((await app.request("/v1/config/client?workspaceId=")).status).toBe(422);
   });
 
   test("includes a registry model when OPENGENI_MODEL_PROVIDERS_JSON is set", async () => {
@@ -2084,7 +2097,12 @@ describe("GET /v1/config/client", () => {
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
     expect(glm?.definitionVersion).toMatch(/^sha256:[a-f0-9]{64}$/u);
-    expect(glm).not.toHaveProperty("availability");
+    expect(glm?.availability).toEqual({
+      status: "unknown",
+      selectable: true,
+      reason: null,
+      checkedAt: null,
+    });
     expect(glm).not.toHaveProperty("deployment");
     expect(glm).not.toHaveProperty("credentialSource");
     expect(JSON.stringify(config)).not.toContain("fw_test");

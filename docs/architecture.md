@@ -341,7 +341,9 @@ Catalog membership, selectability, and cost are separate authorities. Deployment
 membership comes from `code` or an operator-owned database singleton. Workspace
 policy, connection readiness and model permissions, organization workspace assignments, and
 provider health determine selectability; deployment cost policy sets `free`/`credits`
-independently of upstream settlement. Workspace custom
+independently of upstream settlement. Caller-scoped `/v1/config/client` and fresh
+session creation use the same workspace selection resolver; signed-out bootstrap
+does not advertise connected-subscription readiness. Workspace custom
 Gateway, OpenRouter, Anthropic API and Claude subscription rows are provider-qualified workspace overlays, never
 deployment catalog or billing rows. Deployment-managed `openrouter/*` and
 workspace-managed `workspace-openrouter/*` remain separate provider and billing
