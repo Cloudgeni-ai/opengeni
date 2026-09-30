@@ -154,6 +154,7 @@ describe("MCP real PostgreSQL exhausted-counter admission", () => {
           expect(result.isError).toBe(true);
           expect(result.structuredContent?.error).toMatchObject({
             code: "allowance_exhausted",
+            retryable: false,
             scope,
             resetsAt: refusal!.resetsAt,
             ...(scope === "member" ? { subjectId } : {}),

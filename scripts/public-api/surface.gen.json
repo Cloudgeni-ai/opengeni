@@ -24585,6 +24585,10 @@
       "ResolveManagedAuthDeepLinkRequest": "type",
       "SelectManagedAuthLoginSlotRequest": "type"
     },
+    "@opengeni/sdk/allowance-refusal": {
+      "allowanceExhaustedMessage": "value",
+      "parseAllowanceExhaustedRefusal": "value"
+    },
     "@opengeni/sdk/artifacts": {
       "CreateEditableArtifactMaterializationRequest": "type",
       "CreateEditableArtifactResourceRequest": "type",

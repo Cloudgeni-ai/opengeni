@@ -13,6 +13,7 @@ import { defineConfig } from "tsup";
 // closure guard: a stray server import stays visible in dist.
 export default defineConfig({
   entry: [
+    "src/allowance-refusal.ts",
     "src/chat/index.ts",
     "src/adapters/next.ts",
     "src/adapters/express.ts",

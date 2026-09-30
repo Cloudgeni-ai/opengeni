@@ -87,6 +87,7 @@ describe("actual MCP orchestration handler allowance refusals", () => {
           expect(result.isError).toBe(true);
           expect(result.structuredContent?.error).toMatchObject({
             code: refusal.code,
+            retryable: false,
             scope,
             resetsAt: refusal.resetsAt,
             ...(scope === "member" ? { subjectId: refusal.subjectId } : {}),

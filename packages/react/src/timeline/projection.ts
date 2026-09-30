@@ -12,7 +12,7 @@ import fleetDecisionItem from "./fleet-decision-projection";
 import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
-} from "@opengeni/contracts/allowance-refusal";
+} from "@opengeni/sdk/allowance-refusal";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   presentFailure,
