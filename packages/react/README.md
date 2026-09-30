@@ -957,9 +957,15 @@ definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
 
 `turnSummary={{ rolling: true }}` selects the readable per-turn presentation:
-every assistant progress message and answer stays fully formatted and visible.
-Each turn has its own Working / Worked disclosure and rolling latest step;
-routine machine inputs get one compact reason per resumed turn. Normal tip-follow
+startup shows the preparation orb outside any disclosure, then hands over to
+Working without resetting the startup-inclusive elapsed clock. While work is
+live, assistant progress messages stay fully formatted and visible,
+followed by one Working or Waiting disclosure with the rolling latest step.
+When the turn finishes, earlier assistant messages and tools share the Worked
+disclosure; the final response remains visible. Expanding reveals that turn's
+earlier prose and activity in chronological order, not a fold of multiple turns.
+An already expanded or actively read view is preserved through settlement.
+Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
 Expanded outer work headers stay reachable at the top of the timeline (below
 Latest question when shown) until their own details end; nested headers never stick.

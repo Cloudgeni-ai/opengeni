@@ -78,6 +78,8 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
+Task-tree [locking invariants](run-lifecycle.md).
+
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
 
@@ -348,7 +350,7 @@ independently of upstream settlement. Workspace custom
 Gateway, OpenRouter, Anthropic API and Claude subscription rows are provider-qualified workspace overlays, never
 deployment catalog or billing rows. Deployment-managed `openrouter/*` and
 workspace-managed `workspace-openrouter/*` remain separate provider and billing
-identities even when they name the same upstream slug. Claude setup: `apps/api/src/routes/workspace-model-providers.ts`; transport: `packages/runtime/src/anthropic-messages.ts`.
+identities for identical slugs. Claude setup: `apps/api/src/routes/workspace-model-providers.ts`; transport: `packages/runtime/src/anthropic-messages.ts`.
 Accepted turns freeze provider identity, not cost policy. Drain or fence them
 before changing `free`/`credits`. Database `codexModels` overrides membership,
 not credentials; retirement preserves only exact accepted execution.

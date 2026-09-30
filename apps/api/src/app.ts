@@ -69,7 +69,7 @@ import {
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
-import { createObservability, withTraceContext } from "@opengeni/observability";
+import { createObservability, withTraceContext, withMcpTelemetry } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
@@ -662,68 +662,70 @@ export function createAppComposition(deps: AppDependencies): {
       },
       { parent: null },
     );
-    return await withTraceContext(span, async () => {
-      try {
-        await next();
-        const status = c.res.status || 200;
-        const durationSeconds = (performance.now() - start) / 1000;
-        observability.recordHttpRequest({
-          method: c.req.method,
-          route,
-          status,
-          durationSeconds,
-        });
-        span.end({
-          attributes: {
-            "http.response.status_code": status,
-            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-          },
-        });
-        observability.info("HTTP request completed", {
-          method: c.req.method,
-          route,
-          status,
-          durationMs: Math.round(durationSeconds * 1000),
-          traceId: span.traceId,
-          spanId: span.spanId,
-          correlationId,
-        });
-      } catch (error) {
-        const status = httpStatusForError(error);
-        const errorCode = errorCodeForStatus(status);
-        const durationSeconds = (performance.now() - start) / 1000;
-        observability.recordHttpRequest({
-          method: c.req.method,
-          route,
-          status,
-          durationSeconds,
-        });
-        observability.incrementCounter({
-          name: "opengeni_http_errors_total",
-          help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
-          labels: { route, status: String(status), code: errorCode },
-        });
-        span.end({
-          attributes: {
-            "http.response.status_code": status,
-            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-          },
-          error,
-        });
-        observability.error("HTTP request failed", {
-          method: c.req.method,
-          route,
-          status,
-          durationMs: Math.round(durationSeconds * 1000),
-          traceId: span.traceId,
-          spanId: span.spanId,
-          correlationId,
-          errorCode,
-          errorClass: "HttpOperationError",
-        });
-        throw error;
-      }
-    });
+    return await withMcpTelemetry(observability, span.traceId, () =>
+      withTraceContext(span, async () => {
+        try {
+          await next();
+          const status = c.res.status || 200;
+          const durationSeconds = (performance.now() - start) / 1000;
+          observability.recordHttpRequest({
+            method: c.req.method,
+            route,
+            status,
+            durationSeconds,
+          });
+          span.end({
+            attributes: {
+              "http.response.status_code": status,
+              "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            },
+          });
+          observability.info("HTTP request completed", {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: Math.round(durationSeconds * 1000),
+            traceId: span.traceId,
+            spanId: span.spanId,
+            correlationId,
+          });
+        } catch (error) {
+          const status = httpStatusForError(error);
+          const errorCode = errorCodeForStatus(status);
+          const durationSeconds = (performance.now() - start) / 1000;
+          observability.recordHttpRequest({
+            method: c.req.method,
+            route,
+            status,
+            durationSeconds,
+          });
+          observability.incrementCounter({
+            name: "opengeni_http_errors_total",
+            help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+            labels: { route, status: String(status), code: errorCode },
+          });
+          span.end({
+            attributes: {
+              "http.response.status_code": status,
+              "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            },
+            error,
+          });
+          observability.error("HTTP request failed", {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: Math.round(durationSeconds * 1000),
+            traceId: span.traceId,
+            spanId: span.spanId,
+            correlationId,
+            errorCode,
+            errorClass: "HttpOperationError",
+          });
+          throw error;
+        }
+      }),
+    );
   });
 
   const accessKeyBoundary = requireAccessKey(deps.settings);

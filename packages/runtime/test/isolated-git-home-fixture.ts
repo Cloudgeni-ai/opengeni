@@ -145,6 +145,8 @@ export type HostShellSessionOptions = {
   /** Rewrites each command before it runs, for example to map the virtual
    *  sandbox `/workspace` onto a temporary directory. */
   rewriteCommand?: (cmd: string) => string;
+  /** Match a managed sandbox's shell explicitly when shell grammar matters. */
+  shell?: "sh" | "bash";
 };
 
 /**
@@ -160,12 +162,20 @@ export function hostShellSession(home: string, options: HostShellSessionOptions 
   return {
     exec: async (args: { cmd: string }): Promise<HostShellCommandResult> => {
       const cmd = options.rewriteCommand ? options.rewriteCommand(args.cmd) : args.cmd;
-      const child = Bun.spawn(["sh", "-c", cmd], {
-        cwd: options.cwd ?? home,
-        env: environment,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const child = Bun.spawn(
+        [
+          options.shell ?? "sh",
+          ...(options.shell === "bash" ? ["--noprofile", "--norc"] : []),
+          "-c",
+          cmd,
+        ],
+        {
+          cwd: options.cwd ?? home,
+          env: environment,
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
       const [stdout, stderr, exitCode] = await Promise.all([
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),

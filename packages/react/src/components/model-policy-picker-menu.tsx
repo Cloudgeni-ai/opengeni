@@ -63,7 +63,6 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     ) {
       props.onLatencyModeChange("standard");
     }
-    props.onOpenChange?.(false);
   };
   const modelRow = (row: ClientPickerModelRow) => (
     <PickerNavRow
