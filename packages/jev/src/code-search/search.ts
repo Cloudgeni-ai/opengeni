@@ -655,43 +655,63 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       .sort((a, b) => pOf(b) - pOf(a))
       .slice(0, cfg.wave2.tileMaxFiles),
   );
+  /** Ranges as text, grouping lines within `gap` of each other, at most `max` ranges plus a count of the rest. */
+  const rangesText = (rs: Array<[number, number]>, gap = 0, max = 10) => {
+    const merged: Array<[number, number]> = [];
+    for (const [a, b] of mergeRanges(rs)) {
+      const last = merged[merged.length - 1];
+      if (last && a - last[1] - 1 <= gap) last[1] = Math.max(last[1], b);
+      else merged.push([a, b]);
+    }
+    return (
+      fmtRanges(merged.slice(0, max)) + (merged.length > max ? ` (+${merged.length - max} more ranges)` : "")
+    );
+  };
   const windowCuts: string[] = [];
+  let otherWindowCuts = 0;
+  const otherWindowFiles = new Set<string>();
   const perFileWindows: Window[][] = selected.map((i) => {
     const c = cands[i]!;
     const lines = readLines(c.path);
     const hits = [...c.hitLines.values()];
+    const relevant = pOf(i) >= thr.T1;
+    const note = (rest: Window[]) => {
+      if (!rest.length) return;
+      if (relevant) windowCuts.push(`${c.path}: ${rangesText(rest.map((w) => [w.start, w.end]))}`);
+      else {
+        otherWindowCuts += rest.length;
+        otherWindowFiles.add(c.path);
+      }
+    };
     if (tiled.has(i)) {
       const tiles = tileFile(lines, hits.map((h) => h.line), langOf(c.path), cfg, renderFor(c.path));
       for (const t of tiles) t.score = scoreWindow(lines, t, kws, cfg.recall.hitCountWeight);
       const keep = [...tiles]
         .sort((a, b) => b.score - a.score || a.start - b.start)
         .slice(0, cfg.wave2.tileMaxWindows);
-      if (keep.length < tiles.length)
-        windowCuts.push(
-          `${c.path}: ${fmtRanges(tiles.filter((t) => !keep.includes(t)).map((t) => [t.start, t.end]))}`,
-        );
+      note(tiles.filter((t) => !keep.includes(t)));
       return keep;
     }
     const all = rankFileWindows(lines, hits, kws, langOf(c.path), cfg, renderFor(c.path));
-    const keep = all.slice(
-      0,
-      pOf(i) >= thr.T1 ? cfg.wave2.windowsPerRelevantFile : cfg.wave2.windowsPerFile,
-    );
-    if (keep.length < all.length)
-      windowCuts.push(
-        `${c.path}: ${fmtRanges(mergeRanges(all.slice(keep.length).map((w) => [w.start, w.end])))}`,
-      );
+    const keep = all.slice(0, relevant ? cfg.wave2.windowsPerRelevantFile : cfg.wave2.windowsPerFile);
+    note(all.slice(keep.length));
     return keep;
   });
-  if (windowCuts.length)
+  if (windowCuts.length || otherWindowCuts)
     cuts.push(
-      `regions per file (limit ${cfg.wave2.windowsPerFile}, ${cfg.wave2.windowsPerRelevantFile} in relevant files, ${cfg.wave2.tileMaxWindows} in small relevant files read whole): not checked ${windowCuts.join("; ")}`,
+      `regions per file (limit ${cfg.wave2.windowsPerFile}, ${cfg.wave2.windowsPerRelevantFile} in relevant files, ${cfg.wave2.tileMaxWindows} in small relevant files read whole): not checked ${[
+        ...windowCuts,
+        ...(otherWindowCuts
+          ? [`${otherWindowCuts} more keyword regions in ${otherWindowFiles.size} less relevant files (${[...otherWindowFiles].slice(0, 6).join(", ")}${otherWindowFiles.size > 6 ? ", ..." : ""})`]
+          : []),
+      ].join("; ")}`,
     );
   const capped = capPassages(perFileWindows, cfg.wave2.maxPassages);
-  // keyword and symbol hit lines no checked window covers (seed-hit, window and passage caps together)
+  // keyword and symbol hit lines no checked window covers in relevant files (seed-hit, window and passage caps)
   const uncovered: string[] = [];
   selected.forEach((ci, f) => {
     const c = cands[ci]!;
+    if (pOf(ci) < thr.T1 || tiled.has(ci)) return;
     const n = readLines(c.path).length;
     const lines = [...c.hitLines.keys()].filter(
       (l) => l <= n && !capped[f]!.some((w) => l >= w.start && l <= w.end),
@@ -701,7 +721,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     );
     if (lines.length || stored)
       uncovered.push(
-        `${c.path}: ${lines.length ? fmtRanges(mergeRanges(lines.map((l) => [l, l]))) : ""}${stored ? `${lines.length ? "; " : ""}more matches past the first ${cfg.recall.maxMatchesPerFile} per keyword not examined` : ""}`,
+        `${c.path}: ${lines.length ? `lines ${rangesText(lines.map((l) => [l, l]), 15)}` : ""}${stored ? `${lines.length ? "; " : ""}more matches past the first ${cfg.recall.maxMatchesPerFile} per keyword not examined` : ""}`,
       );
   });
   if (uncovered.length) cuts.push(`keyword hits outside every checked region: ${uncovered.join("; ")}`);
