@@ -8,6 +8,78 @@ afterEach(() => {
 });
 
 describe("CdpConnection", () => {
+  test("detaching one target settles only its pending commands and preserves the browser connection", async () => {
+    const requests: Array<{ id: number; sessionId?: string }> = [];
+    let send: (message: unknown) => void = () => {
+      throw new Error("socket not ready");
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      websocket: {
+        message(socket, raw) {
+          requests.push(JSON.parse(String(raw)));
+          send = (message) => {
+            socket.send(JSON.stringify(message));
+          };
+        },
+      },
+    });
+    servers.push(server);
+    const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+    const abort = new AbortController();
+    const cleanup = spyOn(abort.signal, "removeEventListener");
+    let disconnected = false;
+    const pending: Promise<unknown>[] = [];
+    connection.onDisconnect(() => {
+      disconnected = true;
+    });
+    try {
+      const detached = connection
+        .send(
+          "Input.dispatchMouseEvent",
+          {},
+          {
+            sessionId: "closing-tab",
+            signal: abort.signal,
+            timeoutMs: 1_000,
+          },
+        )
+        .catch((error: unknown) => error);
+      const sibling = connection.send("Page.getLayoutMetrics", {}, { sessionId: "other-tab" });
+      const browser = connection.send("Browser.getVersion");
+      pending.push(detached, sibling, browser);
+      while (requests.length < 3) await Bun.sleep(1);
+      // The event envelope belongs to its parent, not the detached child.
+      send({
+        method: "Target.detachedFromTarget",
+        sessionId: "parent-session",
+        params: { sessionId: "closing-tab" },
+      });
+      const error = await detached;
+      expect(error).toMatchObject({
+        name: "CdpSessionDetachedError",
+        method: "Input.dispatchMouseEvent",
+      });
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(disconnected).toBe(false);
+      send({ id: requests[0]!.id, result: { late: true } });
+      send({ id: requests[1]!.id, result: { sibling: true } });
+      send({ id: requests[2]!.id, result: { browser: true } });
+      expect(await sibling).toEqual({ sibling: true });
+      expect(await browser).toEqual({ browser: true });
+      abort.abort();
+      expect(disconnected).toBe(false);
+    } finally {
+      cleanup.mockRestore();
+      connection.close();
+      await Promise.allSettled(pending);
+    }
+  });
+
   test("disconnect observers run once, unsubscribe, and observe an already closed connection", async () => {
     const server = Bun.serve({
       port: 0,

@@ -20,6 +20,87 @@ import { CdpConnection } from "../src/cdp";
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
 
+e2e(
+  "a popup closing during a click stays uncertain without losing its parent or replaying input",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-popup-close-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        return new Response(
+          new URL(request.url).pathname === "/popup"
+            ? '<title>Popup</title><button onclick="window.close()">Close popup</button>'
+            : '<title>Parent</title><input aria-label="Draft" value="unsaved draft"><button onclick="window.open(&quot;/popup&quot;)">Open popup</button>',
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `close_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const browserSessionId = randomUUID(),
+      controllerGeneration = randomUUID();
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const parent = await driver.start(String(server.url));
+      await controller.run(
+        command(parent, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Open popup", exact: true },
+        }),
+      );
+      let popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+      for (let n = 0; !popup && n < 40; n++) {
+        await Bun.sleep(25);
+        popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+      }
+      expect(popup).toBeDefined();
+      const observed = await driver.observe(popup!.id);
+      const close = command(observed, {
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Close popup", exact: true },
+      });
+      const receipt = await controller.run(close);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      expect(await controller.run(close)).toEqual(receipt);
+      expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
+      const retained = await driver.observe(parent.target.id);
+      expect(retained.target.targetGeneration).toBe(parent.target.targetGeneration);
+      expect(retained.target.documentGeneration).toBe(parent.target.documentGeneration);
+      expect(
+        await driver.readDom(parent.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: "input" },
+          expectedTargetGeneration: parent.target.targetGeneration,
+          expectedDocumentGeneration: parent.target.documentGeneration!,
+          expectedFrameId: parent.frameId!,
+        }),
+      ).toMatchObject({ kind: "element", value: "unsaved draft" });
+    } finally {
+      server.stop(true);
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  40_000,
+);
+
 headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
   async () => {

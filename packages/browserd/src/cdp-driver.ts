@@ -54,6 +54,7 @@ import {
   CdpCommandTimeoutError,
   CdpConnection,
   CdpProtocolError,
+  CdpSessionDetachedError,
   CdpTransportError,
   type CdpEvent,
 } from "./cdp";
@@ -1126,14 +1127,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
           return null;
         }
-        const currentInfo = await this.requireTargetInfo(
-          await this.ensureConnection(),
-          info.targetId,
-        );
-        return await this.observeUnlocked(state, currentInfo);
+        try {
+          const currentInfo = await this.requireTargetInfo(
+            await this.ensureConnection(),
+            info.targetId,
+          );
+          return await this.observeUnlocked(state, currentInfo);
+        } catch (error) {
+          // Input has already been dispatched. A closing popup or failed
+          // follow-up read cannot prove that the mutation itself failed.
+          if (!(error instanceof InteractionDefiniteDriverError)) throw error;
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
+          );
+        }
       },
       true,
-    );
+    ).catch((error: unknown) => {
+      if (error instanceof CdpSessionDetachedError) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
+        );
+      }
+      throw error;
+    });
     this.refreshSubscribedFrame(command.targetId);
     return observation;
   }

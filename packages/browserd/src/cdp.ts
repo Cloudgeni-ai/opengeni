@@ -49,8 +49,17 @@ export class CdpCommandTimeoutError extends CdpTransportError {
   }
 }
 
+/** One attached target ended; the browser connection can still serve other targets. */
+export class CdpSessionDetachedError extends Error {
+  constructor(readonly method: string) {
+    super(`CDP ${method} target session detached`);
+    this.name = "CdpSessionDetachedError";
+  }
+}
+
 type PendingCommand = {
   method: string;
+  sessionId: string | undefined;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -170,6 +179,7 @@ export class CdpConnection {
       options.signal?.addEventListener("abort", abort!, { once: true });
       this.pending.set(id, {
         method,
+        sessionId: options.sessionId,
         resolve: (value) => resolve(value as T),
         reject,
         timer,
@@ -291,6 +301,16 @@ export class CdpConnection {
       params: isRecord(message.params) ? message.params : {},
       sessionId: typeof message.sessionId === "string" ? message.sessionId : null,
     };
+    if (
+      event.method === "Target.detachedFromTarget" &&
+      typeof event.params.sessionId === "string"
+    ) {
+      for (const [id, pending] of this.pending) {
+        if (pending.sessionId !== event.params.sessionId) continue;
+        this.settlePending(id);
+        pending.reject(new CdpSessionDetachedError(pending.method));
+      }
+    }
     const keys = new Set([
       eventKey(event.method, event.sessionId),
       eventKey(event.method, null),
