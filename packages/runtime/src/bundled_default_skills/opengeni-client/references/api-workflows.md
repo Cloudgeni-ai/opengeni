@@ -25,6 +25,8 @@ Only add `x-opengeni-access-key` when the operator says the deployment
 shared-key boundary is enabled. It is not a replacement for organization API
 keys in managed SaaS.
 
+A full organization API key can provision workspaces, members and asUser sessions; /v1/access/me reports this as credential.effectiveWorkspacePermissions.
+
 ## Minimal Server-Side Session Client
 
 ```ts

@@ -190,6 +190,16 @@ export default defineConfig({
               priority: 3,
             },
             {
+              // These artifact kind glyphs are drawn by conversation cards on a
+              // direct session load and by the lazy editor. Left to entry-aware
+              // grouping they land in the editor chunk, and one icon import drags
+              // the whole editor into the direct session graph.
+              name: "artifact-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:file|image|panels-top-left)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
               // A few tiny primitives are shared by the initial composer and
               // the active-session route. Pin that boundary so entry-aware
               // merging cannot use an icon or label helper to pull the full

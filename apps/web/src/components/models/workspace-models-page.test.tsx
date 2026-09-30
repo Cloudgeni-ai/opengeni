@@ -4,6 +4,7 @@ import type {
   CodexAccount,
   CodexAccountsResponse,
   CodexOverviewResponse,
+  ConnectionMetadata,
   WorkspaceCodexSubscriptionSource,
 } from "@opengeni/sdk";
 import { act, useState, type ReactNode } from "react";
@@ -129,7 +130,16 @@ const client = {
       settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: null },
     }),
   ),
-  listConnections: mock(async () => []),
+  listConnections: mock(async (): Promise<ConnectionMetadata[]> => []),
+  getWorkspaceClaudeSubscriptionUsage: mock(async () => ({
+    connected: true,
+    credentialVersion: 1,
+    windows: [],
+    observedAt: null,
+    source: null,
+    refreshStatus: "not_checked",
+    refreshCheckedAt: null,
+  })),
   listWorkspaceGatewayCustomModels: mock(async () => ({ models: [] })),
   listWorkspaceOpenRouterCustomModels: mock(async () => ({ models: [] })),
   listWorkspaceClaudeCustomModels: mock(async () => ({ models: [] })),
@@ -149,7 +159,11 @@ const client = {
 const CREDITS_MODEL = { id: "gpt-credits", label: "GPT credits", cost: "credits" };
 const context: {
   client: typeof client;
-  clientConfig: { billingMode: "disabled" | "stripe"; models: unknown[] };
+  clientConfig: {
+    billingMode: "disabled" | "stripe";
+    models: unknown[];
+    claudeSubscriptionEnabled?: boolean;
+  };
   accessContext: { accountGrants: { accountId: string; permissions: string[] }[] } | null;
   [key: string]: unknown;
 } = {
@@ -261,6 +275,8 @@ beforeEach(() => {
     settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: null },
   }));
   client.requestJson.mockImplementation(async () => ({}));
+  client.listConnections.mockImplementation(async () => []);
+  context.clientConfig.claudeSubscriptionEnabled = false;
 });
 
 const ACCOUNTS_SECTION = "Subscriptions and API keys that pay for models here.";
@@ -513,6 +529,49 @@ describe("Models list", () => {
       await cleanup(view);
     }
   });
+});
+
+test("Claude workspace reauthentication returns Back and Cancel to its account", async () => {
+  context.clientConfig.claudeSubscriptionEnabled = true;
+  const now = new Date().toISOString();
+  client.listConnections.mockImplementation(async () => [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      accountId: "organization-a",
+      workspaceId: "workspace-a",
+      subjectId: null,
+      providerDomain: "api.anthropic.com",
+      kind: "api_key",
+      status: "active",
+      version: 1,
+      metadata: { credentialRole: "claude_subscription" },
+      grantedScopes: [],
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastUsedAt: null,
+      lastError: null,
+      createdBySubjectId: "user:owner",
+      updatedBySubjectId: "user:owner",
+      createdAt: now,
+      updatedAt: now,
+    },
+  ]);
+  const view = await render();
+  try {
+    await act(async () => navigateTo({ account: "gateway:claude_subscription" }));
+    await flush();
+    for (const label of ["Claude subscription", "Cancel"]) {
+      await act(async () => button(view.container, "Sign in again")!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Reconnect Claude subscription");
+      await act(async () => button(view.container, label)!.click());
+      await flush();
+      expect(lastNavigation?.search.account).toBe("gateway:claude_subscription");
+      expect(view.container.querySelector("h1")?.textContent).toBe("Claude subscription");
+    }
+  } finally {
+    await cleanup(view);
+  }
 });
 
 describe("Codex pool controls", () => {

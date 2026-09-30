@@ -60,10 +60,12 @@ export function EditableArtifactMessage({
   title,
   detail,
   retry,
+  retryLabel = "Retry",
 }: {
   title: string;
   detail: string;
   retry?: (() => void) | undefined;
+  retryLabel?: string | undefined;
 }) {
   return (
     <div className="grid h-full min-h-56 place-items-center bg-og-bg p-6 text-center">
@@ -76,7 +78,7 @@ export function EditableArtifactMessage({
             onClick={retry}
             className="mt-3 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium hover:bg-og-primary-hover outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
           >
-            Retry
+            {retryLabel}
           </button>
         ) : null}
       </div>

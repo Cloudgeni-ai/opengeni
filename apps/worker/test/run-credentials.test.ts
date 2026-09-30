@@ -11,6 +11,7 @@ import {
 describe("host-owned run credential request", () => {
   test("Connected Machines never look up or call a platform credential provider", async () => {
     const result = await bindRunCredentialResolver({
+      effectiveTools: [],
       db: new Proxy({} as never, {
         get: () => {
           throw new Error("must not query platform credentials");

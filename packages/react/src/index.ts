@@ -557,13 +557,20 @@ export {
   chainLinkResolvers,
   sessionLinkResolver,
   useOpenGeniLinkResolver,
+  viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
 } from "./components/open-geni-links";
 export { parseOpenGeniLink } from "@opengeni/sdk";
+export {
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  type ArtifactLabels,
+} from "./components/artifacts/artifact-chrome";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";

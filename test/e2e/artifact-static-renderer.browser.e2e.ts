@@ -4,6 +4,8 @@ import { chromium, type Browser } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
+// The shared frame module, served by the console's Vite dev server.
+const FRAME_MODULE = `/@fs${repoRoot}packages/react/src/components/artifacts/published-html-artifact-frame.tsx`;
 
 describe("published HTML artifact browser acceptance", () => {
   let browser: Browser;
@@ -65,10 +67,9 @@ describe("published HTML artifact browser acceptance", () => {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     const parentUrl = page.url();
     await page.evaluate(
-      async ({ sourceUrl }) => {
+      async ({ sourceUrl, frameModule }) => {
         document.documentElement.dataset.artifactParent = "unchanged";
-        const { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX } =
-          await import("/src/components/artifacts/artifact-sandbox.tsx");
+        const { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX } = await import(frameModule);
         const iframe = document.createElement("iframe");
         iframe.setAttribute("sandbox", PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX);
         iframe.srcdoc = `<!doctype html>
@@ -83,7 +84,7 @@ describe("published HTML artifact browser acceptance", () => {
           </script>`;
         document.body.replaceChildren(iframe);
       },
-      { sourceUrl: resourceUrl },
+      { sourceUrl: resourceUrl, frameModule: FRAME_MODULE },
     );
 
     const frame = page.frames().find((candidate) => candidate !== page.mainFrame());
@@ -110,9 +111,9 @@ describe("published HTML artifact browser acceptance", () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await page.evaluate(async () => {
+    await page.evaluate(async (frameModule) => {
       const { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument } =
-        await import("/src/components/artifacts/artifact-sandbox.tsx");
+        await import(frameModule);
       const iframe = document.createElement("iframe");
       iframe.setAttribute("sandbox", PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX);
       iframe.srcdoc = publishedHtmlArtifactDocument(
@@ -159,7 +160,7 @@ describe("published HTML artifact browser acceptance", () => {
         ]);
       });
       document.body.replaceChildren(iframe);
-    });
+    }, FRAME_MODULE);
 
     const frame = page.frames().find((candidate) => candidate !== page.mainFrame());
     expect(frame).toBeDefined();

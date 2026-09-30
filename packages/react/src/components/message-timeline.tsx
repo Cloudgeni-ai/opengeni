@@ -63,7 +63,7 @@ import {
   type OlderHistoryLoadReceipt,
   type OlderHistoryLoader,
 } from "../older-history";
-import { Markdown } from "./markdown";
+import { Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
@@ -170,6 +170,11 @@ export type MessageTimelineProps = {
         context: { searchTarget: TimelineSearchTarget | null },
       ) => ReactNode)
     | undefined;
+  /**
+   * Render assistant `opengeni-html` / `opengeni-site` fences in the default
+   * message renderer (`SessionConversation` supplies the inline Site preview).
+   */
+  renderInteractiveBlock?: MarkdownProps["renderInteractiveBlock"];
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
   /**
@@ -482,6 +487,7 @@ function cssEscapeAttribute(value: string): string {
  */
 export function MessageTimeline({
   resolveLink,
+  renderInteractiveBlock,
   userMessageDisclosureLabels,
   searchTarget,
   events,
@@ -555,6 +561,9 @@ export function MessageTimeline({
               <Markdown
                 searchTarget={searchItem?.id === item.id ? searchTarget : null}
                 streaming={item.kind === "agent-message" && item.streaming}
+                renderInteractiveBlock={
+                  item.kind === "agent-message" ? renderInteractiveBlock : undefined
+                }
               >
                 {text}
               </Markdown>
@@ -567,7 +576,7 @@ export function MessageTimeline({
               body
             );
           },
-    [renderMessageText, searchItem?.id, searchTarget],
+    [renderInteractiveBlock, renderMessageText, searchItem?.id, searchTarget],
   );
   // Event-window identity is independent of projected rows (partial messages
   // can acquire a different first-delta id when older text arrives).

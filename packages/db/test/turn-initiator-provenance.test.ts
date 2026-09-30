@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   clipAgentProvenanceHops,
+  contextForCausalTurn,
   frozenScheduledOccurrenceInitiator,
   UNATTRIBUTED_LEGACY_INITIATOR,
 } from "../src/turn-initiator";
@@ -57,6 +58,33 @@ describe("accepted scheduled service provenance", () => {
 });
 
 describe("bounded agent provenance", () => {
+  test("causal continuations retain exact service identity and context without recursive chains", () => {
+    const initiator = { kind: "service" as const, subjectId: "host:drift", label: "Drift" };
+    const original = { occurrenceId: "run-42", nested: { region: "eu" }, label: "Drift" };
+    let context = original as Record<string, unknown>;
+    for (let index = 0; index < 40; index++) {
+      context = contextForCausalTurn(
+        { updateIds: [`update-${index}`] },
+        { initiator, context },
+        { sessionId: "session", turnId: `turn-${index}` },
+      );
+    }
+    const via = context.via as Array<Record<string, unknown>>;
+    expect(via).toHaveLength(32);
+    expect(context.viaTruncated).toBe(true);
+    expect(context.updateIds).toEqual(["update-39"]);
+    expect(via[0]).toEqual({
+      kind: "service",
+      sessionId: "session",
+      turnId: "turn-0",
+      initiator,
+      context: original,
+    });
+    expect(via.at(-1)?.turnId).toBe("turn-39");
+    expect(via.every((hop) => !("via" in (hop.context as Record<string, unknown>)))).toBe(true);
+    expect(original).toEqual({ occurrenceId: "run-42", nested: { region: "eu" }, label: "Drift" });
+  });
+
   test("retains the causal root and newest hops when the middle is truncated", () => {
     const hops = Array.from({ length: 40 }, (_, index) => ({
       kind: "agent",

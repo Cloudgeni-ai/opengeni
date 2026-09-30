@@ -40,6 +40,7 @@ export function sanitizedTestEnvironment(
     Object.entries(source).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
   const requireRealDatabase = environment.OPENGENI_REQUIRE_REAL_DB === "1";
+  const nativePostgresUrl = environment.OPENGENI_TEST_PG_URL;
   for (const name of Object.keys(environment)) {
     if (name.startsWith("OPENGENI_")) delete environment[name];
   }
@@ -47,10 +48,14 @@ export function sanitizedTestEnvironment(
   environment.OPENGENI_TEST_HERMETIC = "1";
   // CI sets this parent flag for the full unit shard because package-local
   // PostgreSQL/FORCE-RLS tests use the unit filename convention. Preserve only
-  // the exact fail-closed boolean; all other ambient OpenGeni state stays
-  // scrubbed. Local focused checks remain infrastructure-free unless their
-  // caller deliberately requires the real database boundary.
-  if (requireRealDatabase) environment.OPENGENI_REQUIRE_REAL_DB = "1";
+  // the exact fail-closed boolean and its explicitly selected native PostgreSQL
+  // fixture; all other ambient OpenGeni state stays scrubbed. Local focused
+  // checks remain infrastructure-free unless their caller deliberately requires
+  // the real database boundary.
+  if (requireRealDatabase) {
+    environment.OPENGENI_REQUIRE_REAL_DB = "1";
+    if (nativePostgresUrl?.trim()) environment.OPENGENI_TEST_PG_URL = nativePostgresUrl;
+  }
   return environment;
 }
 

@@ -252,6 +252,9 @@ import type {
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -1320,7 +1323,11 @@ export class OpenGeniClient {
   /** Only this principal's submissions. No session filter means general feedback only. */
   async listOwnFeedback(
     workspaceId: string,
-    options: { sessionId?: string; limit?: number; includeTurns?: boolean } = {},
+    options: {
+      sessionId?: string;
+      limit?: number;
+      includeTurns?: boolean;
+    } = {},
   ): Promise<{ feedback: Feedback[] }> {
     const query = new URLSearchParams();
     if (options.sessionId) query.set("sessionId", options.sessionId);
@@ -4726,12 +4733,56 @@ export class OpenGeniClient {
     );
   }
 
+  /** Sign in with model and profile access; no inference request is made. */
+  async startWorkspaceClaudeSubscriptionOAuth(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionOAuthStartResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/start`,
+      {},
+    );
+  }
+
+  async completeWorkspaceClaudeSubscriptionOAuth(
+    workspaceId: string,
+    request: ClaudeSubscriptionOAuthCompleteRequest,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/complete`,
+      request,
+    );
+  }
+
+  async startOrganizationClaudeSubscriptionOAuth(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionOAuthStartResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/start`,
+      {},
+    );
+  }
+
+  async completeOrganizationClaudeSubscriptionOAuth(
+    organizationId: string,
+    request: ClaudeSubscriptionOAuthCompleteRequest,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/complete`,
+      request,
+    );
+  }
+
   async refreshWorkspaceClaudeSubscriptionUsage(
     workspaceId: string,
   ): Promise<ClaudeSubscriptionUsage> {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage/refresh`,
+      {},
     );
   }
 
@@ -4750,6 +4801,7 @@ export class OpenGeniClient {
     return this.requestJson(
       "POST",
       `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage/refresh`,
+      {},
     );
   }
 
@@ -4913,7 +4965,17 @@ export class OpenGeniClient {
     );
   }
 
-  /** The caller's access context: subject, account + workspace grants, defaults. */
+  /**
+   * The caller's subject, grants, defaults, and optional direct API-key authority.
+   * `credential.effectiveWorkspacePermissions` expands workspace admin without
+   * changing existing grants or including account-only permissions. Full
+   * organization keys can provision shared workspaces, external members, and
+   * `asUser` sessions; user requests additionally need live membership.
+   * Organization-key scope excludes Personal workspaces. Neither key kind bypasses
+   * session visibility or the explicit `secrets:read` permission requirement. Credential
+   * metadata is omitted for `asUser`/external actors, humans, delegated tokens,
+   * other caller contexts, and older servers.
+   */
   async getAccessContext(): Promise<AccessContext> {
     return await this.requestJson<AccessContext>("GET", "/v1/access/me");
   }
@@ -6093,10 +6155,9 @@ export class OpenGeniClient {
   async listScheduledTaskAccessAttention(
     workspaceId: string,
   ): Promise<ScheduledTaskAccessAttention[]> {
-    const response = await this.requestJson<{ tasks: ScheduledTaskAccessAttention[] }>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`,
-    );
+    const response = await this.requestJson<{
+      tasks: ScheduledTaskAccessAttention[];
+    }>("GET", `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`);
     return response.tasks;
   }
 
@@ -7350,7 +7411,12 @@ export class OpenGeniClient {
 
   async discoverPlugins(
     workspaceId: string,
-    options: { id?: string; query?: string; provider?: string; offset?: number } = {},
+    options: {
+      id?: string;
+      query?: string;
+      provider?: string;
+      offset?: number;
+    } = {},
   ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
     return this.requestJson(
       "GET",
@@ -8409,6 +8475,56 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Embedding transport -----------------------------------------------------
+
+  /** The URL of an API path on this client's base (relative when the base is relative). */
+  apiUrl(path: string): string {
+    if (!path.startsWith("/")) throw new TypeError("API path must start with /");
+    return `${this.baseUrl}${path}`;
+  }
+
+  /**
+   * A client of the same class that adds `headers` to every request, keeping
+   * this client's base URL, fetch, credentials, and actor attribution. Used to
+   * scope a surface (for example an artifact viewer) to one host context.
+   */
+  withHeaders(headers: Readonly<Record<string, string>>): this {
+    const extra = { ...headers };
+    const base = this.options.headers;
+    const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
+    const client = new Client({
+      ...this.options,
+      headers: () => ({ ...(typeof base === "function" ? base() : base), ...extra }),
+    });
+    if (this.externalActorHeader !== undefined) {
+      client.externalActorHeader = this.externalActorHeader;
+    }
+    client.serviceInitiatorHeader = this.serviceInitiatorHeader;
+    client.serviceContextHeader = this.serviceContextHeader;
+    return client;
+  }
+
+  /**
+   * Fetch an absolute URL under this client's base URL through its fetch and
+   * headers. For transports the SDK builds itself (the editable-artifact live
+   * transport), so host authentication stays in one place. A URL outside the
+   * base is refused: credentials never leave the configured API.
+   */
+  async fetchApi(input: string | URL, init: RequestInit = {}): Promise<Response> {
+    const origin =
+      typeof globalThis.location?.href === "string" ? globalThis.location.href : undefined;
+    const base = new URL(this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`, origin);
+    const target = new URL(input, base);
+    if (target.origin !== base.origin || !`${target.pathname}/`.startsWith(base.pathname)) {
+      throw new TypeError("fetchApi only reaches this client's API base URL");
+    }
+    const headers = new Headers(init.headers);
+    for (const [name, value] of Object.entries(this.headers())) {
+      if (!headers.has(name)) headers.set(name, value);
+    }
+    return (await this.fetchImpl(target.href, { ...init, headers })) as Response;
+  }
+
   // --- Internals -------------------------------------------------------------
 
   private headers(correlationId?: string): Record<string, string> {
@@ -8631,11 +8747,10 @@ export class OpenGeniClient {
     sessionId: string,
     target: string,
   ): Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }> {
-    return await this.requestJson<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
-      { target },
-    );
+    return await this.requestJson<{
+      pinned: string;
+      appliedTo?: "waiting_turn" | "next_turn";
+    }>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`, { target });
   }
 
   // --- SuperGrok/xAI connected subscriptions ------------------------------------------------------

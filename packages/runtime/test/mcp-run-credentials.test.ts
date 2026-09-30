@@ -33,6 +33,60 @@ function material(url = target.url, expiresAt?: string) {
 }
 
 describe("attempt-local MCP credentials", () => {
+  test("native connection targets never enter provider selection or credential ownership", () => {
+    const native = {
+      ...target,
+      connectionRef: {
+        providerDomain: "product.example",
+        kind: "oauth2" as const,
+        subjectScope: "workspace" as const,
+      },
+    };
+    const settings = testSettings({ mcpServers: [native] });
+    expect(
+      selectedSessionRemoteMcpTargets(settings, [target], [{ kind: "mcp", id: target.id }]),
+    ).toEqual([]);
+    const credentials = new RunMcpCredentials([native]);
+    credentials.replace(material());
+    expect(credentials.has(native.id)).toBe(false);
+  });
+
+  test("native request boundary drops stale provider grants without overriding any headers", () => {
+    const credentials = new RunMcpCredentials([target]);
+    credentials.replace({
+      expiresAt: null,
+      mcp: [
+        {
+          url: target.url,
+          headers: { Authorization: secret, "x-api-key": "provider-key" },
+        },
+      ],
+    });
+    const native = {
+      ...target,
+      connectionRef: { providerDomain: "product.example" },
+    };
+    const request = { headers: { Authorization: "Bearer native-A", "x-native": "yes" } };
+    expect(credentials.requestInit(native, native.url, request)).toBe(request);
+    expect(new Headers(request.headers).get("authorization")).toBe("Bearer native-A");
+    expect(new Headers(request.headers).get("x-api-key")).toBeNull();
+    expect(credentials.has(native.id)).toBe(false);
+    const staleRenewal = credentials.prepare(material());
+    staleRenewal();
+    expect(credentials.has(native.id)).toBe(false);
+  });
+
+  test("native preparation narrowing fences a renewal staged before route resolution", () => {
+    const credentials = new RunMcpCredentials([target]);
+    credentials.replace(material());
+    const staged = credentials.prepare(material());
+    credentials.assertRemoteTargets([
+      { ...target, connectionRef: { providerDomain: "product.example" } },
+    ]);
+    staged();
+    expect(credentials.has(target.id)).toBe(false);
+  });
+
   test("reusing a product server id at a different URL never receives product headers", () => {
     const attacker = { id: "product-capabilities", url: "https://evil.example/mcp" };
     const credentials = new RunMcpCredentials([attacker]);
@@ -487,11 +541,12 @@ test("unselected and local MCP targets skip credentials without failing session 
   expect(requests).toBe(0);
 });
 
-test("credentialed 403 challenge fields cannot leak through native auth-needed events", async () => {
+test("native 403 recovery preserves its bearer and never sends discarded provider material", async () => {
   const remote = { id: target.id, url: "http://127.0.0.1:9/mcp" };
   const credentials = new RunMcpCredentials([remote]);
   credentials.replace(material(remote.url));
   const notices: unknown[] = [];
+  const authorizations: Array<string | null> = [];
   const connectionRef = { providerDomain: "product.example", kind: "oauth2" as const };
   const settings = testSettings({
     sandboxBackend: "none",
@@ -508,17 +563,23 @@ test("credentialed 403 challenge fields cannot leak through native auth-needed e
     onAuthNeeded: (notice) => {
       notices.push(notice);
     },
-    mcpFetchImpl: async () =>
-      new Response(secret, {
+    mcpFetchImpl: async (_url, init) => {
+      authorizations.push(new Headers(init?.headers).get("authorization"));
+      return new Response(secret, {
         status: 403,
         headers: {
-          "www-authenticate": `Bearer error="insufficient_scope", scope="${secret}", resource="${secret}", error_description="${secret}"`,
+          "www-authenticate": 'Bearer error="insufficient_scope", scope="read"',
         },
-      }),
+      });
+    },
   });
   try {
     expect(notices.length).toBeGreaterThan(0);
     expect(JSON.stringify(notices)).toContain("insufficient_scope");
+    expect(authorizations.length).toBeGreaterThan(0);
+    expect([...new Set(authorizations)]).toEqual(["native"]);
+    expect(credentials.has(remote.id)).toBe(false);
+    expect(JSON.stringify(notices)).toContain("read");
     expect(JSON.stringify(notices)).not.toContain(secret);
     expect(JSON.stringify(prepared.attemptToolCatalog)).not.toContain(secret);
   } finally {

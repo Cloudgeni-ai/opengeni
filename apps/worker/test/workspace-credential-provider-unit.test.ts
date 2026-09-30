@@ -4,6 +4,7 @@ import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import * as database from "@opengeni/db";
 import { verifyOpenGeniSignature, type RunCredentialsRequest } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
+import { verifyCredentialProviderRequest } from "@opengeni/sdk";
 import {
   credentialProviderRequestBody,
   workspaceCredentialProviderResolver,
@@ -25,6 +26,7 @@ const input = {
   purpose: "provision",
   forceRefresh: false,
   initiator: { kind: "subject", subjectId: "accepted-sender" },
+  initiatorContext: {},
   sandboxOs: "linux",
   effectiveSandboxBackend: "none",
 } as RunCredentialsRequest;
@@ -44,6 +46,60 @@ const row = {
 afterEach(() => mock.restore());
 
 describe("worker integration adapter without PostgreSQL", () => {
+  test.each(["human", "service", "agent"] as const)(
+    "signs the exact %s initiator context without treating it as human authority",
+    async (kind) => {
+      const initiator =
+        kind === "human"
+          ? { kind: "subject" as const, subjectId: "accepted-human", label: "Human" }
+          : { kind: "service" as const, subjectId: "host:scheduled", label: "Scheduled check" };
+      const context = {
+        occurrenceId: "accepted-occurrence",
+        nested: { exact: ["é", 3, false] },
+        updateIds: ["accepted-update-1", "accepted-update-2"],
+        ...(kind === "agent"
+          ? {
+              via: [
+                {
+                  kind: "agent",
+                  sessionId: "parent",
+                  turnId: "parent-turn",
+                  attemptId: "parent-attempt",
+                  executionGeneration: 1,
+                },
+              ],
+            }
+          : {}),
+      };
+      let received: Awaited<ReturnType<typeof verifyCredentialProviderRequest>> | undefined;
+      const resolver = await workspaceCredentialProviderResolver(
+        {} as Database,
+        settings,
+        scope,
+        null,
+        {
+          resolveProvider: async () => row as never,
+          resolveHuman: async () => null,
+          fetch: async (_url, init) => {
+            received = await verifyCredentialProviderRequest({
+              body: String(init?.body),
+              headers: new Headers(init?.headers),
+              secret,
+            });
+            return Response.json({ status: "not_applicable" });
+          },
+        },
+      );
+      expect(await resolver!({ ...input, initiator, initiatorContext: context })).toEqual({
+        status: "not_applicable",
+        ...scope,
+      });
+      expect(received?.initiatorContext).toEqual({ kind, initiator, context });
+      expect(received?.initiatingHuman).toBeNull();
+      expect(received?.initiatingHumanSubjectId).toBeNull();
+    },
+  );
+
   test("a paused workspace registration suppresses the deployment credential port", async () => {
     spyOn(database, "resolveWorkspaceCredentialProvider").mockResolvedValue({
       ...row,
@@ -52,6 +108,7 @@ describe("worker integration adapter without PostgreSQL", () => {
     spyOn(database, "getSessionRootId").mockResolvedValue(scope.sessionId);
     let called = false;
     const resolver = await bindRunCredentialResolver({
+      effectiveTools: [],
       db: {} as Database,
       settings,
       ...scope,
@@ -133,6 +190,7 @@ describe("worker integration adapter without PostgreSQL", () => {
   test("sandbox-free turns do not expand deployment run-credential port use", async () => {
     let called = false;
     const resolver = await bindRunCredentialResolver({
+      effectiveTools: [],
       db: {} as Database,
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
@@ -188,6 +246,7 @@ describe("worker integration adapter without PostgreSQL", () => {
       initiatingHumanSubjectId: "accepted-human",
       initiatingHuman: human,
       initiator: input.initiator,
+      initiatorContext: { kind: "human", initiator: input.initiator, context: {} },
       lane: "workspace",
       mcpServers: [{ id: "custom", url: "https://product.example/mcp" }],
     });

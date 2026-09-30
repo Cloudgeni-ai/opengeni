@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
+import { selectedSessionRemoteMcpTargets } from "@opengeni/runtime";
 import {
   accountRouteAuthNeededPayload,
   expandMcpAccountRoutes,
@@ -118,6 +119,23 @@ test("empty accepted bindings remove authenticated defaults while null keeps his
   const legacy = expandMcpAccountRoutes({ settings: original, tools, bindings: null });
   expect(legacy.tools).toEqual(tools);
   expect(legacy.settings).toBe(original);
+});
+
+test("product credential targets follow account narrowing and never translate onto aliases", () => {
+  const original = settings();
+  const publicServer = { id: "public", url: "https://public.test/mcp" };
+  original.mcpServers.push(publicServer);
+  const attachments = original.mcpServers.map(({ id, url }) => ({ id, url }));
+  for (const bindings of [[], [personal], [personal, workspace]]) {
+    const routes = expandMcpAccountRoutes({
+      settings: original,
+      tools: attachments.map(({ id }) => ({ kind: "mcp", id, optional: true, eager: true })),
+      bindings,
+    });
+    expect(selectedSessionRemoteMcpTargets(routes.settings, attachments, routes.tools)).toEqual([
+      publicServer,
+    ]);
+  }
 });
 
 test("bindings cannot grant a connector excluded by canonical policy", () => {

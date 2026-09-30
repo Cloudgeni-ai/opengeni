@@ -1,5 +1,6 @@
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
+export * from "./claude-subscription-oauth";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
@@ -2797,6 +2798,35 @@ export const AccessGrant = z.object({
 });
 export type AccessGrant = z.infer<typeof AccessGrant>;
 
+/**
+ * Organization API key access tier. `full` keys administer the organization
+ * (create workspaces, mint keys, run sessions in every shared workspace);
+ * `read` keys only inventory shared workspaces and read their sessions, events,
+ * and files. The tier is derived from the key's stored permissions, never
+ * stored separately: a key whose permissions omit `workspace:admin` is `read`.
+ */
+export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
+export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
+
+/** Informational projection of direct API-key authority, not an authorization grant. */
+export const AccessCredential = z.object({
+  kind: z.enum(["organization_api_key", "workspace_api_key"]),
+  /** Organization access tier; workspace keys instead carry explicit permissions. */
+  access: OrganizationApiKeyAccess.optional(),
+  accountId: z.string().uuid(),
+  /** Null for organization keys: authority applies to all same-organization shared workspaces. */
+  workspaceId: z.string().uuid().nullable(),
+  /**
+   * Workspace permissions resolved by authorization, including wildcard expansion.
+   * A full organization key can provision workspaces, members and asUser sessions;
+   * user requests still require user authority. Personal workspaces are excluded
+   * from organization-key authority. Account permissions remain in accountGrants.
+   */
+  effectiveWorkspacePermissions: z.array(Permission),
+  note: z.string(),
+});
+export type AccessCredential = z.infer<typeof AccessCredential>;
+
 export const AccessContext = z.object({
   mode: ProductAccessMode,
   subjectId: z.string().min(1),
@@ -2805,6 +2835,8 @@ export const AccessContext = z.object({
   workspaceGrants: z.array(AccessGrant),
   defaultAccountId: z.string().uuid().nullable(),
   defaultWorkspaceId: z.string().uuid().nullable(),
+  /** Direct API-key authority only; omitted for human, delegated and asUser contexts. */
+  credential: AccessCredential.optional(),
 });
 export type AccessContext = z.infer<typeof AccessContext>;
 
@@ -3370,16 +3402,6 @@ export const UpdateWorkspaceRequest = z
   })
   .strict();
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
-
-/**
- * Organization API key access tier. `full` keys administer the organization
- * (create workspaces, mint keys, run sessions in every shared workspace);
- * `read` keys only inventory shared workspaces and read their sessions, events,
- * and files. The tier is derived from the key's stored permissions, never
- * stored separately: a key whose permissions omit `workspace:admin` is `read`.
- */
-export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
-export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
 
 export const ApiKey = z.object({
   id: z.string().uuid(),
@@ -17719,6 +17741,24 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     }),
     /** Session proxy capability; absent on native deployments. */
     sandboxFiles: z.boolean().optional(),
+    /**
+     * Session proxy capability for the embedded artifact viewer; absent on
+     * native deployments. The live socket is ticket-authenticated and reached
+     * directly; the cache partition identifies the proxied user.
+     */
+    artifacts: z
+      .object({
+        editableLiveUrl: z.string().url().max(2_048),
+        cachePartition: z
+          .object({
+            accountId: z.string().min(1).max(256),
+            principalId: z.string().min(1).max(256),
+            authorizationEpoch: z.string().min(1).max(256),
+          })
+          .strict(),
+      })
+      .strict()
+      .optional(),
     // Native voice-input capability. Provider/model/credentials stay server-private;
     // clients only learn whether a deployment can transcribe and the hard ceilings.
     voiceInput: ClientVoiceInputConfig.default({

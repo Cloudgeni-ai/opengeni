@@ -68,3 +68,46 @@ test("failed or mismatched telemetry binding never observes a replacement creden
     expect(latest.size).toBe(0);
   }
 });
+
+test("native generation bindings survive another replica renewing between catalog load and dispatch", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const bound = parseModelProvidersJson(
+    JSON.stringify(
+      providers.map((provider) => ({
+        ...provider,
+        anthropic: {
+          auth: "oauth",
+          credentialBinding: { connectionId: id, credentialVersion: 7 },
+        },
+      })),
+    ),
+  );
+  const latest = new Map<"workspace" | "organization", CapturedClaudeUsage>();
+  const observe = await createClaudeUsageObserver(bound, latest, async () => ({
+    token: "sk-ant-oat01-renewed",
+    connectionId: id,
+    credentialVersion: 7,
+  }));
+  expect(observe.binding("workspace-claude-subscription")).toMatchObject({
+    expectedConnectionId: id,
+    expectedCredentialVersion: 7,
+  });
+  observe.renew("workspace-claude-subscription", {
+    token: "sk-ant-oat01-renewed",
+    connectionId: id,
+    credentialVersion: 7,
+  });
+  observe(
+    "workspace-claude-subscription",
+    new Response(null, {
+      headers: { "anthropic-ratelimit-unified-5h-utilization": ".4" },
+    }),
+  );
+  expect(latest.get("workspace")!.token).toBe("sk-ant-oat01-renewed");
+  observe.renew("workspace-claude-subscription", {
+    token: "sk-ant-oat01-replaced",
+    connectionId: id,
+    credentialVersion: 8,
+  });
+  expect(observe.binding("workspace-claude-subscription")!.token).toBe("sk-ant-oat01-renewed");
+});

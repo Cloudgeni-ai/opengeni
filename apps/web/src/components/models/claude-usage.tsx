@@ -212,7 +212,7 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
   const stale = Boolean(reportedAt && now - Date.parse(reportedAt) > 5 * 60_000);
   const disabled =
     value?.refreshStatus === "scope_required"
-      ? "This setup token reports usage with model responses. Readings update when Claude is used."
+      ? "This setup token cannot check current usage. Sign in again to enable usage checks."
       : value?.refreshStatus === "reconnect"
         ? "Replace the token to reconnect Claude."
         : undefined;
@@ -247,10 +247,10 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
         refreshDisabledReason={disabled}
         onRefresh={state.canRefresh ? () => void state.refresh() : undefined}
       />
-      {value?.source === "response_headers" || value?.refreshStatus === "scope_required" ? (
+      {value?.refreshStatus === "scope_required" ? (
         <p className="mt-3 text-xs leading-4.5 text-fg-muted">
-          Setup tokens report usage and reset times with model responses. Readings update when
-          Claude is used.
+          This setup token allows model calls. Usage readings update after Claude is used. Sign in
+          again to check current usage and reset times.
         </p>
       ) : null}
     </DetailSection>

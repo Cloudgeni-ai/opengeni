@@ -149,6 +149,11 @@ OpenGeni POSTs:
   "accountId": "…", "workspaceId": "…", "sessionId": "…", "rootSessionId": "…",
   "parentSessionId": null, "turnId": "…", "attemptId": "…",
   "initiator": { "kind": "subject", "subjectId": "user:alice" },
+  "initiatorContext": {
+    "kind": "human",
+    "initiator": { "kind": "subject", "subjectId": "user:alice" },
+    "context": {}
+  },
   "initiatingHumanSubjectId": "user:alice",
   "initiatingHuman": { "subjectId": "user:alice", "externalIdentity": null },
   "sandboxBackend": "modal", "sandboxOs": "linux"
@@ -204,6 +209,53 @@ external identity record, never from the session creator. No known human means
 fields are unchanged. These fields are informational identity, never
 authorization: authorize users and tools with the authenticated connection.
 
+`initiatorContext` carries the **exact accepted turn's frozen provenance**, not
+the session creator, latest human, or mutable session metadata. Its `kind` is
+`human`, `service`, or `agent` (the newest frozen `via` hop is an agent
+delegation). `initiator` retains the full accepted causal identity, including a
+signed service's subject and label; `context` retains the accepted non-secret
+host context without rewriting its keys. Service assertions are bounded to
+4096 UTF-8 bytes at acceptance. The complete object is part of the raw body
+covered by `OpenGeni-Signature`; `verifyCredentialProviderRequest` returns its
+typed value unchanged. It is optional in SDK types only for older senders;
+upgraded workers always send it on provision and renewal.
+
+Agent-created children inherit their calling turn's service identity and
+`context.via` records the exact calling session, turn, attempt, and execution
+generation. Internal continuations and child lifecycle inputs keep their
+existing service principal: at claim, their `via` chain freezes the exact
+target causal turn's session/turn ids, identity, and context. Each hop's context
+excludes its own `via`, avoiding recursive chains. Chains retain the root and
+newest hops, up to 32, with `viaTruncated: true` when clipped. Coalesced internal
+turns carry their own batch's `context.updateIds`, never a sender's older batch.
+Retries and renewals retain the same accepted facts. No historical missing
+service provenance is reconstructed from current session state.
+
+These fields grant **nothing** and do not replace `initiatingHuman`, the delegated
+grant subject, permissions, or OpenGeni's existing authorization checks. A host
+can apply its own credential-issuance policy to a scheduled service turn without
+pretending it is a human turn. For example, after independently mapping the
+trusted workspace id to its tenant and verifying the scheduled occurrence:
+
+```ts
+const request = await verifyCredentialProviderRequest({ body: rawBody, headers, secret });
+const tenant = await tenants.byOpenGeniWorkspaceId(request.workspaceId);
+const origin = request.initiatorContext;
+if (!tenant || origin?.kind !== "service" ||
+    origin.initiator.subjectId !== "product:scheduled-drift" ||
+    typeof origin.context.occurrenceId !== "string" ||
+    !await scheduledPolicy.authorize(tenant.id, origin.context.occurrenceId)) {
+  return Response.json({ status: "not_applicable" });
+}
+// Return only the credentials this tenant's scheduled-check policy permits.
+return Response.json({ status: "ok", environment: await scheduledCredentials(tenant.id) });
+```
+
+For an inherited continuation, apply that same host policy to the original
+service identity/context retained in the causal `via` chain, and validate the
+causal chain required by your policy. Never treat `kind`, a service label, an
+occurrence id, or the mere presence of a human as an authorization by itself.
+
 ### Renewable MCP headers
 
 Attach and select your remote MCP as usual when creating a session:
@@ -224,8 +276,15 @@ Return `mcp` entries from the credential provider's `ok` response. `url`
 matches only a selected, session-attached remote MCP by its exact normalized
 URL (WHATWG URL normalization), never by id. The request's `mcpServers` lists
 these selected product-supplied targets so your provider can authorize each URL.
+Selection uses the same effective turn policy as execution, including session
+defaults on composer and omitted-tools Send follow-ups. Optional and deferred
+servers remain selected; frozen scheduled selections are not widened.
 A reused id at a different endpoint cannot receive credentials for your URL.
 Deployment MCPs, workspace connectors and local bridges are not eligible.
+Servers with `connectionRef` use native connection authentication only: they
+never enter the provider's target list or receive provider headers, including
+historical turns without account-binding snapshots. Provider headers cannot
+replace an authorized native account or disclose native-denied selections.
 Provider headers override same-named static headers
 case-insensitively while valid; renewal replaces the turn-local material.
 Header values are secret material: never placed in session events, history,

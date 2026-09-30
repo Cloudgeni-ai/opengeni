@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
 import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
+import type { AccessContext, AccessCredential } from "../src/index";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
@@ -521,6 +522,79 @@ describe("OpenGeniClient access + workspaces", () => {
       operationId: commandOperationId,
     });
     expect(JSON.parse(requests[7]!.body!)).toEqual(command);
+  });
+
+  test.each([
+    {
+      kind: "organization_api_key",
+      access: "full",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: null,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:create", "members:manage"],
+      note: "All shared workspaces in this organization; Personal workspaces are excluded.",
+    },
+    {
+      kind: "workspace_api_key",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: WORKSPACE_ID,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:read", "secrets:read"],
+      note: "Only this workspace; secrets:read is explicitly granted.",
+    },
+  ] satisfies AccessCredential[])(
+    "getAccessContext preserves $kind credential metadata and existing grants",
+    async (credential) => {
+      const access: AccessContext = {
+        mode: "managed",
+        subjectId: "api_key:test",
+        accountGrants: [
+          {
+            accountId: ENVIRONMENT_ID,
+            subjectId: "api_key:test",
+            permissions: ["account:read"],
+          },
+        ],
+        workspaceGrants: [],
+        defaultAccountId: ENVIRONMENT_ID,
+        defaultWorkspaceId: credential.workspaceId,
+        credential,
+      };
+      const { client, requests } = makeClient(() => jsonResponse(access));
+
+      const result = await client.getAccessContext();
+
+      expect(result).toEqual(access);
+      expect(result.credential).toEqual(credential);
+      expect(result.accountGrants).toEqual(access.accountGrants);
+      expect(result.workspaceGrants).toEqual(access.workspaceGrants);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.method).toBe("GET");
+      expect(new URL(requests[0]!.url).pathname).toBe("/v1/access/me");
+    },
+  );
+
+  test("getAccessContext accepts older servers without credential metadata", async () => {
+    const access: AccessContext = {
+      mode: "managed",
+      subjectId: "api_key:legacy",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          workspaceId: WORKSPACE_ID,
+          accountId: ENVIRONMENT_ID,
+          subjectId: "api_key:legacy",
+          permissions: ["workspace:read", "sessions:read"],
+        },
+      ],
+      defaultAccountId: ENVIRONMENT_ID,
+      defaultWorkspaceId: WORKSPACE_ID,
+    };
+    const { client } = makeClient(() => jsonResponse(access));
+
+    const result = await client.getAccessContext();
+
+    expect(result).toEqual(access);
+    expect(result.credential).toBeUndefined();
+    expect(result).not.toHaveProperty("credential");
   });
 
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
