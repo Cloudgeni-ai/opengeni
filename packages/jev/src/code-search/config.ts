@@ -363,10 +363,13 @@ export function validateCodeSearchConfig(c: CodeSearchConfig): void {
   }
   if (c.wave3.maxLeadCandidates > 250) probs.push("wave3.maxLeadCandidates must be <= 250");
   if (c.symbols.maxJudged > 250) probs.push("symbols.maxJudged must be <= 250");
-  if (!(c.symbols.threshold >= 0 && c.symbols.threshold <= 1)) probs.push("symbols.threshold must be in [0,1]");
+  if (!(c.symbols.threshold >= 0 && c.symbols.threshold <= 1))
+    probs.push("symbols.threshold must be in [0,1]");
   if (c.wave2.tileTargetLines < 5) probs.push("wave2.tileTargetLines must be >= 5");
-  if (!(c.pack.importPrior > 0 && c.pack.importPrior <= 1)) probs.push("pack.importPrior must be in (0,1]");
-  if (!(c.pack.footerShare > 0 && c.pack.footerShare < 0.5)) probs.push("pack.footerShare must be in (0,0.5)");
+  if (!(c.pack.importPrior > 0 && c.pack.importPrior <= 1))
+    probs.push("pack.importPrior must be in (0,1]");
+  if (!(c.pack.footerShare > 0 && c.pack.footerShare < 0.5))
+    probs.push("pack.footerShare must be in (0,0.5)");
   if (!(c.status.lo <= c.status.hi)) probs.push("status.lo must be <= status.hi");
   if (c.pack.charsPerToken <= 0) probs.push("pack.charsPerToken must be > 0");
   if (c.pack.filePenalty < 0) probs.push("pack.filePenalty must be >= 0");

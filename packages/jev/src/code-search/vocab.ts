@@ -59,7 +59,13 @@ export async function keywordNotes(o: KeywordNotesInput): Promise<KeywordNote[]>
     }
     const files = o.candidates.filter((c) => c.kwHits[k.index] || c.pathKws.includes(k.index));
     if (files.length && !files.some((c) => o.relevantFiles.has(c.path))) {
-      notes.push({ raw: k.raw, fragments: [], suggestions: [], status: "irrelevant", files: k.df || files.length });
+      notes.push({
+        raw: k.raw,
+        fragments: [],
+        suggestions: [],
+        status: "irrelevant",
+        files: k.df || files.length,
+      });
     }
   }
   if (!notes.length || !o.suggestFrom.length) return notes;
@@ -126,7 +132,11 @@ export async function keywordNotes(o: KeywordNotesInput): Promise<KeywordNote[]>
       const inRelevant = [...s.files].some((f) => o.relevantFiles.has(f));
       scored.push({
         id,
-        score: (full ? 3 : parts) + (inRelevant ? 2 : 0) + 0.2 * Math.log(1 + s.n) + 0.3 * Math.log(1 + s.files.size),
+        score:
+          (full ? 3 : parts) +
+          (inRelevant ? 2 : 0) +
+          0.2 * Math.log(1 + s.n) +
+          0.3 * Math.log(1 + s.files.size),
       });
     }
     n.suggestions = scored

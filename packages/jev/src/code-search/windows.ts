@@ -654,7 +654,12 @@ export function tileFile(
     const len = i - s;
     const prev = lines[i - 1]!;
     if (prev.trim()) base = Math.min(base, indentOf(prev));
-    if (len >= target && lang !== "other" && isDeclLine(lines[i]!, lang) && indentOf(lines[i]!) <= base) {
+    if (
+      len >= target &&
+      lang !== "other" &&
+      isDeclLine(lines[i]!, lang) &&
+      indentOf(lines[i]!) <= base
+    ) {
       const c = leadingComments(lines, i, lang);
       if (c > s) {
         cuts.push([s, c - 1]);
@@ -727,8 +732,12 @@ function tileSplit(lines: string[], whole: Window, maxChars: number, o: RenderOp
 /** Name declared on a declaration line (function, class, const, method, property function), if any. */
 export function declName(line: string): string | undefined {
   const m =
-    /\b(?:function\*?|class|interface|type|enum|namespace|struct|trait|fn|def|func|mod|const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(line) ??
-    /^\s*(?:(?:public|private|protected|static|async|readonly|override|get|set|export|default)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>)?\s*[:=(]/.exec(line) ??
+    /\b(?:function\*?|class|interface|type|enum|namespace|struct|trait|fn|def|func|mod|const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(
+      line,
+    ) ??
+    /^\s*(?:(?:public|private|protected|static|async|readonly|override|get|set|export|default)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>)?\s*[:=(]/.exec(
+      line,
+    ) ??
     /^#{1,6}\s+(.{1,60})/.exec(line);
   const name = m?.[1]?.trim();
   return name && !CONTROL.has(name) ? name : undefined;
@@ -759,7 +768,10 @@ export function outlineRanges(
       )
         continue;
       // a call (`useEffect(() => {`, `formatSize(x),`) is not a declaration
-      if (/^\s*[\w$.]+\s*\((?:.*=>|.*[),]\s*$)/.test(l) && !/\)\s*(?::[^={]+)?\{\s*$/.test(l.replace(/=>\s*\{\s*$/, "")))
+      if (
+        /^\s*[\w$.]+\s*\((?:.*=>|.*[),]\s*$)/.test(l) &&
+        !/\)\s*(?::[^={]+)?\{\s*$/.test(l.replace(/=>\s*\{\s*$/, ""))
+      )
         continue;
       const name = declName(l);
       if (name) found.push({ name, line: i, indent: indentOf(l) });

@@ -53,7 +53,11 @@ afterAll(() => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
 });
 function session(root: string): WorkspaceSession {
-  return new WorkspaceSession(new LocalCodeSearchWorkspace(root), new AbortController().signal, 30_000);
+  return new WorkspaceSession(
+    new LocalCodeSearchWorkspace(root),
+    new AbortController().signal,
+    30_000,
+  );
 }
 
 const occ = (lines: string[]) => extractSymbols(lines).map((o) => [o.name, o.kind, o.line]);
@@ -122,7 +126,10 @@ describe("extractSymbols / importNames", () => {
   // the `use` branch, so every name is returned twice and counted twice in symbolCandidates' occurrence weight.
   // importNames("use crate::store::{Reader, Writer};") -> Reader, Writer, Reader, Writer
   test("importNames returns each name of a Rust use-list once", () => {
-    expect(importNames("use crate::store::{Reader, Writer};").map((x) => x.name)).toEqual(["Reader", "Writer"]);
+    expect(importNames("use crate::store::{Reader, Writer};").map((x) => x.name)).toEqual([
+      "Reader",
+      "Writer",
+    ]);
   });
 
   test("TS default + named imports, type-only names, require destructuring", () => {
@@ -175,7 +182,9 @@ describe("specificName", () => {
 
 describe("usagePatterns", () => {
   test("groups names into ASCII-word-bounded alternations under the char cap, dropping names that never fit", () => {
-    expect(usagePatterns(["alphaOne", "betaTwo"])).toEqual(["(?-u:\\b)(?:alphaOne|betaTwo)(?-u:\\b)"]);
+    expect(usagePatterns(["alphaOne", "betaTwo"])).toEqual([
+      "(?-u:\\b)(?:alphaOne|betaTwo)(?-u:\\b)",
+    ]);
     const names = Array.from({ length: 10 }, (_, i) => `someIdentifier${i}`);
     const pats = usagePatterns(names, 80);
     expect(pats.length).toBeGreaterThan(1);
@@ -210,7 +219,10 @@ describe("symbolCandidates", () => {
       path: "src/page.tsx",
       p: 0.8,
       hitLines: [],
-      lines: ['import { useArtifactCatalog } from "./catalog";', "const data = useArtifactCatalog();"],
+      lines: [
+        'import { useArtifactCatalog } from "./catalog";',
+        "const data = useArtifactCatalog();",
+      ],
     },
   ];
   test("an imported name called across files outranks a local helper; generic names are skipped", () => {
@@ -230,12 +242,17 @@ describe("symbolCandidates", () => {
     );
     expect(hook.seenAt).toEqual({ path: "src/list.tsx", line: 1 });
     // sorted by weight
-    for (let i = 1; i < c.length; i++) expect(c[i - 1]!.weight).toBeGreaterThanOrEqual(c[i]!.weight);
+    for (let i = 1; i < c.length; i++)
+      expect(c[i - 1]!.weight).toBeGreaterThanOrEqual(c[i]!.weight);
   });
   test("excluded names (exact or lowercased) are skipped; question words raise a name", () => {
-    const ex = symbolCandidates(files, new Set(["useartifactcatalog"]), new Set()).map((x) => x.name);
+    const ex = symbolCandidates(files, new Set(["useartifactcatalog"]), new Set()).map(
+      (x) => x.name,
+    );
     expect(ex).not.toContain("useArtifactCatalog");
-    const base = symbolCandidates(files, new Set(), new Set()).find((x) => x.name === "formatRowLabel")!;
+    const base = symbolCandidates(files, new Set(), new Set()).find(
+      (x) => x.name === "formatRowLabel",
+    )!;
     const q = symbolCandidates(files, new Set(), new Set(["format", "row", "label"])).find(
       (x) => x.name === "formatRowLabel",
     )!;
@@ -261,8 +278,16 @@ describeWithRipgrep("locateUsages", () => {
     "docs/catalog.md": "Call useArtifactCatalog() to list artifacts.\n",
   });
   test("classifies definitions, imports and references; caps lines per file; skips prose and tests", async () => {
-    const u = await locateUsages(session(root), ["useArtifactCatalog", "ArtifactListRoute"], cfg, [], false, 5);
-    const at = (path: string) => u.hits.filter((h) => h.path === path).map((h) => [h.name, h.line, h.kind]);
+    const u = await locateUsages(
+      session(root),
+      ["useArtifactCatalog", "ArtifactListRoute"],
+      cfg,
+      [],
+      false,
+      5,
+    );
+    const at = (path: string) =>
+      u.hits.filter((h) => h.path === path).map((h) => [h.name, h.line, h.kind]);
     expect(at("src/catalog.ts")).toEqual([["useArtifactCatalog", 1, "def"]]);
     expect(at("src/list.tsx")).toEqual([
       ["useArtifactCatalog", 1, "import"],
@@ -277,7 +302,10 @@ describeWithRipgrep("locateUsages", () => {
       "src/list.tsx",
       "src/many.ts",
     ]);
-    expect([...u.files.get("ArtifactListRoute")!].sort()).toEqual(["src/list.tsx", "src/route.tsx"]);
+    expect([...u.files.get("ArtifactListRoute")!].sort()).toEqual([
+      "src/list.tsx",
+      "src/route.tsx",
+    ]);
     // hits are sorted by path, then line
     const keys = u.hits.map((h) => `${h.path}\0${String(h.line).padStart(6, "0")}`);
     expect(keys).toEqual([...keys].sort());
@@ -292,7 +320,13 @@ describeWithRipgrep("locateUsages", () => {
   });
   test("no names: no search", async () => {
     const ws = new LocalCodeSearchWorkspace(root);
-    const u = await locateUsages(new WorkspaceSession(ws, new AbortController().signal, 30_000), [], cfg, [], false);
+    const u = await locateUsages(
+      new WorkspaceSession(ws, new AbortController().signal, 30_000),
+      [],
+      cfg,
+      [],
+      false,
+    );
     expect(u).toEqual({ hits: [], files: new Map(), cappedFiles: 0, ms: 0 });
     expect(ws.calls).toEqual([]);
   });
@@ -372,7 +406,13 @@ describeWithRipgrep("keywordNotes", () => {
   test("nothing to note: no ripgrep call", async () => {
     const ws = new LocalCodeSearchWorkspace(root);
     const s = new WorkspaceSession(ws, new AbortController().signal, 30_000);
-    const rec = await recall({ session: s, question: "q", keywords: ["artifact"], pathPrefixes: [], config: cfg });
+    const rec = await recall({
+      session: s,
+      question: "q",
+      keywords: ["artifact"],
+      pathPrefixes: [],
+      config: cfg,
+    });
     const calls = ws.calls.length;
     const notes = await keywordNotes({
       session: s,
@@ -410,7 +450,13 @@ function expectExactCover(ws: Window[], n: number) {
 
 describe("tileFile", () => {
   test("covers every line exactly once and cuts at declaration boundaries", () => {
-    const lines = ['import { a } from "a";', "", ...fn("alpha", 16), ...fn("beta", 16), ...fn("gamma", 16)];
+    const lines = [
+      'import { a } from "a";',
+      "",
+      ...fn("alpha", 16),
+      ...fn("beta", 16),
+      ...fn("gamma", 16),
+    ];
     const ws = tileFile(lines, [5, 30, 5], "brace", cfg);
     expectExactCover(ws, lines.length);
     // every tile after the first starts at a function declaration
@@ -419,7 +465,10 @@ describe("tileFile", () => {
       "export function gamma(x: number): number {",
     ]);
     expect(ws.map((w) => w.hits)).toEqual([[5], [30], []]);
-    expect(ws[1]!.label).toEqual({ line: ws[1]!.start, text: "export function beta(x: number): number {" });
+    expect(ws[1]!.label).toEqual({
+      line: ws[1]!.start,
+      text: "export function beta(x: number): number {",
+    });
     expect(ws.every((w) => w.kind === "hit" && w.score === 0)).toBe(true);
   });
 
@@ -445,7 +494,8 @@ describe("tileFile", () => {
       "",
     ];
     const lines = ['import { a } from "a";', "", ...f("alpha"), ...f("beta"), ...f("gamma")];
-    for (const w of tileFile(lines, [], "brace", cfg)) expect(lines[w.end - 1]).not.toMatch(/^export function/);
+    for (const w of tileFile(lines, [], "brace", cfg))
+      expect(lines[w.end - 1]).not.toMatch(/^export function/);
   });
 
   test("hard cut at maxWindowLines, preferring a blank line in the tile's last quarter", () => {
@@ -462,7 +512,8 @@ describe("tileFile", () => {
     expectExactCover(ws, withBlank.length);
     expect(ws.every((w) => w.label === undefined)).toBe(true);
     const c = codeSearchConfig({ wave2: { maxWindowLines: 40 } });
-    for (const w of tileFile(other, [], "other", c)) expect(w.end - w.start + 1).toBeLessThanOrEqual(40);
+    for (const w of tileFile(other, [], "other", c))
+      expect(w.end - w.start + 1).toBeLessThanOrEqual(40);
   });
 
   test("tiles over the char cap are split into consecutive whole-line chunks", () => {
@@ -471,7 +522,9 @@ describe("tileFile", () => {
     expectExactCover(ws, wide.length);
     expect(ws.length).toBeGreaterThan(1);
     for (const w of ws) {
-      const chars = wide.slice(w.start - 1, w.end).reduce((s, l, i) => s + `${w.start + i}| ${l}`.length + 1, 0);
+      const chars = wide
+        .slice(w.start - 1, w.end)
+        .reduce((s, l, i) => s + `${w.start + i}| ${l}`.length + 1, 0);
       expect(chars).toBeLessThanOrEqual(cfg.wave2.maxWindowChars);
     }
     expect(ws.flatMap((w) => w.hits)).toEqual([3, 25]);
@@ -496,7 +549,7 @@ describe("declName / outlineRanges", () => {
   });
   const file = [
     'import { useEffect } from "react";',
-    'import {',
+    "import {",
     "  formatSize,",
     '} from "./fmt";',
     "const MAX_ITEMS = 10;",
@@ -542,12 +595,20 @@ describe("declName / outlineRanges", () => {
     ]);
   });
   test("only the given ranges are scanned; other languages and max <= 0 give nothing", () => {
-    expect(outlineRanges(file, "brace", [[7, 20]], 20).map((d) => d.name)).toEqual(["rollback", "handleSave"]);
+    expect(outlineRanges(file, "brace", [[7, 20]], 20).map((d) => d.name)).toEqual([
+      "rollback",
+      "handleSave",
+    ]);
     expect(
-      outlineRanges(file, "brace", [
-        [1, 5],
-        [23, 99],
-      ], 20).map((d) => d.name),
+      outlineRanges(
+        file,
+        "brace",
+        [
+          [1, 5],
+          [23, 99],
+        ],
+        20,
+      ).map((d) => d.name),
     ).toEqual(["Store", "save"]);
     expect(outlineRanges(file, "other", [[1, file.length]], 20)).toEqual([]);
     expect(outlineRanges(file, "brace", [[1, file.length]], 0)).toEqual([]);
@@ -558,15 +619,28 @@ describe("declName / outlineRanges", () => {
 describe("isImportOnly / inclusionRel", () => {
   test("import blocks (including multi-line lists) are import-only; code is not", () => {
     expect(isImportOnly(['import { a } from "a";', 'import b from "b";'])).toBe(true);
-    expect(isImportOnly(["import {", "  alpha,", "  beta,", '} from "./x";', 'import c from "c";'])).toBe(true);
-    expect(isImportOnly(["from x import a", "use crate::y::{b, c};", 'const z = require("z");'])).toBe(true);
+    expect(
+      isImportOnly(["import {", "  alpha,", "  beta,", '} from "./x";', 'import c from "c";']),
+    ).toBe(true);
+    expect(
+      isImportOnly(["from x import a", "use crate::y::{b, c};", 'const z = require("z");']),
+    ).toBe(true);
     expect(isImportOnly(['export { a } from "./a";', 'export type { B } from "./b";'])).toBe(true);
     expect(
-      isImportOnly(["export function f({", "  alpha,", "  beta,", "}) {", "  return alpha + beta;", "}"]),
+      isImportOnly([
+        "export function f({",
+        "  alpha,",
+        "  beta,",
+        "}) {",
+        "  return alpha + beta;",
+        "}",
+      ]),
     ).toBe(false);
     expect(isImportOnly(["const a = 1;", "const b = a + 1;", "return b;"])).toBe(false);
     // mostly code with one import
-    expect(isImportOnly(['import { a } from "a";', "const b = a();", "const c = b();", "run(c);"])).toBe(false);
+    expect(
+      isImportOnly(['import { a } from "a";', "const b = a();", "const c = b();", "run(c);"]),
+    ).toBe(false);
     // fewer than two code lines, and comments do not count
     expect(isImportOnly(['import { a } from "a";'])).toBe(false);
     expect(isImportOnly(["// import x", 'import { a } from "a";', "", "/* c */"])).toBe(false);
@@ -580,13 +654,33 @@ describe("isImportOnly / inclusionRel", () => {
 
 describe("ranges", () => {
   test("fmtRanges, mergeRanges, complementRanges", () => {
-    expect(fmtRanges([[1, 3], [5, 5], [7, 9]])).toBe("1-3, 5, 7-9");
-    expect(mergeRanges([[10, 12], [1, 3], [4, 6], [11, 20], [30, 31]])).toEqual([
+    expect(
+      fmtRanges([
+        [1, 3],
+        [5, 5],
+        [7, 9],
+      ]),
+    ).toBe("1-3, 5, 7-9");
+    expect(
+      mergeRanges([
+        [10, 12],
+        [1, 3],
+        [4, 6],
+        [11, 20],
+        [30, 31],
+      ]),
+    ).toEqual([
       [1, 6],
       [10, 20],
       [30, 31],
     ]);
-    expect(complementRanges(40, [[5, 10], [1, 2], [20, 40]])).toEqual([
+    expect(
+      complementRanges(40, [
+        [5, 10],
+        [1, 2],
+        [20, 40],
+      ]),
+    ).toEqual([
       [3, 4],
       [11, 19],
     ]);
@@ -597,7 +691,10 @@ describe("ranges", () => {
 });
 
 // ---------------------------------------------------------------------------
-const bigFile = Array.from({ length: 400 }, (_, i) => `const v${i + 1} = ${i + 1}; // filler text for line ${i + 1}`);
+const bigFile = Array.from(
+  { length: 400 },
+  (_, i) => `const v${i + 1} = ${i + 1}; // filler text for line ${i + 1}`,
+);
 const smallFile = Array.from({ length: 20 }, (_, i) => `const s${i + 1} = ${i + 1};`);
 function ev(
   id: string,
@@ -628,7 +725,9 @@ describe("priorityOrder: sub-question fallback and fillMin", () => {
       ev("w4", "e.ts", 1, 10, 0.2, [0.1, 0.2]),
     ];
     const c = codeSearchConfig({ pack: { minPassages: 1 } });
-    const order = priorityOrder(ps, { subQuestions: ["s1", "s2"], T2: 0.5, cfg: c }).map((x) => x.id);
+    const order = priorityOrder(ps, { subQuestions: ["s1", "s2"], T2: 0.5, cfg: c }).map(
+      (x) => x.id,
+    );
     // w1 is below minRelevance but its coverage reaches subFloor
     expect(order).toEqual(["strong", "w1", "w2"]);
     const one = priorityOrder(ps, {
@@ -645,10 +744,7 @@ describe("priorityOrder: sub-question fallback and fillMin", () => {
     expect(none).toEqual(["strong"]);
   });
   test("a sub-question whose best passage reaches T2 takes only that passage", () => {
-    const ps = [
-      ev("a", "a.ts", 1, 10, 0.2, [0.7]),
-      ev("b", "b.ts", 1, 10, 0.2, [0.45]),
-    ];
+    const ps = [ev("a", "a.ts", 1, 10, 0.2, [0.7]), ev("b", "b.ts", 1, 10, 0.2, [0.45])];
     const order = priorityOrder(ps, {
       subQuestions: ["s1"],
       T2: 0.5,
@@ -664,18 +760,20 @@ describe("priorityOrder: sub-question fallback and fillMin", () => {
       ev("d", "d.ts", 1, 10, 0.2),
     ];
     const c = codeSearchConfig({ pack: { minPassages: 1 } });
-    expect(priorityOrder(ps, { subQuestions: [], T2: 0.5, cfg: c }).map((x) => x.id)).toEqual(["a"]);
-    expect(priorityOrder(ps, { subQuestions: [], T2: 0.5, cfg: c, fillMin: 0.3 }).map((x) => x.id)).toEqual([
+    expect(priorityOrder(ps, { subQuestions: [], T2: 0.5, cfg: c }).map((x) => x.id)).toEqual([
       "a",
-      "b",
-      "c",
     ]);
+    expect(
+      priorityOrder(ps, { subQuestions: [], T2: 0.5, cfg: c, fillMin: 0.3 }).map((x) => x.id),
+    ).toEqual(["a", "b", "c"]);
   });
   test("an import-only passage needs rel / importPrior to pass T2", () => {
     const imp = { ...ev("imp", "a.ts", 1, 10, 0.8), importOnly: true };
     const c = codeSearchConfig({ pack: { minPassages: 0 } });
     expect(priorityOrder([imp], { subQuestions: [], T2: 0.5, cfg: c })).toEqual([]);
-    expect(priorityOrder([{ ...imp, rel: 1 }], { subQuestions: [], T2: 0.5, cfg: c }).length).toBe(1);
+    expect(priorityOrder([{ ...imp, rel: 1 }], { subQuestions: [], T2: 0.5, cfg: c }).length).toBe(
+      1,
+    );
   });
 });
 
@@ -686,7 +784,13 @@ describe("packBody: whole files, stitching, file order, budget cuts", () => {
     const body = packBody([a, b], opts());
     expect(body.included.length).toBe(1);
     const p = body.included[0]!;
-    expect(p).toMatchObject({ path: "src/small.ts", start: 1, end: 20, whole: true, trimmed: false });
+    expect(p).toMatchObject({
+      path: "src/small.ts",
+      start: 1,
+      end: 20,
+      whole: true,
+      trimmed: false,
+    });
     expect(p.block.split("\n")[0]).toBe("== src/small.ts:1-20  rel 0.90  (whole file)");
     expect(p.block).toContain("20| const s20 = 20;");
     expect(p.block).toBe(renderWhole(a, opts()));
@@ -815,7 +919,14 @@ describe("renderFooter", () => {
         { name: "rollback", line: 90 },
       ],
     },
-    { path: "src/b.ts", lines: 50, shown: [], checked: [], note: "file triage 0.83", outline: [{ name: "Store", line: 3 }] },
+    {
+      path: "src/b.ts",
+      lines: 50,
+      shown: [],
+      checked: [],
+      note: "file triage 0.83",
+      outline: [{ name: "Store", line: 3 }],
+    },
     { path: "src/c.ts", lines: 10, shown: [[1, 10]], checked: [] },
     { path: "src/d.ts", lines: 0, shown: [], checked: [] },
   ];
@@ -873,7 +984,11 @@ describe("renderFooter", () => {
       coverage: many,
       cuts: [longCut],
       otherFiles: Array.from({ length: 10 }, (_, i) => ({ path: `src/other${i}.ts`, score: 0.3 })),
-      leadsNotFollowed: Array.from({ length: 8 }, (_, i) => ({ name: `leadName${i}`, score: 0.3, seenAt: "a.ts:1" })),
+      leadsNotFollowed: Array.from({ length: 8 }, (_, i) => ({
+        name: `leadName${i}`,
+        score: 0.3,
+        seenAt: "a.ts:1",
+      })),
       keywords: [{ raw: "nope", fragments: [], suggestions: [], status: "zero" }],
     });
     const full = renderFooter({ ...input, maxChars: 100_000 });
@@ -882,7 +997,9 @@ describe("renderFooter", () => {
     const maxChars = 1200;
     const out = renderFooter({ ...input, maxChars });
     expect(out.length).toBeLessThanOrEqual(maxChars);
-    expect(out).toContain("  src/module00.ts (200 lines): shown 1-10; not shown 11-200 (declares handler0 100)");
+    expect(out).toContain(
+      "  src/module00.ts (200 lines): shown 1-10; not shown 11-200 (declares handler0 100)",
+    );
     expect(out).not.toContain("src/module19.ts");
     expect(out).toMatch(/\(\d+ more relevant files not listed\)/);
     expect(out).not.toContain("src/other");
@@ -898,10 +1015,25 @@ describe("renderFooter", () => {
 
 // ---------------------------------------------------------------------------
 describe("symbol judge", () => {
-  const ctx = { question: "How does the artifact list load more rows?", subQuestions: ["Where is paging?"] };
+  const ctx = {
+    question: "How does the artifact list load more rows?",
+    subQuestions: ["Where is paging?"],
+  };
   const items: LeadItem[] = [
-    { id: "y1000", name: "useArtifactCatalog", seenAt: "src/a.ts:1", context: "imported at src/a.ts:1: import ...", lex: 1 },
-    { id: "y1001", name: "loadMoreRows", seenAt: "src/a.ts:9", context: "called at src/a.ts:9: loadMoreRows()", lex: 0.4 },
+    {
+      id: "y1000",
+      name: "useArtifactCatalog",
+      seenAt: "src/a.ts:1",
+      context: "imported at src/a.ts:1: import ...",
+      lex: 1,
+    },
+    {
+      id: "y1001",
+      name: "loadMoreRows",
+      seenAt: "src/a.ts:9",
+      context: "called at src/a.ts:9: loadMoreRows()",
+      lex: 0.4,
+    },
   ];
   test("buildSymbolRequest: one Noul per identifier, identifier and context in the state", () => {
     const { state, questions } = buildSymbolRequest(items, ctx, cfg);
@@ -941,7 +1073,10 @@ describe("symbol judge", () => {
     expect(judge.stats().symbols!.requests).toBeGreaterThanOrEqual(1);
     expect(await judge.scoreSymbols([], ctx)).toEqual(new Map());
     sizes.length = 0;
-    const many = Array.from({ length: 130 }, (_, i) => ({ ...items[0]!, id: `y2${String(i).padStart(3, "0")}` }));
+    const many = Array.from({ length: 130 }, (_, i) => ({
+      ...items[0]!,
+      id: `y2${String(i).padStart(3, "0")}`,
+    }));
     const s2 = await judge.scoreSymbols(many, ctx);
     expect(s2.size).toBe(130);
     expect(sizes.reduce((a, b) => a + b, 0)).toBe(130);

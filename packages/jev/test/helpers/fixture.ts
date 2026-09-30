@@ -139,7 +139,10 @@ export function fakeJevFetch(opts: FakeJevOptions = {}) {
       else if (id === "overall" || id.startsWith("sub::")) text = "status";
       if (st.symbols?.[id] !== undefined) {
         const sym: string = st.symbols[id];
-        answers[id] = { type: "noul", noul: (opts.symbolGood ?? []).some((g) => sym.startsWith(`${g}  (`)) ? 0.9 : 0.1 };
+        answers[id] = {
+          type: "noul",
+          noul: (opts.symbolGood ?? []).some((g) => sym.startsWith(`${g}  (`)) ? 0.9 : 0.1,
+        };
         continue;
       }
       let p = text === "status" ? 0.85 : good.some((g) => text.includes(g)) ? 0.9 : 0.1;

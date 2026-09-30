@@ -481,7 +481,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       const isGeneric = files.size > cfg.symbols.maxRefFiles;
       if (isGeneric) generic.push(`${name} (${files.size} files)`);
       const hits = usage.hits.filter((h) => h.name === name && (!isGeneric || h.kind === "def"));
-      for (const h of hits) if (h.kind === "def") symbolDefs.push({ name, path: h.path, line: h.line, p: x.p });
+      for (const h of hits)
+        if (h.kind === "def") symbolDefs.push({ name, path: h.path, line: h.line, p: x.p });
       if (!hits.length) continue;
       const kwIndex = kws.length;
       const esc = escapeRegex(name);
@@ -642,16 +643,20 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
           round: round_,
           sources: srcFiles.map((f) => f.path),
           candidates: all.length,
-          judged: items.map((it) => ({ name: it.name, p: round(symScores.get(it.id) ?? Number.NaN), ctx: it.context })),
+          judged: items.map((it) => ({
+            name: it.name,
+            p: round(symScores.get(it.id) ?? Number.NaN),
+            ctx: it.context,
+          })),
           chosen: chosen.map((x) => x.it.name),
         };
         symbolRounds.push(roundTrace);
         if (!chosen.length) break;
         sources = (await followNames(round_, chosen, roundTrace)).filter(codeFile);
-
       }
       // ranked (for "more candidates") includes the newly triaged files by score
-      for (let i = 0; i < cands.length; i++) if (!ranked.includes(i) && fileScores.has(fileIds[i]!)) ranked.push(i);
+      for (let i = 0; i < cands.length; i++)
+        if (!ranked.includes(i) && fileScores.has(fileIds[i]!)) ranked.push(i);
       ranked.sort((a, b) => pOf(b) - pOf(a) || cands[b]!.lexScore - cands[a]!.lexScore || a - b);
     }
     mark("symbols", tSym);
@@ -690,7 +695,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       else merged.push([a, b]);
     }
     return (
-      fmtRanges(merged.slice(0, max)) + (merged.length > max ? ` (+${merged.length - max} more ranges)` : "")
+      fmtRanges(merged.slice(0, max)) +
+      (merged.length > max ? ` (+${merged.length - max} more ranges)` : "")
     );
   };
   const windowCuts: string[] = [];
@@ -710,7 +716,13 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       }
     };
     if (tiled.has(i)) {
-      const tiles = tileFile(lines, hits.map((h) => h.line), langOf(c.path), cfg, renderFor(c.path));
+      const tiles = tileFile(
+        lines,
+        hits.map((h) => h.line),
+        langOf(c.path),
+        cfg,
+        renderFor(c.path),
+      );
       for (const t of tiles) t.score = scoreWindow(lines, t, kws, cfg.recall.hitCountWeight);
       const keep = [...tiles]
         .sort((a, b) => b.score - a.score || a.start - b.start)
@@ -719,7 +731,10 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       return keep;
     }
     const all = rankFileWindows(lines, hits, kws, langOf(c.path), cfg, renderFor(c.path));
-    const keep = all.slice(0, relevant ? cfg.wave2.windowsPerRelevantFile : cfg.wave2.windowsPerFile);
+    const keep = all.slice(
+      0,
+      relevant ? cfg.wave2.windowsPerRelevantFile : cfg.wave2.windowsPerFile,
+    );
     note(all.slice(keep.length));
     return keep;
   });
@@ -728,7 +743,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       `regions per file (limit ${cfg.wave2.windowsPerFile}, ${cfg.wave2.windowsPerRelevantFile} in relevant files, ${cfg.wave2.tileMaxWindows} in small relevant files read whole): not checked ${[
         ...windowCuts,
         ...(otherWindowCuts
-          ? [`${otherWindowCuts} more keyword regions in ${otherWindowFiles.size} less relevant files (${[...otherWindowFiles].slice(0, 6).join(", ")}${otherWindowFiles.size > 6 ? ", ..." : ""})`]
+          ? [
+              `${otherWindowCuts} more keyword regions in ${otherWindowFiles.size} less relevant files (${[...otherWindowFiles].slice(0, 6).join(", ")}${otherWindowFiles.size > 6 ? ", ..." : ""})`,
+            ]
           : []),
       ].join("; ")}`,
     );
@@ -747,15 +764,27 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     );
     if (lines.length || stored)
       uncovered.push(
-        `${c.path}: ${lines.length ? `lines ${rangesText(lines.map((l) => [l, l]), 15)}` : ""}${stored ? `${lines.length ? "; " : ""}more matches past the first ${cfg.recall.maxMatchesPerFile} per keyword not examined` : ""}`,
+        `${c.path}: ${
+          lines.length
+            ? `lines ${rangesText(
+                lines.map((l) => [l, l]),
+                15,
+              )}`
+            : ""
+        }${stored ? `${lines.length ? "; " : ""}more matches past the first ${cfg.recall.maxMatchesPerFile} per keyword not examined` : ""}`,
       );
   });
-  if (uncovered.length) cuts.push(`keyword hits outside every checked region: ${uncovered.join("; ")}`);
+  if (uncovered.length)
+    cuts.push(`keyword hits outside every checked region: ${uncovered.join("; ")}`);
   const passageCut = perFileWindows.flatMap((ws, f) =>
-    ws.filter((w) => !capped[f]!.includes(w)).map((w) => `${cands[baseSel[f]!]!.path}:${w.start}-${w.end}`),
+    ws
+      .filter((w) => !capped[f]!.includes(w))
+      .map((w) => `${cands[baseSel[f]!]!.path}:${w.start}-${w.end}`),
   );
   if (passageCut.length)
-    cuts.push(`passages checked (limit ${cfg.wave2.maxPassages}): not checked ${passageCut.join(", ")}`);
+    cuts.push(
+      `passages checked (limit ${cfg.wave2.maxPassages}): not checked ${passageCut.join(", ")}`,
+    );
   const qTerms = contentTerms(ctx.question);
   const subTerms = subQuestions.map((s) => contentTerms(s));
   const evidence: EvidencePassage[] = [];
@@ -769,7 +798,10 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   ) => {
     const lines = readLines(path);
     const focus = extra.lead ?? extra.caller;
-    const render = renderFor(path, focus ? [new RegExp(`\\b${escapeRegex(focus)}\\b`)] : needlesNow);
+    const render = renderFor(
+      path,
+      focus ? [new RegExp(`\\b${escapeRegex(focus)}\\b`)] : needlesNow,
+    );
     const text = renderLines(lines, w.start, w.end, render);
     const rawLines = lines.slice(w.start - 1, w.end);
     const raw = rawLines.join("\n");
@@ -817,11 +849,18 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   };
   // "must change together": a shortlist of the declarations of the most relevant code files, judged while
   // wave 2 runs (no added latency); a chosen declaration gets its own passage when no window holds it
-  const changeDecls: Array<{ id: string; name: string; path: string; line: number; p?: number }> = [];
+  const changeDecls: Array<{ id: string; name: string; path: string; line: number; p?: number }> =
+    [];
   const changeItems: LeadItem[] = [];
   if (cfg.change.enabled) {
     const top = baseSel
-      .filter((i) => pOf(i) >= thr.T1 && !isDocPath(cands[i]!.path) && !isChangelogPath(cands[i]!.path) && (allowTests || !cands[i]!.isTest))
+      .filter(
+        (i) =>
+          pOf(i) >= thr.T1 &&
+          !isDocPath(cands[i]!.path) &&
+          !isChangelogPath(cands[i]!.path) &&
+          (allowTests || !cands[i]!.isTest),
+      )
       .sort((a, b) => pOf(b) - pOf(a))
       .slice(0, cfg.change.files);
     for (const i of top) {
@@ -836,7 +875,11 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         const id = `c${String(changeItems.length).padStart(3, "0")}`;
         // signature plus the calls the body makes: what a declaration mutates shows in its calls
         // (`rollbackWorkspaceArtifact`, `setWorkspaceArtifactStatus`), rarely in its first lines
-        const end = Math.min(lines.length, (blockEnd(lines, d.line - 1, lang) ?? d.line + 30) + 1, d.line + 150);
+        const end = Math.min(
+          lines.length,
+          (blockEnd(lines, d.line - 1, lang) ?? d.line + 30) + 1,
+          d.line + 150,
+        );
         const calls = [
           ...new Set(
             lines
@@ -846,7 +889,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
           ),
         ].slice(0, 10);
         const body =
-          l.trim().slice(0, 200) + (calls.length ? `\ncalls: ${calls.join(", ")}` : "") + `\nlines ${d.line}-${end}`;
+          l.trim().slice(0, 200) +
+          (calls.length ? `\ncalls: ${calls.join(", ")}` : "") +
+          `\nlines ${d.line}-${end}`;
         changeItems.push({ id, name: d.name, seenAt: `${path}:${d.line}`, context: body, lex: 0 });
         changeDecls.push({ id, name: d.name, path, line: d.line });
       }
@@ -880,7 +925,13 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       continue;
     }
     const lines = readLines(d.path);
-    const w = definitionWindow(lines, d.line, langOf(d.path), cfg, renderFor(d.path, [new RegExp(`\\b${escapeRegex(d.name)}\\b`)]));
+    const w = definitionWindow(
+      lines,
+      d.line,
+      langOf(d.path),
+      cfg,
+      renderFor(d.path, [new RegExp(`\\b${escapeRegex(d.name)}\\b`)]),
+    );
     const before = passageItems.length;
     makePassage(d.path, w, 0, { lead: d.name });
     const e = evidence[evidence.length - 1]!;
@@ -901,8 +952,21 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     // a small file the identifiers lead to is tiled whole, like the small relevant files of wave 2
     const ws =
       isNew && lines.length <= cfg.symbols.tileNewMaxLines
-        ? tileFile(lines, symHits.map((h) => h.line), langOf(c.path), cfg, renderFor(c.path)).slice(0, cfg.wave2.tileMaxWindows)
-        : rankFileWindows(lines, isNew ? [...c.hitLines.values()] : symHits, kws, langOf(c.path), cfg, renderFor(c.path))
+        ? tileFile(
+            lines,
+            symHits.map((h) => h.line),
+            langOf(c.path),
+            cfg,
+            renderFor(c.path),
+          ).slice(0, cfg.wave2.tileMaxWindows)
+        : rankFileWindows(
+            lines,
+            isNew ? [...c.hitLines.values()] : symHits,
+            kws,
+            langOf(c.path),
+            cfg,
+            renderFor(c.path),
+          )
             .filter((x) => !overlapsEvidenceEarly(c.path, x))
             .slice(0, isNew ? cfg.wave2.windowsPerFile : 3);
     if (isNew && lines.length <= cfg.symbols.tileNewMaxLines) symbolTiled.push(c.path);
@@ -916,7 +980,11 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   if (changeNew.length) applyScores(await judge.scorePassages(changeNew, ctx, "change_defs"));
   mark("wave2", ts);
   emit("change", {
-    judged: changeDecls.map((d) => ({ name: d.name, at: `${d.path}:${d.line}`, p: round(d.p ?? Number.NaN) })),
+    judged: changeDecls.map((d) => ({
+      name: d.name,
+      at: `${d.path}:${d.line}`,
+      p: round(d.p ?? Number.NaN),
+    })),
     chosen: changeChosen.slice(0, cfg.change.maxChosen).map((d) => `${d.name}@${d.path}:${d.line}`),
   });
   emit("wave2", {
@@ -960,7 +1028,11 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         const lines = readLines(d.path);
         // the file could not be read as text (missing, binary, UTF-16) or changed after ripgrep saw it
         if (d.line > lines.length) {
-          leadsFollowed.push({ name: x.name, score: x.p, def: `${d.path}:${d.line} (not in the file as read)` });
+          leadsFollowed.push({
+            name: x.name,
+            score: x.p,
+            def: `${d.path}:${d.line} (not in the file as read)`,
+          });
           continue;
         }
         const w = definitionWindow(
@@ -971,26 +1043,40 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
           renderFor(d.path, [new RegExp(`\\b${escapeRegex(x.name)}\\b`)]),
         );
         const ov = overlapsEvidence(d.path, w);
-        leadsFollowed.push({ name: x.name, score: x.p, def: `${d.path}:${d.line}${ov ? " (overlaps evidence)" : ""}` });
+        leadsFollowed.push({
+          name: x.name,
+          score: x.p,
+          def: `${d.path}:${d.line}${ov ? " (overlaps evidence)" : ""}`,
+        });
         if (!ov) makePassage(d.path, w, 0, { lead: x.name });
       }
     }
     // call sites: other places that use the lead (sibling code paths that must change together)
     const callerLeads = chosen.filter((x) => specificName(x.name));
     if (cfg.wave3.callersPerLead > 0 && callerLeads.length) {
-      const usage = await locateUsages(session, callerLeads.map((x) => x.name), cfg, exArgs, allowTests, 12);
+      const usage = await locateUsages(
+        session,
+        callerLeads.map((x) => x.name),
+        cfg,
+        exArgs,
+        allowTests,
+        12,
+      );
       const refs = usage.hits.filter((h) => h.kind === "ref" && !inEvidence(h.path, h.line));
       const picks: typeof refs = [];
       for (const x of callerLeads) {
         if ((usage.files.get(x.name)?.size ?? 0) > cfg.symbols.maxRefFiles) {
-          cuts.push(`call sites of ${x.name}: used in ${usage.files.get(x.name)!.size} files, too many to check (definition only).`);
+          cuts.push(
+            `call sites of ${x.name}: used in ${usage.files.get(x.name)!.size} files, too many to check (definition only).`,
+          );
           continue;
         }
         const mine = refs
           .filter((h) => h.name === x.name && (!isTestPath(h.path) || allowTests))
           .sort(
             (a, b) =>
-              Number(evidence.some((e) => e.path === b.path)) - Number(evidence.some((e) => e.path === a.path)) ||
+              Number(evidence.some((e) => e.path === b.path)) -
+                Number(evidence.some((e) => e.path === a.path)) ||
               (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line),
           );
         const perFile = new Set<string>();
@@ -1003,7 +1089,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         const total = new Set(mine.map((h) => h.path)).size;
         if (total > perFile.size)
           cuts.push(
-            `call sites of ${x.name}: checked ${perFile.size} of ${total} files; not checked: ${[...new Set(mine.map((h) => h.path))]
+            `call sites of ${x.name}: checked ${perFile.size} of ${total} files; not checked: ${[
+              ...new Set(mine.map((h) => h.path)),
+            ]
               .filter((p) => !perFile.has(p))
               .slice(0, 10)
               .join(", ")}${total - perFile.size > 10 ? ", ..." : ""}`,
@@ -1034,7 +1122,13 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     const weak =
       strong.length < cfg.wave3.seedPassages
         ? evidence
-            .filter((e) => !pendingIds.has(e.id) && !strong.includes(e) && !e.importOnly && e.rel >= cfg.wave3.seedFloor)
+            .filter(
+              (e) =>
+                !pendingIds.has(e.id) &&
+                !strong.includes(e) &&
+                !e.importOnly &&
+                e.rel >= cfg.wave3.seedFloor,
+            )
             .sort((a, b) => b.rel - a.rel)
             .slice(0, cfg.wave3.seedPassages - strong.length)
         : [];
@@ -1044,7 +1138,12 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       .filter((e) => pendingIds.has(e.id))
       .map((e) => ({
         e,
-        p: Math.max(0, ...symbolDefs.filter((d) => d.path === e.path && d.line >= e.start && d.line <= e.end).map((d) => d.p)),
+        p: Math.max(
+          0,
+          ...symbolDefs
+            .filter((d) => d.path === e.path && d.line >= e.start && d.line <= e.end)
+            .map((d) => d.p),
+        ),
       }))
       .filter((x) => x.p > 0);
     const seeds = [
@@ -1057,7 +1156,12 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       rel,
     }));
     const leadSearched = new Set([...searched, ...followedSymbols.map((n) => n.toLowerCase())]);
-    const extracted = extractLeads(seeds, leadSearched, qWords, Math.ceil(cfg.wave3.maxLeadCandidates * 1.5));
+    const extracted = extractLeads(
+      seeds,
+      leadSearched,
+      qWords,
+      Math.ceil(cfg.wave3.maxLeadCandidates * 1.5),
+    );
     const selectedPaths = new Set(selected.map((i) => cands[i]!.path));
     const defSearch = await locateDefinitions(
       session,
@@ -1068,7 +1172,13 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       allowTests,
     );
     const seenAt = new Map(extracted.map((l) => [l.name, l.seenAt.path]));
-    defsForLeads = chooseDefinitions(defSearch.hits, selectedPaths, cfg.wave3.defsPerLead, allowTests, seenAt);
+    defsForLeads = chooseDefinitions(
+      defSearch.hits,
+      selectedPaths,
+      cfg.wave3.defsPerLead,
+      allowTests,
+      seenAt,
+    );
     const leadDrops: Record<string, string> = {};
     // genericity penalty: a name defined/used as a key in many files (sessionId, workspaceId, isRecord) is rarely
     // what the answer hinges on
@@ -1142,8 +1252,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
           rel: round(e.rel),
         })),
     });
-  }
-  else if (symbolItems.length) applyScores(await judge.scorePassages(symbolItems, ctx, "symbol_windows"));
+  } else if (symbolItems.length)
+    applyScores(await judge.scorePassages(symbolItems, ctx, "symbol_windows"));
   mark("wave3", ts);
 
   // ---- 5. pack + status (adaptive: a low rating follows more leads once and refills the budget)
@@ -1177,7 +1287,10 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       mark("status", tStatus);
     } catch (error) {
       mark("status", tStatus);
-      if (signal.aborted || !(error instanceof JevUnavailableError || error instanceof JevRequestError))
+      if (
+        signal.aborted ||
+        !(error instanceof JevUnavailableError || error instanceof JevRequestError)
+      )
         throw error;
       statusCheckError = error;
       status = { label: "unknown", overall: null, subs: [], error: error.message.slice(0, 200) };
@@ -1189,7 +1302,12 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   let refilled = false;
   const ratingOf = () => (status.overall === null ? null : status.overall);
   const firstRating = ratingOf();
-  if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.followBelowRating && cfg.wave3.enabled) {
+  if (
+    !statusCheckError &&
+    firstRating !== null &&
+    firstRating < cfg.pack.followBelowRating &&
+    cfg.wave3.enabled
+  ) {
     // follow the next leads (a lower bar) and the next triaged files once
     const nextLeads = leadCands
       .filter((l) => !chosenNames.has(l.name))
@@ -1198,7 +1316,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       .sort((a, b) => b.p - a.p)
       .slice(0, cfg.wave3.maxLeadsFollowed);
     const added = await followLeads(nextLeads, defsForLeads);
-    adaptive.push(`rating ${r2(firstRating)}: followed ${nextLeads.length} more leads (${added} passages)`);
+    adaptive.push(
+      `rating ${r2(firstRating)}: followed ${nextLeads.length} more leads (${added} passages)`,
+    );
     body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
     await check(body);
   } else if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.fillBelowRating) {
@@ -1206,7 +1326,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
     if (body.included.length !== before) {
       // the rating stays that of the passages above the bar (no second check: one Jev round less)
-      adaptive.push(`rating ${r2(firstRating)}: filled the budget with passages rel >= ${cfg.pack.fillMinRelevance}`);
+      adaptive.push(
+        `rating ${r2(firstRating)}: filled the budget with passages rel >= ${cfg.pack.fillMinRelevance}`,
+      );
       refilled = true;
     }
   }

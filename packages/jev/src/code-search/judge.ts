@@ -255,7 +255,9 @@ export function buildChangeRequest(items: LeadItem[], ctx: JudgeContext, cfg: Co
     question: ctx.question,
     ...withSubs(ctx),
     criteria: PROMPTS.changeCriteria,
-    declarations: Object.fromEntries(items.map((l) => [l.id, `${l.name}  (${l.seenAt})\n${l.context}`])),
+    declarations: Object.fromEntries(
+      items.map((l) => [l.id, `${l.name}  (${l.seenAt})\n${l.context}`]),
+    ),
   };
   const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
     items.map((l) => [l.id, noul(PROMPTS.changeQuestion(l.id, l.name, q))]),

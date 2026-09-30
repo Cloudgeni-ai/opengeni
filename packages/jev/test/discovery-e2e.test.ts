@@ -9,8 +9,7 @@
  * keyword or symbol leads to. ArtifactList.tsx is too large to show whole, and its handleRetry handler sits in
  * a tile the fake scores 0.1, so the coverage map must name it among the not-shown declarations.
  */
-import {
-  codeSearchConfig, afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { codeSearchConfig, runCodeSearch } from "../src";
 import { fakeJevClient, makeFixtureRepo, packPassages } from "./helpers/fixture";
@@ -24,7 +23,8 @@ const filler = (name: string, n: number) => [
   "  let total = 0;",
   ...Array.from(
     { length: n },
-    (_, i) => `  total += rows.length * ${i} + Math.max(0, rows[${i % 7}] ?? 0) - Math.min(${i}, rows.length) * 3;`,
+    (_, i) =>
+      `  total += rows.length * ${i} + Math.max(0, rows[${i % 7}] ?? 0) - Math.min(${i}, rows.length) * 3;`,
   ),
   "  return total;",
   "}",
@@ -106,14 +106,18 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
     const stage = (name: string) => events.find(([s]) => s === name)![1] as any;
 
     // recall matched only ArtifactList.tsx
-    expect(stage("recall").candidates.map((c: any) => c.path)).toEqual(["src/components/ArtifactList.tsx"]);
+    expect(stage("recall").candidates.map((c: any) => c.path)).toEqual([
+      "src/components/ArtifactList.tsx",
+    ]);
 
     // symbol discovery judged the file's identifiers, followed useArtifactPaging and added paging.ts
     const sym = stage("symbols");
     expect(sym.rounds[0].sources).toEqual(["src/components/ArtifactList.tsx"]);
     expect(sym.rounds[0].chosen).toEqual(["useArtifactPaging"]);
     expect(sym.rounds[0].judged.map((j: any) => j.name)).toContain("handleRetry");
-    expect(sym.added).toEqual([{ path: "src/hooks/paging.ts", p: 0.9, via: ["useArtifactPaging"] }]);
+    expect(sym.added).toEqual([
+      { path: "src/hooks/paging.ts", p: 0.9, via: ["useArtifactPaging"] },
+    ]);
     expect(sym.selected).toEqual(["src/components/ArtifactList.tsx", "src/hooks/paging.ts"]);
     // round 2 judged paging.ts's identifiers (fetchRowPage is not a symbol worth following for the fake)
     expect(sym.rounds[1].sources).toEqual(["src/hooks/paging.ts"]);
@@ -126,11 +130,17 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
 
     // wave 3 followed fetchRowPage: its definition and its call site in Toolbar.tsx
     const leads = stage("leads");
-    expect(leads.followed).toEqual([{ name: "fetchRowPage", score: 0.9, def: "src/api/rows.ts:1" }]);
+    expect(leads.followed).toEqual([
+      { name: "fetchRowPage", score: 0.9, def: "src/api/rows.ts:1" },
+    ]);
     const toolbarLines = FILES["src/toolbar/Toolbar.tsx"]!.split("\n");
     const callLine = toolbarLines.findIndex((l) => l.includes("() => fetchRowPage(")) + 1;
     const caller = leads.defPassages.find((p: any) => p.caller)!;
-    expect(caller).toMatchObject({ path: "src/toolbar/Toolbar.tsx", lead: "fetchRowPage", rel: 0.9 });
+    expect(caller).toMatchObject({
+      path: "src/toolbar/Toolbar.tsx",
+      lead: "fetchRowPage",
+      rel: 0.9,
+    });
     expect(caller.start).toBeLessThanOrEqual(callLine);
     expect(caller.end).toBeGreaterThanOrEqual(callLine);
 
@@ -148,12 +158,16 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
     // paging.ts is shown (whole: it is small), although no keyword matched it
     const paging = packPassages(text).find((p) => p.path === "src/hooks/paging.ts")!;
     expect(paging).toBeDefined();
-    expect(blocks.find((b) => b.startsWith("== src/hooks/paging.ts:"))!.split("\n")[0]).toContain("(whole file)");
+    expect(blocks.find((b) => b.startsWith("== src/hooks/paging.ts:"))!.split("\n")[0]).toContain(
+      "(whole file)",
+    );
 
     // ArtifactList.tsx: its first tile is shown, the handleRetry tile is not, and the coverage map names it
     const listLines = FILES["src/components/ArtifactList.tsx"]!.split("\n");
     const retryLine = listLines.findIndex((l) => l.startsWith("export const handleRetry")) + 1;
-    const shownList = packPassages(text).filter((p) => p.path === "src/components/ArtifactList.tsx");
+    const shownList = packPassages(text).filter(
+      (p) => p.path === "src/components/ArtifactList.tsx",
+    );
     expect(shownList.length).toBeGreaterThan(0);
     expect(shownList.some((p) => p.start <= 4 && p.end >= 4)).toBe(true);
     expect(shownList.some((p) => p.start <= retryLine && p.end >= retryLine)).toBe(false);
@@ -163,7 +177,9 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
       .slice(footerStart)
       .split("\n")
       .find((l) => l.startsWith("  src/components/ArtifactList.tsx ("))!;
-    expect(coverageLine).toMatch(/^ {2}src\/components\/ArtifactList\.tsx \(\d+ lines\): shown [\d, -]+; not shown [\d, -]+ \(declares /);
+    expect(coverageLine).toMatch(
+      /^ {2}src\/components\/ArtifactList\.tsx \(\d+ lines\): shown [\d, -]+; not shown [\d, -]+ \(declares /,
+    );
     expect(coverageLine).toContain(`handleRetry ${retryLine}`);
     expect(coverageLine).toContain(`checked, below the bar:`);
     // the value-only locals and calls of the file are not named
@@ -176,7 +192,10 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
       question: "How does the artifact list load more rows?",
       keywords: ["ArtifactList", "onLoadMore"],
       workspace: new LocalCodeSearchWorkspace(root),
-      jev: fakeJevClient({ good: ["useArtifactPaging", "fetchRowPage"], symbolGood: ["useArtifactPaging"] }),
+      jev: fakeJevClient({
+        good: ["useArtifactPaging", "fetchRowPage"],
+        symbolGood: ["useArtifactPaging"],
+      }),
       config: codeSearchConfig({ symbols: { enabled: false } }),
       onStage: (stage, data) => events.push([stage, data]),
     });

@@ -91,7 +91,8 @@ export function isImportOnly(lines: string[]): boolean {
         l,
       );
     if (inBlock || start) n++;
-    if (!inBlock && /^\s*(?:import|export)(?:\s+type)?\s*(?:[\w$]+\s*,\s*)?\{[^}]*$/.test(l)) inBlock = true;
+    if (!inBlock && /^\s*(?:import|export)(?:\s+type)?\s*(?:[\w$]+\s*,\s*)?\{[^}]*$/.test(l))
+      inBlock = true;
     else if (inBlock && /\}/.test(l)) inBlock = false;
   }
   return n / code.length >= 0.6;
@@ -235,7 +236,8 @@ function blockHeader(x: EvidencePassage, start: number, end: number, o: PackOpti
   if (covTags.length) parts.push(`[${covTags.join(" ")}]`);
   if (x.kind === "def" && x.lead) parts.push(`(definition of ${x.lead})`);
   if (x.caller) parts.push(`(uses ${x.caller})`);
-  if (x.ctName && (x.ct ?? 0) >= o.cfg.change.threshold) parts.push(`[change together: ${x.ctName}]`);
+  if (x.ctName && (x.ct ?? 0) >= o.cfg.change.threshold)
+    parts.push(`[change together: ${x.ctName}]`);
   if (start !== x.start || end !== x.end) parts.push(`(trimmed from ${x.start}-${x.end})`);
   let h = parts.join("  ");
   if (x.label && x.label.line < start) h += `\n   in L${x.label.line}: ${x.label.text}`;
@@ -308,7 +310,13 @@ export function packBody(passages: EvidencePassage[], o: PackOptions): PackBody 
   const cap = o.cfg.pack.maxPassageChars;
   const irel = (x: EvidencePassage) => inclusionRel(x, o.cfg);
   const wholeFiles = new Set<string>();
-  const packed = (x: EvidencePassage, s: number, e: number, block: string, whole = false): PackedPassage => ({
+  const packed = (
+    x: EvidencePassage,
+    s: number,
+    e: number,
+    block: string,
+    whole = false,
+  ): PackedPassage => ({
     id: x.id,
     path: x.path,
     start: s,
@@ -372,7 +380,9 @@ export function packBody(passages: EvidencePassage[], o: PackOptions): PackBody 
     let changed = true;
     while (changed) {
       changed = false;
-      const sorted = [...included].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.start - b.start));
+      const sorted = [...included].sort((a, b) =>
+        a.path < b.path ? -1 : a.path > b.path ? 1 : a.start - b.start,
+      );
       for (let i = 0; i + 1 < sorted.length; i++) {
         const a = sorted[i]!;
         const b = sorted[i + 1]!;
@@ -469,7 +479,10 @@ export function mergeRanges(ranges: Array<[number, number]>): Array<[number, num
 }
 
 /** 1..n minus the shown ranges. */
-export function complementRanges(n: number, shown: Array<[number, number]>): Array<[number, number]> {
+export function complementRanges(
+  n: number,
+  shown: Array<[number, number]>,
+): Array<[number, number]> {
   const out: Array<[number, number]> = [];
   let next = 1;
   for (const [a, b] of mergeRanges(shown)) {
@@ -554,8 +567,7 @@ export function renderFooter(f: FooterInput): string {
     .slice(0, p.leadsNotFollowed)
     .map((l) => `${l.name} (${r2(l.score)}${l.note ? `, ${l.note}` : ""}) @${l.seenAt}`);
   const moreLeads = f.leadsNotFollowed.length - leads.length;
-  const moreExcluded =
-    f.excluded.filter((x) => !coverageFiles.has(x.path)).length - more.length;
+  const moreExcluded = f.excluded.filter((x) => !coverageFiles.has(x.path)).length - more.length;
   const kw = (st: KeywordNote["status"]) =>
     f.keywords
       .filter((k) => k.status === st)
@@ -568,24 +580,34 @@ export function renderFooter(f: FooterInput): string {
       });
   const zero = [...kw("zero"), ...kw("fragments")];
   const irrelevant = kw("irrelevant");
-  const build = (cov: number, checkedMax: number, m: string[], mf: string[], l: string[], cuts: string[]) => {
+  const build = (
+    cov: number,
+    checkedMax: number,
+    m: string[],
+    mf: string[],
+    l: string[],
+    cuts: string[],
+  ) => {
     const lines: string[] = [];
     if (cov > 0) {
       lines.push(
         "Relevant files and what this pack did not show (read the not-shown ranges in full before changing code there):",
       );
       for (const c of f.coverage.slice(0, cov)) lines.push(coverageLine(c, checkedMax));
-      if (f.coverage.length > cov) lines.push(`  (${f.coverage.length - cov} more relevant files not listed)`);
+      if (f.coverage.length > cov)
+        lines.push(`  (${f.coverage.length - cov} more relevant files not listed)`);
     }
     if (cuts.length) lines.push("Cut by limits:", ...cuts.map((c) => `  ${c}`));
     if (m.length || mf.length) {
       lines.push("More candidates (not included; read if needed):");
       const restM = moreExcluded + (more.length - m.length);
-      if (m.length) lines.push(`  ${m.join(", ")}${restM > 0 ? ` (+${restM} weaker passages)` : ""}`);
+      if (m.length)
+        lines.push(`  ${m.join(", ")}${restM > 0 ? ` (+${restM} weaker passages)` : ""}`);
       if (mf.length) lines.push(`  files: ${mf.join(", ")}`);
     }
     const restL = moreLeads + (leads.length - l.length);
-    if (l.length) lines.push(`Leads not followed: ${l.join(", ")}${restL > 0 ? ` (+${restL} weaker)` : ""}`);
+    if (l.length)
+      lines.push(`Leads not followed: ${l.join(", ")}${restL > 0 ? ` (+${restL} weaker)` : ""}`);
     if (zero.length) lines.push(`Keywords with zero hits: ${zero.join(", ")}`);
     if (irrelevant.length)
       lines.push(`Keywords that matched only files judged irrelevant: ${irrelevant.join(", ")}`);
@@ -605,7 +627,8 @@ export function renderFooter(f: FooterInput): string {
     else if (m.length) m = m.slice(0, -1);
     else if (checkedMax > 1) checkedMax--;
     else if (cov > 6) cov--;
-    else if (cuts.some((c) => c.length > 160)) cuts = cuts.map((c) => (c.length > 160 ? `${c.slice(0, 157)}...` : c));
+    else if (cuts.some((c) => c.length > 160))
+      cuts = cuts.map((c) => (c.length > 160 ? `${c.slice(0, 157)}...` : c));
     else if (l.length) l = l.slice(0, -1);
     else if (cov > 1) cov--;
     else break;

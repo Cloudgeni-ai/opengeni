@@ -54,7 +54,13 @@ export function extractSymbols(lines: string[]): SymbolOccurrence[] {
   const out: SymbolOccurrence[] = [];
   const push = (name: string, kind: SymbolKind, i: number, from?: string) => {
     if (name.length < 3 || KEYWORDS.has(name)) return;
-    out.push({ name, kind, line: i + 1, text: lines[i]!.trim().slice(0, 200), ...(from ? { from } : {}) });
+    out.push({
+      name,
+      kind,
+      line: i + 1,
+      text: lines[i]!.trim().slice(0, 200),
+      ...(from ? { from } : {}),
+    });
   };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -62,11 +68,14 @@ export function extractSymbols(lines: string[]): SymbolOccurrence[] {
     // import { a, b as c } from "m" (possibly over several lines)
     if (
       /^\s*(?:import\b[^'"(]*|export\s+(?:type\s+)?)\{[^}]*$/.test(line) &&
-      !/^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|interface|type\s+\w|enum)\b/.test(line)
+      !/^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|interface|type\s+\w|enum)\b/.test(
+        line,
+      )
     ) {
       let j = i;
       let joined = line;
-      while (j + 1 < lines.length && j - i < 60 && !/\}/.test(lines[j]!)) joined += " " + lines[++j]!;
+      while (j + 1 < lines.length && j - i < 60 && !/\}/.test(lines[j]!))
+        joined += " " + lines[++j]!;
       if (j !== i) {
         importNames(joined).forEach(({ name, from }) => push(name, "import", i, from));
         i = j;
@@ -93,15 +102,19 @@ export function extractSymbols(lines: string[]): SymbolOccurrence[] {
     }
     for (const m of line.matchAll(/\.([A-Za-z_$][\w$]*)\s*\(/g)) push(m[1]!, "member", i);
     for (const m of line.matchAll(/<([A-Z][\w$]*)[\s/>]/g)) push(m[1]!, "jsx", i);
-    for (const m of line.matchAll(/\b([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)\b/g)) push(m[1]!, "type", i);
-    for (const m of line.matchAll(/\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g)) push(m[1]!, "constant", i);
+    for (const m of line.matchAll(/\b([A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+)\b/g))
+      push(m[1]!, "type", i);
+    for (const m of line.matchAll(/\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g))
+      push(m[1]!, "constant", i);
   }
   return out;
 }
 
 /** Names and module of an import/export/use line (TS/JS, Python, Rust). */
 export function importNames(text: string): Array<{ name: string; from?: string }> {
-  const from = /\bfrom\s+['"]([^'"]+)['"]/.exec(text)?.[1] ?? /\brequire\(\s*['"]([^'"]+)['"]\s*\)/.exec(text)?.[1];
+  const from =
+    /\bfrom\s+['"]([^'"]+)['"]/.exec(text)?.[1] ??
+    /\brequire\(\s*['"]([^'"]+)['"]\s*\)/.exec(text)?.[1];
   const out: Array<{ name: string; from?: string }> = [];
   const add = (raw: string) => {
     const name = raw
@@ -281,7 +294,10 @@ export interface UsageSearch {
 }
 
 /** ripgrep patterns (case-sensitive, ASCII word boundaries) over the names, each at most maxChars. */
-export function usagePatterns(names: readonly string[], maxChars = CODE_SEARCH_MAX_PATTERN_CHARS): string[] {
+export function usagePatterns(
+  names: readonly string[],
+  maxChars = CODE_SEARCH_MAX_PATTERN_CHARS,
+): string[] {
   const wrap = (xs: string[]) => `(?-u:\\b)(?:${xs.map(escapeRegex).join("|")})(?-u:\\b)`;
   const out: string[] = [];
   let group: string[] = [];
@@ -312,7 +328,10 @@ export async function locateUsages(
 ): Promise<UsageSearch> {
   const t0 = performance.now();
   if (!names.length) return { hits: [], files: new Map(), cappedFiles: 0, ms: 0 };
-  const extra = [...DEF_SCAN_EXCLUDES, ...(allowTests ? [] : TEST_EXCLUDES)].flatMap((g) => ["-g", g]);
+  const extra = [...DEF_SCAN_EXCLUDES, ...(allowTests ? [] : TEST_EXCLUDES)].flatMap((g) => [
+    "-g",
+    g,
+  ]);
   const outs = await mapLimit(usagePatterns(names), RIPGREP_SPLIT_CONCURRENCY, (pattern) =>
     session.ripgrep(
       [
@@ -360,7 +379,8 @@ export async function locateUsages(
     perFileCount.set(path, (perFileCount.get(path) ?? 0) + 1);
     const present = new Set((text.match(/[A-Za-z_$][\w$]*/g) ?? []).filter((t) => nameSet.has(t)));
     for (const name of present) {
-      const isImport = /^\s*(?:import|export\s*\{|from\s+\S+\s+import|use\s)/.test(text) || /require\(/.test(text);
+      const isImport =
+        /^\s*(?:import|export\s*\{|from\s+\S+\s+import|use\s)/.test(text) || /require\(/.test(text);
       const isDef = !isImport && kinds.get(name)!.some((k) => k.re.test(text));
       hits.push({
         name,

@@ -226,9 +226,18 @@ describe("config", () => {
       threshold: 0.5,
       maxChosen: 6,
     });
-    expect(Object.keys(DEFAULT_CODE_SEARCH_CONFIG).sort()).toEqual(
-      ["change", "jev", "pack", "recall", "status", "symbols", "thresholds", "wave1", "wave2", "wave3"],
-    );
+    expect(Object.keys(DEFAULT_CODE_SEARCH_CONFIG).sort()).toEqual([
+      "change",
+      "jev",
+      "pack",
+      "recall",
+      "status",
+      "symbols",
+      "thresholds",
+      "wave1",
+      "wave2",
+      "wave3",
+    ]);
     expect(Object.isFrozen(DEFAULT_CODE_SEARCH_CONFIG.recall)).toBe(true);
     expect(Object.isFrozen(DEFAULT_CODE_SEARCH_CONFIG.symbols)).toBe(true);
   });
@@ -262,22 +271,41 @@ describe("config", () => {
     expect(c.wave2.windowsPerRelevantFile).toBe(4);
     expect(c.wave3.callersPerLead).toBe(0);
     expect(c.pack).toMatchObject({ stitchGap: 0, wholeFileMaxChars: 0, subFallback: 1 });
-    expect(() => codeSearchConfig({ symbols: { maxJudged: 251 } })).toThrow(/symbols.maxJudged must be <= 250/);
-    expect(() => codeSearchConfig({ symbols: { threshold: 1.2 } })).toThrow(/symbols.threshold must be in \[0,1\]/);
+    expect(() => codeSearchConfig({ symbols: { maxJudged: 251 } })).toThrow(
+      /symbols.maxJudged must be <= 250/,
+    );
+    expect(() => codeSearchConfig({ symbols: { threshold: 1.2 } })).toThrow(
+      /symbols.threshold must be in \[0,1\]/,
+    );
     expect(() => codeSearchConfig({ symbols: { threshold: -0.1 } })).toThrow(/symbols.threshold/);
-    expect(() => codeSearchConfig({ wave2: { tileTargetLines: 4 } })).toThrow(/wave2.tileTargetLines must be >= 5/);
-    expect(() => codeSearchConfig({ pack: { importPrior: 0 } })).toThrow(/pack.importPrior must be in \(0,1\]/);
+    expect(() => codeSearchConfig({ wave2: { tileTargetLines: 4 } })).toThrow(
+      /wave2.tileTargetLines must be >= 5/,
+    );
+    expect(() => codeSearchConfig({ pack: { importPrior: 0 } })).toThrow(
+      /pack.importPrior must be in \(0,1\]/,
+    );
     expect(() => codeSearchConfig({ pack: { importPrior: 1.5 } })).toThrow(/pack.importPrior/);
-    expect(() => codeSearchConfig({ pack: { footerShare: 0 } })).toThrow(/pack.footerShare must be in \(0,0.5\)/);
+    expect(() => codeSearchConfig({ pack: { footerShare: 0 } })).toThrow(
+      /pack.footerShare must be in \(0,0.5\)/,
+    );
     expect(() => codeSearchConfig({ pack: { footerShare: 0.5 } })).toThrow(/pack.footerShare/);
     expect(() => codeSearchConfig({ symbols: { maxRoundz: 1 } as never })).toThrow(
       /unknown code_search config key: symbols.maxRoundz/,
     );
-    expect(() => codeSearchConfig({ symbols: { enabled: "yes" } as never })).toThrow(/expected boolean/);
-    expect(() => codeSearchConfig({ symbolz: {} } as never)).toThrow(/unknown code_search config section/);
+    expect(() => codeSearchConfig({ symbols: { enabled: "yes" } as never })).toThrow(
+      /expected boolean/,
+    );
+    expect(() => codeSearchConfig({ symbolz: {} } as never)).toThrow(
+      /unknown code_search config section/,
+    );
     // the boundaries themselves are valid
-    expect(codeSearchConfig({ symbols: { maxJudged: 250, threshold: 1 } }).symbols.threshold).toBe(1);
-    expect(codeSearchConfig({ pack: { importPrior: 1 }, wave2: { tileTargetLines: 5 } }).pack.importPrior).toBe(1);
+    expect(codeSearchConfig({ symbols: { maxJudged: 250, threshold: 1 } }).symbols.threshold).toBe(
+      1,
+    );
+    expect(
+      codeSearchConfig({ pack: { importPrior: 1 }, wave2: { tileTargetLines: 5 } }).pack
+        .importPrior,
+    ).toBe(1);
   });
 });
 
