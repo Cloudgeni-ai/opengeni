@@ -6,7 +6,7 @@ import type { Root } from "react-dom/client";
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
-const { act } = await import("react");
+const { act, useState } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const {
   RunsOnMenuBody,
@@ -38,7 +38,7 @@ afterEach(async () => {
 async function renderInMenu(body: ReactNode) {
   await act(async () =>
     root.render(
-      <DropdownMenu open>
+      <DropdownMenu defaultOpen>
         <DropdownMenuContent>{body}</DropdownMenuContent>
       </DropdownMenu>,
     ),
@@ -55,14 +55,14 @@ function row(name: string) {
   return found;
 }
 
-async function press(key: string) {
+async function press(key: string, options: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...options });
   await act(async () => {
-    document.activeElement?.dispatchEvent(
-      new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
-    );
+    document.activeElement?.dispatchEvent(event);
     // Radix moves roving focus on a timeout.
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+  return event;
 }
 
 const machine = (name: string, state = "online") =>
@@ -182,6 +182,80 @@ test("a draft naming the workspace default environment checks Workspace default"
     expect.stringContaining("Managed sandbox"),
     expect.stringContaining("Workspace default: Node 22"),
   ]);
+});
+
+function MachineFolderFixture({ presentation = "menu" }: { presentation?: "menu" | "dialog" }) {
+  const [draft, setDraft] = useState({
+    ...emptySessionDraft(),
+    compute: {
+      kind: "machine" as const,
+      sandboxId: "sandbox-build-01",
+      folder: { kind: "root" as const },
+    },
+  } as ReturnType<typeof emptySessionDraft>);
+  return (
+    <RunsOnMenuBody
+      {...choices({ draft })}
+      presentation={presentation}
+      disabled={false}
+      onChange={setDraft}
+      onComputeChange={setDraft}
+      onRetryMachines={() => {}}
+    />
+  );
+}
+
+test("Custom path transfers focus to its field and Tab or Enter returns to menu navigation", async () => {
+  await renderInMenu(<MachineFolderFixture />);
+  expect(document.activeElement).toBe(row("build-01"));
+  await press("ArrowDown");
+  expect(document.activeElement).toBe(row("Machine root"));
+  await press("ArrowDown");
+  expect(document.activeElement).toBe(row("Custom path"));
+  await press("Enter");
+  const input = document.querySelector<HTMLInputElement>(
+    '[aria-label="Custom working directory"]',
+  )!;
+  expect(input).not.toBeNull();
+  expect(document.activeElement).toBe(input);
+  for (const key of ["ArrowLeft", "ArrowRight", "Home", "End", " ", "b"]) {
+    expect((await press(key)).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input);
+  }
+  // IME confirmation is text editing, not a route out of the field.
+  await press("Enter", { isComposing: true });
+  expect(document.activeElement).toBe(input);
+  for (const [key, shiftKey] of [
+    ["Tab", false],
+    ["Tab", true],
+    ["Enter", false],
+  ] as const) {
+    expect((await press(key, { shiftKey })).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(row("Custom path"));
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    // Selecting the already-selected row re-enters the existing field.
+    await press("Enter");
+    expect(document.activeElement).toBe(input);
+  }
+  await press("Tab");
+  await press("ArrowUp");
+  expect(document.activeElement).toBe(row("Machine root"));
+  await press("Enter");
+  expect(document.querySelector('[aria-label="Custom working directory"]')).toBeNull();
+  expect(document.activeElement).toBe(row("Machine root"));
+});
+
+test("Custom path in a dialog focuses its input without taking over native Tab", async () => {
+  await act(async () => root.render(<MachineFolderFixture presentation="dialog" />));
+  const custom = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
+    (radio) => radio.textContent === "Custom path",
+  )!;
+  await act(async () => custom.click());
+  const input = container.querySelector<HTMLInputElement>(
+    '[aria-label="Custom working directory"]',
+  )!;
+  expect(document.activeElement).toBe(input);
+  expect((await press("Tab")).defaultPrevented).toBe(false);
 });
 
 test("a failed machine load offers a retry the keyboard reaches", async () => {

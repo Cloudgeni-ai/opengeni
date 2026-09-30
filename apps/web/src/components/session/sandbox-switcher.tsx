@@ -8,16 +8,12 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // empty, so the drill-in just names the compute.
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
-import { CheckIcon, LaptopIcon, Loader2Icon, ServerIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { LaptopIcon, Loader2Icon, ServerIcon } from "lucide-react";
+import { useRef, type ReactNode } from "react";
 
 import { ComposerMenuHeader } from "@/components/ui/composer-menu";
 import {
-  MENU_BUTTON_CLASS,
-  MENU_CHECK_CLASS,
-  MENU_CHECK_SLOT_CLASS,
   MENU_LABEL_CLASS,
-  MENU_META_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
 } from "@/components/ui/menu-styles";
@@ -25,6 +21,12 @@ import { userErrorText } from "@/lib/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { cn } from "@/lib/utils";
+import {
+  RadioGroup,
+  RadioRow,
+  useFocusCheckedRow,
+  type MenuBodyPresentation,
+} from "./composer-menu-radio";
 
 export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
 export const NO_SANDBOX_LABEL = "No sandbox";
@@ -97,74 +99,76 @@ export type SessionRunsOn = ReturnType<typeof useSessionRunsOn>;
  */
 export function SessionRunsOnMenuBody(props: {
   leading?: ReactNode;
+  presentation?: MenuBodyPresentation;
   runsOn: SessionRunsOn;
   workspaceId: string;
   rigId: string | null;
 }) {
   const { fleet, machines } = props.runsOn;
+  const presentation = props.presentation ?? "menu";
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useFocusCheckedRow(bodyRef, presentation);
   const rigs = useWorkspaceRigs({ workspaceId: props.workspaceId, enabled: props.rigId !== null });
   const rig = props.rigId ? rigs.rigs.find((candidate) => candidate.id === props.rigId) : null;
   return (
     <>
       <ComposerMenuHeader title="Runs on" leading={props.leading} />
-      <div className="min-h-0 overflow-y-auto overscroll-contain pb-1">
-        <div role="radiogroup" aria-label="Runs on">
+      <div ref={bodyRef} className="min-h-0 overflow-y-auto overscroll-contain pb-1">
+        <RadioGroup
+          presentation={presentation}
+          label="Runs on"
+          value={props.runsOn.activeMachine?.sandboxId ?? "current"}
+        >
           {props.runsOn.activeMachine === null ? (
             // No listed box is active (e.g. no sandbox): still say where it runs now.
-            <button
-              type="button"
-              role="radio"
-              aria-checked
+            <RadioRow
+              value="current"
               disabled
-              className={cn(MENU_BUTTON_CLASS, "disabled:opacity-100")}
-            >
-              <SandboxMark
-                kind={undefined}
-                backend={props.runsOn.sandboxBackend}
-                className="size-4"
-              />
-              <span className="min-w-0 flex-1 truncate">{props.runsOn.activeName}</span>
-              <span className={MENU_CHECK_SLOT_CLASS}>
-                <CheckIcon className={MENU_CHECK_CLASS} />
-              </span>
-            </button>
+              className="disabled:opacity-100 data-[disabled]:opacity-100"
+              label={props.runsOn.activeName}
+              onSelect={() => {}}
+              icon={
+                <SandboxMark
+                  kind={undefined}
+                  backend={props.runsOn.sandboxBackend}
+                  className="size-4"
+                />
+              }
+            />
           ) : null}
           {machines.map((machine) => {
             const selectable = isSelectable(machine) && fleet.canAttach;
             const swapping = fleet.attachingSandboxId === machine.sandboxId;
             return (
-              <button
+              <RadioRow
                 key={machine.sandboxId}
-                type="button"
-                role="radio"
-                aria-checked={machine.active}
+                value={machine.sandboxId}
                 disabled={!selectable || fleet.attaching}
-                onClick={() => {
-                  if (machine.active || !selectable) return;
+                onSelect={() => {
+                  if (machine.active || !selectable || fleet.attaching) return;
                   void fleet.attach(machine.sandboxId);
                 }}
-                className={MENU_BUTTON_CLASS}
-              >
-                <SandboxMark
-                  kind={machine.kind}
-                  backend={props.runsOn.sandboxBackend}
-                  className="size-4"
-                />
-                <span className="min-w-0 flex-1 truncate">{machineDisplayName(machine)}</span>
-                {machine.state !== "online" && !machine.active ? (
-                  <span className={MENU_META_CLASS}>{machineStateLabel(machine.state)}</span>
-                ) : null}
-                <span className={MENU_CHECK_SLOT_CLASS}>
-                  {swapping ? (
+                label={machineDisplayName(machine)}
+                meta={
+                  machine.state !== "online" && !machine.active
+                    ? machineStateLabel(machine.state)
+                    : undefined
+                }
+                icon={
+                  swapping ? (
                     <Loader2Icon className="size-4 animate-spin" />
-                  ) : machine.active ? (
-                    <CheckIcon className={MENU_CHECK_CLASS} />
-                  ) : null}
-                </span>
-              </button>
+                  ) : (
+                    <SandboxMark
+                      kind={machine.kind}
+                      backend={props.runsOn.sandboxBackend}
+                      className="size-4"
+                    />
+                  )
+                }
+              />
             );
           })}
-        </div>
+        </RadioGroup>
         {fleet.mutationError ? (
           <p role="alert" className={cn(MENU_NOTE_CLASS, "text-danger")}>
             Couldn't move this chat. {userErrorText(fleet.mutationError)}

@@ -1,31 +1,22 @@
 import type { MachineView } from "@opengeni/react/machines";
 import type { NewSessionSelectionHistory, Rig } from "@opengeni/sdk";
-import { BoxIcon, CheckIcon, LaptopIcon, LockIcon, ServerIcon, UsersIcon } from "lucide-react";
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  type ReactNode,
-  type RefObject,
-} from "react";
+import { BoxIcon, LaptopIcon, LockIcon, ServerIcon, UsersIcon } from "lucide-react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ComposerMenuHeader } from "@/components/ui/composer-menu";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
-  DropdownMenuItem,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-} from "@/components/ui/dropdown-menu";
+  RadioGroup,
+  RadioRow,
+  useFocusCheckedRow,
+  type MenuBodyPresentation,
+} from "./composer-menu-radio";
+export type { MenuBodyPresentation } from "./composer-menu-radio";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
 import {
-  MENU_BUTTON_CLASS,
-  MENU_CHECK_CLASS,
-  MENU_CHECK_SLOT_CLASS,
   MENU_LABEL_CLASS,
-  MENU_META_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
 } from "@/components/ui/menu-styles";
@@ -48,115 +39,6 @@ import { cn } from "@/lib/utils";
  * "+" menu presents a drill-in as a dialog, there is no menu to rove in, so
  * the rows are plain radio buttons that Tab reaches.
  */
-
-/** Where a drill-in body is rendered: inside the "+" dropdown, or in a dialog. */
-export type MenuBodyPresentation = "menu" | "dialog";
-
-const RadioGroupContext = createContext<{
-  presentation: MenuBodyPresentation;
-  value: string | null;
-}>({ presentation: "menu", value: null });
-
-function RadioGroup(props: {
-  presentation: MenuBodyPresentation;
-  label: string;
-  /** The checked row's value; null when no row is checked. */
-  value: string | null;
-  className?: string;
-  children: ReactNode;
-}) {
-  const { presentation, value } = props;
-  const context = useMemo(() => ({ presentation, value }), [presentation, value]);
-  return (
-    <RadioGroupContext.Provider value={context}>
-      {props.presentation === "menu" ? (
-        <DropdownMenuRadioGroup
-          value={props.value ?? ""}
-          aria-label={props.label}
-          className={props.className}
-        >
-          {props.children}
-        </DropdownMenuRadioGroup>
-      ) : (
-        <div role="radiogroup" aria-label={props.label} className={props.className}>
-          {props.children}
-        </div>
-      )}
-    </RadioGroupContext.Provider>
-  );
-}
-
-function RadioRow(props: {
-  value: string;
-  disabled?: boolean;
-  icon?: ReactNode;
-  label: string;
-  meta?: string;
-  onSelect: () => void;
-}) {
-  const group = useContext(RadioGroupContext);
-  const content = (
-    <>
-      {props.icon}
-      <span className="min-w-0 flex-1 truncate">{props.label}</span>
-      {props.meta ? <span className={MENU_META_CLASS}>{props.meta}</span> : null}
-    </>
-  );
-  if (group.presentation === "menu") {
-    return (
-      <DropdownMenuRadioItem
-        value={props.value}
-        disabled={props.disabled}
-        // Keep the menu open: a choice here can reveal more choices below it.
-        onSelect={(event) => {
-          event.preventDefault();
-          props.onSelect();
-        }}
-        className="cursor-pointer"
-      >
-        {content}
-      </DropdownMenuRadioItem>
-    );
-  }
-  const checked = group.value === props.value;
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={checked}
-      disabled={props.disabled}
-      onClick={props.onSelect}
-      className={MENU_BUTTON_CLASS}
-    >
-      {content}
-      <span className={MENU_CHECK_SLOT_CLASS}>
-        {checked ? <CheckIcon className={MENU_CHECK_CLASS} /> : null}
-      </span>
-    </button>
-  );
-}
-
-/**
- * A drill-in replaces the row that opened it, so menu focus would fall to the
- * page. Put it on the checked row (else the first enabled one), where a native
- * radio group would, so arrow keys work at once.
- */
-function useFocusCheckedRow(
-  ref: RefObject<HTMLElement | null>,
-  presentation: MenuBodyPresentation,
-) {
-  useEffect(() => {
-    const body = ref.current;
-    if (presentation !== "menu" || !body) return;
-    if (body.contains(document.activeElement)) return;
-    const enabled = '[role="menuitemradio"]:not([data-disabled])';
-    const row =
-      body.querySelector<HTMLElement>(`${enabled}[aria-checked="true"]`) ??
-      body.querySelector<HTMLElement>(enabled);
-    row?.focus({ preventScroll: true });
-    // Only on open: later choices keep focus where the user put it.
-  }, [ref, presentation]);
-}
 
 function machineStateMeta(machine: MachineView): string {
   if (machine.state === "offline") return "Offline";
@@ -301,6 +183,15 @@ export function RunsOnMenuBody(
   const presentation = props.presentation ?? "menu";
   const bodyRef = useRef<HTMLDivElement>(null);
   useFocusCheckedRow(bodyRef, presentation);
+  const customPathRowRef = useRef<HTMLElement>(null);
+  const customPathInputRef = useRef<HTMLInputElement>(null);
+  const focusCustomPath = useRef(false);
+  useEffect(() => {
+    if (focusCustomPath.current && customPathInputRef.current) {
+      focusCustomPath.current = false;
+      customPathInputRef.current.focus({ preventScroll: true });
+    }
+  }, [compute]);
   const personalRigs = props.rigs.filter((rig) => rig.scope === "user");
   const workspaceRigs = props.rigs.filter((rig) => rig.scope !== "user");
   const showWhere = props.selfhostedPrimary || props.machines.length > 0 || props.fleetLoadFailed;
@@ -444,9 +335,13 @@ export function RunsOnMenuBody(
             />
             <RadioRow
               value="path"
+              ref={(node) => {
+                customPathRowRef.current = node;
+              }}
               disabled={props.disabled}
               label="Custom path"
-              onSelect={() =>
+              onSelect={() => {
+                focusCustomPath.current = true;
                 props.onComputeChange({
                   ...draft,
                   compute: {
@@ -456,12 +351,13 @@ export function RunsOnMenuBody(
                       path: compute.folder.kind === "path" ? compute.folder.path : "",
                     },
                   },
-                })
-              }
+                });
+              }}
             />
             {compute.folder.kind === "path" ? (
               <div className="px-2.5 pt-1 pb-1.5">
                 <Input
+                  ref={customPathInputRef}
                   value={compute.folder.path}
                   disabled={props.disabled}
                   onChange={(event) =>
@@ -470,7 +366,18 @@ export function RunsOnMenuBody(
                       compute: { ...compute, folder: { kind: "path", path: event.target.value } },
                     })
                   }
-                  onKeyDown={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => {
+                    // Text editing must not trigger menu typeahead or roving focus.
+                    event.stopPropagation();
+                    if (
+                      presentation === "menu" &&
+                      !event.nativeEvent.isComposing &&
+                      (event.key === "Tab" || event.key === "Enter")
+                    ) {
+                      event.preventDefault();
+                      customPathRowRef.current?.focus({ preventScroll: true });
+                    }
+                  }}
                   placeholder="/home/me/repos/project or packages/runtime"
                   aria-label="Custom working directory"
                   className="h-8 text-sm"
