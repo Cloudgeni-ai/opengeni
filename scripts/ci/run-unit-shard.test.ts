@@ -9,12 +9,60 @@ import {
   planUnitTestProcesses,
   runBoundedTestProcesses,
   resolveUnitTestSelection,
+  sanitizedTestEnvironment,
   sourceMutatesSharedPostgresRole,
   sourceRequiresExclusiveSharedPostgres,
   sourceUsesExplicitTestConcurrency,
   sourceUsesWallClockPerformanceAssertion,
 } from "./run-unit-shard";
 import { discoverTestFiles } from "./workspace";
+
+describe("native PostgreSQL unit environment", () => {
+  const nativeUrl = "postgres://postgres:fixture@127.0.0.1:5432/postgres?sslmode=disable";
+
+  test("preserves the explicit native fixture only with fail-closed real DB intent", () => {
+    expect(
+      sanitizedTestEnvironment({
+        PATH: "/bin",
+        OPENGENI_REQUIRE_REAL_DB: "1",
+        OPENGENI_TEST_PG_URL: nativeUrl,
+        OPENGENI_DATABASE_URL: "postgres://ambient",
+        OPENGENI_API_KEY: "ambient-key",
+      }),
+    ).toEqual({
+      PATH: "/bin",
+      NODE_ENV: "test",
+      OPENGENI_TEST_HERMETIC: "1",
+      OPENGENI_REQUIRE_REAL_DB: "1",
+      OPENGENI_TEST_PG_URL: nativeUrl,
+    });
+  });
+
+  test.each([undefined, "0", "true"])("scrubs a native fixture without exact opt-in %s", (flag) => {
+    expect(
+      sanitizedTestEnvironment({
+        OPENGENI_REQUIRE_REAL_DB: flag,
+        OPENGENI_TEST_PG_URL: nativeUrl,
+      }),
+    ).toEqual({ NODE_ENV: "test", OPENGENI_TEST_HERMETIC: "1" });
+  });
+
+  test.each([undefined, "", "   "])(
+    "does not invent a native fixture for an empty URL %s",
+    (url) => {
+      expect(
+        sanitizedTestEnvironment({
+          OPENGENI_REQUIRE_REAL_DB: "1",
+          OPENGENI_TEST_PG_URL: url,
+        }),
+      ).toEqual({
+        NODE_ENV: "test",
+        OPENGENI_TEST_HERMETIC: "1",
+        OPENGENI_REQUIRE_REAL_DB: "1",
+      });
+    },
+  );
+});
 
 describe("local unit selection", () => {
   test("uses the same complete unit inventory as CI without admitting prepared runtime tests", () => {
