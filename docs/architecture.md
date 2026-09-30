@@ -4,10 +4,7 @@
 
 ## Navigation
 
-1. Read §2–4, §6.
-2. **Subsystems:** §13 sources.
-3. **Behavior:** source links.
-4. **Stale boundaries:** update per §14.
+Read §2–4 and §6. Subsystems: §13; updates: §14.
 
 ---
 
