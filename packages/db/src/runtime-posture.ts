@@ -3901,6 +3901,11 @@ export function evaluateRuntimeDatabasePosture(
       true,
     ],
   ] as const;
+  const quotedIntegrationSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+  const integrationSearchPaths = [
+    `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
+    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
+  ];
   if (tableByName.has("organization_credential_providers")) {
     for (const [name] of integrationRoutine) {
       if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
@@ -3920,7 +3925,7 @@ export function evaluateRuntimeDatabasePosture(
         !routine.execute ||
         routine.securityDefiner !== definer ||
         routine.owner !== tableByName.get(tableName)?.owner ||
-        !routine.configuration?.some((value) => value.startsWith("search_path="))
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value))
       ) {
         violations.push(
           `integration routine ${routine.name} has unsafe execution, ownership or search path`,

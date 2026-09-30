@@ -84,6 +84,8 @@ test("0542 is additive rolling storage without external-identity runtime grants"
   expect(source).toStartWith("-- deployment-mode: rolling");
   expect(source).not.toMatch(/\bDROP\s+(TABLE|COLUMN|FUNCTION)\b/i);
   expect(source).not.toMatch(/GRANT\s+SELECT[^;]*\bexternal_identities\b/i);
+  expect(source).toContain("DO $integration_search_paths$");
+  expect(source).toContain("SET search_path = pg_catalog, %I, pg_temp");
   for (const table of [
     "organization_credential_providers",
     "organization_webhooks",

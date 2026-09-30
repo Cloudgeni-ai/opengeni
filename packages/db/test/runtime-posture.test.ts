@@ -1086,6 +1086,33 @@ describe("runtime database posture evaluator", () => {
         value.includes("integration routine"),
       ),
     ).toBe(true);
+    routine.owner = "opengeni_migrator";
+    for (const path of [
+      "search_path=public",
+      'search_path="$user", public',
+      "search_path=pg_temp, public, pg_catalog",
+      "search_path=pg_catalog, foreign_schema, pg_temp",
+      "search_path=pg_catalog, public, untrusted, pg_temp",
+    ]) {
+      routine.configuration = [path];
+      expect(
+        evaluateRuntimeDatabasePosture(posture, options).some((value) =>
+          value.includes("integration routine"),
+        ),
+      ).toBe(true);
+    }
+    posture.schemas.push(
+      { ...posture.schemas[0]!, name: "tenantx" },
+      { ...posture.schemas[0]!, name: "Tenant Space" },
+    );
+    routine.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
+    expect(
+      evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "tenantx" }),
+    ).toEqual([]);
+    routine.configuration = ['search_path=pg_catalog, "Tenant Space", pg_temp'];
+    expect(
+      evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "Tenant Space" }),
+    ).toEqual([]);
   });
 
   test("integration policy mutation requires a same-owner definer with a safe search path", () => {

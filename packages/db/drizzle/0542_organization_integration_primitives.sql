@@ -341,6 +341,31 @@ REVOKE ALL ON FUNCTION opengeni_private.claim_organization_webhook_deliveries_v1
 REVOKE ALL ON FUNCTION opengeni_private.settle_organization_webhook_delivery_v1(uuid,uuid,integer,text,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.prune_organization_webhook_deliveries_v1(integer,integer) FROM PUBLIC;
 
+-- Pin the reviewed data schema rather than inheriting the migration login's
+-- path (which can include "$user"). Explicit pg_temp last also prevents a
+-- temporary relation from shadowing the owner-run helpers' tenant tables.
+DO $integration_search_paths$
+DECLARE
+  target_schema text := current_schema();
+  signature text;
+BEGIN
+  FOREACH signature IN ARRAY ARRAY[
+    'resolve_organization_credential_provider_v1(uuid,uuid)',
+    'resolve_integration_initiating_human_v1(uuid,uuid,text)',
+    'integration_webhook_payload_v1(uuid,uuid,uuid,text,uuid,uuid,bigint,timestamptz,jsonb)',
+    'enqueue_workspace_webhook_deliveries_v1()',
+    'enqueue_organization_webhook_deliveries_v1()',
+    'claim_organization_webhook_deliveries_v1(uuid,integer,integer)',
+    'settle_organization_webhook_delivery_v1(uuid,uuid,integer,text,integer)',
+    'prune_organization_webhook_deliveries_v1(integer,integer)'
+  ] LOOP
+    EXECUTE format(
+      'ALTER FUNCTION opengeni_private.%s SET search_path = pg_catalog, %I, pg_temp',
+      signature, target_schema
+    );
+  END LOOP;
+END $integration_search_paths$;
+
 DO $grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
