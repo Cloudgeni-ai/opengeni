@@ -31,6 +31,10 @@ import {
   workspaceSlackReactionChannelAllowed,
 } from "@opengeni/contracts";
 import {
+  allowanceExhaustedMessage,
+  parseAllowanceExhaustedRefusal,
+} from "@opengeni/contracts/allowance-refusal";
+import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   type Settings,
@@ -3637,7 +3641,10 @@ async function continueSlackReactionSession(
     throw new SlackInteractionPermanentError("session_owner_mismatch");
   }
   await reopenSlackInteractionDelivery(deps.db, interaction);
-  await acceptSlackReactionTask(deps, grant, interaction.sessionId, entry, resources);
+  const sessionId = interaction.sessionId;
+  await withSlackAllowanceAdmissionNotice(deps, entry, interaction, async () => {
+    await acceptSlackReactionTask(deps, grant, sessionId, entry, resources);
+  });
 }
 
 async function acceptSlackReactionTask(
@@ -3692,6 +3699,7 @@ async function continueSlackSession(
   ) {
     throw new SlackInteractionPermanentError("session_owner_mismatch");
   }
+  const sessionId = interaction.sessionId;
   await reopenSlackInteractionDelivery(deps.db, interaction);
   if (entry.text.trim().toLowerCase() === "stop") {
     if (!hasPermission(grant.permissions, "sessions:control")) {
@@ -3759,19 +3767,54 @@ async function continueSlackSession(
   if (!hasPermission(grant.permissions, "sessions:control")) {
     throw new SlackInteractionPermanentError("sessions_control_denied");
   }
-  await acceptSessionUserMessage(
-    await withCatalogSettings(deps, grant),
-    grant,
-    interaction.workspaceId,
-    interaction.sessionId,
-    {
-      text: entry.text,
-      ...(options.modelContext ? { modelContext: options.modelContext } : {}),
-      resources,
-      clientEventId: `slack:${entry.providerEventId}`,
-      surface: "slack",
-    },
-  );
+  await withSlackAllowanceAdmissionNotice(deps, entry, interaction, async () => {
+    await acceptSessionUserMessage(
+      await withCatalogSettings(deps, grant),
+      grant,
+      interaction.workspaceId,
+      sessionId,
+      {
+        text: entry.text,
+        ...(options.modelContext ? { modelContext: options.modelContext } : {}),
+        resources,
+        clientEventId: `slack:${entry.providerEventId}`,
+        surface: "slack",
+      },
+    );
+  });
+}
+
+/** Existing-thread allowance refusals are permanent admission results, not
+ * silent inbox failures. Other source/authority failures retain their behavior.
+ */
+async function withSlackAllowanceAdmissionNotice(
+  deps: ApiRouteDeps,
+  entry: SlackInteractionInboxEntry,
+  destination: Pick<SlackInteraction, "slackChannelId" | "slackThreadTs">,
+  admit: () => Promise<void>,
+) {
+  try {
+    await admit();
+  } catch (error) {
+    if (
+      error instanceof HTTPException &&
+      (parseAllowanceExhaustedRefusal(error.cause) ?? parseAllowanceExhaustedRefusal(error))
+    ) {
+      const client = await createOpenGeniSlackBotInteractionClient(deps, {
+        accountId: entry.accountId,
+        workspaceId: entry.workspaceId,
+        connectionId: entry.connectionId,
+        subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+      });
+      await client.postMessage({
+        operationId: deterministicUuid(`slack-allowance-admission-failed:${entry.id}`),
+        channelId: destination.slackChannelId,
+        threadTimestamp: destination.slackThreadTs,
+        text: slackAdmissionFailureText(error),
+      });
+    }
+    throw error;
+  }
 }
 
 const SLACK_ACTION_ID_BY_KIND: Record<SlackInteractionActionKind, string> = {
@@ -5253,11 +5296,14 @@ async function deliverSlackSessionEvents(
       const payloadOutput = safePayloadText(event.payload, "output");
       const hasPublishableOutput = payloadOutput.trim().length > 0;
       if (safePayloadText(event.payload, "segmentLimit") === "budget_exhausted") {
+        const allowance = parseAllowanceExhaustedRefusal(event.payload);
         await postDelivery(
           client,
           interaction,
           event,
-          `${requester.mention}OpenGeni reached a billing or usage limit. Ask your organization owner to check credits and usage limits, then reply in this thread to resume.`,
+          allowance
+            ? `${requester.mention}${allowanceExhaustedMessage(allowance)} After the allowance is available, reply in this thread to resume.`
+            : `${requester.mention}OpenGeni reached a billing or usage limit. Ask your organization owner to check credits and usage limits, then reply in this thread to resume.`,
           "billing-limit",
         );
         terminal = "failed";
@@ -6150,7 +6196,12 @@ function safeErrorCode(error: unknown) {
   );
 }
 
-function slackAdmissionFailureText(error: HTTPException) {
+export function slackAdmissionFailureText(error: HTTPException) {
+  const allowance =
+    parseAllowanceExhaustedRefusal(error.cause) ?? parseAllowanceExhaustedRefusal(error);
+  if (allowance) {
+    return `OpenGeni could not start this task. ${allowanceExhaustedMessage(allowance)} After the allowance is available, reply in this thread to try again.`;
+  }
   if (error.status === 402) {
     return "OpenGeni could not start this task because the selected model has no available billing source. Open OpenGeni, select a connected subscription model, and try again.";
   }

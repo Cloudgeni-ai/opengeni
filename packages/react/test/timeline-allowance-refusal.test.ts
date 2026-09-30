@@ -1,0 +1,111 @@
+import { describe, expect, test } from "bun:test";
+import type { SessionEvent } from "@opengeni/sdk";
+import {
+  buildTimeline,
+  creditExhaustedFromEvents,
+  groupTimeline,
+} from "../src/timeline/projection";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
+
+function event(sequence: number, type: string, payload: unknown): SessionEvent {
+  return {
+    id: `allowance-${sequence}`,
+    workspaceId: "ws",
+    sessionId: "session",
+    turnId: "turn",
+    sequence,
+    type,
+    payload,
+    occurredAt: "2026-09-30T12:00:00Z",
+  };
+}
+const refusal = {
+  code: "allowance_exhausted",
+  scope: "workspace",
+  resetsAt: "2026-10-01T00:00:00Z",
+  message: "PRIVATE wrapper says buy credits",
+};
+
+describe("allowance timeline presentation", () => {
+  test.each(["workspace", "member"] as const)(
+    "typed %s completion precedes generic budget exhaustion",
+    (scope) => {
+      const completed = event(2, "turn.completed", {
+        ...refusal,
+        scope,
+        subjectId: "user:member",
+        segmentLimit: "budget_exhausted",
+      });
+      const items = buildTimeline([
+        event(1, "agent.message.completed", { messageId: "work", text: "Working" }),
+        completed,
+      ]);
+      const notice = items.find((item) => item.kind === "notice");
+      expect(notice).toMatchObject({
+        tone: "failed",
+        text: expect.stringContaining(
+          scope === "workspace" ? "organization administrator" : "workspace administrator",
+        ),
+      });
+      expect(JSON.stringify(items)).toContain("2026-10-01 00:00 UTC");
+      expect(JSON.stringify(items)).not.toMatch(/buy credits|subscription|PRIVATE/i);
+      expect(items.find((item) => item.kind === "turn-end")).toMatchObject({ outcome: "failed" });
+      expect(creditExhaustedFromEvents([completed])).toBe(false);
+      expect(
+        groupTimeline(items, { readableTurns: true }).some(
+          (group) => group.kind === "activity" && group.outcome === "failed",
+        ),
+      ).toBe(true);
+    },
+  );
+
+  test("standalone usage exhaustion is visible and coalesces the paired completion or failure", () => {
+    const exhausted = event(1, "usage.exhausted", refusal);
+    expect(buildTimeline([exhausted]).filter((item) => item.kind === "notice")).toHaveLength(1);
+    for (const type of ["turn.completed", "turn.failed"]) {
+      const items = buildTimeline([
+        exhausted,
+        event(2, type, {
+          ...refusal,
+          segmentLimit: "budget_exhausted",
+        }),
+      ]);
+      expect(items.filter((item) => item.kind === "notice")).toHaveLength(1);
+      expect(items.find((item) => item.kind === "turn-end")).toMatchObject({ outcome: "failed" });
+    }
+  });
+
+  test("non-recurring member refusal and malformed reset never become an add-credits state", () => {
+    const member = event(1, "turn.failed", { ...refusal, scope: "member", resetsAt: null });
+    expect(JSON.stringify(buildTimeline([member]))).toContain("no automatic reset");
+    const malformed = event(2, "turn.completed", {
+      ...refusal,
+      resetsAt: "invalid",
+      segmentLimit: "budget_exhausted",
+    });
+    expect(creditExhaustedFromEvents([malformed])).toBe(false);
+    expect(JSON.stringify(buildTimeline([malformed]))).not.toContain(CREDIT_EXHAUSTION_MESSAGE);
+  });
+
+  test("human Retry preserves a later same-turn refusal instead of coalescing it with history", () => {
+    const items = buildTimeline([
+      event(1, "usage.exhausted", refusal),
+      event(2, "turn.completed", { ...refusal, segmentLimit: "budget_exhausted" }),
+      event(3, "turn.recovery.requested", { reason: "human_retry" }),
+      event(4, "usage.exhausted", refusal),
+      event(5, "turn.completed", { ...refusal, segmentLimit: "budget_exhausted" }),
+    ]);
+    expect(items.filter((item) => item.kind === "notice")).toHaveLength(2);
+  });
+
+  test("ordinary insufficient credits retain their existing presentation", () => {
+    const completed = event(1, "turn.completed", {
+      detail: "insufficient OpenGeni credits",
+      segmentLimit: "budget_exhausted",
+    });
+    expect(creditExhaustedFromEvents([completed])).toBe(true);
+    expect(buildTimeline([completed]).find((item) => item.kind === "notice")).toMatchObject({
+      text: CREDIT_EXHAUSTION_MESSAGE,
+    });
+  });
+});

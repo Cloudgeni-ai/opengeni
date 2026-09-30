@@ -15,6 +15,9 @@ import {
 } from "@opengeni/contracts";
 import {
   addSessionSystemUpdate,
+  applyCreditDebitAfterUse,
+  applyCreditLedgerEntry,
+  checkWorkspaceAllowance,
   applySessionTurnSettlement,
   appendSessionEvents,
   bootstrapWorkspace,
@@ -40,6 +43,8 @@ import {
   grantWorkspaceAccess,
   upsertSlackChannelRoute,
   saveSlackBotUserLink,
+  setWorkspaceAllowance,
+  setMemberAllowance,
   synchronizeCanonicalHumanLoginBindings,
   updateSlackTaskPolicy,
   updateWorkspaceSettings,
@@ -1240,6 +1245,143 @@ async function seedRecentSession(
 }
 
 describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
+  test.each(["workspace", "member"] as const)(
+    "exhausted %s counter gives allowance remedies for signed Slack create and thread reply",
+    async (scope) => {
+      if (!available) return;
+      const value = await fixture({
+        managedBilling: true,
+        ownerPermissions: [
+          "sessions:create",
+          "sessions:read",
+          "sessions:control",
+          "workspace:admin",
+        ],
+      });
+      await applyCreditLedgerEntry(client.db, {
+        accountId: value.owner.accountId,
+        type: "credit_topup",
+        amountMicros: 1_000_000,
+        sourceType: "test",
+        sourceId: crypto.randomUUID(),
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const personalId = crypto.randomUUID();
+      await shared!.admin`insert into workspaces(id,account_id,name)
+        values(${personalId},${value.owner.accountId},'Personal')`;
+      await shared!
+        .admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+        values(${value.owner.accountId},${value.owner.subjectId},'owner','active',${personalId})`;
+      const channelId = `C_ALLOWANCE_${scope}`;
+      const rootTs = "1706500000.000001";
+      await postEvent(value.app, {
+        teamId: value.teamId,
+        eventId: `E_ALLOWANCE_START_${crypto.randomUUID()}`,
+        event: {
+          type: "app_mention",
+          user: value.ownerSlackUserId,
+          channel: channelId,
+          ts: rootTs,
+          text: `<@${value.botUserId}> Initially allowed`,
+        },
+      });
+      await drainAll(value.deps);
+      const [interaction] = await interactions(value.owner.workspaceId);
+      expect(interaction?.session_id).toBeTruthy();
+      const [turn] = await shared!.admin`select id from session_turns
+        where session_id=${interaction!.session_id} order by created_at limit 1`;
+      expect(turn).toBeDefined();
+      const policyScope = {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        actorSubjectId: value.owner.subjectId,
+        subjectId: value.owner.subjectId,
+      };
+      await setWorkspaceAllowance(client.db, {
+        ...policyScope,
+        includedCredits: scope === "workspace" ? 5 : 100,
+        period: scope === "workspace" ? "monthly" : "none",
+        expectedVersion: 0,
+      });
+      if (scope === "member")
+        await setMemberAllowance(client.db, {
+          ...policyScope,
+          rule: { credits: 5 },
+          expectedVersion: 0,
+        });
+      await applyCreditDebitAfterUse(client.db, {
+        ...policyScope,
+        type: "model",
+        amountMicros: 10,
+        sourceType: "model_response",
+        sourceId: `${turn!.id}:fixture-response`,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const refusal = await checkWorkspaceAllowance(client.db, policyScope);
+      expect(refusal).toMatchObject({ code: "allowance_exhausted", scope });
+      const before = await shared!
+        .admin`select id from session_turns where workspace_id=${value.owner.workspaceId}`;
+      const postsBefore = value.slack.posts.length;
+      for (const [ts, thread_ts] of [
+        ["1706500001.000001", undefined],
+        ["1706500002.000001", rootTs],
+      ]) {
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_ALLOWANCE_REFUSE_${crypto.randomUUID()}`,
+          event: {
+            type: thread_ts ? "message" : "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts,
+            ...(thread_ts ? { thread_ts } : {}),
+            text: thread_ts ? "Refuse this work" : `<@${value.botUserId}> Refuse this work`,
+          },
+        });
+        await drainAll(value.deps);
+      }
+      const refusals = value.slack.posts.slice(postsBefore).map((post) => post.text);
+      expect(refusals.filter((text) => text.includes("usage allowance is exhausted"))).toHaveLength(
+        2,
+      );
+      for (const text of refusals) {
+        expect(text).toContain(
+          scope === "workspace" ? "organization administrator" : "workspace administrator",
+        );
+        expect(text).toContain(scope === "workspace" ? "UTC" : "no automatic reset");
+        expect(text).not.toMatch(/subscription|buy credits|sql/i);
+      }
+      const after = await shared!
+        .admin`select id from session_turns where workspace_id=${value.owner.workspaceId}`;
+      expect([...after]).toEqual([...before]);
+
+      // A mid-turn settlement must deliver the same remedy, once, even when
+      // it carries the paired usage.exhausted receipt.
+      const beforeSettlement = value.slack.posts.length;
+      await appendSessionEvents(client.db, value.owner.workspaceId, interaction!.session_id, [
+        { type: "usage.exhausted", payload: refusal! },
+        {
+          type: "turn.completed",
+          payload: {
+            ...refusal!,
+            output: "",
+            segmentLimit: "budget_exhausted",
+          },
+        },
+      ]);
+      await drainAll(value.deps);
+      const settlementPosts = value.slack.posts.slice(beforeSettlement);
+      expect(settlementPosts).toHaveLength(1);
+      expect(settlementPosts[0]!.text).toContain(
+        scope === "workspace" ? "organization administrator" : "workspace administrator",
+      );
+      expect(settlementPosts[0]!.text).not.toMatch(/subscription|buy credits|check credits/i);
+      await drainAll(value.deps);
+      expect(value.slack.posts.length).toBe(beforeSettlement + 1);
+    },
+    60_000,
+  );
+
   for (const [trigger, retryShell] of [
     ["app_mention", false],
     ["reaction", false],
