@@ -262,6 +262,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(await requireAccessContext(c, deps));
   });
 
+  app.get("/v1/workspaces/:workspaceId/access/grant", async (c) => {
+    // Inventory may be empty for an external actor. Resolve the selected
+    // workspace through the canonical membership/key-ceiling boundary.
+    const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"));
+    c.header("cache-control", "private, no-store");
+    return c.json(grant);
+  });
+
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
     const externalWorkspaces = await listExternalActorWorkspaces(context, deps);

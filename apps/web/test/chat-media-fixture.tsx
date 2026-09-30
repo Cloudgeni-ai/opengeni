@@ -9,6 +9,7 @@ import { createRoot } from "react-dom/client";
 import { ChatInteractiveBlock } from "../src/components/artifacts/chat-interactive-block";
 import { InlineChatImage } from "../src/components/artifacts/inline-chat-image";
 import { mediaFixture, workspaceId, siteId, imageId } from "./chat-media-context-fixture";
+import { consoleLinkResolver } from "../src/lib/session-artifact-navigation";
 import "../src/styles.css";
 
 declare global {
@@ -31,6 +32,7 @@ function Fixture() {
       <h1 className="p-3 text-lg">Chat media entry regression</h1>
       <div className="min-h-0 flex-1">
         <MessageTimeline
+          resolveLink={consoleLinkResolver}
           className="h-full"
           items={items}
           status="completed"

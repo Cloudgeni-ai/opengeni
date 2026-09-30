@@ -8405,6 +8405,56 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Embedding transport -----------------------------------------------------
+
+  /** The URL of an API path on this client's base (relative when the base is relative). */
+  apiUrl(path: string): string {
+    if (!path.startsWith("/")) throw new TypeError("API path must start with /");
+    return `${this.baseUrl}${path}`;
+  }
+
+  /**
+   * A client of the same class that adds `headers` to every request, keeping
+   * this client's base URL, fetch, credentials, and actor attribution. Used to
+   * scope a surface (for example an artifact viewer) to one host context.
+   */
+  withHeaders(headers: Readonly<Record<string, string>>): this {
+    const extra = { ...headers };
+    const base = this.options.headers;
+    const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
+    const client = new Client({
+      ...this.options,
+      headers: () => ({ ...(typeof base === "function" ? base() : base), ...extra }),
+    });
+    if (this.externalActorHeader !== undefined) {
+      client.externalActorHeader = this.externalActorHeader;
+    }
+    client.serviceInitiatorHeader = this.serviceInitiatorHeader;
+    client.serviceContextHeader = this.serviceContextHeader;
+    return client;
+  }
+
+  /**
+   * Fetch an absolute URL under this client's base URL through its fetch and
+   * headers. For transports the SDK builds itself (the editable-artifact live
+   * transport), so host authentication stays in one place. A URL outside the
+   * base is refused: credentials never leave the configured API.
+   */
+  async fetchApi(input: string | URL, init: RequestInit = {}): Promise<Response> {
+    const origin =
+      typeof globalThis.location?.href === "string" ? globalThis.location.href : undefined;
+    const base = new URL(this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`, origin);
+    const target = new URL(input, base);
+    if (target.origin !== base.origin || !`${target.pathname}/`.startsWith(base.pathname)) {
+      throw new TypeError("fetchApi only reaches this client's API base URL");
+    }
+    const headers = new Headers(init.headers);
+    for (const [name, value] of Object.entries(this.headers())) {
+      if (!headers.has(name)) headers.set(name, value);
+    }
+    return (await this.fetchImpl(target.href, { ...init, headers })) as Response;
+  }
+
   // --- Internals -------------------------------------------------------------
 
   private headers(correlationId?: string): Record<string, string> {

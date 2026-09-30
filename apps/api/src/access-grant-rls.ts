@@ -8,7 +8,7 @@ import { freezeAgentLearningPolicy, withSessionRlsActorContext } from "@opengeni
 import { HTTPException } from "hono/http-exception";
 
 export async function withAccessGrantSessionRlsContext<T>(
-  deps: ApiRouteDeps,
+  deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
   fn: () => Promise<T>,
 ): Promise<T> {

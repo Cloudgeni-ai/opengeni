@@ -1,3 +1,4 @@
+import type { Database } from "@opengeni/db";
 import type {
   EditableArtifact,
   EditableArtifactActor,
@@ -288,6 +289,8 @@ export type ReadEditableArtifactTransactionBasisRequest = Readonly<{
   clientTransactionId: EditableArtifactReceipt["clientTransactionId"];
   previousLocalTransactionId: EditableArtifactReceipt["previousLocalTransactionId"];
   selectiveUndoOperationIds: readonly EditableArtifactOperationId[];
+  /** Backend-only live authority; checked transactionally even on receipt replay. */
+  authorizeCommit?: EditableArtifactCommitAuthorizer;
 }>;
 
 export type EditableArtifactTransactionUndoBasis = Readonly<{
@@ -324,6 +327,13 @@ export type ExpectedEditableArtifactPredecessor = Readonly<{
   replicaCounter: number;
 }>;
 
+/**
+ * Receives the actual persistence transaction, never a separate pool handle.
+ * May run repeatedly for replay, lock admission and final persistence; must not
+ * perform external mutations. Stores without this transaction capability deny.
+ */
+export type EditableArtifactCommitAuthorizer = (tx: Database) => Promise<void>;
+
 export type TryCommitAppliedEditableArtifactTransactionRequest =
   CommitAppliedEditableArtifactTransaction &
     Readonly<{
@@ -333,6 +343,7 @@ export type TryCommitAppliedEditableArtifactTransactionRequest =
       expectedAuthorizationRevision: number;
       /** Rechecked by durable production stores in the commit transaction. */
       authorizationActor: EditableArtifactActor;
+      authorizeCommit?: EditableArtifactCommitAuthorizer;
       actorKey: string;
       clientTransactionId: EditableArtifactReceipt["clientTransactionId"];
       requestHash: EditableArtifactReceipt["requestHash"];

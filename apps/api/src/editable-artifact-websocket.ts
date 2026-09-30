@@ -8,6 +8,7 @@ import {
   type EditableArtifactLiveServerFrame,
   type EditableArtifactLiveSession,
   type EditableArtifactLiveSinkPort,
+  type OpenEditableArtifactLiveInput,
 } from "@opengeni/core";
 import type {
   ApiWebSocketConnection,
@@ -35,7 +36,10 @@ export type EditableArtifactWebSocketHandler = Readonly<{
 export class EditableArtifactWebSocketTransport {
   readonly websocket: EditableArtifactWebSocketHandler;
 
-  constructor(private readonly application: EditableArtifactApplicationPort | undefined) {
+  constructor(
+    private readonly application: EditableArtifactApplicationPort | undefined,
+    private readonly authorizeSourceSession?: OpenEditableArtifactLiveInput["authorizeSourceSession"],
+  ) {
     this.websocket = Object.freeze({
       open: (socket) => socket.data.attach(socket),
       message: (socket, message) => socket.data.receive(message),
@@ -60,7 +64,10 @@ export class EditableArtifactWebSocketTransport {
     if (!offeredProtocol(request.headers.get("sec-websocket-protocol"))) {
       return new Response("WebSocket protocol required", { status: 426 });
     }
-    const connection = new EditableArtifactWebSocketConnection(this.application);
+    const connection = new EditableArtifactWebSocketConnection(
+      this.application,
+      this.authorizeSourceSession,
+    );
     const upgraded = server.upgrade(request, {
       data: connection,
       headers: {
@@ -82,7 +89,10 @@ export class EditableArtifactWebSocketConnection
   private queuedBytes = 0;
   private terminal = false;
 
-  constructor(private readonly application: EditableArtifactApplicationPort) {}
+  constructor(
+    private readonly application: EditableArtifactApplicationPort,
+    private readonly authorizeSourceSession?: OpenEditableArtifactLiveInput["authorizeSourceSession"],
+  ) {}
 
   attach(socket: EditableArtifactWebSocketLike): void {
     if (this.socket || this.terminal) {
@@ -177,6 +187,9 @@ export class EditableArtifactWebSocketConnection
         protocolVersion: frame.protocolVersion,
         resume: frame.resume,
         sink: this,
+        ...(this.authorizeSourceSession
+          ? { authorizeSourceSession: this.authorizeSourceSession }
+          : {}),
       });
       if (this.terminal) {
         await session.close("transport_error");

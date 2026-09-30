@@ -4073,6 +4073,17 @@ export type ClientConfig = {
   modelSelection?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
+  /**
+   * Session proxy capability for the embedded artifact viewer; absent on
+   * native deployments. The live socket is ticket-authenticated and reached
+   * directly; the cache partition identifies the proxied user.
+   */
+  artifacts?:
+    | {
+        editableLiveUrl: string;
+        cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
+      }
+    | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**

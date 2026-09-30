@@ -72,7 +72,29 @@ const gallery: ArtifactCatalogItem[] = Array.from({ length: 60 }, (_, index) => 
   updatedAt: "2026-09-01T00:00:00Z",
   sourceSessionId: sessionId,
 }));
+const siteVersion = {
+  id: "88888888-8888-4888-8888-888888888888",
+  revision: 3,
+  requestedTools: [],
+};
 const client = {
+  tools: { forWorkspace: () => ({}) },
+  async getWorkspaceArtifact(_workspaceId: string, id: string) {
+    const item = items.find((candidate) => candidate.id === id && candidate.kind === "site");
+    if (!item) throw Object.assign(new Error("Site not found."), { status: 404 });
+    return {
+      artifact: {
+        id,
+        workspaceId,
+        title: item.title,
+        status: item.status,
+        currentVersion: siteVersion,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      },
+      versions: [siteVersion],
+    };
+  },
   async getWorkspaceArtifactHtml(_workspaceId: string, id: string) {
     fixtureActivity.siteHtml.push(id);
     // A still must render the markup without running the script or loading the image.
@@ -161,9 +183,17 @@ export function useAppContext() {
       fixtureActivity.prompts.push(input.text);
       return null;
     },
+    workspaces: [{ id: workspaceId, accountId: "99999999-9999-4999-8999-999999999999" }],
     accessContext: {
       subjectId: "fixture",
-      workspaceGrants: [{ workspaceId, permissions: ["sessions:create"] }],
+      workspaceGrants: [
+        {
+          workspaceId,
+          accountId: "99999999-9999-4999-8999-999999999999",
+          subjectId: "fixture",
+          permissions: ["sessions:create"],
+        },
+      ],
     },
   } as unknown as AppContextValue;
 }

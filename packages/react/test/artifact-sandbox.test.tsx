@@ -8,10 +8,10 @@ import {
   PublishedHtmlArtifactFrame,
   openGeniSiteBridgePortFromBootstrap,
   publishedHtmlArtifactDocument,
-} from "@opengeni/react/artifacts";
+} from "../src/artifacts";
 import { OPENGENI_SITE_BRIDGE_CONNECT, OPENGENI_SITE_BRIDGE_VERSION } from "@opengeni/sdk/site";
 
-import { ArtifactSandbox } from "./artifact-sandbox";
+import { ArtifactSandbox } from "../src/components/artifacts/artifact-sandbox";
 
 beforeAll(() => {
   GlobalRegistrator.register();

@@ -77,7 +77,9 @@ mock.module("@/components/artifacts/site-conversations", () => ({
   SiteConversations: () => createElement("button", { type: "button" }, "Conversations"),
 }));
 
-mock.module("@/components/artifacts/artifact-sandbox", () => ({
+const actualArtifacts = await import("@opengeni/react/artifacts");
+mock.module("@opengeni/react/artifacts", () => ({
+  ...actualArtifacts,
   ArtifactSandbox: ({ children }: { children?: ReactNode }) =>
     createElement("div", { "data-testid": "site-sandbox" }, children),
 }));

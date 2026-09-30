@@ -238,6 +238,7 @@ import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
+import { registerSessionArtifactAssociationRoutes } from "./routes/session-artifact-associations";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
@@ -1452,6 +1453,7 @@ export function createAppComposition(deps: AppDependencies): {
 
   registerConnectCallbackReturns(app, routeDeps);
   registerFileRoutes(app, routeDeps);
+  registerSessionArtifactAssociationRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);

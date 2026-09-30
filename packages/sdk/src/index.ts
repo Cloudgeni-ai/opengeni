@@ -197,7 +197,7 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
-export { createSessionProxyHandler } from "./session-proxy";
+export { artifactViewerCapability, createSessionProxyHandler } from "./session-proxy";
 export type {
   SessionProxyContext,
   SessionProxyCreateInput,
@@ -214,6 +214,7 @@ export {
   openGeniLinkScheme,
   parseRetainedFileReference,
   parseSandboxLink,
+  SESSION_SCOPE_HEADER,
 } from "./message-links";
 export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
