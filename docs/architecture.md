@@ -373,6 +373,11 @@ history, without reviving removed tools. Server `effectiveTools` reports known
 model names and upfront/search visibility; unknown external MCP schemas remain
 `toolsKnown: false`. See [`agent configuration`](design/agent-configuration.md).
 
+Media projection shares `resolveAgentMediaToolSurface` with runtime attachment.
+Unresolved adapters are omitted with `mediaToolsKnown: false`, rather than inferred
+from pool readiness or policy. Exact per-session build snapshots retain only
+value-free attachment kinds, never credentials.
+
 ### 3.8 A Connected Machine is first-class primary compute
 
 Agents run on Connected Machines (`selfhosted`), without creating sandboxes.

@@ -438,6 +438,36 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
 } as const satisfies Record<string, AgentFunctionToolClass>;
 export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIES;
 
+/**
+ * Value-free snapshot of the adapters actually selected for one runtime build.
+ * Undefined means attachment has not been resolved, not that media is absent.
+ * Subscription pool readiness is not evidence for either adapter.
+ */
+export type AgentMediaAttachment = {
+  image: "native_hosted" | "provider_adapter" | null;
+  video: boolean;
+};
+
+export function resolveAgentMediaToolSurface(
+  config: ResolvedAgentConfig | null | undefined,
+  attachment?: AgentMediaAttachment,
+): { toolsKnown: boolean; hosted: AgentFunctionToolName[]; runtime: AgentFunctionToolName[] } {
+  if (!resolveAgentToolFamilies(config).media) {
+    return { toolsKnown: true, hosted: [], runtime: [] };
+  }
+  if (!attachment) return { toolsKnown: false, hosted: [], runtime: [] };
+  return {
+    toolsKnown: true,
+    hosted: attachment.image === "native_hosted" ? ["image_generation"] : [],
+    runtime: [
+      ...(attachment.image === "provider_adapter" ? ["generate_image" as const] : []),
+      ...(attachment.video
+        ? ["get_video_generation_capabilities" as const, "generate_video" as const]
+        : []),
+    ],
+  };
+}
+
 /** Skill tools that only read installed Skills (`skills: "read"`). */
 export const AGENT_SKILL_READ_TOOL_NAMES = ["skill_read"] as const;
 /** Skill tools that change Skills (`skills: "manage"` only). */
@@ -470,7 +500,7 @@ export type AgentToolEnvironment = {
   hasSkills?: boolean;
   webSearch?: boolean;
   humanInput?: boolean;
-  media?: boolean;
+  media?: boolean | undefined;
   hasDeferredTools?: boolean;
   routerInHistory?: boolean;
 };
@@ -1379,6 +1409,8 @@ export const AgentEffectiveTools = z
   .object({
     capabilities: ResolvedAgentCapabilities,
     unavailable: z.array(AgentCapabilityId),
+    /** False means media adapters await exact turn/credential attachment; tools does not guess them. */
+    mediaToolsKnown: z.boolean().optional(),
     tools: z
       .array(
         z
@@ -1429,10 +1461,14 @@ export function projectAgentEffectiveTools(input: {
   /** Raw first-party names; other entries use model-facing names. */
   upfrontToolNames?: ReadonlySet<string>;
   firstPartyModelNames?: ReadonlyMap<FirstPartyMcpToolName, string>;
+  mediaAttachment?: AgentMediaAttachment | undefined;
 }): AgentEffectiveTools {
   const { capabilities } = input.config;
+  const media = resolveAgentMediaToolSurface(input.config, input.mediaAttachment);
+  const mediaNames = new Set<string>([...media.hosted, ...media.runtime]);
   const families = resolveAgentToolFamilies(input.config, {
     ...input.environment,
+    media: media.toolsKnown ? mediaNames.size > 0 : undefined,
     productServerIds: input.productServerIds,
   });
   const tools: AgentEffectiveToolEntry[] = input.firstPartyMcpTools
@@ -1445,7 +1481,9 @@ export function projectAgentEffectiveTools(input: {
     }));
   const functionTool = (name: AgentFunctionToolName, source: AgentEffectiveToolEntry["source"]) => {
     const owner = AGENT_FUNCTION_TOOL_CAPABILITIES[name];
+    if (owner === "media" && !mediaNames.has(name)) return;
     if (!families.allowsFunctionTool(name)) return;
+    if (tools.some((tool) => tool.name === name)) return;
     tools.push({
       name,
       capability: owner,
@@ -1458,6 +1496,8 @@ export function projectAgentEffectiveTools(input: {
   };
   for (const name of input.hostedToolNames ?? []) functionTool(name, "hosted");
   for (const name of input.runtimeToolNames ?? []) functionTool(name, "runtime");
+  for (const name of media.hosted) functionTool(name, "hosted");
+  for (const name of media.runtime) functionTool(name, "runtime");
   for (const name of input.sandboxToolNames ?? []) functionTool(name, "sandbox");
   if (families.router)
     for (const name of input.routerToolNames ?? []) functionTool(name, "runtime");
@@ -1478,6 +1518,7 @@ export function projectAgentEffectiveTools(input: {
       humanInput: families.humanInput,
       media: families.media,
     },
+    mediaToolsKnown: media.toolsKnown,
     unavailable: [
       ...new Set([
         ...input.config.unavailable,

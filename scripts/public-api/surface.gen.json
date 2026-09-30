@@ -7180,6 +7180,7 @@
         "$.mcpServers[].capability|2": "const=[\"\\\"product\\\"\"]",
         "$.mcpServers[].id": "string!",
         "$.mcpServers[].toolsKnown": "boolean!",
+        "$.mediaToolsKnown": "boolean?",
         "$.tools": "array!",
         "$.tools[]": "object",
         "$.tools[].capability": "union!=[\"0\",\"1\",\"2\",\"3\"]",

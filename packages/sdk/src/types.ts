@@ -8626,6 +8626,8 @@ export type ResolvedAgentConfig = {
 export type AgentEffectiveTools = {
   capabilities: ResolvedAgentCapabilities;
   unavailable: AgentCapabilityId[];
+  /** False until exact runtime media adapters (including credential identity) are resolved. */
+  mediaToolsKnown?: boolean | undefined;
   tools: Array<{
     name: string;
     capability: AgentCapabilityId | "runtime" | "sandbox" | "product";

@@ -35088,38 +35088,6 @@ export async function getSessionTurnXaiProviderAccountAuthoritySnapshot(
   );
 }
 
-/** Internal metadata projection; never infer a frozen turn actor from its creator. */
-export async function getSessionTurnMediaAuthority(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-) {
-  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        subjectId: schema.sessionTurns.initiatingHumanSubjectId,
-        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-        xai: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.id, turnId),
-        ),
-      )
-      .limit(1);
-    return row
-      ? {
-          subjectId: row.subjectId ?? row.initiatorSubjectId,
-          xai: XaiProviderAccountAuthoritySnapshotV1.parse(row.xai),
-        }
-      : null;
-  });
-}
-
 export async function getSessionTurnPersonalConnectionDelegations(
   db: Database,
   workspaceId: string,

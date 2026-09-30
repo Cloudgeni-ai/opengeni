@@ -40,6 +40,16 @@ visibility from server-side runtime inputs. External MCP tools remain explicitly
 unknown (`toolsKnown: false`) until a catalog is available; they are not invented
 from capability names.
 
+Media projection uses `resolveAgentMediaToolSurface`, the runtime's shared
+adapter-attachment descriptor. Before the exact turn has selected its image/video
+adapters, `mediaToolsKnown: false` means no media tools are claimed in `tools`.
+Subscription readiness, model support, workspace keys and media policy do not
+prove attachment: delegated text credentials may lack a local media credential
+identity. A verified per-session attachment snapshot reports the actual hosted or
+adapter names. Explicitly disabled or resolved-absent media is known empty.
+The capability bit expresses authorization, not availability; unresolved media
+is not falsely added to `unavailable`.
+
 ## Why
 
 An embedder today configures an OpenGeni agent through about fifteen independent

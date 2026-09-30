@@ -18,6 +18,7 @@ import {
   projectAgentEffectiveTools,
   resolveAgentConfig,
   resolveAgentToolFamilies,
+  resolveAgentMediaToolSurface,
   resolveAgentConfigUpdate,
   resolveWorkspaceAgentDefaults,
   resolveWorkspaceDefaultAgentIdentity,
@@ -544,6 +545,52 @@ describe("workspace defaults helpers", () => {
 });
 
 describe("effective tools projection", () => {
+  test("unresolved media never advertises guessed adapter names or claims unavailable", () => {
+    const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;
+    const projection = projectAgentEffectiveTools({
+      config,
+      firstPartyMcpTools: [],
+      mcpServerIds: [],
+      productServerIds: new Set(),
+      hostedToolNames: ["image_generation"],
+      runtimeToolNames: ["generate_image", "generate_video"],
+      environment: { media: true },
+    });
+    expect(projection.tools).toEqual([]);
+    expect(projection.mediaToolsKnown).toBe(false);
+    expect(projection.capabilities.media).toBe(true);
+    expect(projection.unavailable).not.toContain("media");
+    expect(resolveAgentMediaToolSurface(config, { image: null, video: false })).toEqual({
+      toolsKnown: true,
+      hosted: [],
+      runtime: [],
+    });
+  });
+
+  test("media snapshot cannot select both image transports or bypass the capability ceiling", () => {
+    const enabled = resolve({ request: { capabilities: "all" } }).config!;
+    const disabled = resolve({ request: { capabilities: "none" } }).config!;
+    for (const image of ["native_hosted", "provider_adapter"] as const) {
+      const projection = projectAgentEffectiveTools({
+        config: enabled,
+        firstPartyMcpTools: [],
+        mcpServerIds: [],
+        productServerIds: new Set(),
+        mediaAttachment: { image, video: true },
+        hostedToolNames: ["image_generation"],
+        runtimeToolNames: ["generate_image", "generate_video", "get_video_generation_capabilities"],
+      });
+      const names = projection.tools.map((tool) => tool.name);
+      expect(names.includes("image_generation")).toBe(image === "native_hosted");
+      expect(names.includes("generate_image")).toBe(image === "provider_adapter");
+      expect(names.filter((name) => name === "generate_video")).toHaveLength(1);
+      expect(resolveAgentMediaToolSurface(disabled, { image, video: true })).toEqual({
+        toolsKnown: true,
+        hosted: [],
+        runtime: [],
+      });
+    }
+  });
   test("unknown workspace connectors cannot bypass none but explicit product tools survive", () => {
     const config = resolve({ request: { capabilities: "none" } }).config!;
     const families = resolveAgentToolFamilies(config, { productServerIds: new Set(["acme"]) });
@@ -565,6 +612,7 @@ describe("effective tools projection", () => {
       mcpServerIds: ["opengeni", "acme", "github"],
       productServerIds: new Set(["acme"]),
       environment: { hasSkills: true },
+      mediaAttachment: { image: "provider_adapter", video: true },
       runtimeToolNames: [
         "request_human_input",
         "skill_read",

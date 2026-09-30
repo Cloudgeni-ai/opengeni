@@ -16,6 +16,7 @@ import {
   type AgentSkillsCapability,
   type FirstPartyMcpToolName,
   type ResolvedAgentConfig,
+  type AgentMediaAttachment,
 } from "@opengeni/contracts";
 import { sessionEffectiveToolProjectionInput } from "@opengeni/core";
 import * as db from "@opengeni/db";
@@ -90,6 +91,8 @@ type FixtureOptions = {
   builtins?: boolean;
   deploymentDisabled?: AgentCapabilityId;
   modelId?: string;
+  subscription?: "codex-subscription" | "xai-subscription";
+  localMediaCredential?: boolean;
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -303,10 +306,32 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       session,
       runSettings: settings,
       capabilitySettings: settings,
-      nativeImageProviderBinding: {
-        providerId: "openai",
-        providerBindingHash: "fixture-native-image-binding",
-      },
+      nativeImageProviderBinding: options.subscription
+        ? null
+        : {
+            providerId: "openai",
+            providerBindingHash: "fixture-native-image-binding",
+          },
+      ...(options.subscription
+        ? {
+            resolvedModel: {
+              provider: {
+                id: "subscription-fixture",
+                kind: options.subscription,
+                api: "responses",
+                builtin: false,
+              },
+              configured: { hostedWebSearch: false, capabilities: { inputModalities: ["text"] } },
+            },
+            codexContext: options.subscription === "codex-subscription" ? {} : undefined,
+            providerTurn: {
+              ...context.providerTurn,
+              effectiveCodexCredentialId: options.localMediaCredential ? "fixture-media-id" : null,
+              effectiveXaiCredentialId: options.localMediaCredential ? "fixture-media-id" : null,
+              xaiRequestContext: options.subscription === "xai-subscription" ? {} : null,
+            },
+          }
+        : {}),
       turnExecutionPolicy,
       trigger,
       agentHumanInputEnabled: disabled !== "humanInput",
@@ -345,6 +370,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       catalog: prepared.attemptToolCatalog!,
       preparation: preparation!,
       buildOptions: buildOptions!,
+      mediaAttachment: {
+        image: buildOptions?.imageGeneration?.kind ?? null,
+        video: buildOptions?.videoGeneration !== undefined,
+      } satisfies AgentMediaAttachment,
       skillCatalog: toolRuntime.skillCatalog,
       skillCatalogWrites,
       selectedServerIds: policy.turnTools.map((tool) => tool.id).sort(),
@@ -518,6 +547,7 @@ describe("agent configuration reaches the production model request", () => {
           humanInputEnabled: true,
           hasWorkspaceSkills: true,
           objectStorageAvailable: true,
+          mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
         } as Parameters<typeof sessionWithEffectiveToolPolicy>[3],
       );
       const known = result.effectiveTools!.tools;
@@ -587,6 +617,51 @@ describe("agent configuration reaches the production model request", () => {
 });
 
 describe("effective-tools projection agrees with actual model preparation", () => {
+  test.each(["codex-subscription", "xai-subscription"] as const)(
+    "%s projection follows the worker's exact local media credential identity",
+    async (subscription) => {
+      for (const localMediaCredential of [false, true]) {
+        const captured = await captureWorkerRequest({
+          agent: agentConfig("all"),
+          subscription,
+          localMediaCredential,
+          modelId: "gpt-5.6-sol",
+        });
+        const result = sessionWithEffectiveToolPolicy(
+          captured.session,
+          captured.selectedServerIds,
+          [],
+          {
+            settings: captured.settings,
+            humanInputEnabled: true,
+            hasWorkspaceSkills: true,
+            objectStorageAvailable: true,
+            mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
+          },
+        ).effectiveTools!;
+        expect(captured.names.includes("generate_image")).toBe(localMediaCredential);
+        expect(result.tools.some((tool) => tool.name === "generate_image")).toBe(
+          localMediaCredential,
+        );
+        expect(result.mediaToolsKnown).toBe(true);
+        const unresolved = sessionWithEffectiveToolPolicy(
+          captured.session,
+          captured.selectedServerIds,
+          [],
+          {
+            settings: captured.settings,
+            humanInputEnabled: true,
+            hasWorkspaceSkills: true,
+            objectStorageAvailable: true,
+          },
+        ).effectiveTools!;
+        expect(unresolved.mediaToolsKnown).toBe(false);
+        expect(unresolved.tools.some((tool) => tool.capability === "media")).toBe(false);
+        expect(unresolved.unavailable).not.toContain("media");
+      }
+    },
+  );
+
   test("search visibility matches the captured first request and deferred catalog", async () => {
     const captured = await captureWorkerRequest({
       agent: agentConfig("all"),
@@ -602,6 +677,7 @@ describe("effective-tools projection agrees with actual model preparation", () =
           humanInputEnabled: true,
           hasWorkspaceSkills: true,
           objectStorageAvailable: true,
+          mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
         },
       ),
     );
@@ -636,6 +712,7 @@ describe("effective-tools projection agrees with actual model preparation", () =
         humanInputEnabled: true,
         hasWorkspaceSkills: true,
         objectStorageAvailable: true,
+        mediaAttachments: new Map([[captured.session.id, captured.mediaAttachment]]),
       },
     );
     const projected = projectAgentEffectiveTools(input);

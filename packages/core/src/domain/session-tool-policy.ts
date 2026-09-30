@@ -1,12 +1,8 @@
 import {
   allowedFirstPartyMcpToolsForSession,
   codeSearchDeploymentPolicy,
-  environmentsEncryptionKeyBytes,
-  isDirectOpenAiApiBaseUrl,
   resolveModelProviderForTurn,
-  resolveModelProvider,
   resolveFirstPartyDelegationSecret,
-  WORKSPACE_GATEWAY_PROVIDER_ID,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -20,11 +16,12 @@ import {
   mergeToolRefs,
   projectAgentEffectiveTools,
   resolveAgentToolFamilies,
+  resolveAgentMediaToolSurface,
   resolveWorkspaceAgentHumanInputEnabled,
   resolveWorkspaceSessionToolDefaults,
   type AgentFunctionToolName,
   type AgentToolEnvironment,
-  type VideoGenerationPolicy,
+  type AgentMediaAttachment,
   type Session,
   type SessionEffectiveToolPolicy,
   type SessionToolPolicy,
@@ -33,20 +30,12 @@ import {
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 import {
   getSandbox,
-  getLatestStartedSessionTurn,
-  getSessionTurnMediaAuthority,
-  getWorkspaceVideoGenerationPolicy,
   listSkillDescriptors,
-  loadWorkspaceVercelAiGatewayApiKey,
   requireWorkspace,
   sessionHasToolRouterHistory,
-  workspaceCodexSubscriptionActive,
-  workspaceXaiSubscriptionActiveForAuthority,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
-import { videoGenerationCapabilitiesForPolicy } from "./video-generation-capabilities";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 
 const MANDATORY_SESSION_MCP_SERVER_IDS = ["opengeni"] as const;
@@ -262,14 +251,10 @@ export type SessionEffectiveToolsContext = {
   workspaceSettings?: unknown;
   objectStorageAvailable: boolean;
   activeSandboxBackends?: ReadonlyMap<string, Settings["sandboxBackend"]>;
-  /** Exact, verified adapter names when a host already holds a runtime snapshot. */
-  mediaToolNames?: readonly AgentFunctionToolName[];
+  /** Exact build options after adapter/credential resolution, keyed by session. No pool-readiness inference. */
+  mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
-  workspaceGatewayImageAvailable?: boolean;
-  workspaceVideoAvailable?: boolean;
-  subscriptionImageSessionIds?: ReadonlySet<string>;
-  subscriptionVideoSessionIds?: ReadonlySet<string>;
 };
 
 /**
@@ -290,15 +275,7 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [
-    workspace,
-    catalog,
-    descriptors,
-    sandboxes,
-    routerHistory,
-    mediaAvailability,
-    subscriptionMedia,
-  ] = await Promise.all([
+  const [workspace, catalog, descriptors, sandboxes, routerHistory] = await Promise.all([
     requireWorkspace(deps.db, workspaceId),
     resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: configured[0]!.accountId,
@@ -340,77 +317,9 @@ export async function workspaceSessionEffectiveToolsContext(
           ] as const,
       ),
     ),
-    configured.some((session) => resolveAgentToolFamilies(session.agent).media) &&
-    baseline.objectStorageAvailable
-      ? workspaceSessionMediaAvailability(deps, workspaceId)
-      : Promise.resolve({
-          workspaceGatewayImageAvailable: false,
-          workspaceVideoAvailable: false,
-        }),
-    baseline.objectStorageAvailable
-      ? Promise.all(
-          configured
-            .filter(
-              (session) =>
-                resolveAgentToolFamilies(session.agent).media &&
-                /^(codex|supergrok)\//.test(session.model),
-            )
-            .map(async (session) => {
-              const latest = await getLatestStartedSessionTurn(deps.db, workspaceId, session.id);
-              const authority = latest
-                ? await getSessionTurnMediaAuthority(deps.db, workspaceId, session.id, latest.id)
-                : null;
-              if (session.model.startsWith("codex/")) {
-                return {
-                  id: session.id,
-                  image: await workspaceCodexSubscriptionActive(
-                    deps.db,
-                    deps.settings,
-                    workspaceId,
-                    latest?.id,
-                  ),
-                  video: false,
-                };
-              }
-              const actor = authority?.subjectId ?? subjectId;
-              const authoritySnapshot =
-                authority?.xai ??
-                (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(deps.db, {
-                  workspaceId,
-                  subjectId: actor,
-                }));
-              const active = await workspaceXaiSubscriptionActiveForAuthority(
-                deps.db,
-                deps.settings,
-                {
-                  workspaceId,
-                  subjectId: actor,
-                  authoritySnapshot,
-                },
-              );
-              const policy = await getWorkspaceVideoGenerationPolicy(deps.db, workspaceId);
-              return {
-                id: session.id,
-                image: active,
-                video:
-                  active &&
-                  policy.fundingSource === "supergrok_subscription" &&
-                  validVideoPolicy(policy) &&
-                  environmentsEncryptionKeyBytes(deps.settings) !== undefined,
-              };
-            }),
-        )
-      : Promise.resolve([]),
   ]);
   return {
     ...baseline,
-    ...mediaAvailability,
-    subscriptionImageSessionIds: new Set(
-      subscriptionMedia.filter((entry) => entry.image).map((entry) => entry.id),
-    ),
-    subscriptionVideoSessionIds: new Set(
-      subscriptionMedia.filter((entry) => entry.video).map((entry) => entry.id),
-    ),
     settings: catalog.settings,
     workspaceSettings: workspace.settings,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspace.settings),
@@ -424,36 +333,6 @@ export async function workspaceSessionEffectiveToolsContext(
       routerHistory.filter(([, present]) => present).map(([id]) => id),
     ),
   };
-}
-
-async function workspaceSessionMediaAvailability(
-  deps: { db: Database; settings: Settings },
-  workspaceId: string,
-) {
-  const [policy, gatewayApiKey] = await Promise.all([
-    getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
-    loadWorkspaceVercelAiGatewayApiKey(deps.db, deps.settings, workspaceId),
-  ]);
-  const encryptionAvailable = environmentsEncryptionKeyBytes(deps.settings) !== undefined;
-  const videoCredentialAvailable =
-    policy.fundingSource === "opengeni_credits"
-      ? Boolean(deps.settings.vercelAiGatewayApiKey) && encryptionAvailable
-      : policy.fundingSource === "workspace_gateway"
-        ? Boolean(gatewayApiKey) && encryptionAvailable
-        : false;
-  return {
-    workspaceGatewayImageAvailable: Boolean(gatewayApiKey),
-    workspaceVideoAvailable: videoCredentialAvailable && validVideoPolicy(policy),
-  };
-}
-
-function validVideoPolicy(policy: VideoGenerationPolicy): boolean {
-  try {
-    videoGenerationCapabilitiesForPolicy({ policy, credentialVersion: 1 });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function sessionHasSkills(session: Session, context: SessionEffectiveToolsContext): boolean {
@@ -479,7 +358,7 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
       return tools.has("artifacts_create") && tools.has("artifacts_publish");
     }
     if (id === "builtin:opengeni-video-generation") {
-      return context.mediaToolNames?.includes("generate_video") === true;
+      return context.mediaAttachments?.get(session.id)?.video === true;
     }
     return true;
   });
@@ -503,47 +382,20 @@ export function sessionEffectiveToolProjectionInput(
   if (model?.provider.kind === "xai-subscription") {
     if (context?.settings.webSearchEnabled) hostedToolNames.push("web_search", "x_search");
   } else if (model?.model.hostedWebSearch) hostedToolNames.push("web_search");
-  if (
-    context?.objectStorageAvailable &&
-    model?.model.capabilities.hostedTools.imageGeneration.runnable &&
-    model.provider.builtin &&
-    model.provider.id === "openai" &&
-    isDirectOpenAiApiBaseUrl(model.provider.baseUrl) &&
-    context.settings.openaiProvider === "openai" &&
-    isDirectOpenAiApiBaseUrl(context.settings.openaiBaseUrl) &&
-    Boolean(context.settings.openaiApiKey)
-  ) {
-    hostedToolNames.push("image_generation");
-  }
-  const gateway = context
-    ? resolveModelProvider(context.settings, WORKSPACE_GATEWAY_PROVIDER_ID)?.provider
-    : undefined;
-  const gatewayImageAvailable =
-    context?.objectStorageAvailable &&
-    !hostedToolNames.includes("image_generation") &&
-    model?.provider.kind !== "codex-subscription" &&
-    model?.provider.kind !== "xai-subscription" &&
-    ((gateway?.kind === "vercel-gateway-workspace" && Boolean(gateway.apiKey)) ||
-      context.workspaceGatewayImageAvailable === true);
-  const videoAvailable =
-    context?.objectStorageAvailable &&
-    session.sandboxBackend !== "none" &&
-    (context.workspaceVideoAvailable === true ||
-      context.subscriptionVideoSessionIds?.has(session.id) === true);
+  const mediaAttachment =
+    context?.mediaAttachments?.get(session.id) ??
+    (context?.objectStorageAvailable === false
+      ? ({ image: null, video: false } as const)
+      : undefined);
+  const media = resolveAgentMediaToolSurface(session.agent, mediaAttachment);
+  hostedToolNames.push(...media.hosted);
   const runtimeToolNames: AgentFunctionToolName[] = context
     ? [
         "request_human_input",
         "list_models",
         "skill_read",
         ...AGENT_SKILL_MANAGE_TOOL_NAMES,
-        ...(gatewayImageAvailable ? ["generate_image" as const] : []),
-        ...(context.subscriptionImageSessionIds?.has(session.id)
-          ? ["generate_image" as const]
-          : []),
-        ...(videoAvailable
-          ? ["generate_video" as const, "get_video_generation_capabilities" as const]
-          : []),
-        ...(context.mediaToolNames ?? []),
+        ...media.runtime,
       ]
     : [];
   const sandboxToolNames: AgentFunctionToolName[] = sandboxAvailable
@@ -643,12 +495,7 @@ export function sessionEffectiveToolProjectionInput(
     hasSkills: context ? sessionHasSkills(session, context) : false,
     webSearch: hostedToolNames.includes("web_search"),
     humanInput: context?.humanInputEnabled ?? false,
-    media:
-      hostedToolNames.includes("image_generation") ||
-      gatewayImageAvailable ||
-      context?.subscriptionImageSessionIds?.has(session.id) === true ||
-      videoAvailable ||
-      (context?.mediaToolNames?.length ?? 0) > 0,
+    media: media.toolsKnown ? media.hosted.length + media.runtime.length > 0 : undefined,
     routerInHistory:
       context?.routerInHistory === true ||
       context?.routerHistorySessionIds?.has(session.id) === true,
@@ -687,6 +534,7 @@ export function sessionEffectiveToolProjectionInput(
     sandboxToolNames,
     routerToolNames,
     upfrontToolNames,
+    mediaAttachment,
   };
 }
 

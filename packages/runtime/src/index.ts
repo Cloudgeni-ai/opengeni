@@ -96,6 +96,7 @@ import {
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
   resolveAgentToolFamilies,
+  resolveAgentMediaToolSurface,
   type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
@@ -2775,6 +2776,10 @@ export function buildOpenGeniAgent(
     humanInput: options.humanInputEnabled !== false,
   });
   const hostedWebSearch = toolFamilies.webSearch;
+  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
+    image: options.imageGeneration?.kind ?? null,
+    video: Boolean(options.videoGeneration),
+  });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send
@@ -2796,59 +2801,58 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
-  if (toolFamilies.media && options.imageGeneration?.kind === "native_hosted") {
+  if (mediaTools.hosted.includes("image_generation")) {
     hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
   }
-  const providerImageGenerationTool =
-    toolFamilies.media && options.imageGeneration?.kind === "provider_adapter"
-      ? agentTool({
-          name: "generate_image",
-          description:
-            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
-          parameters: GenerateImageToolInput,
-          errorFunction: null,
-          execute: async (input, _context, details) => {
-            const toolCallId = details?.toolCall?.callId;
-            if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
-            if (options.imageGeneration?.kind !== "provider_adapter") {
-              throw new Error("Image-generation adapter changed during execution");
-            }
-            return await options.imageGeneration.execute(input, { toolCallId });
-          },
-        })
-      : null;
-  const videoGenerationCapabilityTool =
-    toolFamilies.media && options.videoGeneration
-      ? agentTool({
-          name: "get_video_generation_capabilities",
-          description:
-            "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
-          parameters: GetVideoGenerationCapabilitiesToolInput,
-          errorFunction: null,
-          execute: async () => {
-            const adapter = options.videoGeneration;
-            if (!adapter) throw new Error("Video-generation capability changed during execution");
-            return await adapter.capabilities();
-          },
-        })
-      : null;
-  const videoGenerationTool =
-    toolFamilies.media && options.videoGeneration
-      ? agentTool({
-          name: "generate_video",
-          description:
-            "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
-          parameters: GenerateVideoToolInput,
-          errorFunction: null,
-          execute: async (input, _context, details) => {
-            const toolCallId = details?.toolCall?.callId;
-            if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
-            const adapter = options.videoGeneration;
-            if (!adapter) throw new Error("Video-generation adapter changed during execution");
-            return await adapter.execute(input, { toolCallId });
-          },
-        })
-      : null;
+  const providerImageGenerationTool = mediaTools.runtime.includes("generate_image")
+    ? agentTool({
+        name: "generate_image",
+        description:
+          "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
+        parameters: GenerateImageToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
+          if (options.imageGeneration?.kind !== "provider_adapter") {
+            throw new Error("Image-generation adapter changed during execution");
+          }
+          return await options.imageGeneration.execute(input, { toolCallId });
+        },
+      })
+    : null;
+  const videoGenerationCapabilityTool = mediaTools.runtime.includes(
+    "get_video_generation_capabilities",
+  )
+    ? agentTool({
+        name: "get_video_generation_capabilities",
+        description:
+          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
+        parameters: GetVideoGenerationCapabilitiesToolInput,
+        errorFunction: null,
+        execute: async () => {
+          const adapter = options.videoGeneration;
+          if (!adapter) throw new Error("Video-generation capability changed during execution");
+          return await adapter.capabilities();
+        },
+      })
+    : null;
+  const videoGenerationTool = mediaTools.runtime.includes("generate_video")
+    ? agentTool({
+        name: "generate_video",
+        description:
+          "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
+        parameters: GenerateVideoToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
+          const adapter = options.videoGeneration;
+          if (!adapter) throw new Error("Video-generation adapter changed during execution");
+          return await adapter.execute(input, { toolCallId });
+        },
+      })
+    : null;
   const humanInputTool = !toolFamilies.humanInput
     ? null
     : agentTool({

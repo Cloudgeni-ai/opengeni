@@ -70,29 +70,101 @@ function projected(row = session(), env = context()) {
 }
 
 describe("server effectiveTools environment projection", () => {
-  test("subscription adapters use exact session availability and preserve sandbox video gating", () => {
+  test.each(["codex/gpt-5.6-sol", "supergrok/grok-4.6", "gpt-6-astra"])(
+    "%s metadata does not infer media attachment from model or pool readiness",
+    async (model) => {
+      const row = session("all", { model });
+      const envSettings = withXaiSubscriptionCatalogProvider(settings);
+      const workspace = spyOn(db, "requireWorkspace").mockResolvedValue({
+        settings: {},
+      } as Awaited<ReturnType<typeof db.requireWorkspace>>);
+      const models = spyOn(catalog, "resolveWorkspaceCatalogSettings").mockResolvedValue({
+        settings: envSettings,
+        source: "code",
+        version: null,
+        modelNotes: {},
+      });
+      const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false);
+      const codexPool = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
+      const xaiPool = spyOn(db, "workspaceXaiSubscriptionActiveForAuthority").mockResolvedValue(
+        true,
+      );
+      const credentials = spyOn(db, "loadWorkspaceVercelAiGatewayApiKey");
+      const policy = spyOn(db, "getWorkspaceVideoGenerationPolicy");
+      const authority = spyOn(db, "getLatestStartedSessionTurn");
+      try {
+        const env = await workspaceSessionEffectiveToolsContext(
+          {
+            db: {} as db.Database,
+            settings: envSettings,
+            objectStorage: {},
+          },
+          row.workspaceId,
+          "reader-not-turn-actor",
+          [row],
+        );
+        const result = projected(row, env).effectiveTools!;
+        expect(result.mediaToolsKnown).toBe(false);
+        expect(result.tools.some((tool) => tool.capability === "media")).toBe(false);
+        expect(result.unavailable).not.toContain("media");
+        expect(AgentEffectiveTools.safeParse(result).success).toBe(true);
+        for (const spy of [codexPool, xaiPool, credentials, policy, authority]) {
+          expect(spy).not.toHaveBeenCalled();
+        }
+      } finally {
+        for (const spy of [
+          workspace,
+          models,
+          history,
+          codexPool,
+          xaiPool,
+          credentials,
+          policy,
+          authority,
+        ]) {
+          spy.mockRestore();
+        }
+      }
+    },
+  );
+
+  test("exact attachment snapshots do not leak across sessions and disabled media is known absent", () => {
+    const row = session();
+    const env = context({
+      objectStorageAvailable: true,
+      mediaAttachments: new Map([
+        ["different-session", { image: "provider_adapter", video: true }],
+      ]),
+    });
+    expect(projected(row, env).effectiveTools!.mediaToolsKnown).toBe(false);
+    expect(
+      projected(row, env).effectiveTools!.tools.some((tool) => tool.capability === "media"),
+    ).toBe(false);
+    const disabled = projected(session("none"), env).effectiveTools!;
+    expect(disabled.mediaToolsKnown).toBe(true);
+    expect(disabled.tools.some((tool) => tool.capability === "media")).toBe(false);
+  });
+
+  test("subscription adapters require an exact attachment snapshot for this session", () => {
     const row = session("all", { model: "supergrok/grok-4.6", sandboxBackend: "local" });
     const result = projected(
       row,
       context({
         objectStorageAvailable: true,
-        subscriptionImageSessionIds: new Set([row.id]),
-        subscriptionVideoSessionIds: new Set([row.id]),
+        mediaAttachments: new Map([[row.id, { image: "provider_adapter", video: true }]]),
       }),
     );
     const names = result.effectiveTools!.tools.map((tool) => tool.name);
     expect(names).toContain("generate_image");
     expect(names).toContain("generate_video");
-    const sandboxless = projected(
+    const absent = projected(
       { ...row, sandboxBackend: "none" },
       context({
         objectStorageAvailable: true,
-        subscriptionVideoSessionIds: new Set([row.id]),
+        mediaAttachments: new Map([[row.id, { image: null, video: false }]]),
       }),
     );
-    expect(sandboxless.effectiveTools!.tools.map((tool) => tool.name)).not.toContain(
-      "generate_video",
-    );
+    expect(absent.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("generate_video");
   });
   test("bundled artifact Skills cannot leak a reader from disabled legacy columns", () => {
     const result = projected(session("none", { bundledSkillIds: ["builtin:opengeni-documents"] }));
@@ -259,7 +331,7 @@ describe("server effectiveTools environment projection", () => {
 
   test("verified adapters expose only their exact names and remain capability gated", () => {
     const env = context({
-      mediaToolNames: ["generate_video", "get_video_generation_capabilities"],
+      mediaAttachments: new Map([[session().id, { image: null, video: true }]]),
     });
     const all = projected(session(), env).effectiveTools!.tools.map((tool) => tool.name);
     expect(all).toContain("generate_video");
