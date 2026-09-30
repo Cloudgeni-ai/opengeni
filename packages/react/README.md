@@ -643,9 +643,10 @@ Native dropdown popups may not appear in page frames. With a controller that
 advertises focused input observations, clicking one opens its choices beside
 the click. Ordinary clicks use a bounded focus probe instead of a full page
 snapshot; only a focused native dropdown (or a child-frame focus hint) requests
-semantic options. **Choose option** remains an explicit fallback for older
-controllers and controls that cannot be identified automatically. Selection uses the
-normal browser action API. The viewer retains that
+semantic options. Current controllers show no permanent **Choose option** button
+over the page; older controllers retain that explicit fallback. **Alt+Down** opens
+the focused dropdown and reads its options on either controller generation.
+Selection uses the normal browser action API. The viewer retains that
 observation's target/document/frame fence. Private, oversized, or ambiguous
 choices remain unavailable; the page's keyboard controls still work. This
 fallback requires a controller with focused native-select metadata support and

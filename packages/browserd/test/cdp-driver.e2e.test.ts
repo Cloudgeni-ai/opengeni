@@ -1134,6 +1134,18 @@ headedE2e(
           { value: "blocked", label: "Blocked", selected: false, disabled: true },
         ],
       });
+      // Keyboard users can open the same popup and explicitly read its focused
+      // options even on controllers whose input observation mode is click-only.
+      await driver.dispatch({
+        ...command(view, { type: "press", key: "Escape" }),
+        observationMode: "none",
+      });
+      await driver.dispatch({
+        ...command(view, { type: "press", key: "Alt+ArrowDown" }),
+        observationMode: "none",
+      });
+      view = await driver.observe(view.target.id);
+      expect(focused(view)?.native?.data).toMatchObject({ kind: "native-select", multiple: false });
       const ref = view.focusedRef!;
       await expect(
         driver.dispatch(
