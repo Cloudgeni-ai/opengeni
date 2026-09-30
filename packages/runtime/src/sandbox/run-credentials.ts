@@ -373,18 +373,8 @@ export function normalizeRunCredentialsResolution(
     // through errors that a worker may publish or log.
     throw new RunCredentialValidationError("run MCP credential material is invalid");
   }
-  if (
-    parsedMcp.data.some(
-      (entry) =>
-        entry.expiresAt !== undefined &&
-        (!Number.isFinite(Date.parse(entry.expiresAt)) ||
-          Date.parse(entry.expiresAt) <= now.getTime()),
-    )
-  ) {
-    throw new RunCredentialValidationError(
-      "run MCP credential expiry is invalid or already expired",
-    );
-  }
+  // Per-target expiry is enforced by the attempt-local MCP controller. A
+  // stale or unselected entry must not prevent unrelated sandbox material.
   return {
     environment,
     files: normalizedFiles,

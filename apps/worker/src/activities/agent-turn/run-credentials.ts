@@ -12,6 +12,7 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
   RunMcpCredentials,
+  selectedSessionRemoteMcpTargets,
 } from "@opengeni/runtime";
 import { codemodeWorkspaceUrl, type Settings } from "@opengeni/config";
 import {
@@ -71,6 +72,7 @@ import type {
 } from "./turn-context";
 
 export type PrepareRunCredentialsDeps = {
+  localMcpServerIds?: readonly string[];
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
@@ -151,9 +153,10 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   const runCredentialResolver = await waitForTurnOperation(
     bindRunCredentialResolver({
       db,
-      settings,
+      settings: runSettings,
       initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
       connectionCredentials: connectionCredentials ?? null,
+      localMcpServerIds: deps.localMcpServerIds ?? [],
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       session,
@@ -202,9 +205,17 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         undefined,
       )
     : null;
-  const runMcpCredentials = new RunMcpCredentials(session.mcpServers ?? [], {
-    ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-  });
+  const runMcpCredentials = new RunMcpCredentials(
+    selectedSessionRemoteMcpTargets(
+      runSettings,
+      session.mcpServers ?? [],
+      turn.tools ?? [],
+      (deps.localMcpServerIds ?? []).map((id) => ({ id })),
+    ),
+    {
+      ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+    },
+  );
   renewals.runMcpCredentials = runMcpCredentials;
   runMcpCredentials.replace(initialRunCredentialMaterial);
   let currentRunCredentialMaterial = initialRunCredentialMaterial;

@@ -1,4 +1,7 @@
-import { CredentialProviderMcpMaterial } from "@opengeni/contracts";
+import {
+  CredentialProviderMcpMaterial,
+  normalizeCredentialProviderMcpUrl,
+} from "@opengeni/contracts";
 
 export type RunMcpCredentialTarget = { id: string; url: string };
 export type RunMcpCredentialMaterial = {
@@ -19,6 +22,7 @@ export class RunMcpCredentialError extends Error {
  */
 export class RunMcpCredentials {
   #entries = new Map<string, { headers: Record<string, string>; expiresAt: number | null }>();
+  #managed = new Set<string>();
   readonly #targets: readonly RunMcpCredentialTarget[];
   readonly #signal: AbortSignal | undefined;
   #remoteTargets: readonly RunMcpCredentialTarget[] | undefined;
@@ -39,6 +43,7 @@ export class RunMcpCredentials {
   close(): void {
     this.#closed = true;
     this.#entries.clear();
+    this.#managed.clear();
     this.#signal?.removeEventListener("abort", this.#onAbort);
   }
 
@@ -57,16 +62,26 @@ export class RunMcpCredentials {
     if (!parsed.success) {
       throw new RunMcpCredentialError("Run MCP credential material is invalid");
     }
+    let skipped = 0;
+    const retained = new Set<string>();
+    const managed = new Set<string>();
     for (const entry of parsed.data) {
       const matches = (this.#remoteTargets ?? this.#targets).filter(
-        (target) => target.id === entry.server || target.url === entry.server,
+        (target) => normalizedUrl(target.url) === entry.url,
       );
-      if (matches.length !== 1) {
-        throw new RunMcpCredentialError("Run MCP credential target is unmatched or ambiguous");
+      if (
+        matches.length !== 1 ||
+        parsed.data.filter((candidate) => candidate.url === entry.url).length !== 1
+      ) {
+        skipped += 1;
+        continue;
       }
       const id = matches[0]!.id;
+      managed.add(id);
       if (next.has(id)) {
-        throw new RunMcpCredentialError("Run MCP credential target is declared twice");
+        skipped += 1;
+        next.delete(id);
+        continue;
       }
       const expiry = entry.expiresAt ? Date.parse(entry.expiresAt) : null;
       const expiresAt =
@@ -74,7 +89,9 @@ export class RunMcpCredentials {
           ? (material?.expiresAt?.getTime() ?? null)
           : Math.min(expiry, material?.expiresAt?.getTime() ?? Infinity);
       if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= this.#now())) {
-        throw new RunMcpCredentialError("Run MCP credential expiry is invalid or already expired");
+        skipped += 1;
+        retained.add(id);
+        continue;
       }
       next.set(id, { headers: { ...entry.headers }, expiresAt });
     }
@@ -82,13 +99,26 @@ export class RunMcpCredentials {
       this.#assertOpen();
       // Tool construction can exclude a local route while a sandbox write is
       // pending. Recheck the narrowed transport set at the atomic commit too.
-      if (
-        this.#remoteTargets &&
-        [...next.keys()].some((id) => !this.#remoteTargets!.some((target) => target.id === id))
-      ) {
-        throw new RunMcpCredentialError("Run MCP credentials require a selected remote target");
+      for (const id of next.keys()) {
+        if (this.#remoteTargets && !this.#remoteTargets.some((target) => target.id === id)) {
+          next.delete(id);
+          skipped += 1;
+        }
+      }
+      // Skipping one target must not disable valid siblings, and retained
+      // material still fails closed at its original expiry.
+      if (skipped) {
+        for (const [id, entry] of this.#entries) {
+          if (!next.has(id) && (retained.has(id) || !managed.has(id))) next.set(id, entry);
+        }
       }
       this.#entries = next;
+      for (const id of managed) {
+        if (!this.#remoteTargets || this.#remoteTargets.some((target) => target.id === id)) {
+          this.#managed.add(id);
+        }
+      }
+      this.#warnSkipped(skipped);
     };
   }
 
@@ -98,28 +128,55 @@ export class RunMcpCredentials {
 
   /** Refuse credentials for omitted, local, or rewritten server routes. */
   assertRemoteTargets(targets: readonly RunMcpCredentialTarget[]): void {
-    for (const id of this.#entries.keys()) {
-      const original = this.#targets.find((target) => target.id === id);
-      if (!targets.some((target) => target.id === id && target.url === original?.url)) {
-        throw new RunMcpCredentialError("Run MCP credentials require a selected remote target");
-      }
-    }
     this.#remoteTargets = this.#targets.filter((original) =>
-      targets.some((target) => target.id === original.id && target.url === original.url),
+      targets.some(
+        (target) =>
+          target.id === original.id &&
+          normalizedUrl(target.url) !== null &&
+          normalizedUrl(target.url) === normalizedUrl(original.url),
+      ),
     );
+    this.#dropExcluded();
   }
 
   excludeLocalTarget(id: string): void {
-    if (this.has(id)) {
-      throw new RunMcpCredentialError("Run MCP credentials require a remote MCP transport");
-    }
     this.#remoteTargets = (this.#remoteTargets ?? this.#targets).filter(
       (target) => target.id !== id,
     );
+    this.#dropExcluded();
+  }
+
+  #dropExcluded(): void {
+    let skipped = 0;
+    for (const id of this.#managed) {
+      if (!this.#remoteTargets?.some((target) => target.id === id)) {
+        this.#entries.delete(id);
+        this.#managed.delete(id);
+        skipped += 1;
+      }
+    }
+    this.#warnSkipped(skipped);
+  }
+
+  #warnSkipped(count: number): void {
+    if (!count) return;
+    console.warn("Run MCP credential entries skipped", {
+      reason: "unmatched_or_unselected_or_ambiguous_or_local_target",
+      count,
+    });
   }
 
   has(id: string): boolean {
-    return this.#entries.has(id);
+    return this.#managed.has(id);
+  }
+
+  assertAvailable(id: string): void {
+    this.#assertOpen();
+    if (!this.#managed.has(id)) return;
+    const entry = this.#entries.get(id);
+    if (!entry || (entry.expiresAt !== null && entry.expiresAt <= this.#now())) {
+      throw new RunMcpCredentialError("MCP authentication unavailable: provider renewal required");
+    }
   }
 
   /** Called at the literal fetch boundary, including POST, SSE GET and DELETE. */
@@ -129,16 +186,19 @@ export class RunMcpCredentials {
     init?: RequestInit,
   ): RequestInit | undefined {
     this.#assertOpen();
+    this.assertAvailable(target.id);
     const entry = this.#entries.get(target.id);
     if (!entry) return init;
     const destination = input instanceof Request ? input.url : String(input);
-    if (new URL(destination).href !== new URL(target.url).href) {
+    const original = (this.#remoteTargets ?? this.#targets).find(
+      (candidate) => candidate.id === target.id,
+    );
+    if (
+      !original ||
+      normalizedUrl(destination) !== normalizedUrl(original.url) ||
+      normalizedUrl(target.url) !== normalizedUrl(original.url)
+    ) {
       throw new RunMcpCredentialError("Run MCP credential request destination changed");
-    }
-    if (entry.expiresAt !== null && entry.expiresAt <= this.#now()) {
-      // The transport's immutable static headers remain the fallback; the old
-      // provider material is never injected into requestInit in the first place.
-      return init;
     }
     const headers = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
@@ -153,5 +213,13 @@ export class RunMcpCredentials {
           }
         : {}),
     };
+  }
+}
+
+function normalizedUrl(value: string): string | null {
+  try {
+    return normalizeCredentialProviderMcpUrl(value);
+  } catch {
+    return null;
   }
 }

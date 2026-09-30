@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
-import type { RunCredentialsRequest } from "@opengeni/contracts";
+import * as database from "@opengeni/db";
+import { verifyOpenGeniSignature, type RunCredentialsRequest } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import {
   credentialProviderRequestBody,
@@ -32,13 +33,103 @@ const settings = testSettings({
 });
 const secret = "signing-secret";
 const row = {
+  id: "provider",
+  workspaceId: scope.workspaceId,
   enabled: true,
   url: "https://product.example/credentials",
   timeoutMs: 2000,
   secretEncrypted: encryptEnvironmentValue(environmentsEncryptionKeyBytes(settings)!, secret),
 };
 
+afterEach(() => mock.restore());
+
 describe("worker integration adapter without PostgreSQL", () => {
+  test("a paused workspace registration suppresses the deployment credential port", async () => {
+    spyOn(database, "resolveWorkspaceCredentialProvider").mockResolvedValue({
+      ...row,
+      enabled: false,
+    } as never);
+    spyOn(database, "getSessionRootId").mockResolvedValue(scope.sessionId);
+    let called = false;
+    const resolver = await bindRunCredentialResolver({
+      db: {} as Database,
+      settings,
+      ...scope,
+      session: { id: scope.sessionId, mcpServers: [] } as never,
+      turn: { id: "turn", initiator: input.initiator, initiatorContext: {}, tools: [] } as never,
+      attemptId: "attempt",
+      effectiveSandboxBackend: "docker",
+      variableSet: null,
+      connectionCredentials: {
+        runCredentials: async () => {
+          called = true;
+          return { status: "ok", ...scope, environment: { TOKEN: "must-not-be-used" } };
+        },
+      },
+    });
+    expect(resolver).not.toBeNull();
+    expect(await resolver!.resolve({ purpose: "provision", forceRefresh: false })).toBeNull();
+    expect(called).toBe(false);
+  });
+
+  test("disabled workspace overrides return explicit opt-out without invoking a provider", async () => {
+    const resolver = await workspaceCredentialProviderResolver(
+      {} as Database,
+      settings,
+      scope,
+      null,
+      {
+        resolveProvider: async () => ({ ...row, enabled: false }) as never,
+        fetch: async () => {
+          throw new Error("paused provider must not be called");
+        },
+      },
+    );
+    expect(resolver).not.toBeNull();
+    expect(await resolver!(input)).toEqual({ status: "not_applicable", ...scope });
+  });
+
+  test("renewal uses the rotated signing secret and never switches to another registration", async () => {
+    let current = row;
+    const signatures: { body: string; signature: string | null }[] = [];
+    const resolver = await workspaceCredentialProviderResolver(
+      {} as Database,
+      settings,
+      scope,
+      null,
+      {
+        resolveProvider: async () => current as never,
+        resolveHuman: async () => null,
+        fetch: async (_url, init) => {
+          signatures.push({
+            body: String(init?.body),
+            signature: new Headers(init?.headers).get("OpenGeni-Signature"),
+          });
+          return Response.json({ status: "ok" });
+        },
+      },
+    );
+    await resolver!(input);
+    current = {
+      ...row,
+      secretEncrypted: encryptEnvironmentValue(
+        environmentsEncryptionKeyBytes(settings)!,
+        "rotated-secret",
+      ),
+    };
+    await resolver!({ ...input, purpose: "renewal" });
+    expect(await verifyOpenGeniSignature({ ...signatures[0]!, secret })).toBe(true);
+    expect(await verifyOpenGeniSignature({ ...signatures[1]!, secret: "rotated-secret" })).toBe(
+      true,
+    );
+    expect(await verifyOpenGeniSignature({ ...signatures[1]!, secret })).toBe(false);
+    current = { ...current, id: "inherited-other-provider" };
+    expect(await resolver!({ ...input, purpose: "renewal" })).toEqual({
+      status: "not_applicable",
+      ...scope,
+    });
+    expect(signatures).toHaveLength(2);
+  });
   test("sandbox-free turns do not expand deployment run-credential port use", async () => {
     let called = false;
     const resolver = await bindRunCredentialResolver({
@@ -75,8 +166,10 @@ describe("worker integration adapter without PostgreSQL", () => {
       human.subjectId,
       {
         resolveProvider: async () => row as never,
-        resolveHuman: async (_db, receivedScope, subject) => {
+        mcpServers: [{ id: "custom", url: "https://product.example/mcp" }],
+        resolveHuman: async (_db, receivedScope, subject, turnId) => {
           expect(receivedScope).toMatchObject(scope);
+          expect(turnId).toBe(input.turnId);
           seenSubject = subject;
           return human;
         },
@@ -84,7 +177,7 @@ describe("worker integration adapter without PostgreSQL", () => {
           seenBody = JSON.parse(String(init?.body));
           return Response.json({
             status: "ok",
-            mcp: [{ server: "custom", headers: { Authorization: "mcp-secret" } }],
+            mcp: [{ url: "https://product.example/mcp", headers: { Authorization: "mcp-secret" } }],
           });
         },
       },
@@ -95,6 +188,8 @@ describe("worker integration adapter without PostgreSQL", () => {
       initiatingHumanSubjectId: "accepted-human",
       initiatingHuman: human,
       initiator: input.initiator,
+      lane: "workspace",
+      mcpServers: [{ id: "custom", url: "https://product.example/mcp" }],
     });
     const material = normalizeRunCredentialsResolution(resolution, scope)!;
     expect(material.mcp?.[0]?.headers.Authorization).toBe("mcp-secret");
@@ -125,7 +220,7 @@ describe("worker integration adapter without PostgreSQL", () => {
         fetch: async () =>
           Response.json({
             status: "ok",
-            mcp: [{ server: "custom", headers: { Host: "do-not-leak" } }],
+            mcp: [{ url: "https://product.example/mcp", headers: { Host: "do-not-leak" } }],
           }),
       },
     );
@@ -151,5 +246,25 @@ describe("worker integration adapter without PostgreSQL", () => {
       },
     );
     expect(resolver).toBeNull();
+  });
+
+  test("organization provider posts its lane and no targets for an unattached session", async () => {
+    let body: Record<string, unknown> | undefined;
+    const resolver = await workspaceCredentialProviderResolver(
+      {} as Database,
+      settings,
+      scope,
+      null,
+      {
+        resolveProvider: async () => ({ ...row, workspaceId: null }) as never,
+        resolveHuman: async () => null,
+        fetch: async (_url, init) => {
+          body = JSON.parse(String(init?.body));
+          return Response.json({ status: "ok" });
+        },
+      },
+    );
+    await resolver!(input);
+    expect(body).toMatchObject({ lane: "organization", mcpServers: [] });
   });
 });

@@ -73,9 +73,15 @@ export function credentialProviderRequestBody(
   input: RunCredentialsRequest,
   initiatingHumanSubjectId: string | null,
   initiatingHuman: CredentialProviderRequest["initiatingHuman"] = null,
+  selection: Pick<CredentialProviderRequest, "lane" | "mcpServers"> = {
+    lane: "workspace",
+    mcpServers: [],
+  },
 ): CredentialProviderRequest {
   return {
     type: "credentials.request",
+    lane: selection.lane,
+    mcpServers: selection.mcpServers.map(({ id, url }) => ({ id, url })),
     purpose: input.purpose,
     forceRefresh: input.forceRefresh,
     accountId: input.accountId,
@@ -136,6 +142,8 @@ export type WorkspaceCredentialProviderDeps = {
   fetch?: typeof pinnedFetch;
   resolveProvider?: typeof resolveWorkspaceCredentialProvider;
   resolveHuman?: typeof resolveInitiatingHuman;
+  /** Trusted selected session-attached remote targets, frozen by the worker. */
+  mcpServers?: readonly { id: string; url: string }[];
 };
 
 /**
@@ -152,35 +160,59 @@ export async function workspaceCredentialProviderResolver(
   deps: WorkspaceCredentialProviderDeps = {},
 ): Promise<WorkspaceRunCredentialResolver | null> {
   const row = await (deps.resolveProvider ?? resolveWorkspaceCredentialProvider)(db, scope);
-  if (!row?.enabled) return null;
-  const initiatingHuman = await (deps.resolveHuman ?? resolveInitiatingHuman)(
-    db,
-    scope,
-    initiatingHumanSubjectId,
-  );
+  if (!row) return null;
+  if (!row.enabled) {
+    // A disabled workspace override is an explicit pause, not an absent
+    // provider. Return a resolver so the deployment port cannot be borrowed.
+    return async (input) => ({
+      status: "not_applicable",
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+    });
+  }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new CredentialProviderError(
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required to use a workspace credential provider",
     );
   }
-  const secret = decryptEnvironmentValue(key, row.secretEncrypted);
   const fetchImpl = deps.fetch ?? pinnedFetch;
   const network: OutboundNetworkSettings = settings;
+  const selection = {
+    lane:
+      "workspaceId" in row && row.workspaceId !== null
+        ? ("workspace" as const)
+        : ("organization" as const),
+    mcpServers: (deps.mcpServers ?? []).map(({ id, url }) => ({ id, url })),
+  };
   return async (input) => {
     const echo = {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
     };
+    // Rotation and disabling take effect on the next outbound request. Never
+    // switch registration mid-attempt if deletion exposes an inherited row.
+    const current = await (deps.resolveProvider ?? resolveWorkspaceCredentialProvider)(db, scope);
+    if (!current?.enabled || current.id !== row.id) {
+      return { status: "not_applicable", ...echo };
+    }
+    const secret = decryptEnvironmentValue(key, current.secretEncrypted);
+    const initiatingHuman = await (deps.resolveHuman ?? resolveInitiatingHuman)(
+      db,
+      scope,
+      initiatingHumanSubjectId,
+      input.turnId,
+    );
     const body = JSON.stringify(
-      credentialProviderRequestBody(input, initiatingHumanSubjectId, initiatingHuman),
+      credentialProviderRequestBody(input, initiatingHumanSubjectId, initiatingHuman, selection),
     );
     let status: number;
     let text: string;
     try {
       const response = await fetchImpl(
-        row.url,
+        current.url,
         {
           method: "POST",
           headers: {
@@ -189,7 +221,7 @@ export async function workspaceCredentialProviderResolver(
             [OPENGENI_SIGNATURE_HEADER]: await signOpenGeniPayload(secret, body),
           },
           body,
-          signal: AbortSignal.timeout(row.timeoutMs),
+          signal: AbortSignal.timeout(current.timeoutMs),
         },
         network,
         { label: "Workspace credential provider", requireHttpsOutsideLocalTest: true },

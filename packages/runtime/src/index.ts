@@ -4,7 +4,8 @@ import {
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
-import { RunMcpCredentials } from "./mcp-run-credentials";
+import { RunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
+import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
@@ -3988,10 +3989,11 @@ export type PrepareToolsOptions = {
   // Immutable human authority used only for subject-owned connection lookup.
   // This is intentionally separate from the worker's first-party MCP identity.
   credentialSubjectId?: string;
-  // The turn's frozen causal human, advertised to MCP servers in the
-  // `_meta.opengeni` identity of every tools/call. Informational, never authority.
+  // The turn's frozen causal human. Informational, never authority.
   initiatingHumanSubjectId?: string | null;
   initiatingHumanExternalIdentity?: { source: string; externalId: string } | null;
+  /** Trusted selected session-attached remote identities, never workspace defaults. */
+  sessionAttachedRemoteMcpTargets?: readonly { id: string; url: string }[];
   /** Renewable, attempt-local headers; never copied into the MCP registry. */
   runMcpCredentials?: RunMcpCredentials;
   // Overrides the fixed first-party MCP permission set for this session's
@@ -4342,6 +4344,13 @@ export async function prepareAgentTools(
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
+  const identityTargets = selectedSessionRemoteMcpTargets(
+    settings,
+    options.sessionAttachedRemoteMcpTargets ?? [],
+    tools,
+    options.localMcpServers,
+  );
+  options = { ...options, sessionAttachedRemoteMcpTargets: identityTargets };
   options.runMcpCredentials?.assertRemoteTargets(
     settings.mcpServers.filter(
       (config) =>
@@ -4442,6 +4451,7 @@ export async function prepareAgentTools(
             if (!options.runMcpCredentials?.has(config.id)) throw error;
             // Transport failures may echo request headers in their message or
             // cause chain. This exception can reach required-tool history.
+            // eslint-disable-next-line preserve-caught-error -- the raw cause can expose credentials
             throw new Error("MCP credentialed transport request failed");
           }
           if (!response.ok && options.runMcpCredentials?.has(config.id)) {
@@ -4573,6 +4583,7 @@ export async function prepareAgentTools(
               ? options.refreshOwnedCommand
               : undefined,
             options.mcpAccountLabels?.get(config.id),
+            options.runMcpCredentials,
           ),
           config,
           options,
@@ -4945,6 +4956,57 @@ function attemptToolScope(options: PrepareToolsOptions): AttemptToolScope | null
   };
 }
 
+/** Narrow trusted attachments to exact selected remote routes, never ID aliases. */
+export function selectedSessionRemoteMcpTargets(
+  settings: Settings,
+  attachments: readonly { id: string; url: string }[],
+  tools: readonly ToolRef[],
+  localServers: readonly Pick<LocalMcpServerRegistration, "id">[] = [],
+): { id: string; url: string }[] {
+  return attachments.flatMap((target) => {
+    const url = normalizedCredentialTargetUrl(target.url);
+    if (
+      !url ||
+      !tools.some((tool) => tool.kind === "mcp" && tool.id === target.id) ||
+      localServers.some((server) => server.id === target.id)
+    ) {
+      return [];
+    }
+    const configs = settings.mcpServers.filter(
+      (config) => config.id === target.id && normalizedCredentialTargetUrl(config.url) === url,
+    );
+    if (configs.length !== 1) return [];
+    const config = configs[0]!;
+    if (
+      isFirstPartyMcpServer(settings, config) ||
+      isCodexAppsMcpServer(config) ||
+      BUILT_IN_MCP_BRIDGE_ADAPTERS.some((adapter) =>
+        adapter.matches({
+          url: config.url,
+          ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
+        }),
+      )
+    ) {
+      return [];
+    }
+    if (
+      attachments.filter((candidate) => normalizedCredentialTargetUrl(candidate.url) === url)
+        .length !== 1
+    ) {
+      return [];
+    }
+    return [{ id: target.id, url }];
+  });
+}
+
+function normalizedCredentialTargetUrl(value: string): string | null {
+  try {
+    return normalizeCredentialProviderMcpUrl(value);
+  } catch {
+    return null;
+  }
+}
+
 async function prepareAttemptToolEnvironment(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
@@ -4953,14 +5015,20 @@ async function prepareAttemptToolEnvironment(
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
-  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry, {
-    workspaceId: scope.workspaceId,
-    sessionId: scope.sessionId,
-    turnId: scope.turnId,
-    attemptId: scope.attemptId,
-    initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
-    initiatingHumanExternalIdentity: options.initiatingHumanExternalIdentity ?? null,
-  });
+  const prepared = await prepareToolGatewayDefinitionsFromServers(
+    servers,
+    registry,
+    {
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      attemptId: scope.attemptId,
+      initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
+      initiatingHumanExternalIdentity: options.initiatingHumanExternalIdentity ?? null,
+    },
+    options.sessionAttachedRemoteMcpTargets,
+    options.runMcpCredentials,
+  );
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
       ...prepared.definitions.map((definition) => ({
@@ -5219,6 +5287,8 @@ async function prepareToolGatewayDefinitionsFromServers(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
   callIdentity?: McpCallIdentity,
+  externalIdentityTargets: readonly { id: string; url: string }[] = [],
+  runMcpCredentials?: RunMcpCredentials,
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: ToolGatewayDefinition[];
@@ -5237,6 +5307,29 @@ async function prepareToolGatewayDefinitionsFromServers(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
     async ({ server, config }): Promise<ToolGatewayDefinition[]> => {
+      const internalIdentity = callIdentity ? { ...callIdentity } : undefined;
+      if (internalIdentity) delete internalIdentity.initiatingHumanExternalIdentity;
+      const serverIdentity = callIdentity
+        ? {
+            workspaceId: callIdentity.workspaceId,
+            sessionId: callIdentity.sessionId,
+            turnId: callIdentity.turnId,
+            attemptId: callIdentity.attemptId,
+            initiatingHumanSubjectId: callIdentity.initiatingHumanSubjectId,
+            ...internalIdentity,
+            ...(externalIdentityTargets.some(
+              (target) =>
+                target.id === config.id &&
+                normalizedCredentialTargetUrl(target.url) ===
+                  normalizedCredentialTargetUrl(config.url),
+            )
+              ? {
+                  initiatingHumanExternalIdentity:
+                    callIdentity.initiatingHumanExternalIdentity ?? null,
+                }
+              : {}),
+          }
+        : undefined;
       const listed = await server.freezeTools();
       return listed.map((tool) => {
         const toolName = server.unprefixedToolName(tool.name);
@@ -5273,11 +5366,20 @@ async function prepareToolGatewayDefinitionsFromServers(
               }
             : {}),
           execute: async (args, context) => {
+            try {
+              runMcpCredentials?.assertAvailable(config.id);
+            } catch (error) {
+              if (!(error instanceof RunMcpCredentialError)) throw error;
+              return {
+                isError: true,
+                content: [{ type: "text", text: error.message }],
+              };
+            }
             const execute = async () =>
               await server.executeCatalogTool(
                 toolName,
                 args,
-                attemptToolCallMeta(server.registryId, context, callIdentity),
+                attemptToolCallMeta(server.registryId, context, serverIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                 },
@@ -5334,7 +5436,13 @@ export function attemptToolCallMeta(
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
-    ...(callIdentity ? { opengeni: { ...callIdentity } } : {}),
+    ...(callIdentity
+      ? {
+          opengeni: Object.fromEntries(
+            Object.entries(callIdentity).filter(([, value]) => value !== undefined),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -7235,6 +7343,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
     private readonly accountLabel?: string,
+    private readonly runMcpCredentials?: RunMcpCredentials,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -7562,6 +7671,7 @@ export class PrefixedMcpServer implements MCPServer {
     const completeWait =
       unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait() : undefined;
     try {
+      this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         const projected = this.inner.callToolResult
           ? await this.inner.callToolResult(unprefixed, callArgs, meta, options)
@@ -7614,6 +7724,13 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      if (error instanceof RunMcpCredentialError) {
+        recordOutcome("auth_needed");
+        return boundedMcpToolResult({
+          isError: true,
+          content: [{ type: "text", text: error.message }],
+        });
+      }
       // A brokered tools/call that receives 401 may already have changed provider
       // state. The broker refreshed credentials for future requests but did not
       // replay this call. Preserve that ambiguity as an explicit model-visible

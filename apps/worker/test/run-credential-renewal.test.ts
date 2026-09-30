@@ -46,7 +46,7 @@ describe("host-managed run credential renewal", () => {
       ...material("unrelated", new Date(now + 3_600_000)),
       mcp: [
         {
-          server: "custom",
+          url: target.url,
           headers: { authorization: "initial" },
           expiresAt: new Date(now + 600_000).toISOString(),
         },
@@ -80,20 +80,20 @@ describe("host-managed run credential renewal", () => {
     ).toBe("initial");
   });
 
-  test("failed MCP target renewal retains the last valid headers and redacts its failure", async () => {
+  test("skipped MCP target renewal retains the last valid headers without failing renewal", async () => {
     const scheduler = fakeScheduler();
     const target = { id: "custom", url: "https://product.example/mcp" };
     const credentials = new RunMcpCredentials([target]);
     credentials.replace({
       expiresAt: null,
-      mcp: [{ server: "custom", headers: { authorization: "initial" } }],
+      mcp: [{ url: target.url, headers: { authorization: "initial" } }],
     });
     const failures: unknown[] = [];
     const controller = startRunCredentialRenewalLoop({
       initialExpiresAt: null,
       resolve: async () => ({
         ...material(""),
-        mcp: [{ server: "unknown", headers: { authorization: "secret-invalid" } }],
+        mcp: [{ url: "https://unknown.example/mcp", headers: { authorization: "secret-invalid" } }],
       }),
       write: async (next) => credentials.replace(next),
       schedule: scheduler.schedule,
@@ -104,9 +104,7 @@ describe("host-managed run credential renewal", () => {
     expect(
       new Headers(credentials.requestInit(target, target.url)!.headers).get("authorization"),
     ).toBe("initial");
-    expect(failures).toEqual([
-      { retryDelayMs: 5000, errorClass: "RunCredentialRenewalOperationError" },
-    ]);
+    expect(failures).toEqual([]);
     expect(JSON.stringify(failures)).not.toContain("secret-invalid");
     await controller.stop();
   });

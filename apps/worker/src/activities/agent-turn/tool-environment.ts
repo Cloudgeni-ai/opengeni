@@ -30,6 +30,7 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   type OpenGeniRuntime,
   type RunMcpCredentials,
+  selectedSessionRemoteMcpTargets,
   type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
@@ -1079,7 +1080,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     });
   };
   const initiatingHuman = await waitForTurnOperation(
-    resolveInitiatingHuman(db, deps.connectionScope, turn.initiatingHumanSubjectId ?? null),
+    resolveInitiatingHuman(
+      db,
+      deps.connectionScope,
+      turn.initiatingHumanSubjectId ?? null,
+      turn.id,
+    ),
     cancellationSignal,
     undefined,
   );
@@ -1101,6 +1107,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
         initiatingHumanExternalIdentity: initiatingHuman?.externalIdentity ?? null,
+        sessionAttachedRemoteMcpTargets: selectedSessionRemoteMcpTargets(
+          githubRestMcp.settings,
+          session.mcpServers ?? [],
+          turn.tools ?? [],
+          localMcpServers,
+        ),
         ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,

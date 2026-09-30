@@ -10,6 +10,7 @@ import type { Settings } from "@opengeni/config";
 import { getSessionRootId, type Database } from "@opengeni/db";
 import {
   normalizeRunCredentialsResolution,
+  selectedSessionRemoteMcpTargets,
   type NormalizedRunCredentialMaterial,
 } from "@opengeni/runtime";
 import { workspaceCredentialProviderResolver } from "./workspace-credential-provider";
@@ -27,6 +28,8 @@ export type RunCredentialResolutionContext = {
   /** Enables the workspace's configured HTTP credential provider. */
   settings?: Settings;
   initiatingHumanSubjectId?: string | null;
+  /** Installed in-process API routes must never enter a product callback. */
+  localMcpServerIds?: readonly string[];
 };
 
 export type BoundRunCredentialResolver = {
@@ -115,6 +118,14 @@ export async function bindRunCredentialResolver(
         input.settings,
         { accountId: input.accountId, workspaceId: input.workspaceId },
         input.turn.initiatingHumanSubjectId ?? null,
+        {
+          mcpServers: selectedSessionRemoteMcpTargets(
+            input.settings,
+            input.session.mcpServers ?? [],
+            input.turn.tools ?? [],
+            (input.localMcpServerIds ?? []).map((id) => ({ id })),
+          ),
+        },
       )
     : null;
   const resolver =
