@@ -181,9 +181,12 @@ export function transitiveDependencies(
 }
 
 export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
-  const projects = ["scripts/ci", "scripts/operator", "scripts/release"].filter((directory) =>
-    existsSync(join(directory, "tsconfig.json")),
-  );
+  const projects = [
+    "scripts/ci",
+    "scripts/operator",
+    "scripts/release",
+    "scripts/agent-behavior-eval",
+  ].filter((directory) => existsSync(join(directory, "tsconfig.json")));
   for (const pkg of graph.packages) {
     if (existsSync(join(pkg.dir, "tsconfig.json"))) projects.push(normalizePath(pkg.dir));
   }
