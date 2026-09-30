@@ -1,5 +1,6 @@
 import type { EditableArtifactAuthorizationPort } from "../domain/editable-artifacts/ports";
 import type { EditableArtifactService } from "../domain/editable-artifacts/service";
+import type { Database } from "@opengeni/db";
 import {
   EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
   EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
@@ -120,6 +121,8 @@ export type OpenEditableArtifactLiveInput = Readonly<{
   authorizeSourceSession?: (
     ticket: EditableArtifactLiveTicketRecord,
     permission: "read" | "edit",
+    transaction?: Database,
+    signal?: AbortSignal,
   ) => Promise<boolean>;
 }>;
 
@@ -288,6 +291,13 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
   async start(): Promise<void> {
     try {
       this.assertOpen();
+      // Deadline enforcement owns no work-queue slot and starts before any
+      // bootstrap/authorization await. A hung callback cannot retain a socket.
+      if (this.sourceSessionLeaseExpiresAt !== null) {
+        void this.runSourceSessionLease().catch((error: unknown) => {
+          if (!this.abort.signal.aborted) void this.fail(error);
+        });
+      }
       this.authorizationRevision = await this.requireRead();
       this.assertOpen();
 
@@ -946,6 +956,25 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
         scope: this.ticket.scope,
         artifactId: this.artifactId,
         actor: this.ticket.actor,
+        ...(this.ticket.sourceSessionAuthority
+          ? {
+              authorizeCommit: async (transaction) => {
+                this.assertOpen();
+                if (
+                  !this.authorizeSourceSession ||
+                  !(await this.withBoundedAuthorization((signal) =>
+                    this.authorizeSourceSession!(this.ticket, "edit", transaction, signal),
+                  ))
+                ) {
+                  throw new EditableArtifactLiveError(
+                    "permission_changed",
+                    "Editable artifact source session permission changed",
+                  );
+                }
+                this.assertOpen();
+              },
+            }
+          : {}),
         request: {
           intentBytes: frame.intentBytes.slice(),
           requestHash: frame.requestHash,
@@ -1056,28 +1085,68 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
   private async checkPermission(
     permission: "read" | "edit",
   ): Promise<Awaited<ReturnType<EditableArtifactAuthorizationPort["authorize"]>>> {
-    this.assertSourceSessionLease();
-    if (this.ticket.sourceSessionAuthority) {
-      if (
-        !this.authorizeSourceSession ||
-        !(await this.authorizeSourceSession(this.ticket, permission))
-      ) {
-        return Object.freeze({ allowed: false, revision: this.authorizationRevision });
+    const decision = await this.withBoundedAuthorization(async (signal) => {
+      if (this.ticket.sourceSessionAuthority) {
+        if (
+          !this.authorizeSourceSession ||
+          !(await this.authorizeSourceSession(this.ticket, permission, undefined, signal))
+        ) {
+          return Object.freeze({ allowed: false, revision: this.authorizationRevision });
+        }
       }
-    }
-    const decision = await this.dependencies.authorization.authorize({
-      scope: this.ticket.scope,
-      artifactId: this.artifactId,
-      actor: this.ticket.actor,
-      permission,
+      signal.throwIfAborted();
+      return await this.dependencies.authorization.authorize({
+        scope: this.ticket.scope,
+        artifactId: this.artifactId,
+        actor: this.ticket.actor,
+        permission,
+      });
     });
-    this.assertSourceSessionLease();
     if (permission === "edit" && !this.ticket.allowEdit) {
       return Object.freeze({ ...decision, allowed: false });
     }
     return decision;
   }
 
+  private async withBoundedAuthorization<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    this.assertSourceSessionLease();
+    const timeout = new AbortController();
+    const signal = AbortSignal.any([this.abort.signal, timeout.signal]);
+    // Native artifact-only sockets retain their authorization timing. Only
+    // source-bound sockets have a renewable product-session lease.
+    if (this.sourceSessionLeaseExpiresAt !== null) {
+      const budget = this.sourceSessionLeaseExpiresAt - this.dependencies.clock.now().getTime();
+      void this.dependencies.scheduler.sleep(budget, signal).then(
+        () =>
+          timeout.abort(
+            new EditableArtifactLiveError("ticket_expired", "Live authorization lease expired", {
+              retryable: true,
+            }),
+          ),
+        () => undefined,
+      );
+    }
+    try {
+      const result = await awaitLiveAuthorization(operation(signal), signal);
+      this.assertOpen();
+      return result;
+    } finally {
+      timeout.abort();
+    }
+  }
+
+  private async runSourceSessionLease(): Promise<void> {
+    while (!this.abort.signal.aborted && this.sourceSessionLeaseExpiresAt !== null) {
+      const remaining = this.sourceSessionLeaseExpiresAt - this.dependencies.clock.now().getTime();
+      if (remaining <= 0) {
+        await this.close("ticket_expired");
+        return;
+      }
+      await this.dependencies.scheduler.sleep(remaining, this.abort.signal);
+    }
+  }
   private assertSourceSessionLease(): void {
     if (
       this.sourceSessionLeaseExpiresAt !== null &&
@@ -1231,6 +1300,29 @@ class EditableArtifactLiveSessionImpl implements EditableArtifactLiveSession {
     }
     await this.close("transport_error");
   }
+}
+
+/** Settle callers on cancellation even when an embedding callback ignores it. */
+function awaitLiveAuthorization<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        if (signal.aborted) reject(signal.reason);
+        else resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function decodeClientFrame(

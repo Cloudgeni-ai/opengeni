@@ -459,6 +459,7 @@ export type ReadPersistedEditableArtifactTransactionBasisRequest = Readonly<{
   clientTransactionId: string;
   previousLocalTransactionId: string | null;
   selectiveUndoOperationIds: readonly string[];
+  authorizeCommit?: (tx: Database) => Promise<void>;
 }>;
 
 export type PersistedEditableArtifactTransactionUndoBasis = Readonly<{
@@ -497,6 +498,8 @@ export type TryCommitPersistedEditableArtifactTransactionRequest =
       expectedLifecycle: "active";
       expectedAuthorizationRevision: number;
       authorizationActor: PersistedEditableArtifactActor;
+      /** Backend authority checked on this exact commit transaction. */
+      authorizeCommit?: (tx: Database) => Promise<void>;
       actorKey: string;
       clientTransactionId: string;
       requestHash: string;
@@ -618,11 +621,29 @@ export async function hasEditableArtifactSessionLink(
   scopeInput: PersistedEditableArtifactScope,
   sessionIdInput: string,
   artifactIdInput: string,
+  options: { lockForCommit?: boolean } = {},
 ): Promise<boolean> {
   const scope = validateScope(scopeInput);
   const sessionId = validateUuid(sessionIdInput, "session id");
   const artifactId = validateStableId(artifactIdInput, "artifact id");
   return await withRlsContext(db, scope, async (tx) => {
+    if (options.lockForCommit) {
+      const rows = await rawRows<{ linked: boolean }>(
+        tx,
+        sql`select true as linked
+          from editable_artifact_session_links link
+          join sessions session
+            on session.account_id = link.account_id
+            and session.workspace_id = link.workspace_id
+            and session.id = link.session_id
+          where link.account_id = ${scope.accountId}::uuid
+            and link.workspace_id = ${scope.workspaceId}::uuid
+            and link.session_id = ${sessionId}::uuid
+            and link.artifact_id = ${artifactId}
+          for share of session, link`,
+      );
+      return rows[0]?.linked === true;
+    }
     const rows = await rawRows<{ linked: boolean }>(
       tx,
       sql`select exists (
@@ -1443,6 +1464,11 @@ export class PostgresEditableArtifactStore {
       this.db,
       scope,
       async (tx) => {
+        if (request.authorizeCommit) {
+          await request.authorizeCommit(tx);
+          await tx.execute(sql`select pg_advisory_xact_lock_shared(
+            hashtextextended(${`session-tenancy:${scope.workspaceId}`}, 0))`);
+        }
         const row = await loadArtifactRow(tx, scope, artifactId, false);
         if (!row) {
           throw new EditableArtifactPersistenceError(
@@ -1453,6 +1479,7 @@ export class PostgresEditableArtifactStore {
         const unitOfWork = new PostgresEditableArtifactUnitOfWork(tx, artifactFromRow(row));
         const priorReceipt = await unitOfWork.findReceipt(actorKey, clientTransactionId);
         if (priorReceipt) {
+          await request.authorizeCommit?.(tx);
           return Object.freeze({ kind: "existing" as const, receipt: priorReceipt });
         }
         const predecessor = previousLocalTransactionId
@@ -1470,7 +1497,10 @@ export class PostgresEditableArtifactStore {
       },
       // Every basis member must describe one MVCC snapshot, but no row lock may
       // survive the read. The pure kernel can safely run after this resolves.
-      { isolationLevel: "repeatable read", accessMode: "read only" },
+      request.authorizeCommit
+        ? { isolationLevel: "repeatable read", accessMode: "read write" }
+        : { isolationLevel: "repeatable read", accessMode: "read only" },
+      request.authorizeCommit ? "none" : "shared",
     );
   }
 
@@ -1581,6 +1611,13 @@ export class PostgresEditableArtifactStore {
       this.db,
       scope,
       async (tx) => {
+        // Live authority takes its canonical lifecycle/source locks before the
+        // aggregate. Keep every lock on this transaction through persistence.
+        if (candidate.authorizeCommit) {
+          await candidate.authorizeCommit(tx);
+          await tx.execute(sql`select pg_advisory_xact_lock_shared(
+            hashtextextended(${`session-tenancy:${scope.workspaceId}`}, 0))`);
+        }
         const row = await loadArtifactRow(tx, scope, artifactId, true);
         if (!row) {
           throw new EditableArtifactPersistenceError(
@@ -1609,6 +1646,7 @@ export class PostgresEditableArtifactStore {
           clientTransactionId,
         );
         if (priorAfterLock) {
+          await candidate.authorizeCommit?.(tx);
           return replayResult(priorAfterLock);
         }
 
@@ -1639,6 +1677,10 @@ export class PostgresEditableArtifactStore {
           return Object.freeze({ kind: "stale" as const });
         }
 
+        // Database source locks already protect durable revocation. A host
+        // callback can change while the aggregate lock waits, so refresh it
+        // again at the final write fence on the same transaction.
+        await candidate.authorizeCommit?.(tx);
         await unitOfWork.commitAppliedTransaction(candidate);
         return Object.freeze({
           kind: "committed" as const,
@@ -1646,6 +1688,7 @@ export class PostgresEditableArtifactStore {
         });
       },
       { isolationLevel: "read committed", accessMode: "read write" },
+      candidate.authorizeCommit ? "none" : "shared",
     );
   }
 

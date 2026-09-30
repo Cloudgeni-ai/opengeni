@@ -36,7 +36,7 @@ const authority: EditableArtifactLiveSourceSessionAuthority = {
 function fixture(bootstrapDelayMs = 0) {
   const frames: EditableArtifactLiveServerFrame[] = [];
   let now = Date.now();
-  let maintenance: (() => void) | undefined;
+  const sleeps = new Set<{ due: number; resolve: () => void }>();
   const clock = { now: () => new Date(now) };
   const server = new EditableArtifactLiveServer(
     {
@@ -46,10 +46,26 @@ function fixture(bootstrapDelayMs = 0) {
       tokens: new WebCryptoEditableArtifactLiveTokens(),
       clock,
       scheduler: {
-        sleep: async (_ms, signal) =>
+        sleep: async (ms, signal) =>
           await new Promise<void>((resolve, reject) => {
-            maintenance = resolve;
-            signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+            const pending = {
+              due: now + ms,
+              resolve: () => {
+                sleeps.delete(pending);
+                signal.removeEventListener("abort", abort);
+                resolve();
+              },
+            };
+            const abort = () => {
+              sleeps.delete(pending);
+              signal.removeEventListener("abort", abort);
+              reject(signal.reason);
+            };
+            if (signal.aborted) abort();
+            else {
+              sleeps.add(pending);
+              signal.addEventListener("abort", abort, { once: true });
+            }
           }),
       },
       read: {
@@ -99,6 +115,7 @@ function fixture(bootstrapDelayMs = 0) {
   const open = (
     token: string,
     authorizeSourceSession?: OpenEditableArtifactLiveInput["authorizeSourceSession"],
+    signal?: AbortSignal,
   ) =>
     server.openLive({
       token,
@@ -119,21 +136,102 @@ function fixture(bootstrapDelayMs = 0) {
         close: () => undefined,
       },
       ...(authorizeSourceSession ? { authorizeSourceSession } : {}),
+      ...(signal ? { signal } : {}),
     });
   return {
     server,
     mint,
     open,
     frames,
+    pendingSleeps: () => sleeps.size,
     async tick(milliseconds = 100) {
       now += milliseconds;
-      maintenance?.();
-      for (let count = 0; count < 20; count += 1) await Promise.resolve();
+      for (let count = 0; count < 100; count += 1) {
+        for (const pending of sleeps) if (pending.due <= now) pending.resolve();
+        await Promise.resolve();
+      }
     },
   };
 }
 
 describe("source-session-bound editor admission", () => {
+  test("caller cancellation aborts stalled authorization and cleans up all timers", async () => {
+    const f = fixture();
+    const caller = new AbortController();
+    let signal: AbortSignal | undefined;
+    let enter: () => void = () => undefined;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const opening = f.open(
+      (await f.mint()).token,
+      async (_ticket, _permission, _tx, value) => {
+        signal = value;
+        enter();
+        return await new Promise<boolean>(() => {});
+      },
+      caller.signal,
+    );
+    const rejected = opening.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await entered;
+    caller.abort(new Error("viewer closed"));
+    expect(await rejected).not.toBeNull();
+    expect(signal?.aborted).toBe(true);
+    expect(f.frames).toHaveLength(0);
+    expect(f.pendingSleeps()).toBe(0);
+  });
+  test("stalled source reauthorization cannot outlive the independent lease", async () => {
+    const f = fixture();
+    let stall = false;
+    let stalledSignal: AbortSignal | undefined;
+    let checks = 0;
+    const session = await f.open(
+      (await f.mint()).token,
+      async (_ticket, _permission, _tx, signal) => {
+        checks += 1;
+        if (!stall) return true;
+        stalledSignal = signal;
+        return await new Promise<boolean>(() => {});
+      },
+    );
+    const before = checks;
+    stall = true;
+    await f.tick(100);
+    expect(checks).toBeGreaterThan(before);
+    expect(stalledSignal?.aborted).toBe(false);
+    await f.tick(14_900);
+    expect(await session.closed).toMatchObject({ reason: "ticket_expired", retryable: true });
+    expect(stalledSignal?.aborted).toBe(true);
+    expect(f.pendingSleeps()).toBe(0);
+  });
+
+  test("stalled bootstrap authorization settles on lease expiry without emitting frames", async () => {
+    const f = fixture();
+    let signal: AbortSignal | undefined;
+    let enter: () => void = () => undefined;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const opening = f.open((await f.mint()).token, async (_ticket, _permission, _tx, value) => {
+      signal = value;
+      enter();
+      return await new Promise<boolean>(() => {});
+    });
+    // Observe the rejection immediately rather than leaving an orphaned promise.
+    const rejected = opening.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await entered;
+    await f.tick(15_000);
+    expect(await rejected).not.toBeNull();
+    expect(signal?.aborted).toBe(true);
+    expect(f.frames).toHaveLength(0);
+    expect(f.pendingSleeps()).toBe(0);
+  });
   test("authenticates the complete binding and preserves atomic one-use consumption", async () => {
     const f = fixture();
     const ticket = await f.mint();
