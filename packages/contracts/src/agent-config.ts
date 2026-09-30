@@ -1144,6 +1144,12 @@ export function legacyEffectiveAgentCapabilities(input: {
   tools: readonly ToolRef[];
   toolPolicy: SessionToolPolicy;
   humanInputEnabled: boolean;
+  /**
+   * The workspace's current omitted-tools default server ids, when known. A
+   * workspace-default session only has `files`/`docs`/connectors that are
+   * actually defaults; without this the ceiling assumes they are.
+   */
+  defaultServerIds?: Iterable<string> | undefined;
 }): ResolvedAgentCapabilities {
   const selected = new Set<AgentToolCapability>(
     input.firstPartyMcpTools.map((tool) => FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool]),
@@ -1151,7 +1157,16 @@ export function legacyEffectiveAgentCapabilities(input: {
   const ids = new Set(input.tools.map((tool) => tool.id));
   const tracksDefaults = input.toolPolicy.mode === "workspace_default";
   const excluded = new Set(input.toolPolicy.excludedMcpServerIds ?? []);
-  const serverOn = (id: string) => ids.has(id) || (tracksDefaults && !excluded.has(id));
+  const defaults = input.defaultServerIds ? new Set(input.defaultServerIds) : null;
+  const isDefault = (id: string) => defaults === null || defaults.has(id);
+  const serverOn = (id: string) =>
+    ids.has(id) || (tracksDefaults && !excluded.has(id) && isDefault(id));
+  const defaultConnector =
+    tracksDefaults &&
+    (defaults === null ||
+      [...defaults].some(
+        (id) => id !== "opengeni" && id !== "files" && id !== "docs" && !excluded.has(id),
+      ));
   return {
     webSearch: true,
     humanInput: input.humanInputEnabled,
@@ -1166,7 +1181,7 @@ export function legacyEffectiveAgentCapabilities(input: {
     workspaceFiles: serverOn("files"),
     workspaceConnectors:
       selected.has("workspaceConnectors") ||
-      tracksDefaults ||
+      defaultConnector ||
       [...ids].some((id) => id !== "opengeni" && id !== "files" && id !== "docs"),
     workspaceAdmin: selected.has("workspaceAdmin"),
   };

@@ -1528,6 +1528,13 @@ export type Session = {
   channelId: string | null;
   firstPartyMcpPermissions: string[] | null;
   firstPartyMcpTools: FirstPartyMcpToolName[];
+  /**
+   * Frozen agent configuration; null for sessions created without one (legacy
+   * behavior). Omitted by older servers.
+   */
+  agent?: ResolvedAgentConfig | null | undefined;
+  /** Capability-level view of what a configured session can use; null for legacy. */
+  effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   parentSessionId: string | null;
@@ -2068,6 +2075,7 @@ export const SESSION_EVENT_TYPES = [
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
+  "session.agent.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "codex.account.selection.changed",
@@ -2941,6 +2949,8 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  /** Agent configuration for every generated session; omitted keeps legacy behavior. */
+  agent?: AgentConfigRequest | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
@@ -3135,6 +3145,12 @@ export type CreateSessionRequest = {
   maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  /**
+   * One agent configuration: capabilities, identity, instructions alias and
+   * renderer. Omission keeps today's behavior (a child inherits its parent's).
+   * Children may only narrow. Requires the server's admission switch.
+   */
+  agent?: AgentConfigRequest | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
@@ -4099,6 +4115,8 @@ export type ClientConfig = {
    * what workspaces without their own setting get (`split` = half of sessions).
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
+  /** Agent configuration rollout and per-capability availability. */
+  agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;
   /** Client-safe hint for whether the console should offer Stripe checkout. */
   billingMode?: BillingMode | undefined;
@@ -4839,6 +4857,8 @@ export type UpdateWorkspaceSettingsRequest = {
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
   defaultSandboxImage?: string | null | undefined;
+  /** Agent defaults for new sessions; null clears. Requires the admission switch. */
+  sessionAgentDefaults?: WorkspaceAgentDefaults | null | undefined;
   [key: string]: unknown;
 };
 
@@ -5279,6 +5299,7 @@ export type NewSessionDraftOptions = {
   goal?: GoalSpec | undefined;
   firstPartyMcpPermissions?: Permission[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+  agent?: AgentConfigRequest | undefined;
 };
 
 export type NewSessionSelectionHistory = {
@@ -8508,3 +8529,131 @@ export type UpdateConnectorToolPermissionsRequest = {
   connectionId: string;
   permission: ConnectorToolPermission;
 } & ({ target: "default" } | { target: "tools"; toolNames: string[] });
+
+/** Agent capability ids (see `@opengeni/contracts` agent-config). */
+export type AgentCapabilityId =
+  | "webSearch"
+  | "humanInput"
+  | "skills"
+  | "goals"
+  | "subagents"
+  | "knowledge"
+  | "schedules"
+  | "artifacts"
+  | "browser"
+  | "media"
+  | "workspaceFiles"
+  | "workspaceConnectors"
+  | "workspaceAdmin";
+
+/** `read` reads installed Skills; `manage` also changes them. */
+export type AgentSkillsCapability = "read" | "manage" | false;
+
+export type AgentCapabilityToggles = {
+  webSearch?: boolean | undefined;
+  humanInput?: boolean | undefined;
+  skills?: AgentSkillsCapability | undefined;
+  goals?: boolean | undefined;
+  subagents?: boolean | undefined;
+  knowledge?: boolean | undefined;
+  schedules?: boolean | undefined;
+  artifacts?: boolean | undefined;
+  browser?: boolean | undefined;
+  media?: boolean | undefined;
+  workspaceFiles?: boolean | undefined;
+  workspaceConnectors?: boolean | undefined;
+  workspaceAdmin?: boolean | undefined;
+};
+
+/**
+ * `"all"`: everything this workspace offers (today's behavior). `"none"`: the
+ * session's own tools plus essentials. An object starts from one and toggles.
+ */
+export type AgentCapabilities =
+  | "all"
+  | "none"
+  | ({ from: "all" | "none" } & AgentCapabilityToggles);
+
+export type AgentRenderer = "opengeni" | "markdown";
+
+export type AgentConfigRequest = {
+  capabilities?: AgentCapabilities | undefined;
+  /** Replaces only OpenGeni's identity lines (max 8,000 chars); null = default identity. */
+  identity?: string | null | undefined;
+  /** Alias of the session `instructions` field. */
+  instructions?: string | undefined;
+  renderer?: AgentRenderer | undefined;
+};
+
+export type WorkspaceAgentDefaults = {
+  capabilities?: AgentCapabilities | undefined;
+  identity?: string | null | undefined;
+  renderer?: AgentRenderer | undefined;
+};
+
+export type ResolvedAgentCapabilities = {
+  webSearch: boolean;
+  humanInput: boolean;
+  skills: AgentSkillsCapability;
+  goals: boolean;
+  subagents: boolean;
+  knowledge: boolean;
+  schedules: boolean;
+  artifacts: boolean;
+  browser: boolean;
+  media: boolean;
+  workspaceFiles: boolean;
+  workspaceConnectors: boolean;
+  workspaceAdmin: boolean;
+};
+
+export type ResolvedAgentConfig = {
+  version: 1;
+  from: "all" | "none";
+  capabilities: ResolvedAgentCapabilities;
+  /** Capabilities wanted on but not offered by this deployment. */
+  unavailable: AgentCapabilityId[];
+  identity: string | null;
+  renderer: AgentRenderer;
+  source:
+    | "request"
+    | "workspace_default"
+    | "deployment_default"
+    | "inherited"
+    | "legacy_conversion";
+};
+
+export type AgentEffectiveTools = {
+  capabilities: ResolvedAgentCapabilities;
+  unavailable: AgentCapabilityId[];
+  tools: Array<{
+    name: string;
+    capability: AgentCapabilityId | "runtime";
+    source: "first_party" | "runtime" | "hosted";
+  }>;
+  mcpServers: Array<{
+    id: string;
+    capability: AgentCapabilityId | "runtime" | "product";
+    toolsKnown: boolean;
+  }>;
+};
+
+/** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */
+export type UpdateSessionAgentRequest = {
+  agent: AgentConfigRequest;
+  /** The session's current `toolPolicyVersion` (shared CAS). */
+  expectedVersion: number;
+};
+
+export type ClientAgentConfig = {
+  enabled: boolean;
+  defaultForNewSessions: boolean;
+  capabilities: Array<{ id: AgentCapabilityId; available: boolean; reason?: string | undefined }>;
+};
+
+/** `error.details.code` of a 422 agent-configuration failure. */
+export type AgentConfigErrorCode =
+  | "agent_capability_unavailable"
+  | "agent_config_conflict"
+  | "agent_config_widening"
+  | "agent_config_not_enabled";

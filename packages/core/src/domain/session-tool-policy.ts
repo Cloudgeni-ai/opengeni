@@ -3,6 +3,7 @@ import {
   SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH,
   mergeToolRefs,
+  projectAgentEffectiveTools,
   resolveWorkspaceSessionToolDefaults,
   type Session,
   type SessionEffectiveToolPolicy,
@@ -227,13 +228,25 @@ export function sessionWithEffectiveToolPolicy(
   for (const server of session.mcpServers) {
     availableIds.add(server.id);
   }
+  const effectiveToolPolicy = resolveSessionToolPolicy({
+    toolPolicy: session.toolPolicy,
+    sessionTools: session.tools,
+    availableMcpServerIds: availableIds,
+    defaultMcpServerIds: workspaceDefaultServerIds,
+  }).effectivePolicy;
   return {
     ...session,
-    effectiveToolPolicy: resolveSessionToolPolicy({
-      toolPolicy: session.toolPolicy,
-      sessionTools: session.tools,
-      availableMcpServerIds: availableIds,
-      defaultMcpServerIds: workspaceDefaultServerIds,
-    }).effectivePolicy,
+    effectiveToolPolicy,
+    // Configured sessions also report what they can use at capability level.
+    ...(session.agent
+      ? {
+          effectiveTools: projectAgentEffectiveTools({
+            config: session.agent,
+            firstPartyMcpTools: session.firstPartyMcpTools,
+            mcpServerIds: effectiveToolPolicy.configuredIds,
+            productServerIds: new Set(session.mcpServers.map((server) => server.id)),
+          }),
+        }
+      : {}),
   };
 }

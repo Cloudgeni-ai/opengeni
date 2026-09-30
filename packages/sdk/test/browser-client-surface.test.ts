@@ -67,6 +67,8 @@ const legacyBrowserUnusedMethods = [
   "undoGovernedLearningActivation",
   "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
+  // The session agent-configuration panel (web milestone M5) adopts this.
+  "updateSessionAgent",
   "verifyPersonalGitHubRepositorySelections",
 ];
 

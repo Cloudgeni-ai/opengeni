@@ -17,6 +17,7 @@ import { registerModelConnectionAccessRoutes } from "./routes/model-connection-a
 import {
   canonicalizeConfiguredModelId,
   codeSearchDeploymentPolicy,
+  agentConfigDeploymentPolicy,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
@@ -24,8 +25,10 @@ import {
   resolveVoiceInputProviderRegistry,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
+  type Settings,
 } from "@opengeni/config";
 import {
+  AGENT_CAPABILITY_IDS,
   ClientConfig,
   CodemodeCallRequest,
   ErrorEnvelope,
@@ -39,6 +42,7 @@ import {
   ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
   type AccessGrant,
+  type ClientAgentConfig,
   type ErrorCode,
 } from "@opengeni/contracts";
 import {
@@ -78,7 +82,11 @@ import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import {
+  ApiHttpError,
+  agentConfigHttpError,
+  workspaceControlBusyHttpError,
+} from "./http/api-error";
 import {
   isRequestBodyValidationError,
   requestBodyValidationHttpError,
@@ -1075,6 +1083,7 @@ export function createAppComposition(deps: AppDependencies): {
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        agentConfig: clientAgentConfig(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -1519,6 +1528,7 @@ export function createAppComposition(deps: AppDependencies): {
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
         : (workspaceControlBusyHttpError(rawError) ??
+          agentConfigHttpError(rawError) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           rawError);
@@ -2915,4 +2925,17 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   }
   const segments = pathname.split("/");
   return !segments.includes("mcp") && !segments.includes("codemode");
+}
+
+/** Client-safe agent-configuration rollout projection. */
+function clientAgentConfig(settings: Settings): ClientAgentConfig {
+  const policy = agentConfigDeploymentPolicy(settings);
+  return {
+    enabled: policy.admissionEnabled,
+    defaultForNewSessions: policy.defaultForNewSessions,
+    capabilities: AGENT_CAPABILITY_IDS.map((id) => {
+      const reason = policy.unavailable[id];
+      return reason === undefined ? { id, available: true } : { id, available: false, reason };
+    }),
+  };
 }

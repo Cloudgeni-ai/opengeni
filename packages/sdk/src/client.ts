@@ -517,6 +517,7 @@ import type {
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -1411,6 +1412,24 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/tool-policy`,
+      request,
+    );
+  }
+
+  /**
+   * Replace the session's agent configuration (capabilities, identity,
+   * instructions alias, renderer). Omitted fields keep their current values.
+   * Uses the tool-policy version (409 when stale) and applies from the next
+   * turn. A legacy session converts from its current effective state.
+   */
+  async updateSessionAgent(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionAgentRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/agent`,
       request,
     );
   }

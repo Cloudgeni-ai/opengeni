@@ -27,6 +27,7 @@ import {
   resolveScheduledTaskPreflightModel,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { requireAgentConfigAdmission, scheduledTaskAgentInput } from "@opengeni/core";
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
@@ -192,6 +193,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
     }
     const payload = parsedPayload.data;
+    requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -327,6 +329,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
     }
     const payload = parsedPayload.data;
+    requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,

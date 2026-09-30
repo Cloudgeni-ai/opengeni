@@ -65,6 +65,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  AGENT_IDENTITY_MAX_CHARACTERS,
   SESSION_TITLE_MAX_CHARACTERS,
   MAX_SELECTED_VARIABLE_SETS,
   sessionGoalUtf8Bytes,
@@ -151,7 +152,11 @@ import {
   HumanInputResponseValidationError,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
-import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
+import {
+  agentConfigDeploymentPolicy,
+  allowedFirstPartyMcpToolsForSession,
+  codemodeWorkspaceUrl,
+} from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -195,6 +200,7 @@ import {
   workflowIdForSession,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { requireAgentConfigAdmission, scheduledTaskAgentInput } from "@opengeni/core";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -1468,6 +1474,7 @@ export function buildOpenGeniMcpServer(
       },
       async (args) => {
         const payload = CreateScheduledTaskRequest.parse(args);
+        requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -1537,6 +1544,7 @@ export function buildOpenGeniMcpServer(
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
+        requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         const update = await validatedScheduledTaskUpdate({
           settings: deps.settings,
@@ -5140,6 +5148,43 @@ function registerWorkspaceOrchestrationTools(
   }
 
   if (can("sessions:create") && sessionCreateVisible) {
+    const capabilityToggle = z4.boolean().optional();
+    const sessionCreateAgentInput = z4
+      .object({
+        capabilities: z4
+          .union([
+            z4.enum(["all", "none"]),
+            z4
+              .object({
+                from: z4.enum(["all", "none"]),
+                webSearch: capabilityToggle,
+                humanInput: capabilityToggle,
+                skills: z4
+                  .union([z4.literal("read"), z4.literal("manage"), z4.literal(false)])
+                  .optional(),
+                goals: capabilityToggle,
+                subagents: capabilityToggle,
+                knowledge: capabilityToggle,
+                schedules: capabilityToggle,
+                artifacts: capabilityToggle,
+                browser: capabilityToggle,
+                media: capabilityToggle,
+                workspaceFiles: capabilityToggle,
+                workspaceConnectors: capabilityToggle,
+                workspaceAdmin: capabilityToggle,
+              })
+              .strict(),
+          ])
+          .optional(),
+        identity: z4.string().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS).nullable().optional(),
+        instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+        renderer: z4.enum(["opengeni", "markdown"]).optional(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Optional agent configuration for the child. Omit to inherit this session's. capabilities 'all' means everything this session has; 'none' keeps only essentials; an object starts from one and switches capabilities off (or back on within this session's own set). A child may only narrow: enabling a capability this session lacks is rejected.",
+      );
     const sessionCreateInput = z4
       .object({
         initialMessage: z4.string().min(1),
@@ -5229,6 +5274,11 @@ function registerWorkspaceOrchestrationTools(
         sandbox: z4
           .union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })])
           .optional(),
+        // Registered only while agent configuration is admitted, so a
+        // deployment with the switch off keeps a byte-identical tool schema.
+        ...(agentConfigDeploymentPolicy(deps.settings).admissionEnabled
+          ? { agent: sessionCreateAgentInput }
+          : {}),
       })
       .superRefine((value, context) => {
         if (!value.variableSetIds) return;

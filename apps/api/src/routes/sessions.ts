@@ -82,6 +82,8 @@ import {
   UpdateSessionVariableSetsRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
+  AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
@@ -305,6 +307,7 @@ import {
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
+  updateSessionAgent,
   updateSessionTitle,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
@@ -2348,6 +2351,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     try {
       const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Replace the session's agent configuration (capabilities, identity,
+  // instructions alias, renderer). Shares the tool-policy version CAS and
+  // applies from the next attempt.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/agent", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      UpdateSessionAgentRequest,
+      await c.req.json().catch(() => null),
+    );
+    try {
+      const session = await updateSessionAgent(deps, grant, sessionId, payload);
       return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
     } catch (error) {
       if (error instanceof SessionToolPolicyVersionConflictError) {
@@ -4867,6 +4899,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/mcp-credentials/rotate" && verb === "POST")
     return "session.mcp.credentials.rotate";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
@@ -5704,6 +5737,24 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         currentRevision: error.cause.currentRevision,
       },
       409,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 422 &&
+    error.cause instanceof AgentConfigError
+  ) {
+    // Typed agent-configuration failure: the specific code is details.code.
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.cause.code,
+          ...(error.cause.capability ? { capability: error.cause.capability } : {}),
+        },
+      },
+      422,
     );
   }
   if (error instanceof HTTPException && error.status === 422) {

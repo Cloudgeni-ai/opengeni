@@ -19,6 +19,7 @@ import {
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  AgentConfigError,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
@@ -127,6 +128,7 @@ import {
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   sandboxImageAllowlist,
+  agentConfigDeploymentPolicy,
   type Settings,
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
@@ -456,6 +458,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, {
         message: "invalid workspace settings patch",
       });
+    }
+    if (
+      parsed.data.sessionAgentDefaults !== undefined &&
+      !agentConfigDeploymentPolicy(deps.settings).admissionEnabled
+    ) {
+      throw new AgentConfigError(
+        "agent_config_not_enabled",
+        "agent configuration is not enabled on this deployment",
+      );
     }
     const requestedImage = parsed.data.defaultSandboxImage;
     if (requestedImage && !sandboxImageAllowlist(deps.settings).includes(requestedImage)) {

@@ -1,4 +1,4 @@
-import type { ErrorCode } from "@opengeni/contracts";
+import { AgentConfigError, type ErrorCode } from "@opengeni/contracts";
 import { WorkspaceControlBusyError } from "@opengeni/db";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
@@ -49,5 +49,29 @@ export function workspaceControlBusyHttpError(error: unknown): ApiHttpError | nu
     retryable: true,
     outcomeUnknown: false,
     details: { code: busy.code, lockTimeoutMs: busy.lockTimeoutMs },
+  });
+}
+
+/**
+ * A typed agent-configuration failure (capability unavailable, conflict,
+ * widening, not enabled). Rendered as 422 validation_failed with the specific
+ * code in `details.code` so clients can branch without parsing messages.
+ */
+export function agentConfigHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof AgentConfigError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof AgentConfigError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    details: {
+      code: cause.code,
+      ...(cause.capability ? { capability: cause.capability } : {}),
+    },
   });
 }
