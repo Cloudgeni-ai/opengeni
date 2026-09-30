@@ -11,6 +11,8 @@ export type ProviderCommandOutput = {
   expected?: ModalRouterProviderCommand;
   chunks: Array<{ stream: "stdout" | "stderr"; chunkId: string; text: string }>;
   exitCode: number | null;
+  /** The provider reports the process exited; only unread output may remain. */
+  providerExited?: boolean;
   streamFidelity?: "separate" | "merged";
 };
 

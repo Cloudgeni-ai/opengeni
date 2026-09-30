@@ -26,7 +26,10 @@ const locator = (): ModalRouterProviderCommand => ({
  * holds `total` bytes of already-written stdout. The command has exited, but
  * as on Modal, its exit is reported only once stdout is read to EOF. A
  * trickling command instead gains 1 KiB per read and never ends. */
-function retainedCommand(total: number, options: { trickle?: boolean; failAtRead?: number } = {}) {
+function retainedCommand(
+  total: number,
+  options: { trickle?: boolean; failAtRead?: number; readBytes?: number } = {},
+) {
   const control = ModalCommandControl.forSandbox(
     {
       version: () => "0.9.0",
@@ -43,7 +46,7 @@ function retainedCommand(total: number, options: { trickle?: boolean; failAtRead
           if (stream === "stderr") return { bytes: Buffer.alloc(0), eof: true };
           reads++;
           if (options.failAtRead === reads) throw new Error("provider unavailable");
-          const size = options.trickle ? 1024 : Math.min(PAGE, total - offset);
+          const size = options.trickle ? 1024 : Math.min(options.readBytes ?? PAGE, total - offset);
           return {
             bytes: Buffer.alloc(size, 120),
             eof: !options.trickle && offset + size >= total,
@@ -139,14 +142,24 @@ describe("retained command backlog drain", () => {
     expect(command.offset()).toBe(2 * PAGE);
   });
 
-  test("output past the recording limit is drained to exit with one marker", async () => {
+  test("a finished command is read to exit even when each read returns little", async () => {
+    // A cold connection or slow provider can return short pages; the provider's
+    // exit report, not the page size, says only unread output remains.
+    const command = retainedCommand(PAGE, { readBytes: 200 * 1024 });
+    expect(await command.probe()).toMatchObject({
+      status: "proved",
+      proof: { outcome: "exited", exitCode: 0 },
+    });
+    expect(command.reads()).toBe(6);
+  });
+
+  test("live output returned to the agent is not capped by the recording limit", async () => {
     const command = retainedCommand(20 * PAGE);
     let result = await command.probe();
     while (result.status === "deferred") result = await command.probe();
     expect(result).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 0 } });
     expect(command.offset()).toBe(20 * PAGE);
-    expect(command.recorded().match(/stopped recording stdout/g)).toHaveLength(1);
-    expect(command.recorded().length).toBeLessThan(17 * PAGE);
+    expect(command.recorded()).toHaveLength(20 * PAGE);
   });
 });
 

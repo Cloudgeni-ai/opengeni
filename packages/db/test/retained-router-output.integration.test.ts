@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
 import {
+  RECORDED_COMMAND_OUTPUT_LIMIT_BYTES as LIMIT,
   captureRetainedRouterOutput,
   getRetainedProviderCommand,
   reserveRetainedProviderInput,
@@ -101,6 +102,41 @@ test("concurrent overlapping pages commit one cursor and no duplicate bytes", as
   expect(output.chunks.map((chunk) => chunk.chunk).join("")).toBe(full);
   expect(output.terminal).toBe(false);
   expect((await captureRetainedRouterOutput(client.db, scope, page(full))).captured).toBe(false);
+});
+
+test("past the recording limit only the marker and the final page are recorded", async () => {
+  const { scope, original } = await fixture();
+  let cursor = original;
+  const capture = async (end: number, stdout: string, eof = false) => {
+    const command = structuredClone(cursor);
+    command.streams.stdout = { byteOffset: end, utf8Remainder: "", eof, exitCode: eof ? 1 : null };
+    if (eof) command.streams.stderr = { byteOffset: 0, utf8Remainder: "", eof, exitCode: 1 };
+    expect(
+      (
+        await captureRetainedRouterOutput(client.db, scope, {
+          expected: cursor,
+          command,
+          stdout,
+          stderr: "",
+        })
+      ).captured,
+    ).toBe(true);
+    cursor = command;
+  };
+  await capture(LIMIT - 10, "head\n");
+  await capture(LIMIT + 10, "cross\n");
+  await capture(LIMIT + 100, "middle\n");
+  await capture(LIMIT + 120, "FATAL: step 42\n", true);
+  const output = await readSessionBackgroundCommandOutput(client.db, {
+    ...scope,
+    commandId: scope.processId,
+  });
+  expect(output.chunks.map((chunk) => chunk.chunk).join("")).toBe(
+    "head\ncross\n[OpenGeni stopped recording stdout after 16 MiB; the final part will still be recorded.]\n" +
+      "[OpenGeni did not record part of this stdout after 16 MiB; its final 20 bytes follow.]\nFATAL: step 42\n",
+  );
+  const stored = (await getRetainedProviderCommand(client.db, scope)) as ModalRouterProviderCommand;
+  expect(stored.streams.stdout.byteOffset).toBe(LIMIT + 120);
 });
 
 test("a failed cursor update rolls back every output event", async () => {

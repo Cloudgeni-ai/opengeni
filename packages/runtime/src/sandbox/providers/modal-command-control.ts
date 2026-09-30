@@ -36,27 +36,6 @@ type RouterEntry = {
   idle?: ReturnType<typeof setTimeout>;
 };
 
-/** Output past this many bytes of one stream is still read, so the command's
- * exit stays observable, but it is not recorded. Without a bound, a command
- * that prints forever would grow the session event log without limit once its
- * output drains at provider speed. */
-export const MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
-
-export function recordedOutputText(
-  stream: "stdout" | "stderr",
-  startOffset: number,
-  endOffset: number,
-  text: string,
-): string {
-  const limit = MODAL_COMMAND_RECORDED_OUTPUT_LIMIT_BYTES;
-  if (endOffset <= limit) return text;
-  // Exactly one page per stream crosses or starts at the limit; stale readers
-  // are fenced by the cursor, so the marker is recorded once.
-  const marker = `[OpenGeni stopped recording ${stream} after ${limit / (1024 * 1024)} MiB. The command keeps running and its exit is still reported.]\n`;
-  if (startOffset < limit) return `${text}\n${marker}`;
-  return startOffset === limit ? marker : "";
-}
-
 /** New commands use replayable task-router byte offsets. Legacy identifiers
  * never cross that protocol boundary and are never used for new starts. */
 export class ModalCommandControl {
@@ -433,12 +412,11 @@ export class ModalCommandControl {
             eof: page.eof,
             exitCode: page.eof ? exit : null,
           };
-          const text = recordedOutputText(stream, old.byteOffset, byteOffset, decoded.text);
-          if (text)
+          if (decoded.text)
             chunks.push({
               stream,
               chunkId: `modal-router:${command.execId}:${stream}:${old.byteOffset}:${byteOffset}:${page.eof ? 1 : 0}`,
-              text,
+              text: decoded.text,
             });
         }
         return {
@@ -446,6 +424,7 @@ export class ModalCommandControl {
           expected: structuredClone(command),
           chunks,
           exitCode: next.streams.stdout.eof && next.streams.stderr.eof ? exit : null,
+          providerExited: exit !== null,
           streamFidelity: command.pty ? "merged" : "separate",
         };
       });

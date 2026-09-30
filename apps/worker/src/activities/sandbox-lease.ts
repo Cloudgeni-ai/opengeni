@@ -359,8 +359,9 @@ export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
 export const RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS = 8;
 export const RETAINED_PROCESS_OUTPUT_DRAIN_BUDGET_MS = 10_000;
 export const RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS = 60_000;
-/** A read returning at least this much output left a backlog behind it. A
- * server or watcher that only trickles output stays on ordinary backoff. */
+/** A live process whose read returned at least this much output left a backlog
+ * behind it. A server or watcher that only trickles output stays on ordinary
+ * backoff; a process the provider reports exited is always read to EOF. */
 export const RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES = 256 * 1024;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
@@ -1939,10 +1940,10 @@ type RetainedProcessProbeSession = ProviderCommandSession & {
 const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
 
 /** A command's exit is reported only after both output streams reach EOF, so a
- * finished command with a large backlog looks running until it is read. While
- * each read still returns a large page, keep reading within the per-claim and
- * per-sweep budgets, so it settles in this claim instead of one page per
- * backoff step. Every page, including `first`, is captured here. */
+ * finished command with a large backlog looks running until it is read. While a
+ * backlog remains, keep reading within the per-claim and per-sweep budgets, so
+ * it settles in this claim instead of one page per backoff step. Every page,
+ * including `first`, is captured here. */
 export async function drainRetainedCommandBacklog(
   session: RetainedProcessProbeSession,
   providerSessionId: number,
@@ -1951,7 +1952,7 @@ export async function drainRetainedCommandBacklog(
   budget?: RetainedProcessDrainBudget,
 ): Promise<RetainedProcessProbeResult> {
   // Measure before capture: capturing a byte-offset page consumes its receipt.
-  let backlog = retainedPageBytes(session, first) >= RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES;
+  let backlog = retainedBacklogRemains(session, first);
   await capturePage(first);
   let observation = classifyRetainedProcessPollResult(first, providerSessionId, session);
   if (typeof session.writeStdin !== "function") return observation;
@@ -1983,7 +1984,7 @@ export async function drainRetainedCommandBacklog(
       // classifies any provider failure through the ordinary path.
       break;
     }
-    backlog = retainedPageBytes(session, next) >= RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES;
+    backlog = retainedBacklogRemains(session, next);
     await capturePage(next);
     observation = classifyRetainedProcessPollResult(next, providerSessionId, session);
   }
@@ -1992,16 +1993,20 @@ export async function drainRetainedCommandBacklog(
     : observation;
 }
 
-/** Bytes a byte-offset page advanced on its busiest stream. Must run before the
- * page is captured, which consumes its receipt. */
-function retainedPageBytes(session: RetainedProcessProbeSession, result: unknown): number {
+/** Whether a byte-offset page leaves a backlog worth reading now: the provider
+ * reports the process exited but its output is not yet read to EOF, or a live
+ * process produced a large page. Must run before the page is captured, which
+ * consumes its receipt. Supervised commands are left to their proof path. */
+function retainedBacklogRemains(session: RetainedProcessProbeSession, result: unknown): boolean {
   const page = session.getProviderCommandOutput?.(result);
-  if (!page?.expected || page.command.kind !== "modal-router-v1") return 0;
+  if (!page?.expected || page.command.kind !== "modal-router-v1") return false;
+  if (page.command.supervision || page.exitCode !== null) return false;
+  if (page.providerExited) return true;
   const { command, expected } = page;
-  return Math.max(
-    ...(["stdout", "stderr"] as const).map(
-      (stream) => command.streams[stream].byteOffset - expected.streams[stream].byteOffset,
-    ),
+  return (["stdout", "stderr"] as const).some(
+    (stream) =>
+      command.streams[stream].byteOffset - expected.streams[stream].byteOffset >=
+      RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES,
   );
 }
 
