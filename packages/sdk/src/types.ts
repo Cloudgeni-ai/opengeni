@@ -1,5 +1,10 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 export type {
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
+} from "@opengeni/contracts";
+export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,

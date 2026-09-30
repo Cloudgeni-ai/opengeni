@@ -699,6 +699,7 @@ export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 export {
   loadIntegrationOAuthPendingState,
   storeIntegrationOAuthPendingState,
+  consumeIntegrationOAuthPendingState,
 } from "./integration-oauth-pending-states";
 export * from "./workspace-integrations";
 export {
@@ -85731,6 +85732,7 @@ export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
 export * from "./claude-subscription-usage";
+export * from "./claude-subscription-tokens";
 
 export {
   setWorkspacePauseTimerInTransaction,

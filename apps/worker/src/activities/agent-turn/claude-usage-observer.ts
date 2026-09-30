@@ -35,6 +35,17 @@ export async function createClaudeUsageObserver(
       .map(async (provider) => {
         const scope: Scope =
           provider.kind === "claude-subscription-workspace" ? "workspace" : "organization";
+        const binding = provider.anthropic?.credentialBinding;
+        if (binding && provider.apiKey)
+          return [
+            provider.id,
+            {
+              scope,
+              token: provider.apiKey,
+              expectedConnectionId: binding.connectionId,
+              expectedCredentialVersion: binding.credentialVersion,
+            },
+          ] as const;
         const credential = await readCredential(scope).catch(() => null);
         if (!credential || credential.token !== provider.apiKey) return null;
         return [
@@ -49,7 +60,7 @@ export async function createClaudeUsageObserver(
       }),
   );
   const captured = new Map(bindings.filter((binding) => binding !== null));
-  return (providerId: string, response: Response) => {
+  const observe = (providerId: string, response: Response) => {
     const binding = captured.get(providerId);
     if (!binding) return;
     const { scope, ...identity } = binding;
@@ -76,4 +87,25 @@ export async function createClaudeUsageObserver(
           : {}),
       });
   };
+  return Object.assign(observe, {
+    binding(providerId: string) {
+      return captured.get(providerId);
+    },
+    renew(
+      providerId: string,
+      credential: {
+        token: string;
+        connectionId: string;
+        credentialVersion: number;
+      },
+    ) {
+      const binding = captured.get(providerId);
+      if (
+        binding &&
+        binding.expectedConnectionId === credential.connectionId &&
+        binding.expectedCredentialVersion === credential.credentialVersion
+      )
+        captured.set(providerId, { ...binding, token: credential.token });
+    },
+  });
 }

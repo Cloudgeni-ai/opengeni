@@ -1,9 +1,6 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
-import {
-  ClaudeTokenInstructions,
-  CLAUDE_MODEL_CHOICES,
-  claudeModelLabel,
-} from "@/components/models/claude-setup";
+import { ClaudeSignInPage } from "@/components/models/claude-signin";
+import { CLAUDE_MODEL_CHOICES, claudeModelLabel } from "@/components/models/claude-setup";
 import { Disclosure } from "@/components/ui/disclosure";
 import {
   ClaudeUsage,
@@ -1180,7 +1177,11 @@ export function ReplaceKeyDialog({
       onOpenChange={onOpenChange}
       size="sm"
       leading={<ProviderTile provider={config.provider} />}
-      title={`Replace the ${config.title} ${config.credentialLabelText === "Setup token" ? "token" : "key"}`}
+      title={
+        config.provider === "claude_subscription"
+          ? "Replace Claude setup token"
+          : `Replace the ${config.title} key`
+      }
       description="New work uses the new credential right away. Work already running finishes on the old one."
       submitLabel={config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
       pendingLabel="Saving…"
@@ -1189,7 +1190,11 @@ export function ReplaceKeyDialog({
       onSubmitted={() => onOpenChange(false)}
     >
       <Field
-        label={config.credentialLabelText ?? "API key"}
+        label={
+          config.provider === "claude_subscription"
+            ? "Setup token"
+            : (config.credentialLabelText ?? "API key")
+        }
         hint={`${config.keyHelp} It's stored encrypted and never shown again.`}
       >
         <SecretInput
@@ -1303,10 +1308,20 @@ export function ProviderConnectionPage({
         state.canManageConnection ? (
           state.connected ? (
             <>
-              <RowButton onClick={() => setReplacing(true)} disabled={state.busy}>
-                {config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
+              <RowButton
+                onClick={
+                  config.provider === "claude_subscription" ? onConnect : () => setReplacing(true)
+                }
+                disabled={state.busy}
+              >
+                {config.provider === "claude_subscription" ? "Sign in again" : "Replace key"}
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
+                {config.provider === "claude_subscription" ? (
+                  <DropdownMenuItem onSelect={() => setReplacing(true)}>
+                    Replace setup token
+                  </DropdownMenuItem>
+                ) : null}
                 <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
                   <UnplugIcon />
                   Disconnect
@@ -1424,15 +1439,21 @@ export function ProviderConnectPage({
 }) {
   const { config } = state;
   const [key, setKey] = useState("");
+  if (config.provider === "claude_subscription")
+    return (
+      <ClaudeSignInPage
+        key={`${state.organization}:${state.accessTarget.organizationId ?? state.accessTarget.workspaceId}`}
+        state={state}
+        onClose={onClose}
+        onConnected={onConnected}
+        footerStart={footerStart}
+      />
+    );
   return (
     <ModelsFormPage
       backLabel={state.connected ? config.title : "Models"}
       headerAside={<ProviderTile provider={config.provider} />}
-      title={
-        state.connected
-          ? `Replace ${config.provider === "claude_subscription" ? "Claude token" : config.title + " API key"}`
-          : `Connect ${config.title}`
-      }
+      title={state.connected ? `Replace ${config.title} API key` : `Connect ${config.title}`}
       description={config.summary}
       onClose={onClose}
       submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
@@ -1454,14 +1475,9 @@ export function ProviderConnectPage({
       onSubmitted={onConnected}
     >
       <FieldStack>
-        {config.provider === "claude_subscription" ? <ClaudeTokenInstructions /> : null}
         <Field
           label={config.credentialLabelText ?? "API key"}
-          hint={
-            config.provider === "claude_subscription"
-              ? "Paste the setup token from Claude Code. It is stored encrypted. Connecting makes no model calls."
-              : `${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`
-          }
+          hint={`${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`}
         >
           <SecretInput
             value={key}

@@ -155,7 +155,8 @@ test("shared usage components explain scope errors and never claim unknown quota
   expect(container.querySelector('[data-slot="usage-meter-group"]')).not.toBeNull();
   expect(container.textContent).toContain("50% left");
   expect(container.textContent).toContain("Limit reached");
-  expect(container.textContent).toContain("Readings update when Claude is used");
+  expect(container.textContent).toContain("Usage readings update after Claude is used");
+  expect(container.textContent).toContain("Sign in again to check current usage and reset times");
   expect(
     container.querySelector('button[aria-label="Check usage now"]')?.getAttribute("aria-disabled"),
   ).toBe("true");

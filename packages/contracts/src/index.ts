@@ -1,5 +1,6 @@
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
+export * from "./claude-subscription-oauth";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
