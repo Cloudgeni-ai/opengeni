@@ -2179,14 +2179,14 @@ workspace control fence and the process -> admission -> lease row locks:
   the lease: no open turn (`queued`, `running`, `requires_action`, `recovering`,
   `waiting_capacity`, which includes a pending approval or human-input request),
   no non-closed attempt, no pending quiescence (unsettled interruption or
-  undrained attempt writer), no `wait_for_input` that has not been superseded,
-  and no unclaimed machine input that will start a turn (pending immediate
-  system updates other than command results; child lifecycle notices only with
-  an active goal). The agent registers that wait for background work it is
-  deliberately waiting on, so such a command is not abandoned; it keeps running,
-  and only the provider-deadline backstop can stop it. A wait past its deadline
-  still blocks until its timeout settlement retires it, and the inventory counts
-  idleness from the wait's end;
+  undrained attempt writer). A `wait_for_input` that has not been superseded,
+  and unclaimed machine input that will start a turn (pending immediate system
+  updates other than command results; child lifecycle notices only with an
+  active goal), are idle-clock facts: the window runs from the wait's deadline
+  and from the input's creation. A held wait therefore keeps the command
+  running, since the agent registered it for background work it is
+  deliberately waiting on, while input or a timeout settlement that a paused
+  session can never deliver cannot pin the box until the provider deadline;
 - the group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`
   (default 30 minutes; it must exceed the idle grace and, when explicit, stay
   below the rotation lead, and it must leave the reaper period plus the drain

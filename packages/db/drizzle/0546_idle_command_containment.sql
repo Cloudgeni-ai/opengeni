@@ -53,6 +53,7 @@ END $$;
 REVOKE ALL ON FUNCTION opengeni_private.clear_command_containment_reason() FROM PUBLIC;
 CREATE TRIGGER sandbox_command_containment_reason_clear
   BEFORE UPDATE ON sandbox_leases FOR EACH ROW
+  WHEN (NEW.unobservable_command_drain_ids IS NULL AND NEW.command_containment_reason IS NOT NULL)
   EXECUTE FUNCTION opengeni_private.clear_command_containment_reason();
 
 -- The SECURITY DEFINER inventory below runs as the FORCE-RLS table owner under
@@ -149,12 +150,15 @@ BEGIN
                   -- An input wait holds until its deadline; idleness counts
                   -- from the wait's end.
                   member.input_wait_until >= idle_before
-                  -- Unclaimed machine input that will start a turn.
+                  -- Unclaimed turn-starting machine input, on the idle
+                  -- clock from its creation (a paused session may never
+                  -- deliver it).
                   OR EXISTS (
                     SELECT 1 FROM %1$I.session_system_updates pending_update
                     WHERE pending_update.workspace_id = member.workspace_id
                       AND pending_update.session_id = member.id
                       AND pending_update.state = 'pending'
+                      AND pending_update.created_at >= idle_before
                       AND (pending_update.kind IN ('scheduled_occurrence', 'goal_continuation',
                           'agent_message', 'agent_steer_instruction', 'session_wait_timeout',
                           'media_generation_result')

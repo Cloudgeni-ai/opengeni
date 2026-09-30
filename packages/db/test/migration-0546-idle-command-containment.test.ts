@@ -8,6 +8,7 @@ import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
   advanceWorkspaceGeneration,
+  COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -356,4 +357,17 @@ describe("0546 idle command containment", () => {
       await owned.release();
     }
   }, 180_000);
+  test("the screen's turn-starting update kinds match the wake class map", async () => {
+    const source = await migrationSource();
+    const lists = [...source.matchAll(/pending_update\.kind IN \(([^)]*)\)/g)].map((match) =>
+      [...match[1]!.matchAll(/'([a-z_]+)'/g)].map((kind) => kind[1]).sort(),
+    );
+    expect(lists).toEqual([
+      [...COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS.always].sort(),
+      [...COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS.withActiveGoal].sort(),
+    ]);
+    expect(COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS.always).not.toContain(
+      "background_command_result",
+    );
+  });
 });

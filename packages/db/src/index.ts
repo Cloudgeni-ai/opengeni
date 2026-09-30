@@ -52566,7 +52566,11 @@ async function sandboxGroupIdleForCommandContainmentTx(
     windowMs: number;
   },
 ): Promise<boolean> {
-  const [facts] = await rawRows<{ idle: boolean; session_ids: string[] }>(
+  const [facts] = await rawRows<{
+    idle: boolean;
+    session_ids: string[];
+    idle_before: Date | string;
+  }>(
     tx,
     sql`
       with member_sessions as (
@@ -52598,16 +52602,39 @@ async function sandboxGroupIdleForCommandContainmentTx(
             (select max(turn.finished_at) from session_turns turn
               where turn.workspace_id = ${input.workspaceId}
                 and turn.session_id in (select id from member_sessions)),
+            -- Unclaimed turn-starting input is an idle-clock fact, not a
+            -- permanent blocker: input a paused session can never deliver
+            -- must not pin the box until its provider deadline.
+            (select max(pending_update.created_at) from session_system_updates pending_update
+              where pending_update.workspace_id = ${input.workspaceId}
+                and pending_update.session_id in (select id from member_sessions)
+                and pending_update.state = 'pending'
+                and (pending_update.kind in (${sql.join(
+                  COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS.always.map((kind) => sql`${kind}`),
+                  sql`, `,
+                )})
+                  or (pending_update.kind in (${sql.join(
+                    COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS.withActiveGoal.map(
+                      (kind) => sql`${kind}`,
+                    ),
+                    sql`, `,
+                  )})
+                    and exists (select 1 from session_goals goal
+                      where goal.workspace_id = pending_update.workspace_id
+                        and goal.session_id = pending_update.session_id
+                        and goal.status = 'active')))),
             (select max(coalesce(admission.settled_at, admission.admitted_at))
               from sandbox_workspace_mutation_admissions admission
               join sandbox_leases lease on lease.id = admission.lease_id
               where admission.lease_id = ${input.leaseId}
                 and admission.lease_epoch = lease.lease_epoch)
           ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false) as idle,
-        array(select id from member_sessions order by id) as session_ids
+        array(select id from member_sessions order by id) as session_ids,
+        now() - (${input.windowMs}::bigint * interval '1 millisecond') as idle_before
     `,
   );
   if (!facts?.idle) return false;
+  const idleBefore = new Date(facts.idle_before).getTime();
   const sessions = facts.session_ids.length
     ? await tx
         .select({
@@ -52625,63 +52652,42 @@ async function sandboxGroupIdleForCommandContainmentTx(
         .orderBy(schema.sessions.id)
     : [];
   for (const session of sessions) {
-    // A wait blocks until it is superseded: past its deadline it still awaits
-    // the typed timeout settlement, which starts a turn.
+    // A wait that is not superseded puts its deadline on the idle clock: held
+    // until it ends, then the window runs from the deadline, so a timeout
+    // settlement that cannot run (a paused session) never pins the box.
     const wait = await sessionInputWaitStateTx(tx, input.workspaceId, session.id, session);
     if (
-      wait.disposition === "held" ||
-      wait.disposition === "timeout" ||
+      ((wait.disposition === "held" || wait.disposition === "timeout") &&
+        session.inputWaitUntil !== null &&
+        session.inputWaitUntil.getTime() >= idleBefore) ||
       (await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
         sessionId: session.id,
-      })) ||
-      (await hasPendingTurnStartingSystemUpdateTx(tx, input.workspaceId, session.id))
+      }))
     )
       return false;
   }
   return true;
 }
 
-/** Unclaimed machine input that will start a turn in an idle session: every
- * immediate kind except terminal command results (held for the next turn) and
- * child lifecycle notices, which wake only a parent with an active goal (a
- * held wait already blocks on its own). */
-async function hasPendingTurnStartingSystemUpdateTx(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<boolean> {
-  const pending = await tx
-    .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
-    .from(schema.sessionSystemUpdates)
-    .where(
-      and(
-        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-        eq(schema.sessionSystemUpdates.sessionId, sessionId),
-        eq(schema.sessionSystemUpdates.state, "pending"),
-      ),
-    );
-  const immediate = pending
-    .map(({ kind }) => kind as SessionSystemUpdateKind)
+/** Pending machine input that would start a turn in an idle session, by the
+ * wake class map: every immediate kind except terminal command results (held
+ * for the next turn); child lifecycle notices only wake a parent with an active
+ * goal. Migration 0546's inventory screen repeats this set as SQL literals; a
+ * test pins the two together. */
+export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
+  const immediate = (
+    Object.entries(SESSION_SYSTEM_UPDATE_WAKE_CLASS) as Array<[SessionSystemUpdateKind, string]>
+  )
     .filter(
-      (kind) =>
-        SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind] === "immediate" &&
-        kind !== "background_command_result",
-    );
-  if (immediate.some((kind) => !isChildLifecycleSystemUpdateKind(kind))) return true;
-  if (!immediate.length) return false;
-  const [goal] = await tx
-    .select({ status: schema.sessionGoals.status })
-    .from(schema.sessionGoals)
-    .where(
-      and(
-        eq(schema.sessionGoals.workspaceId, workspaceId),
-        eq(schema.sessionGoals.sessionId, sessionId),
-      ),
+      ([kind, wakeClass]) => wakeClass === "immediate" && kind !== "background_command_result",
     )
-    .limit(1);
-  return goal?.status === "active";
-}
+    .map(([kind]) => kind);
+  return {
+    always: immediate.filter((kind) => !isChildLifecycleSystemUpdateKind(kind)),
+    withActiveGoal: immediate.filter((kind) => isChildLifecycleSystemUpdateKind(kind)),
+  };
+})();
 
 /** The deadline backstop's owner test is the idle rule's: a closed turn owner
  * must hold no pending quiescence (unsettled interruption or attempt writer). */

@@ -807,8 +807,8 @@ describe("idle command containment", () => {
       expect((await readLease(db, fixture.workspaceId, fixture.sandboxGroupId))?.liveness).toBe(
         "warm",
       );
-      // Past its deadline the wait still awaits its timeout settlement, which
-      // starts a turn: the command is still awaited.
+      // Just past its deadline the wait still blocks: the idle window runs from
+      // the wait's end, not from the last turn.
       await admin`update sessions set input_wait_until = now() - interval '1 second'
         where id = ${fixture.attempt.sessionId}`;
       expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
@@ -835,6 +835,30 @@ describe("idle command containment", () => {
       ).not.toContainEqual({ sandbox_group_id: fixture.sandboxGroupId });
       expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
       await admin`update session_system_updates set state = 'superseded' where id = ${update!.id}`;
+      expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    }
+    // A paused session can never deliver its pending input or settle its
+    // expired wait: both are idle-clock facts, not permanent blockers.
+    {
+      const fixture = await idleFixture();
+      await admin`update sessions set direct_control_state = 'paused',
+        direct_pause_revision = control_version,
+        input_wait_turn_id = ${fixture.attempt.turnId}, input_wait_until = now() - interval '1 minute',
+        input_wait_reason = 'waiting for the build', input_wait_set_at = now() - interval '2 hours'
+        where id = ${fixture.attempt.sessionId}`;
+      await admin`insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
+        ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.attempt.sessionId},
+          'agent_message', ${crypto.randomUUID()}, ${`paused-${crypto.randomUUID()}`},
+          'queued while paused', ${admin.json({ type: "agent_message" })})`;
+      await idleFor(fixture, 45);
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+      // Both facts age past the window while the session stays paused.
+      await admin`update sessions set input_wait_until = now() - interval '31 minutes'
+        where id = ${fixture.attempt.sessionId}`;
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+      await admin`update session_system_updates set created_at = now() - interval '31 minutes'
+        where session_id = ${fixture.attempt.sessionId} and state = 'pending'`;
       expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
     }
     // A pending approval or structured human input in any group session.
@@ -966,17 +990,25 @@ describe("idle command containment", () => {
     // never costs the exclusive workspace-control fence.
     await idleFor(fixture, 5);
     expect(await inventory()).not.toContain(fixture.sandboxGroupId);
-    // A wait whose deadline passed long ago but whose timeout is unsettled
-    // passes the coarse inventory, not exact enrollment.
-    await admin`update sessions set input_wait_turn_id = ${fixture.attempt.turnId},
-      input_wait_until = now() - interval '31 minutes', input_wait_reason = 'waiting for tests',
-      input_wait_set_at = now() - interval '2 hours' where id = ${fixture.attempt.sessionId}`;
+    // Pending quiescence (a settled interruption without a receipt) passes the
+    // coarse inventory, not exact enrollment.
+    await admin`update session_turn_attempts set quiesced_at = null
+      where id = ${fixture.attempt.attemptId}`;
+    const [receipt] = await admin<{ id: string }[]>`insert into session_command_receipts (
+      account_id, workspace_id, actor_type, actor_subject_id, action, target_session_id,
+      target_turn_id, operation_key, canonical_request_hash) values (
+      ${fixture.accountId}, ${fixture.workspaceId}, 'human', 'containment-fixture',
+      'session.queue.steer', ${fixture.attempt.sessionId}, ${fixture.attempt.turnId},
+      ${crypto.randomUUID()}, 'containment-fixture') returning id`;
+    const [interruption] = await admin<{ id: string }[]>`insert into session_attempt_interruptions (
+      account_id, workspace_id, session_id, operation_id, attempt_id, kind, control_revision, state)
+      values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.attempt.sessionId},
+        ${receipt!.id}, ${fixture.attempt.attemptId}, 'steer', 1, 'settled') returning id`;
     await idleFor(fixture, 31);
     expect(await inventory()).toContain(fixture.sandboxGroupId);
     await sweep();
     expect(outcomes).toContain("not_eligible");
-    await admin`update sessions set input_wait_turn_id = null, input_wait_until = null,
-      input_wait_reason = null, input_wait_set_at = null where id = ${fixture.attempt.sessionId}`;
+    await admin`delete from session_attempt_interruptions where id = ${interruption!.id}`;
     outcomes.length = 0;
     expect((await sweep()).some((row) => row.sandboxGroupId === fixture.sandboxGroupId)).toBe(true);
     expect(outcomes).toContain("idle_enrolled");

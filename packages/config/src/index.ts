@@ -3192,6 +3192,9 @@ function optionalEnvironmentValue(name: string, source: NodeJS.ProcessEnv): stri
   return value && value.trim().length > 0 ? value : undefined;
 }
 
+// getSettings runs per request in some processes; say this once per process.
+let idleCommandContainmentDisabledWarned = false;
+
 export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
   const optional = (name: string): string | undefined => optionalEnvironmentValue(name, source);
   const modelCatalogSource = optional("OPENGENI_MODEL_CATALOG_SOURCE");
@@ -3705,11 +3708,14 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       settings.sandboxIdleCommandContainmentMs = derived;
     } else {
       settings.sandboxIdleCommandContainmentMs = undefined;
-      console.warn(
-        "[config] idle command containment disabled: no window fits between " +
-          `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}) and the Modal idle ` +
-          "timeout / rotation lead ceiling; set OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS to override.",
-      );
+      if (!idleCommandContainmentDisabledWarned) {
+        idleCommandContainmentDisabledWarned = true;
+        console.warn(
+          "[config] idle command containment disabled: no window fits between " +
+            `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}) and the Modal idle ` +
+            "timeout / rotation lead ceiling; set OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS to override.",
+        );
+      }
     }
   }
   validateSettings(settings, source);
