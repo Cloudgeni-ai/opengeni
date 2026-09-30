@@ -5116,11 +5116,6 @@
       background-color: var(--og-color-hover);
     }
   }
-:where(.og-root).focus-visible\:bg-og-surface-2,:where(.og-root) .focus-visible\:bg-og-surface-2 {
-    &:focus-visible {
-      background-color: var(--og-color-surface-2);
-    }
-  }
 :where(.og-root).focus-visible\:bg-og-surface-3\/50,:where(.og-root) .focus-visible\:bg-og-surface-3\/50 {
     &:focus-visible {
       background-color: var(--og-color-surface-3);

@@ -276,7 +276,7 @@ function ConnectModelsPanel(props: {
             </>
           );
           const className =
-            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40";
+            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40";
           return props.href ? (
             <a key={option.title} href={props.href} className={className}>
               {content}
@@ -327,7 +327,7 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
             onClick={() =>
               props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
             }
-            className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+            className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
           >
             <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
             {messages.fast}

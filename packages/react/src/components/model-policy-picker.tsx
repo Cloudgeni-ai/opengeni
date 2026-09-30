@@ -303,7 +303,7 @@ export function PickerNavRow(props: {
       data-testid={props.testId}
       className={cn(
         // The one menu row (lib/menu-styles.ts), with density tokens for embedders.
-        "flex min-h-8 w-full cursor-pointer items-center gap-2.5 rounded-og-md px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-surface-2 focus-visible:bg-og-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11",
+        "flex min-h-8 w-full cursor-pointer items-center gap-2.5 rounded-og-md px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-hover focus-visible:bg-og-hover focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
@@ -332,7 +332,7 @@ export function PickerBackHeader(props: {
         type="button"
         onClick={props.onBack}
         data-testid="model-picker-back"
-        className="flex min-h-8 min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-og-md pr-2.5 text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11"
+        className="flex min-h-8 min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-og-md pr-2.5 text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-hover focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11"
       >
         <span className="flex size-8 shrink-0 items-center justify-center text-og-fg-muted">
           <ChevronLeftIcon className="size-4" />

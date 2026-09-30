@@ -418,7 +418,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
         <CollapsibleTrigger asChild>
           <button
             type="button"
-            className="flex min-h-8 w-full items-center gap-2 rounded-[10px] px-2.5 py-1.5 text-left text-sm text-fg transition-colors hover:bg-surface-2 pointer-coarse:min-h-11"
+            className="flex min-h-8 w-full items-center gap-2 rounded-[10px] px-2.5 py-1.5 text-left text-sm text-fg transition-colors hover:bg-hover pointer-coarse:min-h-11"
           >
             <ChevronDownIcon
               className={cn(
@@ -497,7 +497,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                       return (
                         <div
                           key={repo.repositoryId}
-                          className="rounded-[10px] px-2.5 py-2 transition-colors hover:bg-surface-2"
+                          className="rounded-[10px] px-2.5 py-2 transition-colors hover:bg-hover"
                         >
                           <div className="flex w-full items-center gap-3 text-left">
                             <span className="min-w-0 flex-1">
@@ -635,7 +635,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                                 <div
                                   key={`${repo.installationId}:${repo.id}`}
                                   className={cn(
-                                    "rounded-[10px] px-2.5 py-2 transition-colors hover:bg-surface-2",
+                                    "rounded-[10px] px-2.5 py-2 transition-colors hover:bg-hover",
                                     blocked && "opacity-55",
                                   )}
                                 >
@@ -1067,7 +1067,7 @@ export function ScheduledTaskRepositoryPicker(props: {
                     <div
                       key={`${repo.installationId}:${repo.id}`}
                       className={cn(
-                        "px-2 py-2 transition-colors hover:bg-surface-2/45",
+                        "px-2 py-2 transition-colors hover:bg-hover",
                         blocked && "opacity-55",
                       )}
                     >
