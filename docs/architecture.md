@@ -370,6 +370,11 @@ Mac updates preserve signed bundles; writes check ACLs
 ([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
 The machine owns files, Git authentication, environment, and durable credentials.
+Connected Machine enrollment is durable until revocation. The enrollment service
+renews expiring transport credentials only with proof from the existing install
+key and the live credential generation. Native credential maintenance adopts the
+result through the connection-file reconciler, without restarting host work.
+See `docs/connected-machines.md` for rollout and offline recovery.
 OpenGeni neither clones repositories nor installs durable control-plane credentials;
 authorized child processes receive only transient, exact-attempt Codemode authority.
 

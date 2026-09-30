@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
-#[cfg(test)]
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::SigningKey;
 use opengeni_agent_proto::v1::{Arch, EnrollmentCredentials, Os};
@@ -167,6 +166,12 @@ pub struct InstallIdentity {
 }
 
 impl InstallIdentity {
+    /// Renewal never creates a replacement identity for an existing grant.
+    pub(crate) fn load_existing(config_dir: &Path) -> Result<Self, InstallIdentityError> {
+        let path = config_dir.join(INSTALL_IDENTITY_FILE);
+        let bytes = std::fs::read(&path).map_err(|e| InstallIdentityError::io(&path, e))?;
+        Self::from_seed_bytes(&path, &bytes)
+    }
     /// Generates a fresh ed25519 install keypair from the OS CSPRNG.
     #[must_use]
     pub fn generate() -> Self {
@@ -232,16 +237,77 @@ impl InstallIdentity {
     }
 
     /// Signs a challenge with the install private key (base64-encoded), for
-    /// proof-of-possession. The device flow does not currently require it, but
-    /// the install key is the agent's stable identity and exposing the signing
-    /// primitive keeps a challenge-response reconcilable with M5 without a wire
-    /// change. Covered by [`tests::signature_round_trips_under_the_install_key`].
-    #[cfg(test)]
+    /// proof-of-possession during renewal of an existing approved enrollment.
     #[must_use]
     pub fn sign_base64(&self, challenge: &[u8]) -> String {
         let sig = self.signing_key.sign(challenge);
         base64::engine::general_purpose::STANDARD_NO_PAD.encode(sig.to_bytes())
     }
+}
+
+/// The envelope expiry is only a scheduling hint; the server validates its MAC
+/// and the install signature. Missing/malformed local tokens are not authority.
+pub(crate) fn renewal_due(bearer: &str, now: u64) -> bool {
+    bearer_expiry(bearer).is_some_and(|expiry| expiry <= now.saturating_add(7 * 24 * 3600))
+}
+
+fn bearer_expiry(bearer: &str) -> Option<u64> {
+    let (payload, _) = bearer.strip_prefix("oge_")?.split_once('.')?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("exp")?.as_u64()
+}
+
+/// Refresh only this approved enrollment. The install key proves possession even
+/// when the machine was offline longer than the transport credential lifetime.
+pub(crate) async fn renew_connection(
+    connection: &crate::config::StoredConnection,
+    identity: &InstallIdentity,
+    now: u64,
+) -> Result<crate::config::StoredConnection, EnrollmentError> {
+    let bearer = &connection.credentials.nats_bearer;
+    let proof = format!("opengeni:enrollment-renew:v1\n{now}\n{bearer}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let response = client
+        .post(join_url(&connection.api_url, "/v1/enrollments/renew"))
+        .json(&serde_json::json!({
+            "bearer": bearer, "signedAt": now,
+            "signature": identity.sign_base64(proof.as_bytes()),
+        }))
+        .send()
+        .await?;
+    // Do not include an untrusted response body (potential credential echo) in logs.
+    if !response.status().is_success() {
+        return Err(EnrollmentError::Status {
+            path: "/v1/enrollments/renew".into(),
+            status: response.status().as_u16(),
+            body: "credential renewal unavailable".into(),
+        });
+    }
+    let wire = response.json::<wire::ExchangeResponse>().await?;
+    let mut credentials = crate::config::StoredCredentials::from_proto(
+        wire.credentials.into_proto(),
+        connection.credentials.update_channel.clone(),
+    );
+    if credentials.agent_id != connection.credentials.agent_id
+        || credentials.workspace_id != connection.credentials.workspace_id
+        || bearer_expiry(&credentials.nats_bearer)
+            .is_none_or(|expiry| expiry <= now.saturating_add(7 * 24 * 3600))
+    {
+        return Err(EnrollmentError::MissingCredentials);
+    }
+    credentials
+        .resume_token
+        .clone_from(&connection.credentials.resume_token);
+    credentials.last_known_epoch = connection.credentials.last_known_epoch;
+    let mut renewed = connection.clone();
+    renewed.credentials = credentials;
+    Ok(renewed)
 }
 
 fn create_identity_file(
@@ -639,6 +705,167 @@ mod wire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A real HTTP exchange checks the native client's wire proof and persisted
+    // continuation state independently of the server-side authorization tests.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Keep the six HTTP cases and their fixture together.
+    async fn renewal_http_preserves_connection_and_rejects_invalid_responses() {
+        use ed25519_dalek::{Signature, Verifier as _};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let identity = InstallIdentity::generate();
+        let now = 10_000_000;
+        let bearer = |expiry| {
+            format!(
+                "oge_{}.signature",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(format!("{{\"exp\":{expiry}}}"))
+            )
+        };
+        for case in [
+            "valid",
+            "wrong_agent",
+            "wrong_workspace",
+            "expired",
+            "denied",
+            "redirect",
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let old = bearer(now - 90 * 24 * 3600);
+            let mut credentials = crate::config::StoredCredentials::from_proto(
+                EnrollmentCredentials {
+                    agent_id: "agent".into(),
+                    workspace_id: "workspace".into(),
+                    nats_credentials: old.clone(),
+                    nats_urls: vec!["wss://old.example".into()],
+                    relay_url: "https://relay.example".into(),
+                    relay_token: "old-relay".into(),
+                    update_pubkey: "update-key".into(),
+                    consented_whole_machine: true,
+                    consented_screen_control: false,
+                },
+                "beta",
+            );
+            credentials.resume_token = "retained-resume".into();
+            credentials.last_known_epoch = 17;
+            let connection = crate::config::StoredConnection::new(&url, credentials);
+            let fresh = bearer(if case == "expired" {
+                now
+            } else {
+                now + 30 * 24 * 3600
+            });
+            let wire = serde_json::json!({"credentials": {
+                "agentId": if case == "wrong_agent" { "another" } else { "agent" },
+                "workspaceId": if case == "wrong_workspace" { "another" } else { "workspace" },
+                "bearer": fresh, "natsUrls": ["wss://new.example"],
+                "relayUrl": "https://relay.example", "relayToken": "new-relay",
+                "updatePublicKey": "update-key", "consentedWholeMachine": true,
+                "consentedScreenControl": false
+            }});
+            let key = identity.signing_key.verifying_key();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let body = loop {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(header_end) =
+                        request.windows(4).position(|part| part == b"\r\n\r\n")
+                    {
+                        let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                        assert!(headers.starts_with("POST /v1/enrollments/renew HTTP/1.1"));
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= header_end + 4 + length {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &request[header_end + 4..header_end + 4 + length],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                assert_eq!(body.as_object().unwrap().len(), 3);
+                assert_eq!(body["bearer"], old);
+                assert_eq!(body["signedAt"], now);
+                let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+                    .decode(body["signature"].as_str().unwrap())
+                    .unwrap();
+                let signature = Signature::from_slice(&bytes).unwrap();
+                key.verify(
+                    format!("opengeni:enrollment-renew:v1\n{now}\n{old}").as_bytes(),
+                    &signature,
+                )
+                .unwrap();
+                let (status, extra, response) = match case {
+                    "denied" => ("401 Unauthorized", "", "DO-NOT-LOG-CREDENTIAL".into()),
+                    "redirect" => (
+                        "307 Temporary Redirect",
+                        "Location: http://127.0.0.1:1/must-not-follow\r\n",
+                        String::new(),
+                    ),
+                    _ => ("200 OK", "", wire.to_string()),
+                };
+                socket.write_all(format!("HTTP/1.1 {status}\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                renew_connection(&connection, &identity, now),
+            )
+            .await
+            .unwrap();
+            server.await.unwrap();
+            if case == "valid" {
+                let renewed = result.unwrap();
+                assert_eq!(renewed.connection_id, connection.connection_id);
+                assert_eq!(renewed.api_url, connection.api_url);
+                assert_eq!(renewed.credentials.nats_bearer, fresh);
+                assert_eq!(renewed.credentials.relay_token, "new-relay");
+                assert_eq!(renewed.credentials.resume_token, "retained-resume");
+                assert_eq!(renewed.credentials.last_known_epoch, 17);
+                assert_eq!(renewed.credentials.update_channel, "beta");
+                assert!(!renewed.credentials.consented_screen_control);
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(!error.contains("DO-NOT-LOG-CREDENTIAL"));
+                if case == "redirect" {
+                    assert!(error.contains("307"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn renewal_is_due_before_expiry_and_after_long_offline_intervals() {
+        let token = |exp| {
+            format!(
+                "oge_{}.signature",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(format!("{{\"exp\":{exp}}}"))
+            )
+        };
+        let now = 10_000_000;
+        assert!(!renewal_due(&token(now + 8 * 24 * 3600), now));
+        assert!(renewal_due(&token(now + 7 * 24 * 3600), now));
+        assert!(renewal_due(&token(now - 90 * 24 * 3600), now));
+        for malformed in [
+            "",
+            "oge_bad.signature",
+            "oge_e30.signature",
+            "ogr_e30.signature",
+        ] {
+            assert!(!renewal_due(malformed, now));
+        }
+    }
 
     #[test]
     fn install_public_key_is_stable_per_identity() {
