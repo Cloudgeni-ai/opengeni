@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "../src/errors";
 import {
   OpenGeniClient,
+  artifactViewerCapability,
   createSessionProxyHandler,
   type SessionProxyHandlerOptions,
 } from "../src/index";
@@ -10,6 +11,8 @@ import { OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 const OTHER_WORKSPACE_ID = "99999999-9999-4999-8999-999999999999";
+const EDITABLE_ID = "0123456789abcdef0123456789abcdef";
+const SITE_ID = "22222222-2222-4222-8222-222222222222";
 const PRODUCT = "https://product.example.test";
 const API = "https://api.example.test";
 
@@ -60,7 +63,27 @@ function upstreamServer() {
       });
     }
     if (path === "/v1/access/me") {
-      return Response.json({ subjectId: "subject-u42", accountGrants: [], workspaceGrants: [] });
+      return Response.json({
+        subjectId: "subject-u42",
+        accountGrants: [],
+        workspaceGrants: [
+          {
+            workspaceId: WORKSPACE_ID,
+            accountId: "acct-1",
+            subjectId: "subject-u42",
+            permissions: ["sessions:read", "artifacts:read"],
+          },
+        ],
+      });
+    }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/editable-artifacts` && request.method === "GET") {
+      return Response.json({ artifacts: [{ id: EDITABLE_ID, title: "Weekly report" }] });
+    }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/artifact-catalog`) {
+      return Response.json({ items: [{ id: SITE_ID, kind: "site" }], nextCursor: null });
+    }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/html`) {
+      return new Response("<h1>Dashboard</h1>", { headers: { "Content-Type": "text/html" } });
     }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "GET") {
       return Response.json({
@@ -603,5 +626,126 @@ describe("createSessionProxyHandler", () => {
       "33333333-3333-4333-8333-333333333333",
     );
     expect(defaults.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
+  });
+
+  test("artifact viewer routes are opt-in, session-scoped, and association-checked", async () => {
+    const item = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`;
+    const scoped = { "x-opengeni-session-id": SESSION_ID };
+    const off = setup();
+    expect((await off.handler(new Request(item, { headers: scoped }))).status).toBe(404);
+    expect((await off.browser.getClientConfig()).artifacts).toBeUndefined();
+    expect(off.upstream.requests.some((r) => r.url.pathname.includes("artifacts/"))).toBe(false);
+
+    const on = setup({ artifacts: true });
+    const config = await on.browser.getClientConfig();
+    expect(config.artifacts?.editableLiveUrl).toBe(
+      "wss://api.example.test/v1/editable-artifacts/live",
+    );
+    expect(config.artifacts?.cachePartition).toMatchObject({
+      accountId: "acct-1",
+      principalId: "subject-u42",
+    });
+    expect(config.artifacts?.cachePartition.authorizationEpoch).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+    // The session must be named, and a product check can refuse it.
+    expect((await on.handler(new Request(item))).status).toBe(400);
+    const refused = setup({ artifacts: true, authorizeSession: () => false });
+    expect((await refused.handler(new Request(item, { headers: scoped }))).status).toBe(404);
+
+    const read = await on.handler(
+      new Request(`${item}?replicaId=1234567890abcdef&extra=1`, { headers: scoped }),
+    );
+    expect(read.status).toBe(200);
+    const forwarded = on.upstream.requests.at(-1)!;
+    expect(forwarded.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`,
+    );
+    expect(Object.fromEntries(forwarded.url.searchParams)).toEqual({
+      replicaId: "1234567890abcdef",
+    });
+    const listing = on.upstream.requests.find((r) =>
+      r.url.pathname.endsWith("/editable-artifacts"),
+    )!;
+    expect(listing.url.searchParams.get("sourceSessionId")).toBe(SESSION_ID);
+
+    const ticket = await on.handler(
+      new Request(`${item}/live-ticket`, {
+        method: "POST",
+        headers: { ...scoped, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          replicaId: "1234567890abcdef",
+          modality: "document",
+          smuggled: true,
+        }),
+      }),
+    );
+    expect(ticket.status).toBe(201);
+    expect(on.upstream.requests.at(-1)!.body).toEqual({
+      replicaId: "1234567890abcdef",
+      modality: "document",
+    });
+
+    // An artifact OpenGeni does not list for this session is not served.
+    const other = await on.handler(
+      new Request(item.replace(EDITABLE_ID, "fedcba9876543210fedcba9876543210"), {
+        headers: scoped,
+      }),
+    );
+    expect(other.status).toBe(404);
+    // Writes and other artifact operations stay closed.
+    for (const [path, method] of [
+      [`${item}/versions`, "POST"],
+      [`${item}/materializations`, "POST"],
+      [
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/rollback`,
+        "POST",
+      ],
+    ] as const) {
+      const response = await on.handler(
+        new Request(path, {
+          method,
+          headers: { ...scoped, "Content-Type": "application/json" },
+          body: "{}",
+        }),
+      );
+      expect(response.status).toBe(404);
+    }
+
+    const site = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`;
+    expect((await on.handler(new Request(`${site}/html`, { headers: scoped }))).status).toBe(400);
+    const html = await on.handler(
+      new Request(`${site}/html?versionId=${SESSION_ID}`, { headers: scoped }),
+    );
+    expect(html.status).toBe(200);
+    expect(await html.text()).toBe("<h1>Dashboard</h1>");
+    expect(html.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
+    expect(html.headers.get("content-disposition")).toContain("attachment");
+    const catalog = on.upstream.requests.find((r) => r.url.pathname.endsWith("/artifact-catalog"))!;
+    expect(Object.fromEntries(catalog.url.searchParams)).toMatchObject({
+      sourceSessionId: SESSION_ID,
+      kind: "site",
+    });
+  });
+
+  test("artifactViewerCapability gives a custom proxy the same client-config capability", async () => {
+    const { upstream } = setup();
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: upstream.fetch,
+    });
+    const capability = await artifactViewerCapability({
+      client: service.asUser("u_42", { source: "northwind" }),
+      workspaceId: WORKSPACE_ID,
+      source: "northwind",
+    });
+    const proxied = await setup({ artifacts: true }).browser.getClientConfig();
+    expect(capability).toEqual(proxied.artifacts!);
+    await expect(
+      artifactViewerCapability({
+        client: service.asUser("u_42"),
+        workspaceId: OTHER_WORKSPACE_ID,
+      }),
+    ).rejects.toThrow();
   });
 });

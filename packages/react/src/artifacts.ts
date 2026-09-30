@@ -1,5 +1,38 @@
 export { inlineHtmlDocument } from "./components/artifacts/inline-html-document";
 export { isRetainedImageContentType, useRetainedImageObjectUrl } from "./timeline/retained-image";
+export {
+  ArtifactBadge,
+  ArtifactButton,
+  ArtifactLoading,
+  ArtifactProblem,
+  ArtifactSelect,
+  ArtifactViewerHeader,
+  artifactKindIcon,
+  artifactKindSubtitle,
+  artifactLoadErrorMessage,
+  artifactLoadErrorView,
+  type ArtifactKind,
+  type ArtifactLoadErrorKind,
+  type ArtifactLoadErrorView,
+  ArtifactSandbox,
+  type ArtifactSandboxProps,
+  DeferredChatMedia,
+  SiteView,
+  type SiteViewProps,
+  ChatInteractiveBlock,
+  type ChatInteractiveBlockProps,
+  type SiteSnapshotClient,
+  type SiteToolBridgeFactory,
+  type SiteToolScope,
+  EditableArtifactView,
+  type EditableArtifactRuntimes,
+  type EditableArtifactViewProps,
+  type OpenedEditableArtifact,
+  SessionArtifactViewer,
+  type SessionArtifactTarget,
+  type SessionArtifactViewerLabels,
+  type SessionArtifactViewerProps,
+} from "./components/artifacts";
 /** Public artifact surfaces. Import from `@opengeni/react/artifacts`. */
 export {
   ArtifactSurface,

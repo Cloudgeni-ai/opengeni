@@ -17683,6 +17683,24 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     }),
     /** Session proxy capability; absent on native deployments. */
     sandboxFiles: z.boolean().optional(),
+    /**
+     * Session proxy capability for the embedded artifact viewer; absent on
+     * native deployments. The live socket is ticket-authenticated and reached
+     * directly; the cache partition identifies the proxied user.
+     */
+    artifacts: z
+      .object({
+        editableLiveUrl: z.string().url().max(2_048),
+        cachePartition: z
+          .object({
+            accountId: z.string().min(1).max(256),
+            principalId: z.string().min(1).max(256),
+            authorizationEpoch: z.string().min(1).max(256),
+          })
+          .strict(),
+      })
+      .strict()
+      .optional(),
     // Native voice-input capability. Provider/model/credentials stay server-private;
     // clients only learn whether a deployment can transcribe and the hard ceilings.
     voiceInput: ClientVoiceInputConfig.default({

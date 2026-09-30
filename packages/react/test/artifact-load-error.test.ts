@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { artifactRouteErrorMessage, mapArtifactRouteError } from "./artifact-route-error";
+import {
+  artifactLoadErrorMessage as artifactRouteErrorMessage,
+  artifactLoadErrorView as mapArtifactRouteError,
+} from "../src/components/artifacts/artifact-chrome";
 
-describe("artifact route load errors", () => {
+describe("artifact load errors", () => {
   for (const kind of ["site", "editable"] as const) {
     for (const status of [401, 403, 404]) {
       test(`${kind} ${status} is unavailable without retry or API status text`, () => {

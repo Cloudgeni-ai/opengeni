@@ -1,4 +1,41 @@
 export {
+  ArtifactBadge,
+  ArtifactButton,
+  ArtifactLoading,
+  ArtifactProblem,
+  ArtifactSelect,
+  ArtifactViewerHeader,
+  artifactKindIcon,
+  artifactKindSubtitle,
+  artifactLoadErrorMessage,
+  artifactLoadErrorView,
+  type ArtifactKind,
+  type ArtifactLoadErrorKind,
+  type ArtifactLoadErrorView,
+} from "./artifact-chrome";
+export { ArtifactSandbox, type ArtifactSandboxProps } from "./artifact-sandbox";
+export { DeferredChatMedia } from "./deferred-chat-media";
+export {
+  ChatInteractiveBlock,
+  type ChatInteractiveBlockProps,
+  type SiteSnapshotClient,
+  type SiteToolBridgeFactory,
+  type SiteToolScope,
+} from "./chat-interactive-block";
+export { SiteView, type SiteViewProps } from "./site-view";
+export {
+  EditableArtifactView,
+  type EditableArtifactRuntimes,
+  type EditableArtifactViewProps,
+  type OpenedEditableArtifact,
+} from "./editable-artifact-view";
+export {
+  SessionArtifactViewer,
+  type SessionArtifactTarget,
+  type SessionArtifactViewerLabels,
+  type SessionArtifactViewerProps,
+} from "./session-artifact-viewer";
+export {
   ArtifactSurface,
   type ArtifactModality,
   type ArtifactSurfaceProps,

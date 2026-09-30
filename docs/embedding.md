@@ -79,7 +79,10 @@ Agent replies link files, sandbox paths, editable artifacts, and Sites with
 host origin. `SessionConversation` downloads retained files by default;
 sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
 session working directory without following symlinks.
-route artifacts and Sites with its `resolveLink` prop (also on
+`opengeni-site` fences render the console's inline Site preview, and
+`onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
+open editable artifacts and Sites in a host container through the proxy's
+opt-in `artifacts: true`. Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
 `@opengeni/sdk` outside React. See
 [links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).

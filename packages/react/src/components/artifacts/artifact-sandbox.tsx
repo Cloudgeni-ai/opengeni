@@ -6,39 +6,41 @@ import {
   RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
-import {
-  PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
-  PublishedHtmlArtifactFrame,
-  publishedHtmlArtifactDocument,
-  type PublishedHtmlArtifactToolBridge,
-} from "@opengeni/react/artifacts";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/cn";
+import { ArtifactBadge, ArtifactButton } from "./artifact-chrome";
+import {
+  PublishedHtmlArtifactFrame,
+  type PublishedHtmlArtifactToolBridge,
+} from "./published-html-artifact-frame";
 
-export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument };
-
-export function ArtifactSandbox(props: {
+export type ArtifactSandboxProps = {
   html: string;
-  height?: number;
-  autoHeight?: boolean;
-  theme?: "light" | "dark";
-  headerControls?: ReactNode;
+  height?: number | undefined;
+  autoHeight?: boolean | undefined;
+  theme?: "light" | "dark" | undefined;
+  headerControls?: ReactNode | undefined;
   title: string;
   /** Hide the visible title/icon while retaining the accessible iframe title. */
-  showTitle?: boolean;
-  showLiveStatus?: boolean;
-  versionLabel?: string;
-  className?: string;
-  editDisabled?: boolean;
-  onEdit?: () => void;
-  toolBridge?: PublishedHtmlArtifactToolBridge;
-  connectedToolCount?: number;
-  sourceFileCount?: number;
-  fill?: boolean;
-}) {
+  showTitle?: boolean | undefined;
+  showLiveStatus?: boolean | undefined;
+  versionLabel?: string | undefined;
+  className?: string | undefined;
+  editDisabled?: boolean | undefined;
+  onEdit?: (() => void) | undefined;
+  toolBridge?: PublishedHtmlArtifactToolBridge | undefined;
+  connectedToolCount?: number | undefined;
+  sourceFileCount?: number | undefined;
+  fill?: boolean | undefined;
+};
+
+/**
+ * The Site/preview frame chrome shared by the console and embedding hosts:
+ * title, version and tool badges, live status, reload, and a full-screen mode
+ * that escapes the host's scroll containers through the modal top layer.
+ */
+export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const [reloadKey, setReloadKey] = useState(0);
   const [focused, setFocused] = useState(false);
   const frameRef = useRef<HTMLDialogElement>(null);
@@ -72,7 +74,7 @@ export function ArtifactSandbox(props: {
         setFocused(false);
       }}
       className={cn(
-        "static m-0 w-full max-h-none max-w-none overflow-hidden rounded-2xl border border-border/80 bg-white p-0 text-left shadow-sm",
+        "og-root static m-0 w-full max-h-none max-w-none overflow-hidden rounded-2xl border border-border/80 bg-white p-0 text-left shadow-sm",
         props.className,
         props.fill && "flex min-h-0 flex-col",
         focused &&
@@ -82,7 +84,7 @@ export function ArtifactSandbox(props: {
       <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2.5">
           {focused ? (
-            <Button
+            <ArtifactButton
               variant="ghost"
               size="sm"
               className="h-8 shrink-0 px-2"
@@ -90,7 +92,7 @@ export function ArtifactSandbox(props: {
             >
               <ArrowLeftIcon className="mr-2 size-3.5" />
               Back
-            </Button>
+            </ArtifactButton>
           ) : null}
           {!focused && props.showTitle !== false ? (
             <span className="grid size-6 shrink-0 place-items-center rounded-md bg-surface-2 text-fg-muted">
@@ -102,22 +104,18 @@ export function ArtifactSandbox(props: {
           )}
           {props.headerControls}
           {props.versionLabel ? (
-            <Badge
-              variant="outline"
-              className="hidden h-5 rounded-md border-border/80 px-1.5 text-2xs font-normal text-fg-muted sm:inline-flex"
-            >
+            <ArtifactBadge className="hidden h-5 rounded-md border-border/80 px-1.5 text-2xs font-normal text-fg-muted sm:inline-flex">
               {props.versionLabel}
-            </Badge>
+            </ArtifactBadge>
           ) : null}
           {props.connectedToolCount ? (
-            <Badge
-              variant="outline"
+            <ArtifactBadge
               className="hidden h-5 max-w-40 gap-1 rounded-md border-border/80 px-1.5 text-2xs font-normal text-fg-muted sm:inline-flex"
               title={`${props.connectedToolCount} workspace tools available to this Site`}
             >
               <PlugZapIcon className="size-3" />
               {props.connectedToolCount} {props.connectedToolCount === 1 ? "tool" : "tools"}
-            </Badge>
+            </ArtifactBadge>
           ) : null}
           {props.sourceFileCount ? (
             <span className="hidden text-2xs text-fg-subtle xl:inline">
@@ -127,7 +125,7 @@ export function ArtifactSandbox(props: {
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {focused && props.onEdit ? (
-            <Button
+            <ArtifactButton
               variant="ghost"
               size="sm"
               className="h-8 px-2"
@@ -137,7 +135,7 @@ export function ArtifactSandbox(props: {
               <SparklesIcon className="mr-2 size-3.5" />
               <span className="hidden sm:inline">Edit with Geni</span>
               <span className="sm:hidden">Edit</span>
-            </Button>
+            </ArtifactButton>
           ) : null}
           {props.showLiveStatus !== false && (
             <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex">
@@ -145,7 +143,7 @@ export function ArtifactSandbox(props: {
               Live
             </span>
           )}
-          <Button
+          <ArtifactButton
             variant="ghost"
             size="icon"
             className="size-8 rounded-md text-fg-muted hover:text-fg"
@@ -153,9 +151,9 @@ export function ArtifactSandbox(props: {
             onClick={reload}
           >
             <RefreshCwIcon className="size-3.5" />
-          </Button>
+          </ArtifactButton>
           {!focused ? (
-            <Button
+            <ArtifactButton
               variant="ghost"
               size="icon"
               className="size-8 rounded-md text-fg-muted hover:text-fg"
@@ -163,7 +161,7 @@ export function ArtifactSandbox(props: {
               onClick={() => setFocused(true)}
             >
               <Maximize2Icon className="size-3.5" />
-            </Button>
+            </ArtifactButton>
           ) : null}
         </div>
       </div>
@@ -171,10 +169,10 @@ export function ArtifactSandbox(props: {
         key={reloadKey}
         title={props.title}
         html={props.html}
-        autoHeight={props.autoHeight && !focused}
-        theme={props.theme}
-        style={!focused && props.height ? { height: props.height } : undefined}
-        toolBridge={props.toolBridge}
+        autoHeight={Boolean(props.autoHeight && !focused)}
+        {...(props.theme ? { theme: props.theme } : {})}
+        {...(!focused && props.height ? { style: { height: props.height } } : {})}
+        {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
         className={cn(
           "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
           props.fill && "h-0 min-h-0 flex-1",

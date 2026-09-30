@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:te
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { DeferredChatMedia } from "./deferred-chat-media";
+import { DeferredChatMedia } from "../src/components/artifacts/deferred-chat-media";
 
 let ownsDom = false;
 let previousAct: PropertyDescriptor | undefined;

@@ -5,7 +5,7 @@ import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { InlineChatImage } from "./inline-chat-image";
-import { DeferredChatMedia } from "./deferred-chat-media";
+import { DeferredChatMedia } from "@opengeni/react/artifacts";
 import { isRetainedTextPreview } from "./retained-text-preview-policy";
 const RetainedTextPreview = lazy(() => import("./retained-text-preview"));
 const PdfFilePreview = lazy(() => import("./pdf-file-preview"));

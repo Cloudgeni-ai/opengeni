@@ -18,11 +18,13 @@ export {
   chainLinkResolvers,
   sessionLinkResolver,
   useOpenGeniLinkResolver,
+  viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
 } from "./components/open-geni-links";
 export { parseOpenGeniLink } from "@opengeni/sdk";
 export type { TimelineSearchTarget } from "./components/timeline-search";

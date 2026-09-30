@@ -1,5 +1,6 @@
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError } from "./errors";
+import { SESSION_SCOPE_HEADER } from "./message-links";
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type { CreateSessionRequest, SessionMcpCredentialUpdateInput } from "./types";
@@ -141,6 +142,22 @@ export type SessionProxyHandlerOptions = {
    */
   sandboxFiles?: boolean | undefined;
   /**
+   * Serve the embedded artifact viewer and inline Site previews: reads of the
+   * editable artifacts and Sites a session produced, and live-ticket minting
+   * for the editor. Explicit opt-in, default false.
+   *
+   * Every request must name its session in the `x-opengeni-session-id` header
+   * (`SessionArtifactViewer` and `SessionConversation` do this). The proxy
+   * runs `authorizeSession`, then only forwards an artifact OpenGeni lists for
+   * that session, so the browser cannot open other workspace artifacts through
+   * it. Editing still requires the user's own `artifacts:publish` grant. Site
+   * tool calls are not proxied.
+   *
+   * The editor's live socket is ticket-authenticated and connects to OpenGeni
+   * directly; `editableLiveUrl` overrides the URL derived from the client.
+   */
+  artifacts?: boolean | { editableLiveUrl?: string | undefined } | undefined;
+  /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
    * lists every session OpenGeni lets that user read in the workspace (shared
@@ -212,6 +229,30 @@ export function createSessionProxyHandler(
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const filesEnabled = options.files ?? true;
   const sandboxFilesEnabled = options.sandboxFiles === true;
+  const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
+  const editableLiveUrl = artifactsEnabled
+    ? liveSocketUrl(
+        (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
+          service.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
+      )
+    : null;
+  // Positive session→artifact decisions, briefly, so one open does not repeat
+  // the association lookup for its detail, HTML, and ticket requests.
+  const artifactDecisions = new Map<string, number>();
+  const accessContexts = new Map<
+    string,
+    Promise<Awaited<ReturnType<ProxyClient["getAccessContext"]>>>
+  >();
+  const accessOf = (client: ProxyClient, key: string) => {
+    let access = accessContexts.get(key);
+    if (!access) {
+      access = client.getAccessContext();
+      access.catch(() => accessContexts.delete(key));
+      if (accessContexts.size >= 1_000) accessContexts.delete(accessContexts.keys().next().value!);
+      accessContexts.set(key, access);
+    }
+    return access;
+  };
   const modelSelection = options.modelSelection ?? true;
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const sessionList = options.sessionList ?? "mine";
@@ -315,10 +356,21 @@ export function createSessionProxyHandler(
             query,
             call,
           );
+          const artifacts = editableLiveUrl
+            ? {
+                editableLiveUrl,
+                cachePartition: await cachePartition(
+                  await accessOf(client, `${source}\u0000${resolved.user}`),
+                  workspaceId,
+                  source,
+                ),
+              }
+            : null;
           return json({
             ...config,
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
             sandboxFiles: sandboxFilesEnabled,
+            ...(artifacts ? { artifacts } : {}),
             ...(modelSelection ? {} : { modelSelection: false }),
           });
         }
@@ -376,6 +428,66 @@ export function createSessionProxyHandler(
           );
         }
         return errorJson(404, "route_not_allowed", "Not found.");
+      }
+
+      if (area === "editable-artifacts" || area === "published-artifacts") {
+        if (!artifactsEnabled) return errorJson(404, "route_not_allowed", "Not found.");
+        const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
+        const route = `${method} ${artifactOp.join("/")}`;
+        const editable = area === "editable-artifacts";
+        const allowed = editable
+          ? route === "GET " || route === "POST live-ticket"
+          : route === "GET " || route === "GET html";
+        if (!artifactId || !SEGMENT.test(artifactId) || !allowed) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
+        const sessionId = request.headers.get(SESSION_SCOPE_HEADER)?.trim() ?? "";
+        if (!SEGMENT.test(sessionId)) {
+          reject(400, "session_scope_required", "Artifact reads must name their session.");
+        }
+        if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
+          return errorJson(404, "session_not_found", "Session not found.");
+        }
+        const decision = `${source}\u0000${resolved.user}\u0000${sessionId}\u0000${area}\u0000${artifactId}`;
+        if ((artifactDecisions.get(decision) ?? 0) < Date.now()) {
+          const listed = editable
+            ? await sessionListsEditableArtifact(client, base, sessionId, artifactId, call)
+            : await sessionListsSite(client, base, sessionId, artifactId, call);
+          if (!listed) return errorJson(404, "artifact_not_found", "Artifact not found.");
+          if (artifactDecisions.size >= 1_000) {
+            artifactDecisions.delete(artifactDecisions.keys().next().value!);
+          }
+          artifactDecisions.set(decision, Date.now() + ARTIFACT_DECISION_TTL_MS);
+        }
+        const item = `${base}/${area}/${artifactId}`;
+        if (route === "GET ") {
+          const replicaId = editable ? query.replicaId : undefined;
+          return json(
+            await client.requestJson(
+              "GET",
+              item,
+              undefined,
+              typeof replicaId === "string" ? { replicaId } : {},
+              call,
+            ),
+          );
+        }
+        if (route === "POST live-ticket") {
+          const body = await readJsonBody(request, maxBodyBytes);
+          return json(
+            await client.requestJson("POST", `${item}/live-ticket`, pick(body, TICKET_FIELDS)),
+            201,
+          );
+        }
+        const versionId = query.versionId;
+        if (typeof versionId !== "string" || !SEGMENT.test(versionId)) {
+          reject(400, "version_required", "versionId is required.");
+        }
+        const html = await client.getWorkspaceArtifactHtml(workspaceId, artifactId, {
+          versionId,
+          signal: request.signal,
+        });
+        return new Response(html, { headers: SITE_HTML_HEADERS });
       }
 
       if (area !== "sessions") return errorJson(404, "route_not_allowed", "Not found.");
@@ -528,6 +640,166 @@ export function createSessionProxyHandler(
 }
 
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
+
+const EDITABLE_ARTIFACT_LIVE_PATH = "/v1/editable-artifacts/live";
+const ARTIFACT_DECISION_TTL_MS = 60_000;
+const TICKET_FIELDS = [
+  "replicaId",
+  "modality",
+  "liveProtocolVersion",
+  "kernelVersion",
+  "modelSchemaVersion",
+  "snapshotVersion",
+  "commandProtocolVersion",
+  "committedTransactionProtocolVersion",
+] as const;
+// Same delivery contract as OpenGeni's own route: the browser fetches the
+// HTML and renders it in a sandboxed frame; opening the URL downloads it.
+const SITE_HTML_HEADERS = {
+  "Content-Type": "text/html; charset=utf-8",
+  "Cache-Control": "private, no-store",
+  "Content-Security-Policy": "sandbox allow-scripts",
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "X-Content-Type-Options": "nosniff",
+  "Content-Disposition": 'attachment; filename="site.html"',
+} as const;
+
+function liveSocketUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol === "https:") url.protocol = "wss:";
+  else if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol !== "wss:" && url.protocol !== "ws:") {
+    throw new TypeError("editableLiveUrl must be an HTTP(S) or WS(S) URL");
+  }
+  return url.href;
+}
+
+function randomReplicaId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  bytes[0] = bytes[0]! | 1;
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sessionListsEditableArtifact(
+  client: ProxyClient,
+  base: string,
+  sessionId: string,
+  artifactId: string,
+  call: { signal: AbortSignal },
+): Promise<boolean> {
+  try {
+    const list = await client.requestJson<{ artifacts?: { id?: unknown }[] }>(
+      "GET",
+      `${base}/editable-artifacts`,
+      undefined,
+      { sourceSessionId: sessionId, replicaId: randomReplicaId() },
+      call,
+    );
+    return (list.artifacts ?? []).some((artifact) => artifact.id === artifactId);
+  } catch (error) {
+    if (error instanceof OpenGeniApiError && (error.status === 404 || error.status === 422)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+const SITE_ASSOCIATION_PAGES = 5;
+
+async function sessionListsSite(
+  client: ProxyClient,
+  base: string,
+  sessionId: string,
+  artifactId: string,
+  call: { signal: AbortSignal },
+): Promise<boolean> {
+  let cursor: string | undefined;
+  try {
+    for (let page = 0; page < SITE_ASSOCIATION_PAGES; page += 1) {
+      const result = await client.requestJson<{
+        items?: { id?: unknown }[];
+        nextCursor?: string | null;
+      }>(
+        "GET",
+        `${base}/artifact-catalog`,
+        undefined,
+        {
+          sourceSessionId: sessionId,
+          kind: "site",
+          status: "active",
+          limit: "100",
+          ...(cursor ? { cursor } : {}),
+        },
+        call,
+      );
+      if ((result.items ?? []).some((item) => item.id === artifactId)) return true;
+      if (!result.nextCursor) return false;
+      cursor = result.nextCursor;
+    }
+    return false;
+  } catch (error) {
+    if (error instanceof OpenGeniApiError && (error.status === 404 || error.status === 422)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * The client-config `artifacts` capability a custom host proxy reports so
+ * `SessionArtifactViewer` can open editable artifacts: the live socket URL
+ * (ticket-authenticated, reached directly) and the proxied user's browser cache
+ * partition. `client` acts as that user (for example `asUser(...)`).
+ */
+export async function artifactViewerCapability(input: {
+  client: Pick<ProxyClient, "getAccessContext" | "apiUrl">;
+  workspaceId: string;
+  /** Stable namespace of the host's user identities, mixed into the partition. */
+  source?: string | undefined;
+  editableLiveUrl?: string | undefined;
+}): Promise<{
+  editableLiveUrl: string;
+  cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
+}> {
+  return {
+    editableLiveUrl: liveSocketUrl(
+      input.editableLiveUrl ?? input.client.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
+    ),
+    cachePartition: await cachePartition(
+      await input.client.getAccessContext(),
+      input.workspaceId,
+      input.source ?? "default",
+    ),
+  };
+}
+
+/** The editor's browser cache partition for this proxied user and workspace. */
+async function cachePartition(
+  access: Awaited<ReturnType<ProxyClient["getAccessContext"]>>,
+  workspaceId: string,
+  source: string,
+): Promise<{ accountId: string; principalId: string; authorizationEpoch: string }> {
+  const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  if (!grant) reject(403, "workspace_not_allowed", "This workspace is not available.");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(
+      JSON.stringify({
+        source,
+        subjectId: access.subjectId,
+        accountId: grant.accountId,
+        permissions: [...grant.permissions].sort(),
+      }),
+    ),
+  );
+  return {
+    accountId: grant.accountId,
+    principalId: access.subjectId,
+    authorizationEpoch: `sha256:${[...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("")}`,
+  };
+}
 
 /** Sandbox link download: one path, no route/target override. */
 function sandboxRead(body: Record<string, unknown> | undefined): Record<string, unknown> {
