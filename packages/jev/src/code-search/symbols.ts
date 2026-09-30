@@ -111,7 +111,7 @@ export function importNames(text: string): Array<{ name: string; from?: string }
       .trim();
     if (/^[A-Za-z_$][\w$]*$/.test(name)) out.push(from ? { name, from } : { name });
   };
-  const braces = /\{([^}]*)\}/.exec(text);
+  const braces = /^\s*use\s/.test(text) ? null : /\{([^}]*)\}/.exec(text);
   if (braces) braces[1]!.split(",").forEach(add);
   const def = /^\s*import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s*(?:,|\s+from\b)/.exec(text);
   if (def) add(def[1]!);

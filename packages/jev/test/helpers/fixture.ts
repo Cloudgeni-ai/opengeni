@@ -98,6 +98,11 @@ export interface FakeJevLog {
 
 export interface FakeJevOptions {
   good?: string[];
+  /**
+   * Identifiers the symbol-discovery judge answers 0.9 for (an entry of `state.symbols` mentioning one); every
+   * other symbol gets 0.1. Unset: every symbol gets 0.1, so symbol discovery follows nothing.
+   */
+  symbolGood?: string[];
   /** Every request returns this retryable status (503 by default when true). */
   fail?: boolean;
   rejectStatus?: number;
@@ -109,7 +114,8 @@ export interface FakeJevOptions {
 /**
  * Deterministic fake Jev: P(yes) = 0.9 when the judged item (file entry, passage text or lead) mentions one of
  * `good`, else 0.1. The second sub-question is only covered by passages mentioning compactNow. Status
- * questions answer 0.85. Usage is the request size / 3.2.
+ * questions answer 0.85. Symbols (symbol discovery) are judged by `symbolGood` instead. Usage is the request
+ * size / 3.2.
  */
 export function fakeJevFetch(opts: FakeJevOptions = {}) {
   const good = opts.good ?? ["compactionThresholdTokens", "compactNow", "clampRatio", "MIN_RATIO"];
@@ -131,6 +137,11 @@ export function fakeJevFetch(opts: FakeJevOptions = {}) {
         text = st.passages?.[id.split("::")[1]!]?.text ?? "";
       else if (st.leads?.[id]) text = st.leads[id];
       else if (id === "overall" || id.startsWith("sub::")) text = "status";
+      if (st.symbols?.[id] !== undefined) {
+        const sym: string = st.symbols[id];
+        answers[id] = { type: "noul", noul: (opts.symbolGood ?? []).some((g) => sym.startsWith(`${g}  (`)) ? 0.9 : 0.1 };
+        continue;
+      }
       let p = text === "status" ? 0.85 : good.some((g) => text.includes(g)) ? 0.9 : 0.1;
       if (id.startsWith("cov::") && id.endsWith("::1") && !text.includes("compactNow")) p = 0.1;
       answers[id] = { type: "noul", noul: p };

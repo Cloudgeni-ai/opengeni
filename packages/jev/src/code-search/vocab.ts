@@ -19,7 +19,8 @@ export function keywordStems(raw: string): string[] {
     .filter((w) => w.length >= 3 && !STOPWORDS.has(w) && !/^\d+$/.test(w))
     .map((w) =>
       w
-        .replace(/ies$/, "y")
+        // "queries" and "query" share "quer"
+        .replace(/(?:ies|y)$/, "")
         .replace(/(?<=\w{3})(?:es|s|ing|ed|ion|ions|er|ers)$/, "")
         .replace(/e$/, ""),
     )

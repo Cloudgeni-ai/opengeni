@@ -647,13 +647,19 @@ export function tileFile(
   const hard = w.maxWindowLines;
   const cuts: Array<[number, number]> = []; // 0-based inclusive
   let s = 0;
+  // the outermost indentation seen in the current tile: a declaration nested deeper (a const inside a
+  // function body) is not a place to cut
+  let base = Infinity;
   for (let i = 1; i < n; i++) {
     const len = i - s;
-    if (len >= target && lang !== "other" && isDeclLine(lines[i]!, lang)) {
+    const prev = lines[i - 1]!;
+    if (prev.trim()) base = Math.min(base, indentOf(prev));
+    if (len >= target && lang !== "other" && isDeclLine(lines[i]!, lang) && indentOf(lines[i]!) <= base) {
       const c = leadingComments(lines, i, lang);
       if (c > s) {
         cuts.push([s, c - 1]);
         s = c;
+        base = Infinity;
         continue;
       }
     }
@@ -667,6 +673,7 @@ export function tileFile(
         }
       cuts.push([s, c - 1]);
       s = c;
+      base = Infinity;
     }
   }
   cuts.push([s, n - 1]);
