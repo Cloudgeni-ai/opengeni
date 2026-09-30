@@ -532,3 +532,9 @@ Keep provider resource inventories, cleanup notes, cloud account identifiers, pr
 Use official upstream charts/operators or managed services for production platform services. OpenGeni's chart should own OpenGeni API, web, worker, migrations, and integration resources. Built-in Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local, CI, and smoke verification only; do not present them as lightweight production alternatives.
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. Agent guidance resumes only when the user asks to continue or the agent's own pause blocker clears, never because the user asked a question. See `docs/goals.md`.
+
+Claude Messages changes: read `docs/model-providers.md#native-claude-messages`
+and `packages/runtime/src/anthropic-messages.ts`. Run the native adapter tests
+(including its Agents SDK tool cycle), model admission tests, and real PostgreSQL
+lifecycle tests when changing connection kinds. Keep subscription and API-key
+credentials distinct; never copy captured credentials into fixtures or source.

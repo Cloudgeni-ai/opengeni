@@ -1,3 +1,4 @@
+import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
@@ -548,7 +549,26 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       getWorkspace(deps.db, workspaceId),
     ]);
+    const claudeConnections: ClaudeConnectionCatalog = {};
+    await Promise.all(
+      CLAUDE_CONNECTION_KINDS.map(async (kind) => {
+        const [active, models] = await Promise.all([
+          organizationModelProviderConnectionActiveForWorkspace(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+        ]);
+        claudeConnections[kind] = { active, models };
+      }),
+    );
     const selections = resolveWorkspaceModelSelection({
+      claudeConnections,
       connectionModelRestrictions,
       settings: resolvedCatalog.settings,
       policy,

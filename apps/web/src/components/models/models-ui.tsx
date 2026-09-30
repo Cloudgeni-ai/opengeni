@@ -20,7 +20,13 @@ export type ModelsScope =
    list, account page or form is showing.
    -------------------------------------------------------------------------- */
 
-export type ModelProviderId = "codex" | "supergrok" | "vercel" | "openrouter";
+export type ModelProviderId =
+  | "codex"
+  | "supergrok"
+  | "vercel"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 function VercelMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -39,6 +45,12 @@ export function ProviderMark({
 }) {
   if (provider === "codex") return <ChatGptMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
+  if (provider === "anthropic" || provider === "claude_subscription")
+    return (
+      <span aria-hidden="true" className={className}>
+        A
+      </span>
+    );
   if (provider === "supergrok") return <SparklesIcon aria-hidden="true" className={className} />;
   return <RouteIcon aria-hidden="true" className={className} />;
 }

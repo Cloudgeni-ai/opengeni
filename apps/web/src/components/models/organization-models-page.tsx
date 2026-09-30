@@ -109,7 +109,17 @@ export function OrganizationModelsPage({
     organizationId,
     providerKind: "openrouter",
   });
-  const gateways: Record<"vercel" | "openrouter", ProviderConnection> = { vercel, openrouter };
+  const anthropic = useOrganizationProviderConnection({
+    client,
+    organizationId,
+    providerKind: "anthropic",
+  });
+  const claude_subscription = useOrganizationProviderConnection({
+    client,
+    organizationId,
+    providerKind: "claude_subscription",
+  });
+  const gateways = { vercel, openrouter, anthropic, claude_subscription };
 
   const backToList = () => nav.openAccount(undefined);
   const codexPlaces: OrgCodexPlaces = {
@@ -149,8 +159,13 @@ export function OrganizationModelsPage({
     page = <OrgCodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} />;
   } else if (view === "connect:supergrok") {
     page = <SuperGrokConnectPage grok={grok} places={grokPlaces} onClose={backToList} />;
-  } else if (view === "connect:vercel" || view === "connect:openrouter") {
-    const id = view === "connect:vercel" ? "vercel" : "openrouter";
+  } else if (
+    view === "connect:vercel" ||
+    view === "connect:openrouter" ||
+    view === "connect:anthropic" ||
+    view === "connect:claude_subscription"
+  ) {
+    const id = view.slice("connect:".length) as keyof typeof gateways;
     page = (
       <ProviderConnectPage
         state={gateways[id]}
@@ -188,11 +203,15 @@ export function OrganizationModelsPage({
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
-      (["openrouter", "vercel"] as const).some((id) => !gateways[id].settled);
+      (["openrouter", "vercel", "anthropic", "claude_subscription"] as const).some(
+        (id) => !gateways[id].settled,
+      );
     const listed =
       (codex.loading ? 0 : codex.loadError || codex.pending ? 1 : codex.accounts.length) +
       superGrokListedCount(grok) +
-      (["openrouter", "vercel"] as const).filter((id) => providerListed(gateways[id])).length;
+      (["openrouter", "vercel", "anthropic", "claude_subscription"] as const).filter((id) =>
+        providerListed(gateways[id]),
+      ).length;
     const empty = !loadingAccounts && listed === 0;
     const connect = (
       <RowButton onClick={() => nav.openView("connect")}>
@@ -220,7 +239,7 @@ export function OrganizationModelsPage({
             <RowList label="Shared accounts" columns={ACCOUNT_COLUMNS} flush>
               <OrgCodexRows codex={codex} places={codexPlaces} />
               <SuperGrokAccountRows grok={grok} places={grokPlaces} />
-              {(["openrouter", "vercel"] as const)
+              {(["openrouter", "vercel", "anthropic", "claude_subscription"] as const)
                 .filter((id) => providerListed(gateways[id]))
                 .map((id) => (
                   <ProviderConnectionRow

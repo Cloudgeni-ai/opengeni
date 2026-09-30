@@ -1,3 +1,4 @@
+import { claudeProviderId, withClaudeConnectionCatalog } from "@opengeni/config";
 import {
   configuredModels,
   withCodexCatalogProvider,
@@ -27,8 +28,17 @@ import { z } from "zod";
 import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
 import { managedCookieHuman, requireScopeMutation } from "./supergrok";
 
-const Kind = z.enum(["codex", "supergrok", "vercel_gateway", "openrouter"]);
+const Kind = z.enum([
+  "codex",
+  "supergrok",
+  "vercel_gateway",
+  "openrouter",
+  "anthropic",
+  "claude_subscription",
+]);
 function modelPrefix(target: ModelConnectionTarget) {
+  if (target.kind === "anthropic" || target.kind === "claude_subscription")
+    return claudeProviderId(target.kind) + "/";
   if (target.kind === "codex" || target.kind === "supergrok") return `${target.kind}/`;
   return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : "openrouter"}/`;
 }
@@ -53,6 +63,8 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           subjectId: human.subjectId,
         };
       }
+      if (kind === "anthropic" || kind === "claude_subscription")
+        throw new HTTPException(404, { message: "Manage this connection in organization Models" });
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
       if (kind === "supergrok") {
         const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
@@ -112,6 +124,16 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         workspaces = (await getOrganizationAdministrationOverview(deps.db, actor)).workspaces.map(
           ({ id, name }) => ({ id, name }),
         );
+        if (connection.kind === "anthropic" || connection.kind === "claude_subscription") {
+          const customModels = await listOrganizationModelProviderCustomModels(deps.db, {
+            organizationId: connection.accountId,
+            actorSubjectId: connection.subjectId,
+            providerKind: connection.kind,
+          });
+          settings = withClaudeConnectionCatalog(settings, {
+            [connection.kind]: { models: customModels },
+          });
+        }
         if (connection.kind === "vercel_gateway" || connection.kind === "openrouter") {
           const models = await listOrganizationModelProviderCustomModels(deps.db, {
             ...actor,

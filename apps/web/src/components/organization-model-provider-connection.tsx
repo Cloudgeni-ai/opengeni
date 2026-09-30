@@ -17,7 +17,53 @@ import type {
 // the organization's workspaces. Returns the same view as the workspace hook,
 // so Organization settings > Models reuses the row and the provider's page.
 
-const META: Record<ProviderKind, ProviderPresentation & { shortName: string }> = {
+export const ORGANIZATION_PROVIDER_META: Record<
+  ProviderKind,
+  ProviderPresentation & { shortName: string }
+> = {
+  anthropic: {
+    title: "Anthropic API",
+    shortName: "Anthropic",
+    provider: "anthropic",
+    billedTo: "The organization's Anthropic API account",
+    summary: "Use Claude with an API key. Usage is billed by Anthropic.",
+    keyHelp:
+      "Create a key in the Anthropic Console. Claude subscription tokens belong in the separate Claude subscription connection.",
+    keyAriaLabel: "Anthropic API key",
+    credentialLabelText: "API key",
+    customModelsHeading: "Claude models",
+    customModelsDescription: "Add the exact Claude model IDs your account can use.",
+    customModelInputAriaLabel: "Anthropic model ID",
+    customModelPlaceholder: "claude-sonnet-4-6",
+    emptyCustomModelsDescription: "Add a Claude model to make it available in your workspaces.",
+    readyModelDescription: "Available where connection access allows",
+    waitingModelDescription: "Waiting for an Anthropic API key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Claude model",
+    connectionManagerDescription: "",
+  },
+  claude_subscription: {
+    title: "Claude subscription",
+    shortName: "Claude",
+    provider: "claude_subscription",
+    billedTo: "The connected Claude subscription",
+    summary: "Use your Claude plan with a Claude Code setup token.",
+    keyHelp:
+      "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; OpenGeni does not refresh setup tokens.",
+    keyAriaLabel: "Claude subscription setup token",
+    credentialLabelText: "Setup token",
+    customModelsHeading: "Claude models",
+    customModelsDescription:
+      "Add the exact Claude model IDs available on your plan. Connection access controls which workspaces may use this subscription.",
+    customModelInputAriaLabel: "Claude subscription model ID",
+    customModelPlaceholder: "claude-sonnet-4-6",
+    emptyCustomModelsDescription: "Add a Claude model to make it available in your workspaces.",
+    readyModelDescription: "Uses the connected Claude subscription",
+    waitingModelDescription: "Waiting for a setup token",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Claude model",
+    connectionManagerDescription: "",
+  },
   vercel_gateway: {
     title: "Vercel AI Gateway",
     shortName: "Gateway",
@@ -75,7 +121,7 @@ export function useOrganizationProviderConnection({
   providerKind: ProviderKind;
   client: OpenGeniBrowserClient;
 }): ProviderConnectionView {
-  const meta = META[providerKind];
+  const meta = ORGANIZATION_PROVIDER_META[providerKind];
   const [connection, setConnection] = useState<Connection | null>(null);
   const [models, setModels] = useState<CustomModel[]>([]);
   const [slug, setSlug] = useState("");

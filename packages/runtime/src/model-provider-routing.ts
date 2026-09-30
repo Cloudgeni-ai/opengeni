@@ -9,6 +9,8 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import OpenAI from "openai";
+import { AnthropicMessagesModel } from "./anthropic-messages";
+import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
@@ -104,6 +106,12 @@ export function buildModelInstance(
   client: OpenAI,
   modelId: string,
 ): Model {
+  if (provider.api === "anthropic-messages")
+    return new AnthropicMessagesModel(
+      provider,
+      modelId,
+      instrumentedModelFetch(provider.id, globalThis.fetch),
+    );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)
     : new OpenGeniResponsesModel(client, modelId, provider);

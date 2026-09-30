@@ -287,6 +287,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     return cached;
   }
   if (scopedCredentialProvider && !provider.apiKey) {
+    if (provider.api === "anthropic-messages")
+      throw new Error(
+        "Claude is not connected. Ask an organization administrator to connect it in Models.",
+      );
     if (provider.kind === "openrouter-organization") {
       throw new OrganizationOpenRouterUnavailableError();
     }

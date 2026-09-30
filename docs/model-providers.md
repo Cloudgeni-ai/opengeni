@@ -1249,3 +1249,35 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 - Health scoring and fleet pressure are observations consumed by the catalog,
   not computed here.
 - Tool capability metadata never grants or discovers tools.
+
+## Native Claude Messages
+
+Organization Models supports **Anthropic API** keys and **Claude subscription**
+setup tokens as separate connections. Generate a subscription token with
+`claude setup-token`; OpenGeni does not refresh it. Replace expired or revoked
+credentials on the connection page. Credentials are encrypted with the existing
+organization connection storage and workspace access policy. Add exact upstream
+model IDs to each connection; connecting alone does not validate model entitlement
+or make a paid model call. Subscription usage consumes the connected plan's limits;
+API-key usage is billed by Anthropic. Neither uses OpenGeni credits.
+
+The `anthropic-messages` protocol is implemented by
+`packages/runtime/src/anthropic-messages.ts`, through the existing Agents SDK
+model interface and instrumented transport. It posts full projected history to
+`/v1/messages`, without remote conversation or thread state. Tool calls/results,
+parallel calls, images, streaming text, signed thinking and redacted thinking are
+preserved. Tool names unsupported on the wire receive stable reversible names.
+Native OpenAI hosted tools and opaque compaction tokens are not compatible;
+ordinary function tools and OpenGeni's text compaction remain available.
+
+Registry providers can set `anthropic.auth` (`api-key` or `oauth`), `cacheTtl`
+(`5m`, `1h`, or `off`), `maxOutputTokens`, and `streamIdleTimeoutMs`. API keys use
+`x-api-key`; subscription tokens use Bearer authentication and the OAuth beta.
+Cache breakpoints cover the final tool, system block and eligible history block,
+without mutating stored history. Usage includes fresh input, cache reads, cache
+writes and output. Organization connections use conservative 200k context / 168k
+input / 150k compaction limits and 32k maximum output; configurable registry
+providers can declare model-specific limits. Select models supporting adaptive
+thinking when enabling reasoning. Invalid streams fail closed, incomplete tools
+are never executed, and truncated compaction summaries are rejected. The adapter
+does not silently retry failed requests or rotate credentials.

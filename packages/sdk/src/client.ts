@@ -8525,7 +8525,13 @@ export class OpenGeniClient {
   async getModelConnectionAccess(target: {
     scope: "organizations" | "workspaces";
     scopeId: string;
-    kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+    kind:
+      | "codex"
+      | "supergrok"
+      | "vercel_gateway"
+      | "openrouter"
+      | "anthropic"
+      | "claude_subscription";
     connectionId: string;
   }): Promise<ModelConnectionAccessResponse> {
     return await this.requestJson(
@@ -8538,7 +8544,13 @@ export class OpenGeniClient {
     target: {
       scope: "organizations" | "workspaces";
       scopeId: string;
-      kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+      kind:
+        | "codex"
+        | "supergrok"
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription";
       connectionId: string;
     },
     policy: ModelConnectionAccessPolicy,

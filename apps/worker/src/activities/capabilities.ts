@@ -1,4 +1,10 @@
 import {
+  CLAUDE_CONNECTION_KINDS,
+  claudeProviderId,
+  withClaudeConnectionCatalog,
+  withClaudeConnectionCredential,
+} from "@opengeni/config";
+import {
   environmentsEncryptionKeyBytes,
   type Settings,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -248,7 +254,10 @@ export async function settingsWithOrganizationProviderCredentials(
   settings: Settings,
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const buildModels = async (providerKind: "vercel_gateway" | "openrouter", prefix: string) => {
+  const buildModels = async (
+    providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription",
+    prefix: string,
+  ) => {
     const active = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
       accountId,
       workspaceId,
@@ -284,7 +293,18 @@ export async function settingsWithOrganizationProviderCredentials(
     workspaceId,
     providerKind: "openrouter",
   });
-  return openRouterKey
+  let result = openRouterKey
     ? withOrganizationOpenRouterCredential(gatewaySettings, openRouterKey, openRouterModels)
     : withOrganizationOpenRouterCatalogProvider(gatewaySettings, openRouterModels);
+  for (const kind of CLAUDE_CONNECTION_KINDS) {
+    const models = await buildModels(kind, claudeProviderId(kind) + "/");
+    result = withClaudeConnectionCatalog(result, { [kind]: { models } });
+    const credential = await loadOrganizationModelProviderApiKey(db, settings, {
+      accountId,
+      workspaceId,
+      providerKind: kind,
+    });
+    if (credential) result = withClaudeConnectionCredential(result, kind, credential);
+  }
+  return result;
 }

@@ -48,7 +48,7 @@ function providerKind(value: string) {
 }
 
 function connectionJson(connection: {
-  providerKind: "vercel_gateway" | "openrouter";
+  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
   status: "active" | "revoked";
   version: number;
   createdAt: Date;
@@ -109,6 +109,13 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       UpsertOrganizationModelProviderConnectionRequest,
       "invalid organization model provider connection",
     );
+    const kind = providerKind(c.req.param("providerKind"));
+    if (kind === "anthropic" && !/^sk-ant-api[0-9]+-\S+$/.test(payload.apiKey))
+      throw new HTTPException(422, {
+        message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
+      });
+    if (kind === "claude_subscription" && !/^sk-ant-oat[0-9]+-\S+$/.test(payload.apiKey))
+      throw new HTTPException(422, { message: "Enter the setup token from claude setup-token." });
     try {
       const connection = await upsertOrganizationModelProviderConnection(deps.db, {
         organizationId,

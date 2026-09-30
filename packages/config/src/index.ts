@@ -2049,7 +2049,7 @@ export type BillingAttributionV1 = {
  * wired as "chat" because its beta Responses endpoint echoes input back and
  * silently no-ops hosted tools (see docs/model-providers.md).
  */
-export const ModelProviderApi = z.enum(["responses", "chat"]);
+export const ModelProviderApi = z.enum(["responses", "chat", "anthropic-messages"]);
 export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
 
 /**
@@ -2076,6 +2076,8 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-organization",
   "openrouter-workspace",
   "openrouter-organization",
+  "anthropic-organization",
+  "claude-subscription-organization",
 ]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
@@ -2129,12 +2131,20 @@ const RegistryModelSchema = z
   });
 
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
+const AnthropicProviderOptions = z.object({
+  auth: z.enum(["api-key", "oauth"]).default("api-key"),
+  cacheTtl: z.enum(["5m", "1h", "off"]).default("5m"),
+  maxOutputTokens: z.number().int().positive().default(32000),
+  streamIdleTimeoutMs: z.number().int().positive().default(600000),
+});
+
 const RegistryProviderSchema = z
   .object({
     kind: RegistryProviderKind.default("api-key"),
     id: z.string().min(1).regex(registryId), // stable provider id, e.g. "fireworks"
     label: z.string().min(1).optional(),
     api: ModelProviderApi.default("chat"),
+    anthropic: AnthropicProviderOptions.optional(),
     wireProfile: ModelProviderWireProfile.default("openai"),
     baseUrl: z.string().url(),
     apiKey: z.string().optional(), // inline key (pragmatic) ...
@@ -2222,6 +2232,8 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   OPENROUTER_PROVIDER_ID,
   WORKSPACE_OPENROUTER_PROVIDER_ID,
   ORGANIZATION_OPENROUTER_PROVIDER_ID,
+  "organization-anthropic",
+  "organization-claude-subscription",
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
@@ -2600,6 +2612,7 @@ export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClient
  * replacement.
  */
 export interface ResolvedModelProvider {
+  anthropic?: z.infer<typeof AnthropicProviderOptions> | undefined;
   id: string; // "openai" | "azure" | registry id
   label: string;
   kind: RegistryProviderKind | "openrouter-managed";
@@ -4742,6 +4755,8 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "openrouter-workspace":
       return { kind: "workspace_connection", mechanism: "api_key" };
     case "vercel-gateway-organization":
+    case "anthropic-organization":
+    case "claude-subscription-organization":
     case "openrouter-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
@@ -4767,6 +4782,8 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "openrouter-workspace":
       return { upstreamPayer: "workspace", metering: "external" };
     case "vercel-gateway-organization":
+    case "anthropic-organization":
+    case "claude-subscription-organization":
     case "openrouter-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
@@ -4805,6 +4822,7 @@ function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
 }
 
 function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
+  anthropic?: ResolvedModelProvider["anthropic"];
   headers: Array<{
     name: string;
     classification: "public" | "secret";
@@ -4819,6 +4837,7 @@ function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   const publicHeaders = new Set(provider.publicDefaultHeaderNames ?? []);
   const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
   return {
+    ...(provider.anthropic ? { anthropic: provider.anthropic } : {}),
     headers: Object.entries(provider.defaultHeaders ?? {})
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([name, value]) =>
@@ -4986,6 +5005,7 @@ export function configuredProviders(
       label: provider.label ?? provider.id,
       kind: provider.kind,
       api: provider.api,
+      anthropic: provider.anthropic,
       wireProfile: provider.wireProfile,
       builtin: false,
       baseUrl: provider.baseUrl,
@@ -7574,6 +7594,8 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-organization" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
+      provider.kind === "anthropic-organization" ||
+      provider.kind === "claude-subscription-organization" ||
       provider.kind === "xai-subscription"
     ) {
       throw new Error(
@@ -7960,4 +7982,96 @@ function parseGcsCredentialsJson(raw: string): unknown {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Native Claude connections reuse the encrypted organization connection boundary. */
+export const CLAUDE_CONNECTION_KINDS = ["anthropic", "claude_subscription"] as const;
+export type ClaudeConnectionKind = (typeof CLAUDE_CONNECTION_KINDS)[number];
+export function claudeProviderId(kind: ClaudeConnectionKind): string {
+  return kind === "anthropic" ? "organization-anthropic" : "organization-claude-subscription";
+}
+export type ClaudeConnectionCatalog = Partial<
+  Record<
+    ClaudeConnectionKind,
+    {
+      active?: boolean;
+      models: readonly { upstreamModelId: string; label?: string | null }[];
+    }
+  >
+>;
+export function withClaudeConnectionCatalog(
+  settings: Settings,
+  connections: ClaudeConnectionCatalog,
+): Settings {
+  let providers = parseModelProvidersJson(settings.modelProvidersJson);
+  for (const kind of CLAUDE_CONNECTION_KINDS) {
+    const connection = connections[kind];
+    if (!connection) continue;
+    const id = claudeProviderId(kind);
+    const prior = providers.find((provider) => provider.id === id);
+    providers = providers.filter((provider) => provider.id !== id);
+    if (!connection.models.length) continue;
+    providers.push({
+      id,
+      label: kind === "anthropic" ? "Anthropic API" : "Claude subscription",
+      kind: kind === "anthropic" ? "anthropic-organization" : "claude-subscription-organization",
+      api: "anthropic-messages",
+      wireProfile: "openai",
+      baseUrl: "https://api.anthropic.com/v1",
+      ...(prior?.apiKey &&
+      prior.kind ===
+        (kind === "anthropic" ? "anthropic-organization" : "claude-subscription-organization")
+        ? { apiKey: prior.apiKey }
+        : {}),
+      anthropic: {
+        auth: kind === "anthropic" ? "api-key" : "oauth",
+        cacheTtl: "5m",
+        maxOutputTokens: 32000,
+        streamIdleTimeoutMs: 600000,
+      },
+      models: connection.models.map((model) => ({
+        contextWindowTokens: 200000,
+        effectiveContextWindowTokens: 168000,
+        autoCompactTokenLimit: 150000,
+        id: id + "/" + model.upstreamModelId,
+        upstreamModelId: model.upstreamModelId,
+        label: model.label ?? model.upstreamModelId,
+        reasoningEffort: true,
+        hostedWebSearch: false,
+        capabilities: {
+          ...legacyModelCapabilities(settings, {
+            reasoningEffort: true,
+            hostedWebSearch: false,
+            vision: true,
+          }),
+          inputFileMediaTypes: [],
+          reasoning: {
+            upstream: "supported",
+            runnable: true,
+            efforts: ["low", "medium", "high"],
+            defaultEffort: "high",
+            required: false,
+          },
+          functionCalling: { upstream: "supported", runnable: true },
+          promptCaching: { upstream: "supported", runnable: true, mode: "automatic" },
+        },
+      })),
+    });
+  }
+  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+}
+export function withClaudeConnectionCredential(
+  settings: Settings,
+  kind: ClaudeConnectionKind,
+  credential: string,
+): Settings {
+  if (!credential.trim()) throw new Error("Claude credential is empty");
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify(
+      parseModelProvidersJson(settings.modelProvidersJson).map((provider) =>
+        provider.id === claudeProviderId(kind) ? { ...provider, apiKey: credential } : provider,
+      ),
+    ),
+  };
 }

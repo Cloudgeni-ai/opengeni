@@ -58,6 +58,8 @@ export async function getWorkspaceConnectionModelRestrictions(
     "workspace-openrouter/": [],
     "organization-gateway/": [],
     "organization-openrouter/": [],
+    "organization-anthropic/": [],
+    "organization-claude-subscription/": [],
   };
   await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) => {
     const rows = await rawRows<{
@@ -66,7 +68,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     }>(
       tx,
       sql`
-      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' ELSE 'organization-openrouter/' END AS prefix,
+      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' ELSE 'organization-openrouter/' END AS prefix,
         allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active'
       UNION ALL
       SELECT CASE WHEN metadata->>'credentialRole' = 'vercel_ai_gateway' THEN 'workspace-gateway/' ELSE 'workspace-openrouter/' END,
@@ -112,10 +114,12 @@ export async function assertModelConnectionAllowsTurn(
     query = sql`SELECT allowed_model_ids AS models FROM ${sql.identifier(codex ? "codex_subscription_credentials" : "xai_subscription_credentials")} WHERE id = ${id}::uuid`;
   } else if (
     model.startsWith("organization-gateway/") ||
-    model.startsWith("organization-openrouter/")
+    model.startsWith("organization-openrouter/") ||
+    model.startsWith("organization-anthropic/") ||
+    model.startsWith("organization-claude-subscription/")
   ) {
     query = sql`SELECT allowed_model_ids AS models FROM organization_model_provider_connections
-      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : "openrouter"} AND status = 'active'`;
+      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : model.startsWith("organization-anthropic/") ? "anthropic" : model.startsWith("organization-claude-subscription/") ? "claude_subscription" : "openrouter"} AND status = 'active'`;
   } else if (model.startsWith("workspace-gateway/") || model.startsWith("workspace-openrouter/")) {
     query = sql`SELECT allowed_model_ids AS models FROM connections WHERE workspace_id = ${input.workspaceId}::uuid
       AND subject_id IS NULL AND kind = 'api_key' AND status = 'active'

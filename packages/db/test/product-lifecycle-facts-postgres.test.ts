@@ -406,11 +406,24 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
       operationId: crypto.randomUUID(),
       expectedVersion: 0,
     });
+    for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+      await upsertOrganizationModelProviderConnection(client.db, {
+        organizationId: owner.organizationId,
+        actorSubjectId: owner.subjectId,
+        providerKind,
+        credentialEncrypted: "encrypted-test",
+        credentialDigest: "test-digest",
+        operationId: crypto.randomUUID(),
+        expectedVersion: 0,
+      });
+    }
     const models = [
       ...(await factsFor({ type: "model.connected", accountId: target.accountId })),
       ...(await factsFor({ type: "model.connected", accountId: owner.organizationId })),
     ];
     expect(models.map((row) => row.payload.attribute).sort()).toEqual([
+      "anthropic",
+      "claude_subscription",
       "codex",
       "openrouter",
       "supergrok",

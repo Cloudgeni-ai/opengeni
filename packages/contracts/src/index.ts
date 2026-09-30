@@ -2643,7 +2643,12 @@ export type OrganizationProviderCustomModelsResponse = z.infer<
   typeof OrganizationProviderCustomModelsResponse
 >;
 
-export const OrganizationModelProviderKind = z.enum(["vercel_gateway", "openrouter"]);
+export const OrganizationModelProviderKind = z.enum([
+  "vercel_gateway",
+  "openrouter",
+  "anthropic",
+  "claude_subscription",
+]);
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
 export const OrganizationModelProviderConnectionResponse = z.object({
   providerKind: OrganizationModelProviderKind,
@@ -17204,7 +17209,7 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       latencyModeSource: TurnExecutionLatencyModeSourceV1.default("deployment"),
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
-      wireApi: z.enum(["responses", "chat"]),
+      wireApi: z.enum(["responses", "chat", "anthropic-messages"]),
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
@@ -17433,7 +17438,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     shortLabel: z.string().min(1).max(64).optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
-    api: z.enum(["responses", "chat"]),
+    api: z.enum(["responses", "chat", "anthropic-messages"]),
     source: z
       .enum(["opengeni", "codex", "supergrok", "workspace_gateway", "openrouter"])
       .optional(),
@@ -17445,7 +17450,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     deployment: z
       .object({
         upstreamModelId: z.string().min(1),
-        wireApi: z.enum(["responses", "chat"]),
+        wireApi: z.enum(["responses", "chat", "anthropic-messages"]),
       })
       .optional(),
     executionLimits: z

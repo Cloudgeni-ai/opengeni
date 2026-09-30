@@ -92,3 +92,29 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   );
   expect(submitButton().hasAttribute("data-analytics-action")).toBe(false);
 });
+
+test("Claude credentials use distinct accessible forms and explain subscription expiry", async () => {
+  const { ORGANIZATION_PROVIDER_META } = await import("../organization-model-provider-connection");
+  for (const kind of ["anthropic", "claude_subscription"] as const) {
+    const config = ORGANIZATION_PROVIDER_META[kind];
+    const state = {
+      config,
+      canManageConnection: true,
+      saveKey: async () => true,
+    } as unknown as ProviderConnection;
+    await act(async () =>
+      root.render(
+        <ProviderConnectPage key={kind} state={state} onClose={() => {}} onConnected={() => {}} />,
+      ),
+    );
+    const input = container.querySelector("input")!;
+    expect(input.getAttribute("aria-label")).toBe(config.keyAriaLabel);
+    expect(input.type).toBe("password");
+    expect(submitButton().disabled).toBe(true);
+    expect(container.textContent).toContain(config.title);
+    if (kind === "claude_subscription") {
+      expect(container.textContent).toContain("claude setup-token");
+      expect(container.textContent).toContain("does not refresh");
+    }
+  }
+});

@@ -57,7 +57,7 @@ import type { AnalyticsAction } from "@/lib/analytics-actions";
 
 // Workspace API-key providers (Vercel AI Gateway, OpenRouter) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list
-// row, the provider's own page, the Replace key prompt and the Connect page.
+// row, the provider's own page, the Replace credential prompt and the Connect page.
 
 type WorkspaceProviderCustomModel = WorkspaceGatewayCustomModel;
 
@@ -78,13 +78,14 @@ type ProviderConnectionConfig = {
   credentialLabel: string;
   readinessProvider: string;
   title: string;
-  provider: "vercel" | "openrouter";
+  provider: "vercel" | "openrouter" | "anthropic" | "claude_subscription";
   billedTo: string;
   analyticsAction: AnalyticsAction;
   /** One sentence under the name, for the not-connected row and the Connect page. */
   summary: string;
   /** Where to get a key. */
   keyHelp: string;
+  credentialLabelText?: string;
   billingDescription: string;
   connectionManagerDescription: string;
   keyAriaLabel: string;
@@ -235,6 +236,7 @@ export type ProviderPresentation = Pick<
   | "provider"
   | "summary"
   | "keyHelp"
+  | "credentialLabelText"
   | "keyAriaLabel"
   | "customModelsHeading"
   | "customModelsDescription"
@@ -1013,7 +1015,7 @@ function CustomModels({ state }: { state: ProviderConnection }) {
   );
 }
 
-/** Replace key: a one-field prompt. */
+/** Replace credential: a one-field prompt. */
 export function ReplaceKeyDialog({
   state,
   open,
@@ -1036,14 +1038,14 @@ export function ReplaceKeyDialog({
       leading={<ProviderTile provider={config.provider} />}
       title={`Replace the ${config.title} key`}
       description="New work uses the new key right away. Work already running finishes on the old one."
-      submitLabel="Replace key"
+      submitLabel="Replace credential"
       pendingLabel="Saving…"
       submitDisabled={!key.trim()}
       onSubmit={async () => await state.saveKey(key)}
       onSubmitted={() => onOpenChange(false)}
     >
       <Field
-        label="API key"
+        label={config.credentialLabelText ?? "API key"}
         hint={`${config.keyHelp} It's stored encrypted and never shown again.`}
       >
         <SecretInput
@@ -1147,13 +1149,13 @@ export function ProviderConnectionPage({
           </StatusBadge>
         )
       }
-      meta={["API key", scopeName ?? state.scopeLabel]}
+      meta={[config.credentialLabelText ?? "API key", scopeName ?? state.scopeLabel]}
       actions={
         state.canManageConnection ? (
           state.connected ? (
             <>
               <RowButton onClick={() => setReplacing(true)} disabled={state.busy}>
-                Replace key
+                Replace credential
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
                 <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
@@ -1282,7 +1284,7 @@ export function ProviderConnectPage({
     >
       <FieldStack>
         <Field
-          label="API key"
+          label={config.credentialLabelText ?? "API key"}
           hint={`${config.keyHelp} It's stored encrypted and never shown again. Connecting doesn't run a model or spend credits.`}
         >
           <SecretInput

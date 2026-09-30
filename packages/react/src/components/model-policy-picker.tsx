@@ -100,6 +100,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
+    claude_subscription: "Claude plan",
     byok: "Billed to the workspace provider account",
     organization_byok: "Billed to the organization provider account",
   },
@@ -200,6 +201,7 @@ export function BillingClassMark(props: {
     external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
+    claude_subscription: "Claude",
     byok: "Workspace provider account",
     organization_byok: "Organization provider account",
   };
@@ -242,6 +244,8 @@ function isCodexModel(model: ClientModel): boolean {
 }
 
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
   // A deployment OpenRouter ID does not encode its workspace-facing cost.

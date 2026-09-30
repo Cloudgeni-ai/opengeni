@@ -7,7 +7,13 @@ import {
   type Database,
 } from "./database";
 
-export type ModelConnectionKind = "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+export type ModelConnectionKind =
+  | "codex"
+  | "supergrok"
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 export type ModelConnectionAccess = {
   allowedModels: string[] | null;
   allowedWorkspaces: string[] | null;
@@ -62,6 +68,8 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
       condition: sql`account_id = ${target.accountId}::uuid AND provider_kind = ${target.kind} AND status = 'active'
         AND ${target.connectionId === "current" ? sql`true` : sql`id::text = ${target.connectionId}`}`,
     };
+  if (target.kind === "anthropic" || target.kind === "claude_subscription")
+    throw new Error("Claude connections are managed at organization scope");
   return {
     table: sql.identifier("connections"),
     condition: sql`account_id = ${target.accountId}::uuid AND workspace_id = ${target.workspaceId}::uuid

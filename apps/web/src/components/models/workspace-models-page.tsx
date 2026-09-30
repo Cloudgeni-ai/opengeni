@@ -215,7 +215,7 @@ export function WorkspaceModelsPage({
     page = (
       <SuperGrokAccountPage grok={grok} accountId={key.id} places={grokPlaces} client={client} />
     );
-  } else if (key?.provider === "gateway") {
+  } else if (key?.provider === "gateway" && (key.id === "vercel" || key.id === "openrouter")) {
     page = (
       <ProviderConnectionPage
         state={gateways[key.id]}
@@ -400,7 +400,13 @@ function ModelsList({
   );
 }
 
-type ConnectChoice = "codex" | "supergrok" | "vercel" | "openrouter";
+type ConnectChoice =
+  | "anthropic"
+  | "claude_subscription"
+  | "codex"
+  | "supergrok"
+  | "vercel"
+  | "openrouter";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -420,13 +426,19 @@ export function ConnectPickerPage({
   codexAvailable: boolean;
   /** "not_enabled": this server has SuperGrok off. "hidden": the viewer can't connect it. */
   grok: "available" | "not_enabled" | "hidden";
-  gateways?: Record<"vercel" | "openrouter", ProviderConnection> | undefined;
+  gateways?:
+    | Partial<
+        Record<"vercel" | "openrouter" | "anthropic" | "claude_subscription", ProviderConnection>
+      >
+    | undefined;
   /** Where the account pays: the workspace's name, or the organization's shared workspaces. */
   scopeName: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
   /** Opens a provider that is already connected. */
-  onOpenConnected?: ((provider: "vercel" | "openrouter") => void) | undefined;
+  onOpenConnected?:
+    | ((provider: "vercel" | "openrouter" | "anthropic" | "claude_subscription") => void)
+    | undefined;
 }) {
   const choices: {
     id: ConnectChoice;
@@ -449,16 +461,13 @@ export function ConnectPickerPage({
         ]
       : []),
     ...(gateways
-      ? (["openrouter", "vercel"] as const)
-          .filter((id) => gateways[id].canManageConnection)
+      ? (["openrouter", "vercel", "anthropic", "claude_subscription"] as const)
+          .filter((id) => gateways[id]?.canManageConnection)
           .map((id) => ({
             id,
-            title: gateways[id].config.title,
-            summary:
-              id === "openrouter"
-                ? "Pay per token through OpenRouter"
-                : "Pay per token through Vercel",
-            connected: gateways[id].connected,
+            title: gateways[id]!.config.title,
+            summary: gateways[id]!.config.billedTo,
+            connected: gateways[id]!.connected,
           }))
       : []),
   ];
@@ -497,7 +506,11 @@ export function ConnectPickerPage({
                   meta={[choice.connected ? "Connected" : choice.summary]}
                   indicator="open"
                   onOpen={() =>
-                    choice.connected && (choice.id === "vercel" || choice.id === "openrouter")
+                    choice.connected &&
+                    (choice.id === "vercel" ||
+                      choice.id === "openrouter" ||
+                      choice.id === "anthropic" ||
+                      choice.id === "claude_subscription")
                       ? onOpenConnected?.(choice.id)
                       : onPick(choice.id)
                   }

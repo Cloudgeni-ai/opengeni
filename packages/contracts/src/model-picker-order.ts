@@ -5,6 +5,7 @@ export type ModelPickerBillingClass =
   | "external"
   | "codex_subscription"
   | "supergrok_subscription"
+  | "claude_subscription"
   | "byok"
   | "organization_byok";
 
@@ -15,11 +16,14 @@ const MODEL_PICKER_BILLING_CLASS_ORDER: readonly ModelPickerBillingClass[] = [
   "external",
   "codex_subscription",
   "supergrok_subscription",
+  "claude_subscription",
   "byok",
   "organization_byok",
 ];
 
 export type ModelPickerBillingCandidate = {
+  provider?: string | undefined;
+  providerId?: string | undefined;
   source?: string | undefined;
   cost?: "free" | "credits" | "subscription" | "workspace" | "organization" | undefined;
   billing?:
@@ -39,6 +43,11 @@ export type ModelPickerBillingCandidate = {
 export function modelPickerBillingClassFor(
   model: ModelPickerBillingCandidate,
 ): ModelPickerBillingClass {
+  if (
+    model.provider === "organization-claude-subscription" ||
+    model.providerId === "organization-claude-subscription"
+  )
+    return "claude_subscription";
   if (model.cost === "credits" || model.cost === "free") return "opengeni_credits";
   if (model.cost === "workspace") return "byok";
   if (model.cost === "organization") return "organization_byok";

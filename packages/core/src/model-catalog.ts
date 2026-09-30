@@ -1,6 +1,10 @@
 import { modelAllowedByConnections, type ConnectionModelRestrictions } from "@opengeni/db";
 import {
   applyModelCatalogDocument,
+  CLAUDE_CONNECTION_KINDS,
+  claudeProviderId,
+  withClaudeConnectionCatalog,
+  type ClaudeConnectionCatalog,
   configuredGatewayWorkspaceProductModelIds,
   configuredGatewayOrganizationProductModelIds,
   configuredModels,
@@ -73,7 +77,7 @@ export function isWorkspaceOpenRouterCustomModelId(settings: Settings, modelId: 
 
 export type WorkspaceCustomModelReference = {
   scope: "workspace" | "organization";
-  providerKind: "vercel_gateway" | "openrouter";
+  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
   upstreamModelId: string;
 };
 
@@ -81,6 +85,15 @@ export function workspaceCustomModelReference(
   settings: Settings,
   modelId: string,
 ): WorkspaceCustomModelReference | null {
+  for (const kind of CLAUDE_CONNECTION_KINDS) {
+    const prefix = claudeProviderId(kind) + "/";
+    if (modelId.startsWith(prefix))
+      return {
+        scope: "organization",
+        providerKind: kind,
+        upstreamModelId: modelId.slice(prefix.length),
+      };
+  }
   if (isWorkspaceGatewayCustomModelId(settings, modelId)) {
     return {
       scope: "workspace",
@@ -348,17 +361,41 @@ export async function resolveWorkspaceCatalogSettings(
     organizationOpenRouterCustomModels,
     retainedOrganizationOpenRouterCustomModels,
   );
+  const claudeConnections: ClaudeConnectionCatalog = {};
+  if (supportsOrganizationProviderReads)
+    for (const kind of CLAUDE_CONNECTION_KINDS) {
+      const models = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKind: kind,
+      });
+      const prefix = claudeProviderId(kind) + "/";
+      for (const productId of retainedProductModelIds)
+        if (productId?.startsWith(prefix)) {
+          const retained = await getOrganizationModelProviderCustomModelForExecution(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: kind,
+            upstreamModelId: productId.slice(prefix.length),
+          });
+          if (retained && !models.some((model) => model.id === retained.id)) models.push(retained);
+        }
+      claudeConnections[kind] = { models };
+    }
   return {
     ...resolved,
-    settings: withOrganizationOpenRouterCatalogProvider(
-      withOrganizationGatewayCatalogProvider(
-        withWorkspaceOpenRouterCatalogProvider(
-          withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
-          openRouterCustomModels,
+    settings: withClaudeConnectionCatalog(
+      withOrganizationOpenRouterCatalogProvider(
+        withOrganizationGatewayCatalogProvider(
+          withWorkspaceOpenRouterCatalogProvider(
+            withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
+            openRouterCustomModels,
+          ),
+          organizationGatewayModels,
         ),
-        organizationGatewayModels,
+        organizationOpenRouterModels,
       ),
-      organizationOpenRouterModels,
+      claudeConnections,
     ),
   };
 }
@@ -388,6 +425,7 @@ export type WorkspaceModelSelectionInput = {
   xaiSubscriptionActive?: boolean;
   workspaceGatewayConnectionActive?: boolean;
   workspaceOpenRouterConnectionActive?: boolean;
+  claudeConnections?: ClaudeConnectionCatalog;
   organizationGatewayConnectionActive?: boolean;
   organizationOpenRouterConnectionActive?: boolean;
   workspaceGatewayCustomModels?: readonly {
@@ -488,6 +526,7 @@ function credentialReadinessFor(input: {
   xaiSubscriptionActive: boolean;
   workspaceGatewayConnectionActive: boolean;
   workspaceOpenRouterConnectionActive: boolean;
+  claudeConnections?: ClaudeConnectionCatalog | undefined;
   organizationGatewayConnectionActive: boolean;
   organizationOpenRouterConnectionActive: boolean;
   observation: ModelCredentialReadinessObservation | undefined;
@@ -522,8 +561,12 @@ function credentialReadinessFor(input: {
         };
   }
   if (source.kind === "organization_connection") {
-    const connectionActive =
-      input.model.providerId === ORGANIZATION_OPENROUTER_PROVIDER_ID
+    const claudeKind = CLAUDE_CONNECTION_KINDS.find(
+      (kind) => claudeProviderId(kind) === input.model.providerId,
+    );
+    const connectionActive = claudeKind
+      ? input.claudeConnections?.[claudeKind]?.active === true
+      : input.model.providerId === ORGANIZATION_OPENROUTER_PROVIDER_ID
         ? input.organizationOpenRouterConnectionActive
         : input.organizationGatewayConnectionActive;
     return connectionActive
@@ -684,15 +727,21 @@ export function resolveWorkspaceModelSelection(
   const xaiSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(codexSettings)
     : codexSettings;
-  const catalogSettings = withOrganizationOpenRouterCatalogProvider(
-    withOrganizationGatewayCatalogProvider(
-      withWorkspaceOpenRouterCatalogProvider(
-        withWorkspaceGatewayCatalogProvider(xaiSettings, input.workspaceGatewayCustomModels ?? []),
-        input.workspaceOpenRouterCustomModels ?? [],
+  const catalogSettings = withClaudeConnectionCatalog(
+    withOrganizationOpenRouterCatalogProvider(
+      withOrganizationGatewayCatalogProvider(
+        withWorkspaceOpenRouterCatalogProvider(
+          withWorkspaceGatewayCatalogProvider(
+            xaiSettings,
+            input.workspaceGatewayCustomModels ?? [],
+          ),
+          input.workspaceOpenRouterCustomModels ?? [],
+        ),
+        input.organizationGatewayCustomModels ?? [],
       ),
-      input.organizationGatewayCustomModels ?? [],
+      input.organizationOpenRouterCustomModels ?? [],
     ),
-    input.organizationOpenRouterCustomModels ?? [],
+    input.claudeConnections ?? {},
   );
   const providers = new Map(
     configuredProviders(catalogSettings).map((provider) => [provider.id, provider]),
@@ -725,6 +774,7 @@ export function resolveWorkspaceModelSelection(
         xaiSubscriptionActive: input.xaiSubscriptionActive === true,
         workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
         workspaceOpenRouterConnectionActive: input.workspaceOpenRouterConnectionActive === true,
+        claudeConnections: input.claudeConnections,
         organizationGatewayConnectionActive: input.organizationGatewayConnectionActive === true,
         organizationOpenRouterConnectionActive:
           input.organizationOpenRouterConnectionActive === true,
