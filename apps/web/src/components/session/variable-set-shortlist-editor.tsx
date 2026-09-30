@@ -1,7 +1,13 @@
 import { useState, type ReactNode } from "react";
-import { ArrowLeftIcon, ChevronDownIcon, ChevronUpIcon, PlusIcon, XIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon, PlusIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ComposerMenuHeader, ComposerMenuSwitch } from "@/components/ui/composer-menu";
+import {
+  ComposerMenuHeader,
+  ComposerMenuRowsSkeleton,
+  ComposerMenuSwitch,
+  MenuBackButton,
+} from "@/components/ui/composer-menu";
+import { MENU_BUTTON_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 import type { VariableSetShortlistRow } from "@/lib/variable-set-shortlist";
 
 export function VariableSetShortlistEditor(props: {
@@ -33,15 +39,10 @@ export function VariableSetShortlistEditor(props: {
         title={adding ? "Add variable sets" : "Variable sets"}
         leading={
           adding ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Back to selected variable sets"
+            <MenuBackButton
+              label="Back to selected variable sets"
               onClick={() => setAdding(false)}
-            >
-              <ArrowLeftIcon />
-            </Button>
+            />
           ) : (
             props.leading
           )
@@ -56,10 +57,10 @@ export function VariableSetShortlistEditor(props: {
           onKeyDown={(event) => {
             if (event.key !== "Escape") event.stopPropagation();
           }}
-          className="mx-2 my-2 rounded-md border border-border bg-bg px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="mb-1.5 h-8 rounded-[10px] border border-border bg-surface px-2.5 text-sm outline-none placeholder:text-fg-subtle focus-visible:border-brand pointer-coarse:h-11"
         />
       ) : (
-        <p className="px-2 py-2 text-2xs text-fg-subtle">
+        <p className="px-2.5 pb-1.5 text-xs leading-4.5 text-fg-muted">
           Sets higher in the list take precedence when names collide.
         </p>
       )}
@@ -70,12 +71,12 @@ export function VariableSetShortlistEditor(props: {
               return (
                 <div
                   key={set.id}
-                  className="flex min-h-11 items-center gap-2 rounded-md px-2 hover:bg-surface-2"
+                  className="flex min-h-8 items-center gap-2.5 rounded-[10px] px-2.5 hover:bg-surface-2 pointer-coarse:min-h-11"
                 >
                   <span className="min-w-0 flex-1 truncate text-sm">
                     {set.name}
                     {set.scope === "user" ? (
-                      <span className="ml-2 text-2xs text-fg-subtle">Only me</span>
+                      <span className="ml-2 text-xs text-fg-muted">Only me</span>
                     ) : null}
                   </span>
                   <ComposerMenuSwitch
@@ -98,7 +99,7 @@ export function VariableSetShortlistEditor(props: {
               return (
                 <div
                   key={row.id}
-                  className="flex min-h-11 items-center gap-0.5 rounded-md px-2 hover:bg-surface-2"
+                  className="flex min-h-8 items-center gap-0.5 rounded-[10px] px-2.5 hover:bg-surface-2 pointer-coarse:min-h-11"
                 >
                   <span
                     className={`min-w-0 flex-1 truncate text-sm ${row.enabled ? "text-fg" : "text-fg-subtle"}`}
@@ -150,29 +151,28 @@ export function VariableSetShortlistEditor(props: {
               );
             })}
         {(adding ? catalog : props.rows).length === 0 ? (
-          <p className="px-2 py-4 text-xs text-fg-subtle">
-            {adding && props.loading
-              ? "Loading variable sets…"
-              : adding
-                ? "No matching variable sets."
-                : "No variable sets in this list."}
-          </p>
+          adding && props.loading ? (
+            <ComposerMenuRowsSkeleton rows={3} label="Loading variable sets" />
+          ) : (
+            <p className={MENU_NOTE_CLASS}>
+              {adding ? "No matching variable sets." : "No variable sets in this list."}
+            </p>
+          )
         ) : null}
       </div>
       {!adding && props.canAdd ? (
-        <Button
+        <button
           type="button"
-          variant="ghost"
-          className="mt-1 justify-start"
+          className={MENU_BUTTON_CLASS}
           disabled={props.disabled}
           onClick={() => setAdding(true)}
         >
           <PlusIcon />
           Add variable sets
-        </Button>
+        </button>
       ) : null}
       {enabledCount >= 25 ? (
-        <p className="px-2 text-2xs text-fg-subtle">
+        <p className="px-2.5 text-xs text-fg-muted">
           Up to 25 sets can be on. Turn one off to enable another.
         </p>
       ) : null}

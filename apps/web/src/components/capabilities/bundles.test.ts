@@ -160,7 +160,7 @@ describe("bundle rows", () => {
         busy: false,
         provenance: "built_in",
       }).accessibleDetail,
-    ).toBe("Skill, curated by OpenGeni");
+    ).toBe("Skill, curated by Opengeni");
     expect(bundleAccessibleDetail("skill", null)).toBe("Skill");
   });
 });

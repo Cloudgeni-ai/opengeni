@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { userErrorText } from "@/lib/api-error";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,
@@ -149,8 +150,7 @@ function failure(error: unknown, conflict: string): DirectoryActionError {
     );
   }
   if (isOrganizationConflict(error)) return new DirectoryActionError(conflict);
-  const message = error instanceof Error && error.message ? error.message : String(error);
-  return new DirectoryActionError(message);
+  return new DirectoryActionError(userErrorText(error), { cause: error });
 }
 
 const EMPTY_INVITATIONS = { invitations: [] as OrganizationInvitation[], nextCursor: null };

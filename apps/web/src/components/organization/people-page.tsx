@@ -48,6 +48,7 @@ import {
   canRevokeOrganizationInvitation,
   organizationMemberCapabilities,
 } from "@/lib/organization-admin";
+import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import type {
   OrganizationInvitation,
@@ -138,10 +139,6 @@ interface PeopleActions {
   resend: (invitation: OrganizationInvitation) => Promise<void>;
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function usePeopleActions(
   directory: OrganizationDirectory,
   setConfirm: (confirm: Confirm) => void,
@@ -158,7 +155,9 @@ function usePeopleActions(
             description: "Give them workspace access again from their page.",
           });
         } catch (error) {
-          toast.error(`Couldn't restore ${memberName(member)}`, { description: errorText(error) });
+          toast.error(`Couldn't restore ${memberName(member)}`, {
+            description: userErrorText(error),
+          });
         }
       },
       resend: async (invitation) => {
@@ -172,7 +171,7 @@ function usePeopleActions(
             });
           }
         } catch (error) {
-          toast.error("Couldn't resend the invitation", { description: errorText(error) });
+          toast.error("Couldn't resend the invitation", { description: userErrorText(error) });
         }
       },
     }),
@@ -338,7 +337,9 @@ function WorkspaceChips({
             <button
               type="button"
               aria-label={`Show all ${sorted.length} workspaces for ${name}`}
-              className="inline-flex h-5.5 shrink-0 items-center rounded-full border border-border bg-surface px-1.5 text-2xs font-medium text-fg-muted tabular-nums transition-colors duration-[120ms] hover:border-border-strong hover:text-fg data-[state=open]:border-border-strong data-[state=open]:text-fg pointer-coarse:h-8 pointer-coarse:px-2.5"
+              // 22px on the row's 18px line without making it taller; touch
+              // gets a larger invisible target instead of a taller chip.
+              className="relative -my-0.5 inline-flex h-5.5 shrink-0 items-center rounded-full border border-border bg-surface px-1.5 text-2xs font-medium text-fg-muted tabular-nums transition-colors duration-[120ms] after:absolute after:-inset-x-1 after:-inset-y-2.5 after:content-[''] hover:border-border-strong hover:text-fg data-[state=open]:border-border-strong data-[state=open]:text-fg"
             >
               +{rest.length}
             </button>
@@ -377,10 +378,10 @@ function WorkspaceChips({
 
 function RoleCell({ role, soleOwner }: { role: OrganizationMembershipRole; soleOwner?: boolean }) {
   return (
-    <span className="flex min-w-0 flex-wrap items-center gap-x-1.5">
-      <span className="truncate text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
+    <span className="flex min-w-0 items-center gap-x-1.5">
+      <span className="shrink-0 text-fg">{ORGANIZATION_ROLE_LABELS[role]}</span>
       {soleOwner ? (
-        <span className="text-xs whitespace-nowrap text-fg-subtle">Only owner</span>
+        <span className="min-w-0 truncate text-xs text-fg-subtle">Only owner</span>
       ) : null}
     </span>
   );
@@ -454,8 +455,9 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
         variant="inline"
         title="Couldn't load the people in this organization."
         action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(directory.members.error)}
       >
-        {directory.members.error.message}
+        {userErrorTextWithoutReference(directory.members.error)}
       </ErrorMessage>
     );
   }
@@ -538,18 +540,15 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
                     title={name}
                     titleAddon={you ? <MetaChip variant="outline">You</MetaChip> : undefined}
                     description={member.email && member.email !== name ? member.email : undefined}
-                    meta={
-                      status
-                        ? [
-                            <StatusBadge
-                              key="status"
-                              variant="dot"
-                              status={member.status === "suspended" ? "suspended" : "queued"}
-                            >
-                              {status}
-                            </StatusBadge>,
-                          ]
-                        : undefined
+                    status={
+                      status ? (
+                        <StatusBadge
+                          variant="dot"
+                          status={member.status === "suspended" ? "suspended" : "queued"}
+                        >
+                          {status}
+                        </StatusBadge>
+                      ) : undefined
                     }
                     cells={{
                       role: (
@@ -587,15 +586,11 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
                 leading={<PersonAvatar name={name} pending />}
                 title={name}
                 description={invitation.targetName ? invitation.targetEmail : undefined}
-                meta={[
-                  <StatusBadge
-                    key="status"
-                    variant="dot"
-                    status={failed ? "invite_failed" : "invited"}
-                  >
+                status={
+                  <StatusBadge variant="dot" status={failed ? "invite_failed" : "invited"}>
                     {invitationStatusLabel(invitation)}
-                  </StatusBadge>,
-                ]}
+                  </StatusBadge>
+                }
                 cells={{
                   role: <RoleCell role={invitation.role} />,
                   workspaces: (
@@ -711,7 +706,7 @@ function WorkspaceAccessRows({
                     }
                   } catch (error) {
                     toast.error(`Couldn't change ${name}'s access to ${workspace.name}`, {
-                      description: errorText(error),
+                      description: userErrorText(error),
                     });
                   } finally {
                     setSaving(null);
@@ -750,8 +745,9 @@ function PersonPage({
             variant="inline"
             title="Couldn't load this person."
             action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+            {...apiErrorDetails(directory.members.error)}
           >
-            {directory.members.error.message}
+            {userErrorTextWithoutReference(directory.members.error)}
           </ErrorMessage>
         ) : (
           <EmptyState
@@ -871,7 +867,9 @@ function PersonPage({
                 await directory.changeOrganizationRole(member, role);
                 toast.success(`${name} is now ${withArticle(ORGANIZATION_ROLE_LABELS[role])}`);
               } catch (error) {
-                toast.error(`Couldn't change ${name}'s role`, { description: errorText(error) });
+                toast.error(`Couldn't change ${name}'s role`, {
+                  description: userErrorText(error),
+                });
                 throw error;
               }
             }}
@@ -1104,7 +1102,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
           setEmails(result.failed.map((each) => each.email));
           throw new Error(
             result.failed.length === 1
-              ? `Couldn't invite ${result.failed[0]!.email}: ${result.failed[0]!.message}`
+              ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
               : `Couldn't invite ${joinNames(result.failed.map((each) => each.email))}. ${result.failed[0]!.message}`,
           );
         }

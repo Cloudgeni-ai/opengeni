@@ -62,7 +62,7 @@ describe("StatusBadge", () => {
   });
 
   test("a reason makes the badge focusable and readable", () => {
-    const reason = "GitHub isn't available on this OpenGeni server yet.";
+    const reason = "GitHub isn't available on this Opengeni server yet.";
     const html = renderToStaticMarkup(<StatusBadge status="unavailable" reason={reason} />);
     expect(html).toContain('tabindex="0"');
     expect(html).toContain('class="sr-only"');

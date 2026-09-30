@@ -52,7 +52,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
-    label: "Agent Knowledge",
+    label: "Knowledge",
     description: "Knowledge, instructions, and skills",
   },
   {
@@ -65,7 +65,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
     label: "Artifacts",
-    description: "Sites, images, documents, and files built with Geni",
+    description: "Sites, images, documents, and files built with Opengeni",
   },
 ];
 

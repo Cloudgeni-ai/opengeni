@@ -72,7 +72,7 @@ describe("Personal workspace accessibility in Chromium", () => {
     expect(
       await collapsed
         .getByRole("button", {
-          name: "Org 11111111. Workspace: Atlas. Switch workspace",
+          name: "Workspace: Atlas, in Org 11111111. Switch workspace or organization",
           exact: true,
         })
         .count(),
@@ -95,7 +95,7 @@ describe("Personal workspace accessibility in Chromium", () => {
     expect(
       await collapsed
         .getByRole("button", {
-          name: "Org aaaaaaaa. Workspace: Beacon. Switch workspace",
+          name: "Workspace: Beacon, in Org aaaaaaaa. Switch workspace or organization",
           exact: true,
         })
         .count(),
@@ -114,7 +114,7 @@ describe("Personal workspace accessibility in Chromium", () => {
   test("a paused Personal menu item preserves identity and dynamic status in its name", async () => {
     const menuitem = page.locator('#personal-menuitem[role="menuitem"]');
     const snapshot = await menuitem.ariaSnapshot();
-    expect(snapshot).toContain("Roadmap Personal workspace Paused");
+    expect(snapshot).toContain("Roadmap, your Personal workspace, private to you Paused");
     expect(await menuitem.isVisible()).toBe(true);
     expect(await menuitem.getAttribute("aria-label")).toBeNull();
   });
@@ -140,7 +140,7 @@ describe("Personal workspace accessibility in Chromium", () => {
       expect(
         await menu.getByRole("menuitem", { name: "Share this session with workspace…" }).count(),
       ).toBe(1);
-      expect(await menu.getByRole("menuitem", { name: "Fork session…" }).count()).toBe(1);
+      expect(await menu.getByRole("menuitem", { name: "Fork session" }).count()).toBe(1);
       await tenancyPage.keyboard.press("Escape");
       await menu.waitFor({ state: "hidden" });
     }
@@ -162,8 +162,9 @@ describe("Personal workspace accessibility in Chromium", () => {
   test("canonical Personal kind remains visible independently of membership lifecycle", async () => {
     const menuitem = page.locator("#suspended-personal-menuitem");
     const snapshot = await menuitem.ariaSnapshot();
-    expect(snapshot).toContain("Roadmap Personal workspace Paused");
-    expect(await menuitem.getByText("Personal", { exact: true }).count()).toBe(1);
+    expect(snapshot).toContain("Roadmap, your Personal workspace, private to you Paused");
+    // Seen as a lock tile in place of the initial; heard in the item's name.
+    expect(await menuitem.locator("svg.lucide-lock").count()).toBe(1);
   });
 
   test("resource and session scope choices are explicit, accessible, and responsive", async () => {

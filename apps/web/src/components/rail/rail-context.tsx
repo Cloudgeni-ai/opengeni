@@ -181,6 +181,14 @@ export function RailProvider({
         void navigate({ to: settings.target, params: { workspaceId: nextWorkspaceId } });
         return;
       }
+      if (settings?.kind === "organization") {
+        void navigate({
+          to: "/workspaces/$workspaceId/organization",
+          params: { workspaceId: nextWorkspaceId },
+          search: settings.section ? { section: settings.section } : {},
+        });
+        return;
+      }
       void navigate({
         to: "/workspaces/$workspaceId/sessions",
         params: { workspaceId: nextWorkspaceId },

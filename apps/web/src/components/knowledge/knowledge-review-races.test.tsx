@@ -155,7 +155,7 @@ async function scenario() {
       <ReviewTab
         workspaceId={workspaceId}
         queue={value}
-        learningLine="Changes wait for review."
+        emptyDescription="Changes wait for review."
         onOpenLearning={() => {}}
         onOpenEntry={() => {}}
         onChanged={() => {}}
@@ -171,16 +171,14 @@ async function scenario() {
     root.render(<RouterProvider router={router} />);
   });
   await settle();
-  // Opening a row mounts the responsive detail copy as in the real browser
-  // acceptance. CSS hides one pane; both copies must avoid redundant reads.
-  const selected = container.querySelector<HTMLButtonElement>('button[aria-current="true"]');
-  expect(selected).not.toBeNull();
-  await act(async () => selected!.click());
+  // The list reads nothing; opening a row opens the change's page, which
+  // reads the proposal once.
+  expect(reads).toEqual([]);
+  const row = container.querySelector<HTMLButtonElement>("[data-slot=list-row] [data-row-action]");
+  expect(row).not.toBeNull();
+  await act(async () => row!.click());
   await settle();
-  expect(reads).toEqual([
-    { id: entryId, view: "needs_review" },
-    { id: entryId, view: "needs_review" },
-  ]);
+  expect(reads).toEqual([{ id: entryId, view: "needs_review" }]);
   return {
     container,
     original,
@@ -208,10 +206,10 @@ test("equivalent queue objects do not reread a proposal, but a renewed revision 
   const view = await scenario();
   try {
     await view.refresh();
-    expect(reads).toHaveLength(2);
+    expect(reads).toHaveLength(1);
     pending = proposal(renewedRevisionId);
     await view.refresh(pending);
-    expect(reads).toHaveLength(4);
+    expect(reads).toHaveLength(2);
     expect(view.container.textContent).toContain("Renewed proposal");
     expect(missingReads).toBe(0);
   } finally {
@@ -230,7 +228,7 @@ test("a committed rejection with a delayed response cannot be reread by an equiv
     await view.reject();
     expect(pending).toBeNull();
     await view.refresh();
-    expect(reads).toHaveLength(2);
+    expect(reads).toHaveLength(1);
     expect(missingReads).toBe(0);
     expect(view.container.textContent).not.toContain("Couldn't load this change");
     await act(async () => release());
@@ -251,10 +249,17 @@ test("stale snapshots cannot resurrect a rejected revision while a new revision 
     await view.refresh();
     await view.refresh();
     expect(view.container.textContent).toContain("You're all caught up");
-    expect(reads).toHaveLength(2);
+    expect(reads).toHaveLength(1);
     expect(missingReads).toBe(0);
     pending = proposal(renewedRevisionId);
     await view.refresh(pending);
+    // The renewed proposal is back on the list, not the rejected one.
+    expect(view.container.textContent).not.toContain("You're all caught up");
+    const row = view.container.querySelector<HTMLButtonElement>(
+      "[data-slot=list-row] [data-row-action]",
+    );
+    await act(async () => row!.click());
+    await settle();
     expect(view.container.textContent).toContain("Renewed proposal");
     expect(view.container.textContent).not.toContain("You're all caught up");
     expect(decisions).toBe(1);
@@ -273,7 +278,7 @@ test("a failed rejection leaves the proposal visible and its action error discov
     expect(view.container.textContent).toContain("Review service unavailable");
     expect(view.container.textContent).not.toContain("You're all caught up");
     expect(missingReads).toBe(0);
-    expect(reads).toHaveLength(2);
+    expect(reads).toHaveLength(1);
   } finally {
     await view.close();
   }

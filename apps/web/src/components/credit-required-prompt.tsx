@@ -17,6 +17,7 @@ import {
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
 import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { validTopupAmount } from "@/lib/format";
 import { analyticsAction } from "@/lib/analytics-actions";
 
@@ -80,9 +81,7 @@ export function CreditRequiredPromptView({
       });
       window.location.assign(session.url);
     } catch (error) {
-      toast.error("Checkout failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Checkout failed", { description: userErrorText(error) });
       setBusy(false);
     }
   }
@@ -92,12 +91,12 @@ export function CreditRequiredPromptView({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {purpose === "topup" ? "Add OpenGeni credits" : "Add OpenGeni credits to continue"}
+            {purpose === "topup" ? "Add Opengeni credits" : "Add Opengeni credits to continue"}
           </DialogTitle>
           <DialogDescription>
             {purpose === "topup"
               ? "Choose an amount, then enter a gift code or payment details in Stripe Checkout."
-              : "This chat uses OpenGeni credits and none are currently available. Buy credits, or connect a model you already pay for."}
+              : "This chat uses Opengeni credits and none are currently available. Buy credits, or connect a model you already pay for."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
@@ -108,6 +107,7 @@ export function CreditRequiredPromptView({
             </p>
             <Button
               type="button"
+              variant={purpose === "topup" ? "default" : "outline"}
               disabled={busy || !validTopupAmount(topupAmount)}
               onClick={() => void buyCredits()}
               {...analyticsAction("buy_credits")}
@@ -127,7 +127,7 @@ export function CreditRequiredPromptView({
         ) : null}
         {purpose === "required" ? (
           <DialogFooter>
-            <Button asChild type="button" variant="secondary">
+            <Button asChild type="button">
               <Link
                 to="/workspaces/$workspaceId/settings"
                 params={{ workspaceId }}
@@ -186,11 +186,11 @@ export function EmptyCreditsNotice({
   useCreditExposure(empty, workspaceId);
   if (!empty) return null;
   return (
-    <Notice tone="waiting" title="This model uses OpenGeni credits">
+    <Notice tone="waiting" title="This model uses Opengeni credits">
       No credits are available for this model. Buy some or connect a model to continue.
       <div className="mt-2 flex flex-wrap gap-2">
         {canBuyCredits && stripeEnabled ? (
-          <Button asChild type="button" size="sm">
+          <Button asChild type="button" size="sm" variant="outline">
             <Link
               to="/workspaces/$workspaceId/organization"
               params={{ workspaceId }}
@@ -202,7 +202,7 @@ export function EmptyCreditsNotice({
             </Link>
           </Button>
         ) : null}
-        <Button asChild type="button" size="sm" variant="secondary">
+        <Button asChild type="button" size="sm">
           <Link
             to="/workspaces/$workspaceId/settings"
             params={{ workspaceId }}

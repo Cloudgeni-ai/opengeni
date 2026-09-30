@@ -32,8 +32,18 @@ const frameSource = await Bun.file(
 const settingsNavSource = await Bun.file(
   `${import.meta.dir}/components/ui/settings-nav.tsx`,
 ).text();
-const shellSource = await Bun.file(
-  `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
+// Organization pages sit in the Organization section of the one settings rail.
+const shellSource = [
+  await Bun.file(`${import.meta.dir}/components/settings/settings-rail.tsx`).text(),
+  await Bun.file(`${import.meta.dir}/components/settings/organization-settings-pages.ts`).text(),
+].join("\n");
+const workspaceShellSource = await Bun.file(
+  `${import.meta.dir}/components/settings/workspace-settings-shell.tsx`,
+).text();
+const workspacesLibSource = await Bun.file(`${import.meta.dir}/lib/workspaces.ts`).text();
+// Which organization pages a person can use: one rule for the rail and the route.
+const accessSource = await Bun.file(
+  `${import.meta.dir}/lib/organization-settings-access.ts`,
 ).text();
 const apiKeySource = await Bun.file(
   `${import.meta.dir}/components/organization-api-keys-section.tsx`,
@@ -91,8 +101,13 @@ describe("organization administration surface", () => {
   });
 
   test("routes accessible general, people, workspaces, identity, security, developer, and billing sections", () => {
-    expect(routeSource).toContain("<OrganizationSettingsShell");
-    expect(shellSource).toContain('label="Organization settings"');
+    // The route renders inside the shared settings shell, under its Organization section.
+    expect(routeSource).not.toContain("SettingsShell");
+    expect(routeSource).toContain("<PageHeader");
+    expect(workspaceShellSource).toContain('label="Settings"');
+    expect(shellSource).toContain('label: "Organization"');
+    expect(routeSource).toContain("organizationSettingsAccess({");
+    expect(shellSource).toContain("organizationSettingsAccess({");
     // The SettingsShell names the settings rail from `label`; NavItem marks the current page.
     expect(frameSource).toContain("aria-label={label}");
     expect(settingsNavSource).toContain('aria-current={active && !disabled ? "page" : undefined}');
@@ -122,12 +137,14 @@ describe("organization administration surface", () => {
     expect(securitySource).toContain("<RetentionRow");
     expect(identitySource).toContain("<OrganizationKnowledgePrompt");
     expect(identitySource).toContain("<AgentChangesSection");
-    expect(routeSource).toContain('context.clientConfig.productAccessMode === "local"');
+    expect(accessSource).toContain('input.clientConfig.productAccessMode === "local"');
     expect(routeSource).toContain("organizationAdministratorSession");
     expect(routeSource).toContain("singleUser={singleUser}");
-    expect(routeSource).toContain('actorRole === "owner" || actorRole === "admin"');
+    // Owners and admins in an administrator session: one rule, shared with the picker.
+    expect(accessSource).toContain("administersOrganization(input)");
+    expect(workspacesLibSource).toContain('role === "owner" || role === "admin"');
     // Models is shown only to organization administrators.
-    expect(routeSource).toMatch(/if \(administrator\) \{[^}]*visible\.add\("models"\)/u);
+    expect(accessSource).toMatch(/if \(administrator\) \{[^}]*visible\.add\("models"\)/u);
     expect(organizationCodexSource).toContain("setLoadError(");
     expect(organizationModelsSource).toContain("<ErrorMessage");
     expect(organizationModelsSource).toContain("Try again");
@@ -140,8 +157,8 @@ describe("organization administration surface", () => {
     expect(workspaceCodexSource).toContain("Manage in organization settings");
     expect(workspaceCodexSource).toContain("manageInOrganization");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
-    expect(routeSource).toContain('accountGrant?.role === "owner"');
-    expect(routeSource).toContain('"account:admin"');
+    expect(accessSource).toContain('accountGrant?.role === "owner"');
+    expect(accessSource).toContain('"account:admin"');
     expect(identitySource).toContain("client.getCompanyProfileAgentPolicy(");
     expect(identitySource).toContain("client.updateCompanyProfileAgentPolicy(");
     expect(identitySource).toContain('label: "Automatic"');

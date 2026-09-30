@@ -450,7 +450,11 @@ const budgets = {
   // measures 36,831 gzip bytes and the merged rebuild 42,744 (Bun 1.4
   // Linux/x64). The DEV-only UI kit has its own stylesheet and is excluded
   // from this scan, so only product utilities remain.
-  cssGzip: wholeKibEnvelope(42_744),
+  // The neutral retheme (settings cards, menu anatomy, hover and glow tokens,
+  // resource-page frame) adds its utilities: main 6f4be148e measures 43,000
+  // gzip bytes and the merged retheme 44,100 (Bun 1.4 Linux/x64). Keep the
+  // next whole-KiB envelope; every other cap remains fixed.
+  cssGzip: wholeKibEnvelope(44_100),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -640,10 +644,11 @@ const effectiveBudgets = {
     wholeKibEnvelope(700_042, 1.5 * kib),
     // Same design-system stylesheet growth documented in the raw bound above.
     wholeKibEnvelope(706_357, 1.5 * kib),
-    // Customer provider validation and credit top-up integrated with a82657f84:
-    // Bun 1.4 macOS/arm64 measures 2,524,920 raw / 711,450 gzip across 39 files.
+    // Customer provider validation and credit top-up on 9719819e0:
+    // untouched main measures 2,514,638 raw / 706,792 gzip across 34 files;
+    // this candidate measures 2,520,562 raw / 709,862 gzip across 34 files.
     // Retain the established 1.5 KiB variance allowance for this gzip graph.
-    wholeKibEnvelope(711_450, 1.5 * kib),
+    wholeKibEnvelope(709_862, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

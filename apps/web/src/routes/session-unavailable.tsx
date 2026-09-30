@@ -69,7 +69,7 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
       }
       action={
         backWorkspaceId ? (
-          <Button asChild type="button" variant="secondary">
+          <Button asChild type="button" variant="outline">
             <a href={workspaceSessionsPath(backWorkspaceId)}>Back to sessions</a>
           </Button>
         ) : undefined

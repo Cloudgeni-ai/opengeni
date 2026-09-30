@@ -49,7 +49,7 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
           type="button"
           data-enroll-cta
           onClick={onEnroll}
-          className="inline-flex items-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-11"
+          className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition-colors hover:bg-og-primary-hover pointer-coarse:min-h-11"
         >
           <PlusIcon className="size-3.5" aria-hidden />
           Connect a machine

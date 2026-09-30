@@ -31,17 +31,19 @@ function Harness({
   workspaceId = "workspace",
   selectedIds = selectedMailIds,
   canReadConnections = true,
+  items = catalog,
 }: {
   client: OpenGeniBrowserClient;
   id?: string;
   workspaceId?: string;
   selectedIds?: string[];
   canReadConnections?: boolean | null;
+  items?: CapabilityCatalogItem[];
 }) {
   state = useConnectionAccounts(
     client,
     { id, workspaceId, selectedIds },
-    catalog,
+    items,
     canReadConnections,
   );
   return null;
@@ -148,14 +150,23 @@ test("caller, session and workspace changes reset choices and fence stale invent
 test("failed inventory blocks sending and retry recovers without forgetting exclusions", async () => {
   let fail = false;
   const client = clientFor(async () => {
-    if (fail) throw new Error("Cannot load accounts");
+    if (fail) {
+      throw Object.assign(
+        new Error("OpenGeni API 500: accounts store down Reference: req-accounts."),
+        {
+          status: 500,
+        },
+      );
+    }
     return accounts;
   });
   await act(async () => root.render(<Harness client={client} />));
   await act(async () => state.selectAccount("mail", ["two"]));
   fail = true;
   await act(async () => state.refresh());
-  expect(state.error).toBe("Cannot load accounts");
+  expect(state.error).toBe(
+    "Couldn't check connected accounts. Opengeni couldn't finish the request. Try again in a moment. Reference: req-accounts.",
+  );
   expect(state.selections).toEqual([]);
   fail = false;
   await act(async () => state.refresh());
@@ -301,4 +312,23 @@ test("returning to connector defaults restores emptied accounts but preserves no
   await act(async () => state.selectAccount("mail", ["two"]));
   await act(async () => state.resetEmptyChoices());
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+});
+
+test("a refreshed catalog keeps the last accounts on screen while it reloads, never loading", async () => {
+  const reload = deferred<ConnectionMetadata[]>();
+  let reads = 0;
+  const client = clientFor(() => (++reads === 1 ? Promise.resolve(accounts) : reload.promise));
+  await act(async () => root.render(<Harness client={client} />));
+  expect(state.selections).toHaveLength(2);
+  // Opening + > Connectors refreshes the workspace catalog: a new array.
+  await act(async () => root.render(<Harness client={client} items={[...catalog]} />));
+  expect(reads).toBe(2);
+  expect(state.loading).toBe(false);
+  expect(state.availableAccountGroups).toHaveLength(1);
+  expect(state.selections).toHaveLength(2);
+  await act(async () => {
+    reload.resolve([accounts[0]!]);
+    await Bun.sleep(0);
+  });
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "one" }]);
 });

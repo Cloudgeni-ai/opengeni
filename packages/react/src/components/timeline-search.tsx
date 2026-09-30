@@ -102,7 +102,7 @@ export function useTimelineSearchNavigation(
       globalThis as unknown as { Highlight?: new (...ranges: Range[]) => unknown }
     ).Highlight;
     const style = document.createElement("style");
-    style.textContent = `::highlight(${highlightName.current}) { background: var(--og-accent, #facc15); color: var(--og-accent-fg, #171717); }`;
+    style.textContent = `::highlight(${highlightName.current}) { background: var(--og-color-accent-deep); color: var(--og-color-accent-fg); }`;
     scroller.append(style);
     let frame = 0;
     const update = () => {

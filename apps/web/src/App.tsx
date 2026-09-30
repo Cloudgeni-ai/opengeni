@@ -383,6 +383,8 @@ const workspaceMachinesRoute = createRoute({
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
+  // Opened from Organization settings > Billing & usage: back returns there.
+  validateSearch: (search: Record<string, unknown>): ReturnToSearch => parseReturnTo(search),
   component: Insights,
 });
 const workspacePriorityRoute = createRoute({
@@ -786,7 +788,8 @@ function Machines() {
 
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
-  return <LazyInsightsRoute workspaceId={workspaceId} />;
+  const search = workspaceInsightsRoute.useSearch();
+  return <LazyInsightsRoute workspaceId={workspaceId} returnTo={returnToOf(search)} />;
 }
 
 function Priority() {

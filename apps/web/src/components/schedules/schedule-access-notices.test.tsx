@@ -77,7 +77,7 @@ describe("scheduled task access notices", () => {
       );
       expect(text).toContain("Refreshing access below may fix it.");
       expect(text).toContain("New schedules in this workspace also get Gmail; this one does not.");
-      expect(text).toContain("1 newer OpenGeni tool is not available to it: browser read.");
+      expect(text).toContain("1 newer Opengeni tool is not available to it: browser read.");
       const button = [...view.container.querySelectorAll("button")].find(
         (candidate) => candidate.textContent === "Refresh access",
       );

@@ -16,6 +16,12 @@ export const OrganizationUsageTotal = z.object({
   quantity: z.string().regex(/^-?\d+$/),
   eventCount: z.string().regex(/^\d+$/),
 });
+/** One member's Personal workspace, as usage only. */
+export const OrganizationUsagePersonalWorkspace = z.object({
+  membershipId: z.string().uuid(),
+  totals: z.array(OrganizationUsageTotal),
+});
+export type OrganizationUsagePersonalWorkspace = z.infer<typeof OrganizationUsagePersonalWorkspace>;
 export const OrganizationUsageSummary = z.object({
   accountId: z.string().uuid(),
   period: OrganizationUsagePeriod,
@@ -34,12 +40,26 @@ export const OrganizationUsageSummary = z.object({
     )
     .max(50),
   nextWorkspaceCursor: z.string().uuid().nullable(),
+  /**
+   * Usage in each member's Personal workspace, keyed by the owner's
+   * organization membership: amounts only, never the workspace's id, name or
+   * content. Only Personal workspaces with usage in the period, the 50 that
+   * spent the most. Absent before migration 0543, hence the defaults.
+   */
+  personalWorkspaces: z.array(OrganizationUsagePersonalWorkspace).max(50).default([]),
+  /** How many Personal workspaces had usage in the period, listed or not. */
+  personalWorkspaceCount: z.number().int().nonnegative().default(0),
 });
 export type OrganizationUsageSummary = z.infer<typeof OrganizationUsageSummary>;
 
-/** A page deliberately excludes totals and charts: those are not recomputed. */
+/**
+ * A page deliberately excludes totals, charts and Personal rows: those are not
+ * recomputed. Pages continue the shared workspaces only.
+ */
 export const OrganizationUsageWorkspacePage = OrganizationUsageSummary.omit({
   totals: true,
   buckets: true,
+  personalWorkspaces: true,
+  personalWorkspaceCount: true,
 });
 export type OrganizationUsageWorkspacePage = z.infer<typeof OrganizationUsageWorkspacePage>;

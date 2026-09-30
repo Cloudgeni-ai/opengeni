@@ -20,6 +20,12 @@ import {
 } from "react";
 
 import { useFieldControlProps } from "@/components/ui/field";
+import {
+  MENU_CHECK_CLASS,
+  MENU_LABEL_CLASS,
+  MENU_NOTE_CLASS,
+  MENU_SURFACE_CLASS,
+} from "@/components/ui/menu-styles";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -200,8 +206,11 @@ export function typeaheadIndex<V extends string>(
 const TRIGGER_CLASS =
   "group/select-trigger inline-flex w-full min-w-0 items-center gap-2 rounded-[10px] border border-border bg-surface px-3 text-left text-sm text-fg transition-colors duration-[120ms] hover:border-border-strong focus-visible:border-brand aria-expanded:border-border-strong aria-expanded:focus-visible:border-brand disabled:cursor-not-allowed disabled:border-border disabled:bg-surface-2 disabled:text-fg-muted aria-invalid:border-danger aria-invalid:hover:border-danger pointer-coarse:h-11";
 
-const PANEL_CLASS =
-  "z-50 flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-[max(var(--radix-popover-trigger-width),22rem)] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[16px] border border-border bg-surface text-fg shadow-og-md outline-none transition-opacity duration-[120ms] starting:opacity-0";
+// The one menu surface (menu-styles.ts); the list inside carries the 6px inset.
+const PANEL_CLASS = cn(
+  MENU_SURFACE_CLASS,
+  "z-50 flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-[max(var(--radix-popover-trigger-width),22rem)] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0 outline-none transition-opacity duration-[120ms] starting:opacity-0",
+);
 
 function TriggerValue<V extends string>({
   option,
@@ -330,8 +339,8 @@ export interface SelectMenuPanelProps<V extends string = string> {
 
 /**
  * The option list. Every option shows its label, meta (for example the
- * payment source) and description; the selected one gets the app's selected
- * highlight and a check.
+ * payment source) and description; the selected one gets the menu check on
+ * the right (menu-styles.ts), hover and keyboard focus the `hover` wash.
  */
 export function SelectMenuPanel<V extends string>({
   options,
@@ -371,8 +380,8 @@ export function SelectMenuPanel<V extends string>({
           key={`group-${option.group}-${option.value}`}
           role="presentation"
           className={cn(
-            "px-2.5 pb-1 text-2xs font-medium text-fg-subtle",
-            index === 0 ? "pt-1.5" : "mt-1.5 border-t border-border pt-3",
+            MENU_LABEL_CLASS,
+            index === 0 ? null : "mt-1.5 border-t border-border pt-2.5",
           )}
         >
           {option.group}
@@ -401,10 +410,8 @@ export function SelectMenuPanel<V extends string>({
           if (!option.disabled) onSelect?.(option.value);
         }}
         className={cn(
-          "group/option flex min-h-9 min-w-0 cursor-pointer items-start gap-2.5 rounded-[10px] px-2.5 py-2 transition-colors duration-[120ms] pointer-coarse:min-h-11",
-          selected ? "bg-brand/5" : null,
-          active && !selected ? "bg-surface-2" : null,
-          active && selected ? "bg-brand/10" : null,
+          "group/option flex min-h-8 min-w-0 cursor-pointer items-start gap-2.5 rounded-[10px] px-2.5 py-1.5 transition-colors duration-[120ms] pointer-coarse:min-h-11",
+          active ? "bg-hover" : null,
           option.disabled ? "cursor-not-allowed" : null,
         )}
       >
@@ -423,7 +430,7 @@ export function SelectMenuPanel<V extends string>({
           <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
             <span
               className={cn(
-                "min-w-0 text-sm font-medium [overflow-wrap:anywhere]",
+                "min-w-0 text-sm [overflow-wrap:anywhere]",
                 option.disabled ? "text-fg-muted" : "text-fg",
               )}
             >
@@ -431,7 +438,7 @@ export function SelectMenuPanel<V extends string>({
             </span>
             {/* Under a group heading that already names it, the meta would repeat. */}
             {option.meta && option.meta !== option.group ? (
-              <span className="min-w-0 text-2xs font-medium text-fg-subtle">{option.meta}</span>
+              <span className="min-w-0 text-xs text-fg-muted">{option.meta}</span>
             ) : null}
           </span>
           {reason ? (
@@ -446,7 +453,7 @@ export function SelectMenuPanel<V extends string>({
           ) : null}
         </span>
         <span aria-hidden="true" className="flex h-5 w-4 shrink-0 items-center">
-          {selected ? <CheckIcon className="size-4 text-brand" strokeWidth={2.25} /> : null}
+          {selected ? <CheckIcon className={MENU_CHECK_CLASS} /> : null}
         </span>
       </div>,
     );
@@ -459,7 +466,7 @@ export function SelectMenuPanel<V extends string>({
       inert={preview || undefined}
       className={cn(
         "flex min-h-0 min-w-0 flex-col",
-        preview && "rounded-[16px] border border-border bg-surface shadow-og-md",
+        preview && cn(MENU_SURFACE_CLASS, "p-0"),
         className,
       )}
     >
@@ -474,10 +481,7 @@ export function SelectMenuPanel<V extends string>({
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5"
       >
         {loading ? (
-          <div
-            role="presentation"
-            className="flex items-center gap-2 px-2.5 py-2.5 text-sm text-fg-muted"
-          >
+          <div role="presentation" className={cn(MENU_NOTE_CLASS, "flex items-center gap-2")}>
             <LoaderCircleIcon
               className="size-4 animate-spin text-fg-subtle motion-reduce:animate-none"
               aria-hidden="true"
@@ -487,7 +491,7 @@ export function SelectMenuPanel<V extends string>({
         ) : rows.length > 0 ? (
           rows
         ) : (
-          <div role="presentation" className="px-2.5 py-3 text-sm text-fg-muted">
+          <div role="presentation" className={MENU_NOTE_CLASS}>
             {emptyMessage}
           </div>
         )}

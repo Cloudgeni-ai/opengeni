@@ -22,7 +22,7 @@ const temporaryPresentation = {
 
 const networkPresentation = {
   title: "Couldn't load this file",
-  description: "The app could not reach OpenGeni. Check your connection and try again.",
+  description: "The app could not reach Opengeni. Check your connection and try again.",
 } as const;
 
 const NETWORK_FETCH_MESSAGE =

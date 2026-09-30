@@ -249,7 +249,7 @@ test("a catalog failure and connection 403 mask cached composer account status",
     await Bun.sleep(0);
   });
   expect(composer!.servers[0]?.connectionStatus).toBe("ready");
-  expect(composer!.connectorActions?.error).toBe("Catalog unavailable");
+  expect(composer!.connectorActions?.error).toBe("Couldn't load connectors. Catalog unavailable");
 
   failure = "denied";
   await act(async () => {
@@ -674,4 +674,60 @@ test("a failed connector OAuth return explains an expired link and strips the ca
   expect(composer!.connectorActions?.error).toBe(expired);
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("a composer that mounts again opens Connectors from the last rows, refreshing in place", async () => {
+  const entry = {
+    id: "mcp:slack",
+    name: "Slack",
+    kind: "mcp",
+    enabled: true,
+    runtime: { available: true, mcpServerId: "slack" },
+    lifecycle: { readiness: "ready" },
+    connectionRef: { connectionId: "connection-1", providerDomain: "slack.com", kind: "oauth2" },
+  } as CapabilityCatalogItem;
+  const connection = {
+    id: "connection-1",
+    providerDomain: "slack.com",
+    subjectId: null,
+    status: "active",
+  } as ConnectionMetadata;
+  const second = deferred<ConnectionMetadata[]>();
+  let reads = 0;
+  const client = {
+    listCapabilities: async () => ({ items: [entry] }),
+    listConnections: async () => (++reads === 1 ? [connection] : second.promise),
+    catalogAssetUrl: () => null,
+  } as unknown as OpenGeniBrowserClient;
+  const props = {
+    workspaceId: "workspace-a",
+    servers: [],
+    firstPartyTools: [],
+    fileUploadsEnabled: false,
+    onToolSelectionChange: () => {},
+  } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  context.client = client;
+  const first = document.createElement("div");
+  document.body.appendChild(first);
+  const firstRoot = createRoot(first);
+  await act(async () => firstRoot.render(<WorkspaceComposerPlus {...props} />));
+  expect(composer!.servers[0]?.connectionStatus).toBe("ready");
+  await act(async () => firstRoot.unmount());
+  first.remove();
+
+  const again = document.createElement("div");
+  document.body.appendChild(again);
+  const againRoot = createRoot(again);
+  await act(async () => againRoot.render(<WorkspaceComposerPlus {...props} />));
+  // The second read is still in flight: the menu shows the cached rows, not loading.
+  expect(reads).toBe(2);
+  expect(composer!.servers[0]?.connectionStatus).toBe("ready");
+  expect(composer!.connectorActions?.loading).toBe(false);
+  await act(async () => {
+    second.resolve([{ ...connection, status: "needs_reauth" } as ConnectionMetadata]);
+    await Bun.sleep(0);
+  });
+  expect(composer!.servers[0]?.connectionStatus).toBe("reconnect");
+  await act(async () => againRoot.unmount());
+  again.remove();
 });

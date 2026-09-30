@@ -1064,7 +1064,7 @@ function BrowserLifecyclePanel(props: {
           <button
             type="button"
             onClick={props.onResume}
-            className="mt-4 inline-flex h-8 items-center rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2"
+            className="mt-4 inline-flex h-8 items-center rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover"
           >
             Open browser
           </button>
@@ -1206,7 +1206,7 @@ function BrowserUnselectedPanel(props: {
           type="button"
           disabled={props.creating}
           onClick={props.onCreate}
-          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <PlusIcon className="size-3.5" />
           {props.creating ? "Opening…" : "New browser"}
@@ -1375,7 +1375,7 @@ function BrowserLaunchMenu(props: {
                       Chrome connection ready
                     </span>
                     <span className="block text-og-xs leading-4 text-og-fg-subtle">
-                      Install the OpenGeni Browser extension in the profile you want to use.
+                      Install the Opengeni Browser extension in the profile you want to use.
                     </span>
                   </span>
                 </div>
@@ -1677,7 +1677,7 @@ function BrowserProfileMenu(props: {
                 <button
                   type="submit"
                   disabled={!name.trim() || props.saving}
-                  className="inline-flex h-8 items-center gap-1 rounded-og-sm bg-og-accent px-2.5 text-og-control font-medium text-white transition hover:opacity-90 disabled:opacity-40"
+                  className="inline-flex h-8 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
                 >
                   {props.saving ? (
                     <LoaderCircleIcon className="size-3.5 animate-spin" />
@@ -1692,7 +1692,7 @@ function BrowserProfileMenu(props: {
         ) : (
           <p className="mt-3 rounded-og-sm bg-og-surface-2 px-2.5 py-2 text-og-xs text-og-fg-subtle">
             {attached
-              ? "Chrome keeps this profile's state directly; OpenGeni does not copy it automatically."
+              ? "Chrome keeps this profile's state directly; Opengeni does not copy it automatically."
               : props.identity?.status === "archived"
                 ? "Restore this profile before saving another version."
                 : "This browser cannot save reusable profile state."}

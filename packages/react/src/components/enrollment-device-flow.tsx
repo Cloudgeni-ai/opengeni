@@ -156,7 +156,7 @@ export function EnrollmentDeviceFlow({
         target="_blank"
         rel="noreferrer"
         onClick={onOpenVerification}
-        className="inline-flex items-center justify-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-2 text-og-menu font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong"
+        className="inline-flex items-center justify-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-2 text-og-menu font-medium transition-colors hover:bg-og-primary-hover"
       >
         Open approval page
         <ExternalLinkIcon className="size-3.5" aria-hidden />

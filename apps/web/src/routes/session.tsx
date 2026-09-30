@@ -85,8 +85,10 @@ import {
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
+import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
+import { SessionRunsOnMenuBody, useSessionRunsOn } from "@/components/session/sandbox-switcher";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useSessionOpening } from "@/lib/session-opening";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
@@ -820,7 +822,7 @@ export function SessionRoute({
       });
     })().catch((error) => {
       toast.error("Connection succeeded, but setup needs attention", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     });
   }, [
@@ -856,7 +858,7 @@ export function SessionRoute({
         });
       })().catch((error) =>
         toast.error("Connection authorized, but setup needs attention", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         }),
       );
     } else {
@@ -1097,7 +1099,7 @@ export function SessionRoute({
                 title="Conversation couldn't be loaded"
                 description="Your saved messages are unchanged. Try loading them again."
                 action={
-                  <Button variant="secondary" onClick={() => void jumpToLatest()}>
+                  <Button variant="outline" onClick={() => void jumpToLatest()}>
                     Retry conversation
                   </Button>
                 }
@@ -1231,7 +1233,7 @@ export function SessionRoute({
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       throw error instanceof Error ? error : new Error(String(error));
     }
@@ -1845,6 +1847,8 @@ function SessionChatPane(props: {
   const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
     null,
   );
+  // "+" > Runs on: the compute this chat runs on and the machines it can move to.
+  const runsOn = useSessionRunsOn(props.session.id, props.session.sandboxBackend);
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -1979,9 +1983,9 @@ function SessionChatPane(props: {
         setDurableToolsSnapshot(updated);
         setConnectorCustomizingOverride((current) => (current === true ? true : null));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = userErrorText(error);
         setDurableToolsError(message);
-        toast.error("Failed to save session tools", { description: message });
+        toast.error("Couldn't save session tools", { description: message });
         try {
           const refreshed = await context.client.getSession(
             props.session.workspaceId,
@@ -2765,7 +2769,7 @@ function SessionChatPane(props: {
                       title="Conversation couldn't be loaded"
                       description="Your saved messages are unchanged. Try loading them again."
                       action={
-                        <Button variant="secondary" onClick={() => void props.onJumpToLatest()}>
+                        <Button variant="outline" onClick={() => void props.onJumpToLatest()}>
                           Retry conversation
                         </Button>
                       }
@@ -3021,6 +3025,22 @@ function SessionChatPane(props: {
                     disabled: terminal || composer.sending,
                     panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
                   }}
+                  {...(runsOn.hasChoices ||
+                  props.session.rigId ||
+                  (runsOn.activeMachine && !runsOn.activeMachine.isSessionGroup)
+                    ? {
+                        runsOn: {
+                          summary: runsOn.activeName,
+                          panel: (
+                            <SessionRunsOnMenuBody
+                              runsOn={runsOn}
+                              workspaceId={props.session.workspaceId}
+                              rigId={props.session.rigId ?? null}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
                 />
               </>
             }
@@ -3052,7 +3072,7 @@ function SessionChatPane(props: {
                     (props.session.status === "failed" || props.session.status === "idle")
                   ? // "Send a message to revive" is a dead end without credits —
                     // the reply turn dies the same budget death.
-                    "Out of OpenGeni credits — add credits to continue."
+                    "Out of Opengeni credits — add credits to continue."
                   : "Send a follow-up…"
             }
             controls={

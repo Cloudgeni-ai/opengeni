@@ -109,7 +109,7 @@ export function tryParseJson(text: string): unknown {
  * workspace no longer has.
  */
 export const CREDIT_EXHAUSTION_MESSAGE =
-  "Out of OpenGeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+  "Out of Opengeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
 
 /**
  * Actionable composer copy for an edge rejection before a turn is accepted.
@@ -117,7 +117,7 @@ export const CREDIT_EXHAUSTION_MESSAGE =
  * actor-private draft or any finalized attachment.
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
-  "This turn requires OpenGeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
+  "This turn requires Opengeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
 
 export function composerSubmissionErrorMessage(error: Error): string {
   return error instanceof OpenGeniApiError &&

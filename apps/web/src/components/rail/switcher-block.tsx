@@ -1,15 +1,17 @@
-// The rail's compact workspace switcher. Its menu groups workspaces by
-// organization and carries workspace/organization creation and settings so the
-// rail does not spend permanent vertical space on a second organization row.
-// Collapsed, it reduces to a workspace-initial avatar that opens the same menu.
+// The rail's workspace picker. Its trigger names the workspace and its
+// organization; its menu lists the current organization's workspaces (with a
+// create action that names the organization), organization settings, and the
+// other organizations to switch to. Collapsed, it reduces to a
+// workspace-initial avatar that opens the same menu.
 import { Link } from "@tanstack/react-router";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { BuildingIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -19,6 +21,7 @@ import {
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
+import { userErrorText } from "@/lib/api-error";
 import type { OrgOption } from "@/lib/org";
 import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
 
@@ -50,9 +53,16 @@ export function additionalOrganizationCreationAttemptIsCurrent(input: {
 
 export const WORKSPACE_SWITCHER_GRID_CLASS = "grid min-w-0 grid-cols-[minmax(0,1fr)] px-2";
 
-export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
+/**
+ * The "New organization" flow: eligibility, the dialog and its exact-once
+ * creation state. `onCreated` opens the new organization's first workspace.
+ */
+export function useCreateOrganizationFlow(onCreated: (workspaceId: string) => void): {
+  canCreate: boolean;
+  start: () => void;
+  dialog: ReactNode;
+} {
   const context = useAppContext();
-  const rail = useRail();
   const managedUserId = context.authSession?.user.id ?? null;
   const canCreateOrganization =
     context.clientConfig.auth.mode === "managedSession" &&
@@ -144,7 +154,7 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
       if (!refreshed) {
         throw new Error("Your access changed before the new organization could be opened");
       }
-      rail.openWorkspace(created.workspaceId);
+      onCreated(created.workspaceId);
       toast.success(`${created.organization.name} created`, {
         description: `${initialWorkspaceName} is ready for your team.`,
       });
@@ -153,7 +163,6 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
       resetCreateOrganizationDraft();
     } catch (error) {
       if (!attemptIsCurrent()) return;
-      const message = error instanceof Error ? error.message : String(error);
       const outcomeUnknown = additionalOrganizationCreationOutcomeUnknown(error);
       if (attemptedState !== "committed" && !outcomeUnknown) {
         attemptedState = "draft";
@@ -166,20 +175,48 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
           ? "Organization created, but not opened"
           : attemptedState === "uncertain"
             ? "Creation could not be confirmed"
-            : "Failed to create organization",
+            : "Couldn't create the organization",
         {
           description:
             attemptedState === "committed"
-              ? `${message}. Try again to refresh access and open the same organization.`
+              ? "Try again to refresh access and open the same organization."
               : attemptedState === "uncertain"
-                ? `${message}. Try again to safely replay this exact request and confirm the result.`
-                : message,
+                ? "Try again to safely replay this exact request and confirm the result."
+                : userErrorText(error),
         },
       );
     } finally {
       if (attemptIsCurrent()) setCreateBusy(false);
     }
   }
+
+  return {
+    canCreate: canCreateOrganization,
+    start: () => setCreateOpen(true),
+    dialog: createOpen ? (
+      <Suspense fallback={null}>
+        <LazyCreateOrganizationDialog
+          open
+          organizationName={organizationName}
+          workspaceName={workspaceName}
+          busy={createBusy}
+          creationState={creationState}
+          onOrganizationNameChange={setOrganizationName}
+          onWorkspaceNameChange={setWorkspaceName}
+          onOpenChange={updateCreateOpen}
+          onSubmit={() => void submitCreateOrganization()}
+        />
+      </Suspense>
+    ) : null,
+  };
+}
+
+export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
+  const rail = useRail();
+  const createOrganizationFlow = useCreateOrganizationFlow(rail.openWorkspace);
+  const onCreateOrganization = createOrganizationFlow.canCreate
+    ? createOrganizationFlow.start
+    : undefined;
 
   if (rail.collapsed) {
     return (
@@ -189,52 +226,23 @@ export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
           collapsed
           align="start"
           onSelect={rail.openWorkspace}
-          onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}
+          onCreateOrganization={onCreateOrganization}
         />
-        {createOpen ? (
-          <Suspense fallback={null}>
-            <LazyCreateOrganizationDialog
-              open
-              organizationName={organizationName}
-              workspaceName={workspaceName}
-              busy={createBusy}
-              creationState={creationState}
-              onOrganizationNameChange={setOrganizationName}
-              onWorkspaceNameChange={setWorkspaceName}
-              onOpenChange={updateCreateOpen}
-              onSubmit={() => void submitCreateOrganization()}
-            />
-          </Suspense>
-        ) : null}
+        {createOrganizationFlow.dialog}
       </>
     );
   }
 
   return (
     <div className={inline ? "ml-auto grid min-w-0 flex-1" : WORKSPACE_SWITCHER_GRID_CLASS}>
-      {createOpen ? (
-        <Suspense fallback={null}>
-          <LazyCreateOrganizationDialog
-            open
-            organizationName={organizationName}
-            workspaceName={workspaceName}
-            busy={createBusy}
-            creationState={creationState}
-            onOrganizationNameChange={setOrganizationName}
-            onWorkspaceNameChange={setWorkspaceName}
-            onOpenChange={updateCreateOpen}
-            onSubmit={() => void submitCreateOrganization()}
-          />
-        </Suspense>
-      ) : null}
-
+      {createOrganizationFlow.dialog}
       <WorkspaceSwitcherMenu
         workspaceId={rail.workspaceId}
         collapsed={false}
         compact={inline}
         align="start"
         onSelect={rail.openWorkspace}
-        onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}
+        onCreateOrganization={onCreateOrganization}
       />
     </div>
   );
@@ -264,7 +272,7 @@ export function OrganizationSwitcherLine(props: {
       <DropdownMenuContent align="start" className="min-w-56">
         {props.orgs.length > 1 ? (
           <>
-            <DropdownMenuLabel className="text-fg-subtle">Organizations</DropdownMenuLabel>
+            <DropdownMenuLabel>Organizations</DropdownMenuLabel>
             {props.orgs.map((org) => (
               <DropdownMenuItem
                 key={org.accountId}
@@ -277,22 +285,20 @@ export function OrganizationSwitcherLine(props: {
               >
                 <span
                   aria-hidden="true"
-                  className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+                  className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted"
                 >
                   {org.label
                     .replace(/^Org\s+/, "")
-                    .slice(0, 2)
+                    .slice(0, 1)
                     .toUpperCase()}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{org.label}</span>
-                {org.accountId === props.activeAccountId ? (
-                  <CheckIcon aria-hidden="true" className="size-4 text-brand" />
-                ) : null}
+                <DropdownMenuCheck checked={org.accountId === props.activeAccountId} />
               </DropdownMenuItem>
             ))}
           </>
         ) : (
-          <DropdownMenuLabel className="text-fg-subtle">{props.currentLabel}</DropdownMenuLabel>
+          <DropdownMenuLabel>{props.currentLabel}</DropdownMenuLabel>
         )}
         {props.onCreate ? (
           <>
@@ -303,8 +309,8 @@ export function OrganizationSwitcherLine(props: {
                 props.onCreate?.();
               }}
             >
-              <PlusIcon className="size-4" />
-              New organization…
+              <PlusIcon />
+              New organization
             </DropdownMenuItem>
           </>
         ) : null}
@@ -316,7 +322,7 @@ export function OrganizationSwitcherLine(props: {
                 to="/workspaces/$workspaceId/organization"
                 params={{ workspaceId: props.workspaceId }}
               >
-                <SettingsIcon className="size-4" />
+                <SettingsIcon />
                 Organization settings
               </Link>
             </DropdownMenuItem>

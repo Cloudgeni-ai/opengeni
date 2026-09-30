@@ -53,7 +53,7 @@ export function OwnershipSelector({
   }
   return (
     <fieldset className="space-y-2">
-      <legend className="text-xs font-medium text-fg-muted">Who can use this connection?</legend>
+      <legend className="text-xs font-medium text-fg">Who can use this connection?</legend>
       <OwnershipOption
         groupName={groupName}
         checked={value === "workspace"}

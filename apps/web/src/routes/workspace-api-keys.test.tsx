@@ -176,6 +176,24 @@ describe("workspace API keys", () => {
     await view.unmount();
   });
 
+  test("a Personal workspace says keys aren't available there, not who manages them", async () => {
+    permissions = ["workspace:read"];
+    const workspace = context.workspaces[0]! as { kind?: string };
+    workspace.kind = "personal";
+    try {
+      const view = await render(undefined);
+      expect(listApiKeys).not.toHaveBeenCalled();
+      expect(view.container.textContent).toContain(
+        "API keys aren't available in Personal workspaces",
+      );
+      expect(view.container.textContent).not.toContain("workspace admins can");
+      expect(view.container.textContent).not.toContain("managed by workspace admins");
+      await view.unmount();
+    } finally {
+      delete workspace.kind;
+    }
+  });
+
   test("creates a key with a 90-day expiry and shows the token once on the same page", async () => {
     const view = await render("new");
     const input = view.container.querySelector<HTMLInputElement>(

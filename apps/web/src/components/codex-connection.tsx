@@ -28,6 +28,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { formatAbsoluteTime } from "@/components/ui/relative-time";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import type { UsageWindowReading } from "@/components/ui/usage-meter";
+import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 import {
   ApiError,
   prepareCodexResetRedemption,
@@ -262,7 +263,7 @@ export function resetAuthorityNote(overview: CodexAccountOverview): string | nul
     count_only: `ChatGPT reports ${count} reset${count === 1 ? "" : "s"} but no details, so they are view only.`,
     capped: "ChatGPT returned fewer details than its count, so these are view only.",
     unsupported: "This plan doesn't report usage limit resets.",
-    unknown: "ChatGPT returned reset data OpenGeni doesn't recognize, so these are view only.",
+    unknown: "ChatGPT returned reset data Opengeni doesn't recognize, so these are view only.",
     error: "Couldn't check usage limit resets. Refresh usage to try again.",
   };
   if (detail[reset.detailState]) return detail[reset.detailState];
@@ -274,7 +275,7 @@ export function resetAuthorityNote(overview: CodexAccountOverview): string | nul
     case "unowned":
       return "No one is recorded as the owner of this older connection, so its resets are view only. Reconnect the same ChatGPT account while signed in as yourself to claim it.";
     case "managed_human_unavailable":
-      return "Resets are view only here: OpenGeni couldn't confirm who is signed in to this browser, so ownership can't be claimed or changed.";
+      return "Resets are view only here: Opengeni couldn't confirm who is signed in to this browser, so ownership can't be claimed or changed.";
     case "different_human":
       return "Only the person who connected this account can redeem its resets. Disconnecting it is the only way to change who owns it.";
     default:
@@ -340,7 +341,6 @@ export function ResetCreditInventory({
           <Button
             type="button"
             size="sm"
-            variant="outline"
             className="rounded-[10px] pointer-coarse:h-11"
             disabled={busy}
             onClick={onReconnectSameAccount}
@@ -421,7 +421,7 @@ export function ResetCreditInventory({
               description={
                 attempt.status === "completed" && attempt.outcome
                   ? redemptionOutcomeCopy(attempt.outcome)
-                  : "ChatGPT no longer lists this reset. Resume only the same uncertain attempt; OpenGeni never starts a new one for it."
+                  : "ChatGPT no longer lists this reset. Resume only the same uncertain attempt; Opengeni never starts a new one for it."
               }
               control={
                 attempt.status !== "completed" ? (
@@ -571,7 +571,8 @@ export function useCodexSubscriptions({
       setLoadError(null);
     } catch (error) {
       setData(null);
-      setLoadError(error instanceof Error ? error.message : "Could not load subscriptions");
+      // Shown under "Couldn't load ..." as what to do; never the raw API message.
+      setLoadError(apiErrorAdvice(error));
     } finally {
       setLoading(false);
     }
@@ -668,7 +669,7 @@ export function useCodexSubscriptions({
         if (success) toast.success(success);
         return true;
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Couldn't change the Codex source");
+        toast.error("Couldn't change the Codex source", { description: userErrorText(error) });
         return false;
       } finally {
         setBusy(false);
@@ -723,11 +724,9 @@ export function useCodexSubscriptions({
                     mode: "workspace",
                   })
                   .catch((error: unknown) =>
-                    toast.error(
-                      error instanceof Error
-                        ? error.message
-                        : "Connected, but couldn't switch to this workspace's accounts",
-                    ),
+                    toast.error("Connected, but couldn't switch to this workspace's accounts", {
+                      description: userErrorText(error),
+                    }),
                   );
                 usageRefreshedRef.current = false;
               }
@@ -758,17 +757,15 @@ export function useCodexSubscriptions({
             recordOutcome("outcome_unknown");
             if (!cancelled.current) {
               setPending(null);
-              toast.error(
-                error instanceof Error
-                  ? error.message
-                  : "Couldn't confirm the ChatGPT sign-in. Try again.",
-              );
+              toast.error("Couldn't confirm the ChatGPT sign-in", {
+                description: userErrorText(error),
+              });
             }
           });
       } catch (error) {
         recordOutcome("outcome_unknown");
         setPending(null);
-        toast.error(error instanceof Error ? error.message : "Couldn't start the ChatGPT sign-in");
+        toast.error("Couldn't start the ChatGPT sign-in", { description: userErrorText(error) });
       } finally {
         setBusy(false);
       }
@@ -785,7 +782,7 @@ export function useCodexSubscriptions({
         await refreshAccounts();
         toast.success(`${codexAccountName(account)} is now the primary account`);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Couldn't change the primary account");
+        toast.error("Couldn't change the primary account", { description: userErrorText(error) });
       } finally {
         setBusy(false);
         setWorking(null);
@@ -808,9 +805,9 @@ export function useCodexSubscriptions({
             : "New work uses the primary account only",
         );
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Couldn't change how accounts are picked",
-        );
+        toast.error("Couldn't change how accounts are picked", {
+          description: userErrorText(error),
+        });
       } finally {
         setBusy(false);
         setWorking(null);
@@ -836,7 +833,7 @@ export function useCodexSubscriptions({
         );
       } catch (error) {
         await refreshAccounts();
-        toast.error(error instanceof Error ? error.message : "Couldn't change this account");
+        toast.error("Couldn't change this account", { description: userErrorText(error) });
       } finally {
         setBusy(false);
         setWorking(null);
@@ -861,7 +858,7 @@ export function useCodexSubscriptions({
         await refreshAccounts();
       } catch (error) {
         await refreshAccounts();
-        toast.error(error instanceof Error ? error.message : "Couldn't change Codex Apps");
+        toast.error("Couldn't change Codex Apps", { description: userErrorText(error) });
       } finally {
         setBusy(false);
         setWorking(null);
@@ -921,7 +918,7 @@ export function useCodexSubscriptions({
         if (createdLocalAttempt) {
           removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
         }
-        toast.error(error instanceof Error ? error.message : "Couldn't prepare the reset");
+        toast.error("Couldn't prepare the reset", { description: userErrorText(error) });
       } finally {
         setPreparingReset(null);
       }
@@ -956,17 +953,13 @@ export function useCodexSubscriptions({
         removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
         setRedemption(null);
         await refreshUsage();
-        toast.error(error instanceof Error ? error.message : "The reset was not sent");
+        toast.error("The reset was not sent", { description: userErrorText(error) });
         return false;
       }
       // Preserve only genuinely ambiguous provider work under the same logical
       // id. The overview is the durable discovery authority after tab loss.
       setRedemption((current) => (current ? { ...current, uncertain: true } : current));
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "The outcome is uncertain. Retry this same attempt.",
-      );
+      toast.error("The outcome is uncertain", { description: "Retry this same attempt." });
       return false;
     }
   }, [redemption, workspaceId, refreshUsage]);
@@ -985,7 +978,7 @@ export function useCodexSubscriptions({
     });
   }, [workspaceId]);
 
-  /** Throws with a user-facing message so the confirm dialog can show it. */
+  /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
   const disconnect = useCallback(
     async (account: CodexAccount): Promise<void> => {
       setBusy(true);
@@ -995,12 +988,11 @@ export function useCodexSubscriptions({
         await refreshAccounts();
         toast.success(`Disconnected ${codexAccountName(account)}`);
       } catch (error) {
-        throw new Error(
-          error instanceof Error && error.message
-            ? error.message
-            : `Couldn't disconnect ${codexAccountName(account)}. Try again.`,
-          { cause: error },
-        );
+        throw error instanceof Error && error.message
+          ? error
+          : new Error(`Couldn't disconnect ${codexAccountName(account)}. Try again.`, {
+              cause: error,
+            });
       } finally {
         setBusy(false);
         setWorking(null);
@@ -1009,7 +1001,7 @@ export function useCodexSubscriptions({
     [client, workspaceId, refreshAccounts],
   );
 
-  /** Throws with a user-facing message so the rename prompt can show it. */
+  /** Throws so the rename prompt can say what to do (API facts go in Technical details). */
   const rename = useCallback(
     async (account: CodexAccount, label: string): Promise<void> => {
       setBusy(true);
@@ -1023,10 +1015,9 @@ export function useCodexSubscriptions({
         await refreshAccounts();
         toast.success("Name saved");
       } catch (error) {
-        throw new Error(
-          error instanceof Error && error.message ? error.message : "Couldn't save the name.",
-          { cause: error },
-        );
+        throw error instanceof Error && error.message
+          ? error
+          : new Error("Couldn't save the name.", { cause: error });
       } finally {
         setBusy(false);
         setWorking(null);
@@ -1111,9 +1102,9 @@ export function CodexRedemptionDialog({ codex }: { codex: CodexSubscriptions }) 
           <dt className="text-fg-muted">Note</dt>
           <dd className="m-0 break-words text-fg-muted">
             {redemption.uncertain
-              ? "The outcome is uncertain. Retry only this same attempt; OpenGeni reuses its original request so it can't be redeemed twice."
+              ? "The outcome is uncertain. Retry only this same attempt; Opengeni reuses its original request so it can't be redeemed twice."
               : redemption.preparation.resumable
-                ? "This resumes the same uncertain attempt; OpenGeni reuses its original request so it can't be redeemed twice."
+                ? "This resumes the same uncertain attempt; Opengeni reuses its original request so it can't be redeemed twice."
                 : `This confirmation expires ${formatAbsoluteTime(toDate(redemption.preparation.expiresAt), { now })}.`}
           </dd>
         </dl>

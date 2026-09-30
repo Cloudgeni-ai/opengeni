@@ -2,6 +2,10 @@
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/inter/wght-italic.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
+/* Display faces for the signed-out pages only; the browser fetches the files
+   only where they are used. */
+@import "@fontsource-variable/dm-sans/wght.css";
+@import "@fontsource/instrument-serif/400-italic.css";
 @import "@opengeni/react/styles.css";
 @import "@opengeni/react/responsive.css";
 
@@ -21,6 +25,8 @@
     ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular,
     "Noto Sans JP Variable", "Noto Sans Arabic Variable", Menlo, monospace;
+  --font-display: "DM Sans Variable", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
 
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;
@@ -31,18 +37,34 @@
   --radius-xl: 20px;
 
   --color-bg: var(--og-color-bg);
+  --color-canvas: var(--og-color-canvas);
+  --color-selection: var(--og-color-selection);
+  --color-hover: var(--og-color-hover);
   --color-surface: var(--og-color-surface-1);
   --color-surface-2: var(--og-color-surface-2);
   --color-surface-3: var(--og-color-surface-3);
   --color-border: var(--og-color-border);
   --color-border-strong: var(--og-color-border-strong);
   --color-fg: var(--og-color-fg);
+  --color-fg-label: var(--og-color-fg-label);
   --color-fg-muted: var(--og-color-fg-muted);
   --color-fg-subtle: var(--og-color-fg-subtle);
 
   --color-brand: var(--og-color-accent);
   --color-brand-strong: var(--og-color-accent-deep);
   --color-brand-fg: var(--og-color-accent-fg);
+
+  /* The filled primary action ("teal wash"). `primary` is the button only;
+     brand stays the neutral mark for icons, links, focus and selection. */
+  --color-primary: var(--og-color-primary);
+  --color-primary-foreground: var(--og-color-primary-fg);
+  --color-primary-border: var(--og-color-primary-border);
+  --color-primary-hover: var(--og-color-primary-hover);
+  --color-switch-track: var(--og-color-switch-track);
+  --color-switch-thumb: var(--og-color-switch-thumb);
+
+  --color-glow-teal: var(--og-glow-teal);
+  --color-glow-peach: var(--og-glow-peach);
 
   --color-status-queued: var(--og-color-status-queued);
   --color-status-running: var(--og-color-status-running);
@@ -60,14 +82,12 @@
   --color-card: var(--color-surface);
   --color-card-foreground: var(--color-fg);
 
-  --color-popover: var(--color-surface-3);
+  /* Menus and popovers are the surface (DESIGN.md "Menus and popovers"). */
+  --color-popover: var(--color-surface);
   --color-popover-foreground: var(--color-fg);
 
-  --color-primary: var(--color-brand-strong);
-  --color-primary-foreground: var(--color-brand-fg);
-
-  --color-secondary: var(--color-surface-2);
-  --color-secondary-foreground: var(--color-fg);
+  --color-secondary: var(--color-selection);
+  --color-secondary-foreground: var(--color-fg-muted);
 
   --color-muted: var(--color-surface-2);
   --color-muted-foreground: var(--color-fg-muted);
@@ -77,18 +97,18 @@
 
   --color-destructive: var(--og-color-danger);
   /* Danger is tuned as a readable foreground token. Filled destructive
-     controls need a darker opaque surface to preserve AA white-text contrast
+     controls use the darker danger fill to preserve AA white-text contrast
      in both themes. */
-  --color-destructive-filled: color-mix(in oklch, var(--og-color-danger) 70%, black);
-  --color-destructive-foreground: var(--og-color-accent-fg);
+  --color-destructive-filled: var(--og-color-danger-fill);
+  --color-destructive-foreground: var(--og-color-danger-fg);
 
   --color-input: var(--color-surface-2);
   --color-ring: var(--color-brand);
 
   --color-sidebar: var(--color-surface);
   --color-sidebar-foreground: var(--color-fg);
-  --color-sidebar-primary: var(--color-brand-strong);
-  --color-sidebar-primary-foreground: var(--color-brand-fg);
+  --color-sidebar-primary: var(--color-primary);
+  --color-sidebar-primary-foreground: var(--color-primary-foreground);
   --color-sidebar-accent: var(--color-surface-2);
   --color-sidebar-accent-foreground: var(--color-fg);
   --color-sidebar-border: var(--color-border);
@@ -102,8 +122,8 @@
   --muted-foreground: var(--color-fg-muted);
   --border: var(--color-border);
   --input: var(--color-surface-2);
-  --primary: var(--color-brand);
-  --primary-foreground: var(--color-brand-fg);
+  --primary: var(--color-primary);
+  --primary-foreground: var(--color-primary-foreground);
   --radius: var(--radius-md);
 }
 
@@ -131,6 +151,52 @@ body {
   font-feature-settings: "cv11", "ss01", "ss03";
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* The main content pane (next to the rail or the settings rail). It paints
+   the canvas, and inside it the page background *is* the canvas: sticky
+   footers, page-variant forms and inset wells that use `bg-bg` keep matching
+   the pane they sit on, while the rail and page chrome outside keep `bg`.
+   Portalled menus and dialogs copy the effective tokens from their trigger. */
+[data-canvas] {
+  --og-color-bg: var(--og-color-canvas);
+  --color-bg: var(--og-color-canvas);
+  background-color: var(--og-color-canvas);
+}
+
+/* The hover wash on something that has its own fill (a suggestion card, an
+   outline card): the same --color-hover, layered over the fill instead of
+   replacing it. Transparent rows and menu items use `hover:bg-hover`. */
+@utility hover-layer {
+  background-image: linear-gradient(var(--color-hover), var(--color-hover));
+}
+
+/* Rail glow: a soft teal wash from the top-left and a peach wash from the
+   bottom-right over the rail color. Used by the main rail and the settings
+   rail; layered so a rail's own background utilities can still override it. */
+@layer components {
+  .og-rail-glow {
+    background:
+      radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal), transparent 85%),
+      radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach), transparent 85%),
+      var(--og-color-bg);
+  }
+
+  /* The signed-out pages: the same two washes along the left edge of the
+     canvas. */
+  .og-page-glow {
+    background:
+      radial-gradient(ellipse 42% 70% at 0 20%, var(--og-glow-teal), transparent 95%),
+      radial-gradient(ellipse 42% 65% at 0 100%, var(--og-glow-peach), transparent 95%),
+      var(--og-color-canvas);
+  }
+}
+
+@media (forced-colors: active) {
+  .og-rail-glow,
+  .og-page-glow {
+    background: Canvas;
+  }
 }
 
 /* Layered so Tailwind border-color utilities (border-brand, border-danger...)
@@ -175,12 +241,16 @@ body {
    - the composer textarea (`.og-root textarea`) already shows a whole-composer
      focus affordance (focus-within border + soft glow), so a second outline
      bounded to the textarea box would double it;
-   - model search inputs use a whole-field focus outline including the icon;
+   - the model search input sits in its menu's search header, like the
+     combobox search, where the caret shows focus;
    - shadcn buttons (`[data-slot="button"]`) carry their own offset ring in
      button.tsx — excluding them here avoids stacking two rings on one control;
    - `[tabindex="-1"]` is for programmatic focus only (timeline scroller, etc.).
      Mouse-click + any key (e.g. Shift) flips keyboard modality and would paint
-     a huge ring around the whole pane — skip those; real tab stops use 0+. */
+     a huge ring around the whole pane — skip those; real tab stops use 0+.
+   - menu items take roving, programmatic focus even under the mouse; their
+     focus is the menu highlight (the `hover` wash), the same for pointer
+     and keyboard (DESIGN.md "Menus and popovers"). */
 :where(
   button,
   a,
@@ -188,7 +258,7 @@ body {
   textarea,
   [role="button"],
   [tabindex]:not([tabindex="-1"])
-):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
+):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
 }
@@ -203,7 +273,7 @@ body {
     textarea,
     [role="button"],
     [tabindex]:not([tabindex="-1"])
-  ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
+  ):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control):not([role^="menuitem"]) {
     border-radius: var(--radius-sm);
   }
 }
@@ -233,6 +303,14 @@ body {
    remains readable. */
 .toaster [data-sonner-toast] > * {
   transition: none;
+}
+
+/* A theme flip swaps every token at once; no control animates through the
+   mix of the two palettes (see lib/appearance.tsx). */
+:root[data-og-theme-switching] *,
+:root[data-og-theme-switching] *::before,
+:root[data-og-theme-switching] *::after {
+  transition: none !important;
 }
 
 /* Respect reduced motion */

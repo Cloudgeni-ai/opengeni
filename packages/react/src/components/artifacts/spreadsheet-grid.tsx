@@ -631,7 +631,7 @@ function spreadsheetCanvasTheme(element: HTMLElement): SpreadsheetCanvasTheme {
   const border = computedToken(style, "--og-color-border", "#d1d5db");
   const foreground = style.color || computedToken(style, "--og-color-fg", "#111827");
   const mutedForeground = computedToken(style, "--og-color-fg-muted", "#6b7280");
-  const accent = computedToken(style, "--og-color-accent", "#3b82f6");
+  const accent = computedToken(style, "--og-color-accent", "#545454");
   const error = computedToken(style, "--og-color-status-failed", "#dc2626");
   const fontFamily =
     style.fontFamily ||
@@ -813,7 +813,7 @@ export function SpreadsheetArtifactSurface({
               <button
                 type="button"
                 onClick={addSheet}
-                className="mt-3 rounded-og-sm bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg"
+                className="mt-3 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium hover:bg-og-primary-hover"
               >
                 Add worksheet
               </button>

@@ -164,7 +164,7 @@ export function NativeConnectSetup({
               {request.displayName ?? request.installationTarget?.displayName ?? request.providerId}
             </DialogTitle>
             <DialogDescription className="text-sm leading-6 text-fg-muted">
-              {request.description ?? "Authorize access to use this connection in OpenGeni."}
+              {request.description ?? "Authorize access to use this connection in Opengeni."}
             </DialogDescription>
           </div>
         </DialogHeader>
