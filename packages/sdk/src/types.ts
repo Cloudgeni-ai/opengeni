@@ -3567,6 +3567,29 @@ export type OrganizationModelProviderKind =
   | "anthropic"
   | "claude_subscription";
 
+export type ClaudeUsageWindow = {
+  id:
+    | "five_hour"
+    | "seven_day"
+    | "seven_day_opus"
+    | "seven_day_sonnet"
+    | "seven_day_overage_included"
+    | "overage";
+  usedPercent: number | null;
+  resetsAt: string | null;
+  status: "allowed" | "allowed_warning" | "rejected" | null;
+  observedAt: string;
+};
+export type ClaudeSubscriptionUsage = {
+  connected: boolean;
+  credentialVersion: number | null;
+  windows: ClaudeUsageWindow[];
+  observedAt: string | null;
+  source: "response_headers" | "provider" | null;
+  refreshStatus: "not_checked" | "available" | "scope_required" | "unavailable" | "reconnect";
+  refreshCheckedAt: string | null;
+};
+
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";

@@ -1,11 +1,4 @@
-import {
-  ArrowRightIcon,
-  Building2Icon,
-  CheckIcon,
-  Loader2Icon,
-  PanelsTopLeftIcon,
-  ShieldCheckIcon,
-} from "lucide-react";
+import { CheckIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -33,8 +26,6 @@ type CreateOrganizationFormProps = {
 };
 
 export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
-  const organizationName = props.organizationName.trim() || "Your organization";
-  const workspaceName = props.workspaceName.trim() || "First shared workspace";
   const creationState = props.creationState ?? "draft";
   const requestLocked = creationState !== "draft";
 
@@ -84,26 +75,10 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
           </p>
         </div>
 
-        <div className="rounded-lg border border-border bg-surface-2/45 p-3.5">
-          <div className="flex items-center gap-2.5 text-sm">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-bg text-fg-muted">
-              <Building2Icon aria-hidden="true" className="size-4" />
-            </span>
-            <span className="min-w-0 flex-1 truncate font-medium">{organizationName}</span>
-            <ArrowRightIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-              <PanelsTopLeftIcon aria-hidden="true" className="size-4" />
-            </span>
-            <span className="min-w-0 flex-1 truncate font-medium">{workspaceName}</span>
-          </div>
-          <div className="mt-3 flex items-start gap-2 border-t border-border pt-3 text-xs leading-relaxed text-fg-subtle">
-            <ShieldCheckIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-success" />
-            <span>
-              You become the owner. Your login stays the same, and nothing is copied from your
-              current organization.
-            </span>
-          </div>
-        </div>
+        <p className="text-xs text-fg-muted">
+          You become the owner. Your login stays the same, and nothing is copied from your current
+          organization.
+        </p>
       </div>
 
       <DialogFooter className="mt-5">

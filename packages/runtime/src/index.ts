@@ -4381,6 +4381,7 @@ export async function prepareAgentTools(
     settings.mcpServers.filter(
       (config) =>
         tools.some((tool) => tool.id === config.id) &&
+        !config.connectionRef &&
         !localRegistry.has(config.id) &&
         !isFirstPartyMcpServer(settings, config) &&
         !isCodexAppsMcpServer(config),
@@ -5004,6 +5005,7 @@ export function selectedSessionRemoteMcpTargets(
     if (configs.length !== 1) return [];
     const config = configs[0]!;
     if (
+      config.connectionRef ||
       isFirstPartyMcpServer(settings, config) ||
       isCodexAppsMcpServer(config) ||
       BUILT_IN_MCP_BRIDGE_ADAPTERS.some((adapter) =>
@@ -12255,3 +12257,4 @@ function sortJson(value: unknown): unknown {
 }
 
 export { createFirstPartyAttemptClient } from "./first-party-client";
+export { withClaudeUsageObserver } from "./claude-subscription-usage";

@@ -1,8 +1,8 @@
 // The rail's workspace picker. Its trigger names the workspace and its
-// organization; its menu lists the current organization's workspaces (with a
-// create action that names the organization), organization settings, and the
-// other organizations to switch to. Collapsed, it reduces to a
-// workspace-initial avatar that opens the same menu.
+// organization; its menu lists the current organization's workspaces and, for
+// a person in several organizations, the others to switch to. Collapsed, it
+// reduces to a workspace-initial avatar that opens the same menu. Creating an
+// organization lives in the account menu (`useCreateOrganizationFlow`).
 import { Link } from "@tanstack/react-router";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { BuildingIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
@@ -211,38 +211,47 @@ export function useCreateOrganizationFlow(onCreated: (workspaceId: string) => vo
   };
 }
 
+/**
+ * "New organization" for the account menu: the menu item (null when this
+ * person can't create one) and the dialog, which the caller renders outside
+ * the menu so it outlives it.
+ */
+export function useNewOrganizationMenuItem(): { item: ReactNode; dialog: ReactNode } {
+  const rail = useRail();
+  const flow = useCreateOrganizationFlow(rail.openWorkspace);
+  return {
+    item: flow.canCreate ? (
+      <DropdownMenuItem onSelect={flow.start}>
+        <PlusIcon />
+        New organization
+      </DropdownMenuItem>
+    ) : null,
+    dialog: flow.dialog,
+  };
+}
+
 export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
   const rail = useRail();
-  const createOrganizationFlow = useCreateOrganizationFlow(rail.openWorkspace);
-  const onCreateOrganization = createOrganizationFlow.canCreate
-    ? createOrganizationFlow.start
-    : undefined;
 
   if (rail.collapsed) {
     return (
-      <>
-        <WorkspaceSwitcherMenu
-          workspaceId={rail.workspaceId}
-          collapsed
-          align="start"
-          onSelect={rail.openWorkspace}
-          onCreateOrganization={onCreateOrganization}
-        />
-        {createOrganizationFlow.dialog}
-      </>
+      <WorkspaceSwitcherMenu
+        workspaceId={rail.workspaceId}
+        collapsed
+        align="start"
+        onSelect={rail.openWorkspace}
+      />
     );
   }
 
   return (
     <div className={inline ? "ml-auto grid min-w-0 flex-1" : WORKSPACE_SWITCHER_GRID_CLASS}>
-      {createOrganizationFlow.dialog}
       <WorkspaceSwitcherMenu
         workspaceId={rail.workspaceId}
         collapsed={false}
         compact={inline}
         align="start"
         onSelect={rail.openWorkspace}
-        onCreateOrganization={onCreateOrganization}
       />
     </div>
   );

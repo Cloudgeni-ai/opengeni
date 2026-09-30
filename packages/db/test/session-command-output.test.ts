@@ -384,3 +384,35 @@ test("managed initial output persists before background adoption", async () => {
   expect(page.chunks.map((item) => item.chunk).join("")).toBe("started\n");
   expect(page.completionObservedAt).toBeNull();
 });
+
+test("a replay that extends a captured chunk inserts only its missing parts, in order", async () => {
+  const identity = await connected();
+  const head = "a".repeat(16_384);
+  const input = { ...identity, chunkId: "op-frame:replay", stream: "stdout" as const };
+  expect(await appendSessionCommandOutput(client.db, { ...input, chunk: head })).toHaveLength(1);
+  const extended = await appendSessionCommandOutput(client.db, {
+    ...input,
+    chunk: head + "b".repeat(50),
+  });
+  expect(extended).toHaveLength(1);
+  expect((extended[0]!.payload as { chunk: string }).chunk).toBe("b".repeat(50));
+  const rows =
+    await shared.admin`select sequence, payload->>'chunk' as chunk from session_events where session_id=${sessionId} and type='sandbox.command.output.delta' and payload->>'commandId'=${identity.commandId} order by sequence`;
+  expect(rows.map((row) => row.chunk)).toEqual([head, "b".repeat(50)]);
+  expect(Number(rows[1]!.sequence)).toBe(Number(rows[0]!.sequence) + 1);
+});
+
+test("a replay that changes a captured part is rejected without inserting anything", async () => {
+  const identity = await connected();
+  const input = { ...identity, chunkId: "op-frame:changed", stream: "stdout" as const };
+  await appendSessionCommandOutput(client.db, { ...input, chunk: "a".repeat(16_384) });
+  await expect(
+    appendSessionCommandOutput(client.db, {
+      ...input,
+      chunk: "c".repeat(16_384) + "d".repeat(10),
+    }),
+  ).rejects.toThrow("retry changed the captured chunk");
+  const [count] =
+    await shared.admin`select count(*)::int as n from session_events where session_id=${sessionId} and type='sandbox.command.output.delta' and payload->>'commandId'=${identity.commandId}`;
+  expect(count!.n).toBe(1);
+});

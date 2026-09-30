@@ -1771,6 +1771,8 @@ export const connections = pgTable(
     kind: text("kind").notNull(),
     status: text("status").notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     createOperationId: text("create_operation_id"),
     createRequestDigest: text("create_request_digest"),
     grantedScopes: jsonb("granted_scopes").$type<string[]>().notNull().default([]),
@@ -14210,6 +14212,8 @@ export const organizationModelProviderConnections = pgTable(
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),

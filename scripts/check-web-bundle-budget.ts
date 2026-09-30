@@ -644,6 +644,12 @@ const effectiveBudgets = {
     wholeKibEnvelope(700_042, 1.5 * kib),
     // Same design-system stylesheet growth documented in the raw bound above.
     wholeKibEnvelope(706_357, 1.5 * kib),
+    // Retiring the For you and Agents routes lowers the direct-session raw graph
+    // by 545 bytes (2,514,093), but the automatic shared-chunk split re-partitions
+    // around the smaller route set (34 -> 36 files, under the 39 cap) and gzip
+    // grows to 709,242 (+2,522; Bun 1.4 Linux/x64). Retain the established
+    // 1.5 KiB allowance; raw, initial, per-file, lazy, and CSS caps stay fixed.
+    wholeKibEnvelope(709_242, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

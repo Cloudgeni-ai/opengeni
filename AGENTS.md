@@ -509,6 +509,12 @@ unit corpus in one shared test process. Prepared-runtime tests, including native
 report delivery, remain separate package-contract checks with their required
 runtime configuration.
 
+PostgreSQL tests using `acquireSharedTestDatabase` can use a prestarted disposable
+native PostgreSQL with pgvector via `OPENGENI_TEST_PG_NATIVE=1`. It must listen on
+`127.0.0.1:61440` with the fixture's `postgres` login/password `x`; the harness
+creates its non-superuser app role and isolated migrated database clones. This
+opt-in never starts, stops, or removes the server through Docker.
+
 Bun services launched by the test harness ignore implicit checkout `.env` files.
 Supply fixture settings through the service environment, or use an explicit
 `--env-file` argument when testing dotenv behavior itself.

@@ -105,6 +105,7 @@ function turn(): SessionTurn {
 
 async function bind(options: { hostPort?: RunCredentialsResolution } = {}) {
   return await bindRunCredentialResolver({
+    effectiveTools: [],
     db: client.db,
     settings,
     initiatingHumanSubjectId: "user:owner",

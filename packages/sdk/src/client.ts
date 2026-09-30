@@ -253,6 +253,7 @@ import type {
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
+  ClaudeSubscriptionUsage,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -4712,6 +4713,41 @@ export class OpenGeniClient {
       "DELETE",
       `/v1/workspaces/${workspaceId}/openrouter-custom-models/${encodeURIComponent(customModelId)}`,
       request,
+    );
+  }
+
+  /** Read metadata for one organization-owned model-provider connection. */
+  async getWorkspaceClaudeSubscriptionUsage(workspaceId: string): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`,
+    );
+  }
+
+  async refreshWorkspaceClaudeSubscriptionUsage(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage/refresh`,
+    );
+  }
+
+  async getOrganizationClaudeSubscriptionUsage(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage`,
+    );
+  }
+
+  async refreshOrganizationClaudeSubscriptionUsage(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage/refresh`,
     );
   }
 

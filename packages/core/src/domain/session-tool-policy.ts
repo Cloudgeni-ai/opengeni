@@ -5,6 +5,7 @@ import {
   mergeToolRefs,
   resolveWorkspaceSessionToolDefaults,
   type Session,
+  type SessionTurn,
   type SessionEffectiveToolPolicy,
   type SessionToolPolicy,
   type ToolRef,
@@ -163,6 +164,41 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
       idsTruncated: Object.values(projections).some((projection) => projection.truncated),
     },
   };
+}
+
+/** Null is ordinary work; an empty list is a frozen scheduled selection. */
+export function scheduledTurnMcpServerIds(turn: Pick<SessionTurn, "metadata">): string[] | null {
+  const metadata = turn.metadata;
+  const value =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? metadata.scheduledEffectiveMcpServerIds
+      : null;
+  return Array.isArray(value) && value.every((id) => typeof id === "string")
+    ? sortedIds(value)
+    : null;
+}
+
+/**
+ * Execution's canonical turn selection. Ordinary turns use the durable session
+ * policy, not the queue's omitted-tools `[]`. Scheduled turns instead retain
+ * their frozen registry and refs, including an explicitly empty selection.
+ */
+export function resolveTurnToolPolicy(
+  input: Omit<SessionToolPolicyInput, "sessionTools"> & {
+    session: Pick<Session, "tools">;
+    turn: Pick<SessionTurn, "tools" | "metadata">;
+  },
+): ResolvedSessionToolPolicy {
+  const scheduledIds = scheduledTurnMcpServerIds(input.turn);
+  const availableIds = new Set(input.availableMcpServerIds);
+  return resolveSessionToolPolicy({
+    toolPolicy: input.toolPolicy,
+    sessionTools: scheduledIds ? input.turn.tools : input.session.tools,
+    availableMcpServerIds: scheduledIds
+      ? scheduledIds.filter((id) => availableIds.has(id))
+      : availableIds,
+    defaultMcpServerIds: scheduledIds ?? input.defaultMcpServerIds ?? [],
+  });
 }
 
 /** Current full runtime registry IDs, including configured static servers. */

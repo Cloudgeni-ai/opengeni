@@ -8,7 +8,8 @@ type ScrollContract =
 const workspaceRouteContracts = {
   workspaceIndexRoute: { kind: "redirect" },
   workspaceAgentRoute: { kind: "redirect" },
-  workspaceAgentsRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceRetiredPriorityRoute: { kind: "redirect" },
+  workspaceRetiredAgentsRoute: { kind: "redirect" },
   workspaceSessionsRoute: {
     kind: "self-managed",
     source: "routes/sessions-index.tsx",
@@ -33,10 +34,6 @@ const workspaceRouteContracts = {
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
-  workspacePriorityRoute: {
-    kind: "self-managed",
-    source: "routes/priority.tsx",
-  },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",
     source: "routes/capabilities.tsx",

@@ -4,10 +4,7 @@
 
 ## Navigation
 
-1. Read §2–4, §6.
-2. **Subsystems:** §13 sources.
-3. **Behavior:** source links.
-4. **Stale boundaries:** update per §14.
+Read §2–4 and §6. Subsystems: §13; updates: §14.
 
 ---
 
@@ -22,21 +19,27 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
 NATS transports reconstructible events. The API authorizes; workers execute.
 
-External users require live membership. `asUser()` supplies identity; labels do
-not. Visibility differs from `agentAccess`. Personal Knowledge follows the
-verified active-turn user; task notes coordinate temporarily. Linking never
-merges users. See [product integration](product-integration.md),
+External users require live membership; `asUser()` supplies identity, labels do
+not. Visibility differs from `agentAccess`; Personal Knowledge follows the
+verified active-turn user. Task notes coordinate; linking never merges users.
+[Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
-[Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal deletes the scoped registry head and revisions through exact
-approval and Learning enforcement.
-Accepted conversation context remains unchanged.
+[Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
+Skill removal deletes scoped heads/revisions with exact approval and Learning
+enforcement, preserving conversation context.
 
 Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors but grant no capabilities or credentials.
 
 Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
+
+[`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
+owns effective turn refs: ordinary work uses session policy; scheduled work
+retains its frozen selection. Credential-provider targeting and MCP preparation
+consume those execution refs, never the queue's omitted-tools empty array.
+Connection-backed MCPs remain exclusively native-authenticated and are excluded
+from provider targeting and header application, even for historical work.
 
 ---
 
@@ -1015,7 +1018,10 @@ quota refusals, not backpressure or newer refusals. Capped admission and waits
 use bounded refreshes. Codex quota labels require explicit `/wham/usage` window
 durations, never primary/secondary position. Headers lacking both durations cannot
 update labeled cache; absent reset timing does not clear an exhausted window.
-The account picker refreshes live usage on open rather than trusting stale labels.
+Opening the account picker refreshes usage.
+
+Claude setup and quota observations:
+[`model-providers.md`](model-providers.md#claude-subscription-usage).
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
@@ -1236,19 +1242,9 @@ pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
 and path/identity re-resolution without retrying an existing or ambiguous
 operation. Deterministic submission conflicts are never reconciled to an
 existing row; ambiguous submission failures may adopt a row only after exact
-attempt scope, catalog, identity, and canonical-argument comparison. Once an
-exact operation has been admitted, a later deterministic wake failure
-reconciles through that exact journal row; if the recovery read is unavailable,
-the client returns a typed outcome-unknown error carrying the same operation id.
-While an admitted operation remains queued or running, the client periodically
-re-notifies the owning dispatcher with that same id. This does not replay the
-tool: a live claim answers already-running, an expired pre-execution claim may
-be reclaimed, and an expired post-execution claim settles outcome-unknown with
-its visible `agent.toolCall.output` in the same PostgreSQL commit as the
-terminal journal state.
-Concurrent first submissions serialize on the caller-owned operation id and
-converge to one creation plus one replay. Client abort is observer-only; server
-cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
+attempt scope, catalog, identity, and canonical-argument comparison.
+Admitted-operation recovery never replays the tool; see
+[run lifecycle](run-lifecycle.md#codemode-recovery). The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
@@ -1507,7 +1503,8 @@ Modal commands use authenticated task-router byte offsets owned by the retained
 process. Output and cursor commit atomically under an expected-cursor fence;
 losing readers reread without duplicating output or settling uncaptured tails.
 Router credentials remain in memory. Legacy batch readers only drain existing
-commands; their locators are never reinterpreted as offsets.
+commands; their locators are never reinterpreted as offsets. The reaper drains
+progressing output within a bounded claim, since exit requires both streams at EOF.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;

@@ -561,6 +561,28 @@
     },
     {
       "method": "GET",
+      "path": "/v1/organizations/:organizationId/model-providers/:providerKind/usage",
+      "sdk": [
+        "OpenGeniClient.getOrganizationClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/model-providers/:providerKind/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshOrganizationClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/organizations/:organizationId/overview",
       "sdk": [
         "OpenGeniClient.getOrganizationAdministrationOverview"
@@ -1112,67 +1134,6 @@
       ],
       "response": [
         "AgentTopologyPageResponse"
-      ]
-    },
-    {
-      "method": "DELETE",
-      "path": "/v1/workspaces/:workspaceId/allowance",
-      "sdk": [
-        "OpenGeniEmbeddingClient.clearWorkspaceAllowance"
-      ],
-      "request": [
-        "ClearWorkspaceAllowanceRequest"
-      ],
-      "response": [
-        "ClearWorkspaceAllowanceResponse"
-      ]
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/allowance",
-      "sdk": [
-        "OpenGeniEmbeddingClient.getWorkspaceAllowance"
-      ],
-      "request": [],
-      "response": [
-        "WorkspaceAllowance"
-      ]
-    },
-    {
-      "method": "PUT",
-      "path": "/v1/workspaces/:workspaceId/allowance",
-      "sdk": [
-        "OpenGeniEmbeddingClient.setWorkspaceAllowance"
-      ],
-      "request": [
-        "SetWorkspaceAllowanceRequest"
-      ],
-      "response": [
-        "WorkspaceAllowance"
-      ]
-    },
-    {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/allowance/grants",
-      "sdk": [
-        "OpenGeniEmbeddingClient.grantWorkspaceCredits"
-      ],
-      "request": [
-        "GrantWorkspaceCreditsRequest"
-      ],
-      "response": [
-        "WorkspaceCreditGrant"
-      ]
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/allowance/state",
-      "sdk": [
-        "OpenGeniEmbeddingClient.getWorkspaceAllowanceState"
-      ],
-      "request": [],
-      "response": [
-        "WorkspaceAllowanceState"
       ]
     },
     {
@@ -4210,19 +4171,6 @@
       ]
     },
     {
-      "method": "PUT",
-      "path": "/v1/workspaces/:workspaceId/members/:subjectId/allowance",
-      "sdk": [
-        "OpenGeniEmbeddingClient.setMemberAllowance"
-      ],
-      "request": [
-        "SetMemberAllowanceRequest"
-      ],
-      "response": [
-        "MemberAllowance"
-      ]
-    },
-    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/members/access-requests/slack",
       "sdk": [
@@ -4383,6 +4331,28 @@
         "DeleteWorkspaceGatewayCustomModelRequest"
       ],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/usage",
+      "sdk": [
+        "OpenGeniClient.getWorkspaceClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshWorkspaceClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
     },
     {
       "method": "GET",
@@ -6757,33 +6727,6 @@
     },
     {
       "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/usage",
-      "sdk": [
-        "OpenGeniEmbeddingClient.getUsage"
-      ],
-      "request": [
-        "GetUsageRequest"
-      ],
-      "response": [
-        "WorkspaceUsageResponse"
-      ]
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/usage/me",
-      "sdk": [
-        "OpenGeniEmbeddingClient.getMyUsage",
-        "createSessionProxyHandler"
-      ],
-      "request": [
-        "GetMyUsageRequest"
-      ],
-      "response": [
-        "WorkspaceUsageResponse"
-      ]
-    },
-    {
-      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/user-resource-authorities",
       "sdk": [
         "OpenGeniClient.listUserResourceAuthorities"
@@ -7076,33 +7019,6 @@
       "response": [
         "EnsureWorkspaceResponse"
       ]
-    },
-    {
-      "method": "DELETE",
-      "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
-      "sdk": [
-        "OpenGeniClient.connectTransport"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
-      "sdk": [
-        "OpenGeniClient.connectTransport"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
-      "sdk": [
-        "OpenGeniClient.connectTransport"
-      ],
-      "request": [],
-      "response": []
     }
   ],
   "ingress": [
@@ -7224,9 +7140,6 @@
       "turn.startup.phase.failed",
       "turn.startup.phase.started",
       "turn.superseded",
-      "usage.exhausted",
-      "usage.period_reset",
-      "usage.threshold_reached",
       "user.approvalDecision",
       "user.humanInputResponse",
       "user.message",
@@ -9385,23 +9298,41 @@
         "$.workspaceId": "string!"
       }
     },
-    "ClearWorkspaceAllowanceRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.expectedVersion": "integer!",
-        "$.operationId": "string?"
-      }
-    },
-    "ClearWorkspaceAllowanceResponse": {
+    "ClaudeSubscriptionUsage": {
       "io": [
         "output"
       ],
       "shape": {
         "$": "object",
-        "$.version": "integer!"
+        "$.connected": "boolean!",
+        "$.credentialVersion": "integer! null",
+        "$.observedAt": "string! null",
+        "$.refreshCheckedAt": "string! null",
+        "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.windows": "array!",
+        "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeUsageWindow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "ref(ClaudeUsageWindowId)!",
+        "$.observedAt": "string!",
+        "$.resetsAt": "string! null",
+        "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.usedPercent": "number! null"
+      }
+    },
+    "ClaudeUsageWindowId": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
       }
     },
     "ClientConfig": {
@@ -12497,15 +12428,6 @@
         "$.video": "ref(GeneratedVideoFacts)!"
       }
     },
-    "GetMyUsageRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.period": "ref(UsageAllowancePeriod)?"
-      }
-    },
     "GetOrganizationCredentialProviderResponse": {
       "io": [
         "output"
@@ -12513,17 +12435,6 @@
       "shape": {
         "$": "object",
         "$.provider": "ref(OrganizationCredentialProvider)! null"
-      }
-    },
-    "GetUsageRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.cursor": "string?",
-        "$.limit": "integer?",
-        "$.period": "ref(UsageAllowancePeriod)?"
       }
     },
     "GetWorkspaceCaptureFileResponse": {
@@ -13256,17 +13167,6 @@
         "$.sourceKind": "enum!=[\"\\\"scoped-knowledge-evidence\\\"\",\"\\\"task-note\\\"\"]",
         "$.turnId": "string!",
         "$.workspaceId": "string!"
-      }
-    },
-    "GrantWorkspaceCreditsRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.credits": "integer!",
-        "$.expiresAt": "string? null",
-        "$.operationId": "string!"
       }
     },
     "HumanInputAnswer": {
@@ -15159,64 +15059,6 @@
         "$|type=media_generation_result.status": "ref(VideoGenerationTerminalFailureStatus)!",
         "$|type=media_generation_result.type": "const!=[\"\\\"media_generation_result\\\"\"]",
         "$|type=media_generation_result.boundedPublicReason": "string!"
-      }
-    },
-    "MemberAllowance": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.rule": "ref(MemberAllowanceRule)! null",
-        "$.subjectId": "string!",
-        "$.version": "integer!"
-      }
-    },
-    "MemberAllowanceDefault": {
-      "io": [
-        "input",
-        "output"
-      ],
-      "shape": {
-        "$": "union=[\"0\",\"1\",\"2\"]",
-        "$|0": "enum=[\"\\\"equal_share\\\"\",\"\\\"none\\\"\"]",
-        "$|1": "object",
-        "$|1.share": "number!",
-        "$|2": "object",
-        "$|2.credits": "integer!"
-      }
-    },
-    "MemberAllowanceRule": {
-      "io": [
-        "input",
-        "output"
-      ],
-      "shape": {
-        "$": "union null=[\"0\",\"1\"]",
-        "$|0": "object",
-        "$|0.share": "number!",
-        "$|1": "object",
-        "$|1.credits": "integer!"
-      }
-    },
-    "MemberAllowanceUsage": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.externalIdentity": "object! null",
-        "$.externalIdentity.externalId": "string!",
-        "$.externalIdentity.source": "string!",
-        "$.fraction": "number! null",
-        "$.limit": "integer! null",
-        "$.remaining": "integer! null",
-        "$.resetsAt": "string! null",
-        "$.rule": "ref(MemberAllowanceRule)! null",
-        "$.status": "ref(UsageAllowanceStatus)!",
-        "$.subjectId": "string!",
-        "$.used": "integer!",
-        "$.version": "integer!"
       }
     },
     "MemorySlackImportance": {
@@ -18941,7 +18783,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -19630,34 +19472,6 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]"
-      }
-    },
-    "SetMemberAllowanceRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.expectedVersion": "integer!",
-        "$.rule": "ref(MemberAllowanceRule)! null"
-      }
-    },
-    "SetWorkspaceAllowanceRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.anchorDay": "integer?",
-        "$.expectedVersion": "integer!",
-        "$.includedCredits": "integer!",
-        "$.memberDefault": "ref(MemberAllowanceDefault)?",
-        "$.period": "enum!=[\"\\\"monthly\\\"\",\"\\\"none\\\"\"]",
-        "$.thresholds": "object?",
-        "$.thresholds.member": "array?",
-        "$.thresholds.member[]": "number",
-        "$.thresholds.workspace": "array?",
-        "$.thresholds.workspace[]": "number"
       }
     },
     "SetWorkspaceArtifactStatusRequest": {
@@ -21596,34 +21410,6 @@
         "$.operationId": "string!"
       }
     },
-    "UsageAllowancePeriod": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "union=[\"0\",\"1\"]",
-        "$|0": "const=[\"\\\"current\\\"\"]",
-        "$|1": "string"
-      }
-    },
-    "UsageAllowanceStatus": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"exhausted\\\"\",\"\\\"ok\\\"\",\"\\\"warning\\\"\"]"
-      }
-    },
-    "UsageAllowanceWindow": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.end": "string! null",
-        "$.start": "string! null"
-      }
-    },
     "UserResourceAuthorityGrant": {
       "io": [
         "output"
@@ -22147,50 +21933,6 @@
         "$.updatedAt": "string!"
       }
     },
-    "WorkspaceAllowance": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.anchorDay": "integer?",
-        "$.includedCredits": "integer!",
-        "$.memberDefault": "ref(MemberAllowanceDefault)?",
-        "$.period": "enum!=[\"\\\"monthly\\\"\",\"\\\"none\\\"\"]",
-        "$.thresholds": "object?",
-        "$.thresholds.member": "array?",
-        "$.thresholds.member[]": "number",
-        "$.thresholds.workspace": "array?",
-        "$.thresholds.workspace[]": "number",
-        "$.version": "integer!"
-      }
-    },
-    "WorkspaceAllowanceState": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.config": "ref(WorkspaceAllowance)! null",
-        "$.version": "integer!"
-      }
-    },
-    "WorkspaceAllowanceUsage": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.fraction": "number! null",
-        "$.grantsRemaining": "integer!",
-        "$.includedCredits": "integer!",
-        "$.limit": "integer! null",
-        "$.remaining": "integer! null",
-        "$.resetsAt": "string! null",
-        "$.status": "ref(UsageAllowanceStatus)!",
-        "$.used": "integer!"
-      }
-    },
     "WorkspaceArtifact": {
       "io": [
         "output"
@@ -22420,18 +22162,6 @@
         "$.updatedAt": "string!",
         "$.url": "string!",
         "$.workspaceId": "string!"
-      }
-    },
-    "WorkspaceCreditGrant": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.credits": "integer!",
-        "$.expiresAt": "string! null",
-        "$.operationId": "string!",
-        "$.remaining": "integer!"
       }
     },
     "WorkspaceGatewayCustomModel": {
@@ -23391,19 +23121,6 @@
         "$.region": "string! null"
       }
     },
-    "WorkspaceUsageResponse": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "object",
-        "$.members": "array!",
-        "$.members[]": "ref(MemberAllowanceUsage)",
-        "$.nextCursor": "string! null",
-        "$.period": "ref(UsageAllowanceWindow)!",
-        "$.workspace": "ref(WorkspaceAllowanceUsage)!"
-      }
-    },
     "WorkspaceVideoGenerationSettings": {
       "io": [
         "output"
@@ -23481,7 +23198,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"session.humanInput.requested\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\"]"
+        "$": "enum=[\"\\\"session.humanInput.requested\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\"]"
       }
     }
   },
@@ -23521,7 +23238,6 @@
       "AgentToolCallOutputPayload": "type",
       "AgentTopologyPageResponse": "type",
       "AgentTopologySession": "type",
-      "AllowanceExhaustedRefusal": "type",
       "ApiIntegrationAuthPreview": "type",
       "ApiIntegrationInstallationSummary": "type",
       "ApiIntegrationOAuthStartRequest": "type",
@@ -23657,8 +23373,8 @@
       "CapabilityUnavailableReason": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
-      "ClearWorkspaceAllowanceRequest": "type",
-      "ClearWorkspaceAllowanceResponse": "type",
+      "ClaudeSubscriptionUsage": "type",
+      "ClaudeUsageWindow": "type",
       "ClientAuthConfig": "type",
       "ClientConfig": "type",
       "ClientModel": "type",
@@ -23962,10 +23678,8 @@
       "generatedImageSandboxPathMatches": "value",
       "GeneratedVideoFacts": "type",
       "GeneratedVideoReceipt": "type",
-      "GetMyUsageRequest": "type",
       "GetOrganizationCredentialProviderResponse": "type",
       "GetSessionOptions": "type",
-      "GetUsageRequest": "type",
       "GetWorkspaceCaptureFileResponse": "type",
       "GetWorkspaceCaptureResponse": "type",
       "GetWorkspaceCredentialProviderResponse": "type",
@@ -24029,7 +23743,6 @@
       "GovernedLearningActivationReceipt": "type",
       "GovernedLearningActivationUndoReceipt": "type",
       "GovernedLearningDecisionReceipt": "type",
-      "GrantWorkspaceCreditsRequest": "type",
       "HumanInputAnswer": "type",
       "HumanInputOption": "type",
       "HumanInputQuestion": "type",
@@ -24188,10 +23901,6 @@
       "McpPersonalConnectionSummary": "type",
       "McpServerConnectionRef": "type",
       "MediaGenerationResult": "type",
-      "MemberAllowance": "type",
-      "MemberAllowanceDefault": "type",
-      "MemberAllowanceRule": "type",
-      "MemberAllowanceUsage": "type",
       "MemorySlackImportance": "type",
       "MemorySlackPublication": "type",
       "MemorySlackPublicationActionRequest": "type",
@@ -24259,7 +23968,6 @@
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
       "OPENGENI_WEBHOOK_HEADERS": "value",
-      "OpenGeniAllowanceExhaustedError": "value",
       "OpenGeniApiContractMismatchError": "value",
       "OpenGeniApiError": "value",
       "OpenGeniClient": "value",
@@ -24622,9 +24330,6 @@
       "SessionTurnSource": "type",
       "SessionTurnStatus": "type",
       "SessionVisibility": "type",
-      "SessionWorkspaceWebhookEvent": "type",
-      "SetMemberAllowanceRequest": "type",
-      "SetWorkspaceAllowanceRequest": "type",
       "SetWorkspaceArtifactStatusRequest": "type",
       "SetWorkspaceEnvironmentVariableRequest": "type",
       "signOpenGeniPayload": "value",
@@ -24805,9 +24510,6 @@
       "UploadFileInput": "type",
       "UpsertIntegrationFacetRequest": "type",
       "UpsertOrganizationModelProviderConnectionRequest": "type",
-      "UsageAllowancePeriod": "type",
-      "UsageAllowanceStatus": "type",
-      "UsageAllowanceWindow": "type",
       "UsageEvent": "type",
       "UsageEventType": "type",
       "UserApprovalDecisionEventInput": "type",
@@ -24846,10 +24548,6 @@
       "Workspace": "type",
       "WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS": "value",
       "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
-      "WorkspaceAllowance": "type",
-      "WorkspaceAllowanceConfig": "type",
-      "WorkspaceAllowanceState": "type",
-      "WorkspaceAllowanceUsage": "type",
       "WorkspaceArtifact": "type",
       "WorkspaceArtifactContentResponse": "type",
       "WorkspaceArtifactDetailResponse": "type",
@@ -24872,7 +24570,6 @@
       "WorkspaceControlEventPage": "type",
       "WorkspaceControlStreamTransport": "type",
       "WorkspaceCredentialProvider": "type",
-      "WorkspaceCreditGrant": "type",
       "WorkspaceEnvironment": "type",
       "WorkspaceEnvironmentVariableMetadata": "type",
       "WorkspaceGatewayCustomModel": "type",
@@ -24950,8 +24647,6 @@
       "WorkspaceStateResponse": "type",
       "WorkspaceTranscriptionPolicy": "type",
       "WorkspaceTranscriptionTarget": "type",
-      "WorkspaceUsageResponse": "type",
-      "WorkspaceUsageWebhookEvent": "type",
       "WorkspaceVideoGenerationSettings": "type",
       "WorkspaceVoiceInputSettings": "type",
       "WorkspaceWebhook": "type",
@@ -24979,10 +24674,6 @@
       "ManagedAuthSessionSetProjection": "type",
       "ResolveManagedAuthDeepLinkRequest": "type",
       "SelectManagedAuthLoginSlotRequest": "type"
-    },
-    "@opengeni/sdk/allowance-refusal": {
-      "allowanceExhaustedMessage": "value",
-      "parseAllowanceExhaustedRefusal": "value"
     },
     "@opengeni/sdk/artifacts": {
       "CreateEditableArtifactMaterializationRequest": "type",
@@ -25029,7 +24720,6 @@
       "isRetryableStreamError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
       "OPENGENI_API_CONTRACT_REVISION": "value",
-      "OpenGeniAllowanceExhaustedError": "value",
       "OpenGeniApiContractMismatchError": "value",
       "OpenGeniApiError": "value",
       "OpenGeniBrowserClient": "value",
@@ -25839,7 +25529,6 @@
       "RotateWorkspaceCredentialProviderSecretResponse": "type",
       "rotateWorkspaceWebhookSecret": "value",
       "RotateWorkspaceWebhookSecretResponse": "type",
-      "SessionWorkspaceWebhookEvent": "type",
       "signOpenGeniPayload": "value",
       "updateOrganizationWebhook": "value",
       "UpdateOrganizationWebhookRequest": "type",
@@ -25850,7 +25539,6 @@
       "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
       "WorkspaceCredentialProvider": "type",
       "WorkspaceSandboxImages": "type",
-      "WorkspaceUsageWebhookEvent": "type",
       "WorkspaceWebhook": "type",
       "WorkspaceWebhookDelivery": "type",
       "WorkspaceWebhookEvent": "type",
@@ -27412,11 +27100,6 @@
       "source",
       "workspaceId"
     ],
-    "OpenGeniAllowanceExhaustedError": [
-      "resetsAt",
-      "scope",
-      "subjectId"
-    ],
     "OpenGeniApiContractMismatchError": [
       "actual",
       "expected"
@@ -27646,6 +27329,7 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
+      "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
@@ -27682,6 +27366,7 @@
       "getWorkspaceArtifactHtml",
       "getWorkspaceCapture",
       "getWorkspaceCaptureFile",
+      "getWorkspaceClaudeSubscriptionUsage",
       "getWorkspaceCredentialProvider",
       "getWorkspaceInsights",
       "getWorkspaceInstructionPolicyRevision",
@@ -27850,7 +27535,9 @@
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
       "refreshCodexUsage",
+      "refreshOrganizationClaudeSubscriptionUsage",
       "refreshScheduledTaskAccess",
+      "refreshWorkspaceClaudeSubscriptionUsage",
       "rejectGoalRevision",
       "rejectPreferenceRegistryProposal",
       "rejectWorkspaceSkill",
@@ -28026,16 +27713,10 @@
       "beginIdentityLink",
       "cancelConnectAttempt",
       "cancelExternalWorkspaceMemberGrant",
-      "clearWorkspaceAllowance",
       "confirmIdentityLink",
       "getConnectAttempt",
       "getConnectionCreationResult",
       "getIdentityLink",
-      "getMyUsage",
-      "getUsage",
-      "getWorkspaceAllowance",
-      "getWorkspaceAllowanceState",
-      "grantWorkspaceCredits",
       "listConnectAccounts",
       "listConnectProviders",
       "listIdentityLinks",
@@ -28045,8 +27726,6 @@
       "requestJsonResponse",
       "revokeIdentityLink",
       "rotateSessionMcpCredentials",
-      "setMemberAllowance",
-      "setWorkspaceAllowance",
       "updateExternalIdentityMembership",
       "updateExternalWorkspaceMember"
     ],

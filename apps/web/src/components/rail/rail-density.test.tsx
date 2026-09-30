@@ -20,10 +20,6 @@ mock.module("@/components/rail/rail-context", () => ({
   useRail: () => rail,
 }));
 
-mock.module("@/components/rail/for-you-link", () => ({
-  ForYouLink: () => <a href="#for-you">For you</a>,
-}));
-
 mock.module("@/components/rail/session-list", () => ({
   NewSessionLink: ({ children, ...props }: { children: ReactNode }) => (
     <a href="#new-session" {...props}>
@@ -117,7 +113,7 @@ describe("session-first rail density", () => {
     window.localStorage.setItem("opengeni.rail.nav", "false");
     const rendered = await render(<PrimaryNav />);
     try {
-      expect(rendered.container.textContent).toContain("For you");
+      expect(rendered.container.textContent).not.toContain("For you");
       expect(rendered.container.textContent).toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         4,
@@ -155,7 +151,6 @@ describe("session-first rail density", () => {
     const primary = await render(<PrimaryNav />);
     try {
       expect(primary.container.textContent).toContain("New session");
-      expect(primary.container.textContent).not.toContain("For you");
       expect(primary.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         0,
       );
@@ -167,7 +162,6 @@ describe("session-first rail density", () => {
 
     const workspace = await render(<WorkspaceShortcutLinks />);
     try {
-      expect(workspace.container.textContent).toContain("For you");
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         4,
       );
@@ -194,21 +188,6 @@ describe("session-first rail density", () => {
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         0,
       );
-    } finally {
-      await act(async () => rendered.root.unmount());
-      rendered.container.remove();
-    }
-  });
-
-  test("identifies For you when the compact disclosure hides its link", async () => {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
-    window.localStorage.setItem("opengeni.rail.nav", "false");
-    pathname = "/workspaces/workspace-1/priority";
-    const rendered = await render(<PrimaryNav />);
-    try {
-      const disclosure = moreDisclosure(rendered.container);
-      expect(disclosure.getAttribute("data-active")).toBe("true");
-      expect(disclosure.getAttribute("aria-label")).toBe("More, current section For you");
     } finally {
       await act(async () => rendered.root.unmount());
       rendered.container.remove();

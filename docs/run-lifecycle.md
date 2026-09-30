@@ -709,6 +709,20 @@ catalog before creating its durable operation. A mismatch returns the stable
 `codemode_catalog_stale` code; the client may then refresh once, re-resolve the
 identity/path, and retry with the same operation id. It never performs that
 recovery after an operation exists or after an ambiguous transport failure.
+
+<a id="codemode-recovery"></a>
+Once an exact operation has been admitted, a later deterministic wake failure
+reconciles through that exact journal row; if the recovery read is unavailable,
+the client returns a typed outcome-unknown error carrying the same operation id.
+While an admitted operation remains queued or running, the client periodically
+re-notifies the owning dispatcher with that same id. This does not replay the
+tool: a live claim answers already-running, an expired pre-execution claim may
+be reclaimed, and an expired post-execution claim settles outcome-unknown with
+its visible `agent.toolCall.output` in the same PostgreSQL commit as the
+terminal journal state.
+Concurrent first submissions serialize on the caller-owned operation id and
+converge to one creation plus one replay. Client abort is observer-only; server
+cancellation remains owned by the attempt/turn lifecycle.
 Worker dispatch performs catalog, identity, approval, input-schema,
 authorization, and argument-sensitive connector-policy prepare before writing
 the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
@@ -2159,6 +2173,21 @@ Repeated Modal binding-missing or binding-mismatch observations enter a durable
 only backoff: the process remains active, retains every blocker, carries no
 exit/loss proof, and is periodically eligible for a later positive binding
 lookup and ordinary reconciliation.
+A Modal command's exit is reported only once both output streams reach EOF.
+Output is therefore read in 1 MiB pages per stream over a widened HTTP/2 flow
+window. Within one claim, observation or cancellation, the reaper keeps
+reading while a backlog remains: the provider reports the process exited but
+its output is not yet at EOF, or a live process just produced a large page
+(256 KiB or more). Reads are bounded by eight reads and ten seconds per claim
+and sixty seconds per sweep. A command left with a backlog is re-probed at
+reaper cadence; one that only trickles output, such as a server, stays on the
+exponential backoff reserved for quiet commands and failures. Supervised
+commands keep their own proof path. Without this, a command that finished in
+seconds but printed megabytes stayed running for hours, holding its process
+blocker and preventing idle drain and capture until the provider deadline.
+The durable record keeps at most 16 MiB per stream plus the stream's final
+page, with explicit markers where output was skipped; later bytes are still
+read, and live output returned to the agent is not capped.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 

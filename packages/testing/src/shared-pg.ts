@@ -39,11 +39,6 @@ const execFileAsync = promisify(execFile);
 // Tests connect as the NON-superuser `opengeni_app` login role (so FORCE RLS is
 // genuinely enforced, exactly as before), with a separate superuser `admin`
 // handle used to seed accounts/workspaces (bypassing RLS).
-//
-// OPENGENI_TEST_PG_ADMIN_URL explicitly opts into an already-running native
-// loopback cluster instead. It must be a dedicated, disposable test cluster:
-// this harness creates/drops databases and manages the cluster-wide app role.
-// Native mode never calls Docker and fails rather than silently skipping.
 // ---------------------------------------------------------------------------
 
 // Keep the fixed cross-process listener outside Linux's default ephemeral client
@@ -55,65 +50,9 @@ const PORT = 61440;
 // mistaken for this harness merely because its old name still exists.
 const CONTAINER = `opengeni-shared-test-pg-${PORT}`;
 const PASSWORD = "x";
+const APP_PASSWORD = "apppw";
 const IMAGE = "pgvector/pgvector:pg16";
-
-function nativeAdminUrl(): URL | null {
-  const configured = process.env.OPENGENI_TEST_PG_ADMIN_URL;
-  if (configured === undefined) {
-    return null;
-  }
-  let url: URL;
-  try {
-    url = new URL(configured);
-  } catch {
-    throw new Error("shared-pg: OPENGENI_TEST_PG_ADMIN_URL must be a PostgreSQL URL");
-  }
-  if (
-    !["postgres:", "postgresql:"].includes(url.protocol) ||
-    !["127.0.0.1", "localhost"].includes(url.hostname) ||
-    !url.username ||
-    !url.port ||
-    Number(url.port) < 1 ||
-    Number(url.port) > 65535 ||
-    url.hash
-  ) {
-    throw new Error(
-      "shared-pg: OPENGENI_TEST_PG_ADMIN_URL requires a loopback host, explicit port, and admin username",
-    );
-  }
-  if (!url.pathname || url.pathname === "/") {
-    url.pathname = "/postgres";
-  }
-  // Share the same lock for either spelling of this IPv4 loopback endpoint.
-  url.hostname = "127.0.0.1";
-  return url;
-}
-
-const NATIVE_ADMIN_URL = nativeAdminUrl();
-const ADMIN_URL =
-  NATIVE_ADMIN_URL ?? new URL(`postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`);
-// PostgreSQL passwords/roles are cluster-wide. All concurrent native test
-// processes must use the same fixture password; Docker retains its old default.
-const APP_PASSWORD = NATIVE_ADMIN_URL
-  ? (process.env.OPENGENI_TEST_PG_APP_PASSWORD ?? "apppw")
-  : "apppw";
-
-function databaseUrl(
-  database: string,
-  credentials?: { username: string; password: string },
-): string {
-  const url = new URL(ADMIN_URL);
-  url.pathname = `/${database}`;
-  if (credentials) {
-    url.username = credentials.username;
-    url.password = credentials.password;
-  }
-  return url.href;
-}
-
-function sqlLiteral(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
-}
+const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // A once-migrated database every test file clones from via `CREATE DATABASE ...
 // TEMPLATE`. Postgres clones a template with a file-level copy, so each file
 // gets a fully-migrated + app-granted database in ~100ms instead of replaying
@@ -170,15 +109,7 @@ async function templateDbName(): Promise<string> {
   return templateDbNameMemo;
 }
 
-// Password/admin-login changes must not create independent locks for the same
-// cluster. Native and Docker state remain separate even on the same port.
-const STATE_ID = NATIVE_ADMIN_URL
-  ? `native-${new Bun.CryptoHasher("sha256")
-      .update(`${ADMIN_URL.hostname}:${ADMIN_URL.port}`)
-      .digest("hex")
-      .slice(0, 16)}`
-  : String(PORT);
-const STATE_DIR = join(tmpdir(), `opengeni-shared-pg-${STATE_ID}`);
+const STATE_DIR = join(tmpdir(), `opengeni-shared-pg-${PORT}`);
 const LOCK_DIR = join(STATE_DIR, "lock");
 const LOCK_OWNER_FILE = join(LOCK_DIR, "owner.json");
 const CONTAINER_STATE_FILE = join(STATE_DIR, "container.json");
@@ -482,7 +413,7 @@ async function waitForReady(url: string): Promise<void> {
 
 /** Is the migrated template database present and marked ready? */
 async function templateReady(): Promise<boolean> {
-  const root = postgres(ADMIN_URL.href, { max: 1 });
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     const rows = await root`
       SELECT 1 FROM pg_database WHERE datname = ${await templateDbName()} AND datistemplate`;
@@ -509,7 +440,7 @@ async function ensureTemplateBuilt(): Promise<void> {
   }
   // Drop a partial/crashed leftover (not yet marked as a template) and rebuild.
   const TEMPLATE_DB = await templateDbName();
-  const root = postgres(ADMIN_URL.href, { max: 1 });
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     await root.unsafe(`DROP DATABASE IF EXISTS "${TEMPLATE_DB}" WITH (FORCE)`);
     await root.unsafe(`CREATE DATABASE "${TEMPLATE_DB}"`);
@@ -517,7 +448,7 @@ async function ensureTemplateBuilt(): Promise<void> {
     await root.end().catch(() => undefined);
   }
 
-  const templateUrl = databaseUrl(TEMPLATE_DB);
+  const templateUrl = `${ADMIN_BASE_URL}/${TEMPLATE_DB}`;
   // Apply the full migration chain once (pgvector extension is created by
   // 0000_initial inside migrate()).
   await migrate(templateUrl);
@@ -534,7 +465,7 @@ async function ensureTemplateBuilt(): Promise<void> {
   // Flip the ready sentinel. This must run with NO open connections to the
   // template; the migrate + grant pools above are already closed. Marking it a
   // template also lets the subsequent `CREATE DATABASE ... TEMPLATE` proceed.
-  const marker = postgres(ADMIN_URL.href, { max: 1 });
+  const marker = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     await marker.unsafe(
       `UPDATE pg_database SET datistemplate = true WHERE datname = '${TEMPLATE_DB}'`,
@@ -545,114 +476,104 @@ async function ensureTemplateBuilt(): Promise<void> {
 }
 
 /**
- * Ensure the single shared cluster and cluster-global opengeni_app role, then
- * register one exact holder. Docker is started under the lock; native mode
- * connects only to the explicitly configured, already-running server.
- * Returns null only when the default Docker fixture is unavailable.
- * Blank/owner callers do not need to build the migrated template.
+ * Ensure the single shared container is up and the cluster-global opengeni_app
+ * role exists, then register one exact holder. Lock-guarded so exactly one
+ * parallel worker starts it. Returns null (and registers no holder) if Docker is
+ * unavailable, so callers can skip gracefully — mirroring the old per-file
+ * `available = false` behaviour.
  */
-async function ensureContainerAndAcquire(buildTemplate = true): Promise<ContainerHandle | null> {
+async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
   return withLock(async () => {
     const priorState = await readContainerState();
-    let generation: string | null = null;
-    if (NATIVE_ADMIN_URL) {
-      // Real server identity, not a fabricated Docker/container id. Reinitializing
-      // the cluster invalidates holder state even when its endpoint is reused.
-      const native = postgres(ADMIN_URL.href, { max: 1, connect_timeout: 2 });
-      try {
-        const [role] = await native`
-          SELECT rolsuper FROM pg_roles WHERE rolname = current_user`;
-        if (!role?.rolsuper) {
-          throw new Error("shared-pg: native test admin must be a PostgreSQL superuser");
-        }
-        const [control] = await native`
-          SELECT system_identifier::text AS identity FROM pg_control_system()`;
-        if (!control?.identity) {
-          throw new Error("shared-pg: native PostgreSQL returned no cluster identity");
-        }
-        generation = new Bun.CryptoHasher("sha256")
-          .update(`${ADMIN_URL.hostname}:${ADMIN_URL.port}\0${control.identity}`)
-          .digest("hex");
-      } finally {
-        await native.end().catch(() => undefined);
+    // Explicitly opt into a prestarted, disposable native PostgreSQL fixture
+    // with this harness's loopback port and role/password contract. Never
+    // control or remove that server through Docker.
+    const native = process.env.OPENGENI_TEST_PG_NATIVE === "1";
+    // A warm fixture's data plane is the authoritative fast path. Docker
+    // Desktop/OrbStack's control API can briefly stop answering under a heavily
+    // parallel suite even while PostgreSQL remains completely healthy. The
+    // fingerprinted immutable template proves this is our exact fixture, so a
+    // transient `docker inspect` outage must not turn into skipped DB tests.
+    let generation = native
+      ? new Bun.CryptoHasher("sha256").update(`native:${ADMIN_BASE_URL}`).digest("hex")
+      : priorState && (await templateReady())
+        ? priorState.generation
+        : null;
+    if (!generation) {
+      const probe = await probeContainer();
+      if (!probe.available) {
+        return null;
       }
-    } else {
-      // A warm fixture's data plane is the authoritative fast path. Docker
-      // Desktop/OrbStack's control API can briefly stop answering under a heavily
-      // parallel suite even while PostgreSQL remains completely healthy. The
-      // fingerprinted immutable template proves this is our exact fixture, so a
-      // transient `docker inspect` outage must not turn into skipped DB tests.
-      generation = priorState && (await templateReady()) ? priorState.generation : null;
-      if (!generation) {
-        const probe = await probeContainer();
-        if (!probe.available) {
-          return null;
-        }
-        generation = probe.id;
-        if (generation && probe.status !== "running" && probe.status !== "restarting") {
-          const resumed =
-            probe.status === "paused"
-              ? await dockerOk(["unpause", generation])
-              : await dockerOk(["start", generation]);
-          if (!resumed) {
-            await dockerOk(["rm", "-f", "-v", generation]);
-            generation = null;
-          }
+      generation = probe.id;
+      if (generation && probe.status !== "running" && probe.status !== "restarting") {
+        const resumed =
+          probe.status === "paused"
+            ? await dockerOk(["unpause", generation])
+            : await dockerOk(["start", generation]);
+        if (!resumed) {
+          await dockerOk(["rm", "-f", "-v", generation]);
+          generation = null;
         }
       }
+    }
+    if (!generation) {
+      // Remove only an inspect-confirmed stopped leftover, then start fresh.
+      // NOT --rm: the container must survive across test-file waves and later
+      // commands so the fixed port is never rebound while its proxy tears down.
+      // The postgres image declares an anonymous data volume. Remove it with
+      // an unusable leftover so failed generations do not leak full clusters.
+      await dockerOk(["rm", "-f", "-v", CONTAINER]);
+      // ONE container is shared by every DB/API/worker integration test FILE in
+      // the parallel `bun test` run. Each file opens its own connection pool (the
+      // createDb pool + a superuser admin pool), so dozens of files together can
+      // demand many hundreds of simultaneous server connections. Default
+      // postgres max_connections=100 would be exhausted ("too many clients"),
+      // which surfaces as silently-wrong RLS reads (a freshly-written row not
+      // visible) rather than a clean error. Give the throwaway test server a
+      // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
+      // per-file pools small as a second line of defence.
+      generation = await startSharedContainer([
+        "run",
+        "-d",
+        "-e",
+        `POSTGRES_PASSWORD=${PASSWORD}`,
+        "-p",
+        `${PORT}:5432`,
+        "--name",
+        CONTAINER,
+        IMAGE,
+        "-c",
+        "max_connections=1000",
+        "-c",
+        "shared_buffers=256MB",
+      ]);
       if (!generation) {
-        // Remove only an inspect-confirmed stopped leftover, then start fresh.
-        // NOT --rm: the container must survive across test-file waves and later
-        // commands so the fixed port is never rebound while its proxy tears down.
-        // The postgres image declares an anonymous data volume. Remove it with
-        // an unusable leftover so failed generations do not leak full clusters.
-        await dockerOk(["rm", "-f", "-v", CONTAINER]);
-        // ONE container is shared by every DB/API/worker integration test FILE in
-        // the parallel `bun test` run. Each file opens its own connection pool (the
-        // createDb pool + a superuser admin pool), so dozens of files together can
-        // demand many hundreds of simultaneous server connections. Default
-        // postgres max_connections=100 would be exhausted ("too many clients"),
-        // which surfaces as silently-wrong RLS reads (a freshly-written row not
-        // visible) rather than a clean error. Give the throwaway test server a
-        // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
-        // per-file pools small as a second line of defence.
-        generation = await startSharedContainer([
-          "run",
-          "-d",
-          "-e",
-          `POSTGRES_PASSWORD=${PASSWORD}`,
-          "-p",
-          `${PORT}:5432`,
-          "--name",
-          CONTAINER,
-          IMAGE,
-          "-c",
-          "max_connections=1000",
-          "-c",
-          "shared_buffers=256MB",
-        ]);
-        if (!generation) {
-          return null; // Docker unavailable or unable to start the fixture.
-        }
+        return null; // Docker unavailable or unable to start the fixture.
       }
     }
     if (!generation) {
       throw new Error("shared-pg: running container has no generation id");
     }
-    await waitForReady(ADMIN_URL.href);
+    await waitForReady(`${ADMIN_BASE_URL}/postgres`);
     // A killed test process can leave Docker's independently-running container
     // alive after `docker run` but before cluster bootstrap. Repair the
     // cluster-global role on EVERY acquisition, not only the fresh-start branch;
     // otherwise the running container looks healthy while every FORCE-RLS clone
     // fails with `role opengeni_app does not exist`.
-    const admin = postgres(ADMIN_URL.href, { max: 1 });
+    const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
     try {
       for (let attempt = 1; ; attempt += 1) {
         try {
-          const roles = await admin`SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app'`;
           await admin.unsafe(`
-            ${roles.length ? "ALTER" : "CREATE"} ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
-              NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD ${sqlLiteral(APP_PASSWORD)}`);
+            DO $$ BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
+                CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                  NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
+              ELSE
+                ALTER ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                  NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
+              END IF;
+            END $$;`);
           break;
         } catch (error) {
           const details = error as { code?: unknown; message?: unknown; routine?: unknown };
@@ -674,9 +595,7 @@ async function ensureContainerAndAcquire(buildTemplate = true): Promise<Containe
     // Build the once-per-container migrated template (idempotent; self-heals a
     // crashed partial). Inside the lock so exactly one process pays the
     // migration; every acquire after that just clones from it.
-    if (buildTemplate) {
-      await ensureTemplateBuilt();
-    }
+    await ensureTemplateBuilt();
     const latestState = await readContainerState();
     const holders = latestState?.generation === generation ? latestState.holders : {};
     for (const [token, holder] of Object.entries(holders)) {
@@ -711,7 +630,7 @@ async function releaseContainer(handle: ContainerHandle): Promise<void> {
 async function createDatabase(dbName: string): Promise<void> {
   // CREATE DATABASE cannot run in a transaction and is safe to issue
   // concurrently from many processes.
-  const root = postgres(ADMIN_URL.href, { max: 1 });
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     await root.unsafe(`CREATE DATABASE "${dbName}"`);
   } finally {
@@ -726,7 +645,7 @@ async function createDatabase(dbName: string): Promise<void> {
  * milliseconds — so retry a few times before giving up.
  */
 async function cloneFromTemplate(dbName: string): Promise<void> {
-  const root = postgres(ADMIN_URL.href, { max: 1 });
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     const deadline = Date.now() + 30_000;
     for (;;) {
@@ -752,7 +671,7 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
 
 /** Best-effort DROP of this file's database, then release its exact holder. */
 async function dropDatabaseAndRelease(dbName: string, handle: ContainerHandle): Promise<void> {
-  const dropper = postgres(ADMIN_URL.href, { max: 1 });
+  const dropper = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   await dropper.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
   await dropper.end().catch(() => undefined);
   await releaseContainer(handle);
@@ -783,8 +702,8 @@ export async function acquireSharedTestDatabase(
   }
 
   const dbName = uniqueDbName(label);
-  const adminUrl = databaseUrl(dbName);
-  const appUrl = databaseUrl(dbName, { username: "opengeni_app", password: APP_PASSWORD });
+  const adminUrl = `${ADMIN_BASE_URL}/${dbName}`;
+  const appUrl = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/${dbName}`;
 
   try {
     // Clone this file's database from the once-migrated template. Postgres does a
@@ -822,19 +741,19 @@ export async function acquireSharedTestDatabase(
  * whatever schema it wants. Returns `null` if docker is unavailable.
  */
 export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTestDatabase | null> {
-  const acquired = await ensureContainerAndAcquire(false);
+  const acquired = await ensureContainerAndAcquire();
   if (!acquired) {
     return null;
   }
 
   const dbName = uniqueDbName(label);
-  const url = databaseUrl(dbName);
+  const databaseUrl = `${ADMIN_BASE_URL}/${dbName}`;
 
   try {
     await createDatabase(dbName);
     let released = false;
     return {
-      databaseUrl: url,
+      databaseUrl,
       appPassword: APP_PASSWORD,
       release: async () => {
         if (released) {
@@ -871,7 +790,7 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
 export async function acquireOwnerMigratedTestDatabase(
   label = "owner-migrated",
 ): Promise<OwnerMigratedTestDatabase | null> {
-  const acquired = await ensureContainerAndAcquire(false);
+  const acquired = await ensureContainerAndAcquire();
   if (!acquired) {
     return null;
   }
@@ -879,10 +798,10 @@ export async function acquireOwnerMigratedTestDatabase(
   const dbName = uniqueDbName(label);
   const ownerRole = `${dbName}_owner`.slice(0, 63);
   const ownerPassword = crypto.randomUUID().replace(/-/g, "");
-  const adminUrl = databaseUrl(dbName);
-  const ownerUrl = databaseUrl(dbName, { username: ownerRole, password: ownerPassword });
+  const adminUrl = `${ADMIN_BASE_URL}/${dbName}`;
+  const ownerUrl = `postgres://${ownerRole}:${ownerPassword}@127.0.0.1:${PORT}/${dbName}`;
 
-  const root = postgres(ADMIN_URL.href, { max: 1 });
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   let admin: postgres.Sql | null = null;
   try {
     // NOCREATEROLE/NOCREATEDB/NOREPLICATION mirror `provision-roles`' posture for
@@ -915,7 +834,7 @@ export async function acquireOwnerMigratedTestDatabase(
         await admin?.end().catch(() => undefined);
         // The database must go first: a role cannot be dropped while it owns one.
         await dropDatabaseAndRelease(dbName, acquired);
-        const dropper = postgres(ADMIN_URL.href, { max: 1 });
+        const dropper = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
         await dropper.unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`).catch(() => undefined);
         await dropper.end().catch(() => undefined);
       },
@@ -923,7 +842,7 @@ export async function acquireOwnerMigratedTestDatabase(
   } catch (err) {
     await admin?.end().catch(() => undefined);
     await root.end().catch(() => undefined);
-    const cleanup = postgres(ADMIN_URL.href, { max: 1 });
+    const cleanup = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
     await cleanup.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
     await cleanup.unsafe(`DROP ROLE IF EXISTS "${ownerRole}"`).catch(() => undefined);
     await cleanup.end().catch(() => undefined);

@@ -32,7 +32,12 @@ message Empty {}
 `).root;
 
 const prefix = "/modal.task_command_router.TaskCommandRouter/";
-const maxPageBytes = 64 * 1024;
+/** Upper bound on one stream's bytes per read. A command's exit is reported
+ * only after both streams reach EOF, and after its turn ends the reaper reads
+ * once per sweep, so a small page left finished large-output commands running
+ * for hours. Invalid UTF-8 can decode to three bytes per input byte, so 1 MiB
+ * stays below the 4 MiB per-stream capture bound after decoding. */
+export const MODAL_ROUTER_READ_PAGE_BYTES = 1024 * 1024;
 const maxWireBytes = 4 * 1024 * 1024;
 
 /** Only constructed at the authenticated Start RPC boundary. Transport loss,
@@ -118,6 +123,10 @@ export class ModalCommandRouterWire {
         "grpc.max_receive_message_length": maxWireBytes,
         "grpc.max_send_message_length": maxWireBytes,
         "grpc.enable_retries": 0,
+        // The HTTP/2 default 64 KiB window caps one read at 64 KiB per round
+        // trip. Two pages lets stdout and stderr each fill a page in one trip
+        // while bounding bytes discarded when a full read cancels its stream.
+        "grpc-node.flow_control_window": 2 * MODAL_ROUTER_READ_PAGE_BYTES,
       },
     );
     this.metadata = new Metadata();
@@ -266,12 +275,12 @@ export class ModalCommandRouterWire {
       };
       call.on("data", (value: { data: Uint8Array }) => {
         if (limited) return;
-        const part = Buffer.from(value.data).subarray(0, maxPageBytes - length);
+        const part = Buffer.from(value.data).subarray(0, MODAL_ROUTER_READ_PAGE_BYTES - length);
         if (part.length) {
           chunks.push(part);
           length += part.length;
         }
-        if (length === maxPageBytes) {
+        if (length === MODAL_ROUTER_READ_PAGE_BYTES) {
           limited = true;
           call.cancel();
         }

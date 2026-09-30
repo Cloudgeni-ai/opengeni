@@ -1,11 +1,11 @@
 import {
   BlocksIcon,
   CodeIcon,
-  CpuIcon,
   CreditCardIcon,
   FingerprintIcon,
-  ShieldIcon,
+  ShieldCheckIcon,
   SlidersHorizontalIcon,
+  SparklesIcon,
   SquareStackIcon,
   UsersIcon,
   type LucideIcon,
@@ -19,17 +19,21 @@ type OrganizationSettingsItem = {
   icon: LucideIcon;
 };
 
-/** The organization's settings pages: one name and one icon each, in rail order. */
+/**
+ * The organization's settings pages: one name and one icon each, in rail order.
+ * A page that exists at both scopes wears the same icon in the workspace rail
+ * (`settings-rail.tsx`): General, People/Access, Models, Developer, Security.
+ */
 export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "general", label: "General", icon: SlidersHorizontalIcon },
   { id: "people", label: "People", icon: UsersIcon },
   { id: "workspaces", label: "Workspaces", icon: SquareStackIcon },
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
-  { id: "models", label: "Models", icon: CpuIcon },
+  { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
   { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },
-  { id: "security", label: "Security & data", icon: ShieldIcon },
+  { id: "security", label: "Security & data", icon: ShieldCheckIcon },
 ];
 
 /**
